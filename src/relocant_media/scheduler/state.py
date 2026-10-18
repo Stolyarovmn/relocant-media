@@ -18,17 +18,17 @@ def claim_lease(
     lease_for: timedelta = DEFAULT_LEASE_DURATION,
 ) -> bool:
     lease_until = now + lease_for
-    statement = insert(SchedulerLease).values(
+    insert_statement = insert(SchedulerLease).values(
         task_key=task_key,
         lease_until=lease_until,
         updated_at=now,
     )
-    statement = statement.on_conflict_do_update(
+    claim_statement = insert_statement.on_conflict_do_update(
         index_elements=["task_key"],
         set_={"lease_until": lease_until, "updated_at": now},
         where=SchedulerLease.lease_until <= now,
     ).returning(SchedulerLease.task_key)
-    claimed = session.scalar(statement) is not None
+    claimed = session.scalar(claim_statement) is not None
     session.commit()
     return claimed
 
