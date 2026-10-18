@@ -35,7 +35,12 @@ def upgrade() -> None:
         sa.Column("title", sa.Text(), nullable=False),
         sa.Column("body", sa.Text(), nullable=False),
         sa.Column("published_at", sa.DateTime(timezone=True)),
-        sa.Column("ingested_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "ingested_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
         sa.UniqueConstraint("source_id", "external_id", name="uq_raw_item_source_external"),
     )
     op.create_table(
@@ -49,7 +54,12 @@ def upgrade() -> None:
         sa.Column("confidence", sa.Numeric(5, 4), nullable=False),
         sa.Column("telegram_message_id", sa.BigInteger()),
         sa.Column("published_at", sa.DateTime(timezone=True)),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
     )
     op.create_table(
         "post_snapshot",
@@ -69,7 +79,12 @@ def upgrade() -> None:
         sa.Column("telegram_message_id", sa.BigInteger()),
         sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("status", sa.String(), nullable=False, server_default="new"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
     )
     op.create_table(
         "moderation_action",
@@ -79,7 +94,12 @@ def upgrade() -> None:
         sa.Column("action", sa.String(), nullable=False),
         sa.Column("reason", sa.Text()),
         sa.Column("model", sa.String()),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
     )
     op.create_table(
         "ad_request",
@@ -89,14 +109,24 @@ def upgrade() -> None:
         sa.Column("status", sa.String(), nullable=False, server_default="new"),
         sa.Column("quoted_price", sa.Numeric(12, 2)),
         sa.Column("currency", sa.String()),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
     )
     op.create_table(
         "daily_report",
         sa.Column("report_date", sa.Date(), primary_key=True),
         sa.Column("city", sa.String(), primary_key=True),
         sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
     )
 
 
