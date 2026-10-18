@@ -1,0 +1,22 @@
+name: daily-analysis
+
+on:
+  workflow_dispatch:
+  # Enable a fixed daily cron only after the owner chooses the report timezone/time.
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - name: Daily analysis placeholder
+        run: |
+          echo "Daily analysis will consume PostgreSQL metrics and produce structured recommendations."
