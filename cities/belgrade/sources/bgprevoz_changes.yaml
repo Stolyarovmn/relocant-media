@@ -1,0 +1,17 @@
+id: bgprevoz_changes
+name: Sekretarijat za javni prevoz — Aktuelne izmene
+publisher: City Administration of Belgrade, Secretariat for Public Transport
+ownership: official
+url: https://www.bgprevoz.rs/linije/aktuelne-izmene
+language: sr
+source_type: official_transport_changes
+trust: 1.0
+check_every: 10m
+categories:
+  - transport
+extraction:
+  strategy: html_list
+  status: planned
+verification:
+  checked_at: 2026-10-18
+  note: Official planned/current public-transport service-change feed.

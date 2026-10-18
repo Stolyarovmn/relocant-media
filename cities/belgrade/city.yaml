@@ -1,0 +1,46 @@
+id: belgrade
+name_ru: Белград
+country: RS
+timezone: Europe/Belgrade
+content_language: ru
+source_languages:
+  - sr
+  - en
+
+publishing:
+  target_posts_per_day:
+    min: 2
+    max: 5
+  auto_publish:
+    low_risk_min_confidence: 0.93
+    medium_risk_min_confidence: 0.97
+    high_risk: false
+
+categories:
+  transport:
+    weight: 1.0
+    risk: low
+  events:
+    weight: 0.8
+    risk: low
+  utilities:
+    weight: 0.9
+    risk: medium
+  immigration:
+    weight: 1.0
+    risk: high
+  law:
+    weight: 0.8
+    risk: high
+  tax:
+    weight: 0.7
+    risk: high
+  banking:
+    weight: 0.7
+    risk: high
+  medicine:
+    weight: 0.6
+    risk: high
+  schools:
+    weight: 0.6
+    risk: medium

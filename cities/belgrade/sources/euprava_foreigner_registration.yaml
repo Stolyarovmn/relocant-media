@@ -1,0 +1,20 @@
+id: euprava_foreigner_registration
+name: eUprava — Prijava boravišta stranca
+publisher: Government of Serbia / Ministry of Interior service on eUprava
+ownership: official
+url: https://euprava.gov.rs/usluge/00008?isNew=True
+language: sr
+source_type: official_government_service
+trust: 1.0
+check_every: 24h
+categories:
+  - immigration
+extraction:
+  strategy: page_change_detection
+  status: planned
+policy:
+  high_risk: true
+  auto_publish: false
+verification:
+  checked_at: 2026-10-18
+  note: Official e-government service page for registering a foreigner's place of stay; legal/immigration changes require human review.

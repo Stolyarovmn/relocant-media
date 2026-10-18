@@ -1,0 +1,17 @@
+id: bgprevoz_news
+name: Sekretarijat za javni prevoz — Vesti
+publisher: City Administration of Belgrade, Secretariat for Public Transport
+ownership: official
+url: https://bgprevoz.rs/vesti
+language: sr
+source_type: official_transport
+trust: 1.0
+check_every: 10m
+categories:
+  - transport
+extraction:
+  strategy: html_list
+  status: planned
+verification:
+  checked_at: 2026-10-18
+  note: Official transport-secretariat news page.

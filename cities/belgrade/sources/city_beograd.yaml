@@ -1,0 +1,21 @@
+id: city_beograd
+name: Grad Beograd
+publisher: City of Belgrade
+ownership: official
+url: https://www.beograd.rs/lat
+language: sr-Latn
+source_type: official_city_portal
+trust: 1.0
+check_every: 15m
+categories:
+  - utilities
+  - health
+  - transport
+  - city
+  - events
+extraction:
+  strategy: html_list
+  status: planned
+verification:
+  checked_at: 2026-10-18
+  note: Official city portal publishes current city news and service information.

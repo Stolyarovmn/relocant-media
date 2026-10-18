@@ -1,0 +1,17 @@
+id: tob_events
+name: Tourist Organization of Belgrade — Events
+publisher: Tourist Organization of Belgrade
+ownership: official
+url: https://www.tob.rs/sr/events
+language: sr-Latn
+source_type: official_events
+trust: 0.95
+check_every: 6h
+categories:
+  - events
+extraction:
+  strategy: html_list
+  status: planned
+verification:
+  checked_at: 2026-10-18
+  note: Official Belgrade tourism event listing.

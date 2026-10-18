@@ -1,0 +1,20 @@
+id: belgrade_health_duty
+name: Grad Beograd — Zdravstvo
+publisher: City of Belgrade
+ownership: official
+url: https://www.beograd.rs/lat/servisne-informacije/zdravstvo
+language: sr-Latn
+source_type: official_health_service_info
+trust: 1.0
+check_every: 6h
+categories:
+  - medicine
+extraction:
+  strategy: html_list
+  status: planned
+policy:
+  high_risk: true
+  auto_publish: false
+verification:
+  checked_at: 2026-10-18
+  note: City service-information listing for duty health institutions; medical information remains human-review-only in v1.
