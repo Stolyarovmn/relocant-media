@@ -65,10 +65,12 @@ class TelegramRuntime:
         self,
         session: Session,
         bot: TelegramBot,
+        city: str = "",
         staging_discussion_group_id: str = "",
     ) -> None:
         self._session = session
         self._bot = bot
+        self._city = city
         self._discussion_group_id = staging_discussion_group_id
 
     async def process(self, payload: dict[str, Any]) -> TelegramProcessingResult:
@@ -132,6 +134,7 @@ class TelegramRuntime:
         decision = rule_based_moderation(text_value)
         self._session.add(
             ModerationAction(
+                city=self._city or None,
                 telegram_chat_id=chat_id,
                 telegram_message_id=message_id,
                 action=decision.value,
