@@ -7,6 +7,10 @@ source_languages:
   - sr
   - en
 
+operations:
+  # Build the previous local day's report after the calendar day is closed.
+  daily_report_local_time: "00:15"
+
 publishing:
   target_posts_per_day:
     min: 2

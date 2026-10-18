@@ -22,6 +22,7 @@ relocant-ingest = "relocant_media.ingestion.cli:main"
 relocant-measure = "relocant_media.analytics.cli:main"
 relocant-smoke = "relocant_media.ops.smoke:main"
 relocant-webhook = "relocant_media.ops.webhook:main"
+relocant-schedule = "relocant_media.scheduler.cli:main"
 
 [project.optional-dependencies]
 dev = [
