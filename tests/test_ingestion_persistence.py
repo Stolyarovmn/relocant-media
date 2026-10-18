@@ -15,6 +15,9 @@ from relocant_media.storage.models import RawItem, Source
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SOURCE_PATH = Path("cities/belgrade/sources/city_beograd_news.yaml")
+RESET_INGESTION_TABLES = text(
+    "TRUNCATE collector_failure, raw_item, source RESTART IDENTITY CASCADE"
+)
 
 
 def _test_database_url() -> str:
@@ -28,11 +31,11 @@ def _test_database_url() -> str:
 def db_session() -> Iterator[Session]:
     engine = create_engine(_test_database_url(), pool_pre_ping=True)
     with Session(engine) as session:
-        session.execute(text("TRUNCATE collector_failure, raw_item, source RESTART IDENTITY CASCADE"))
+        session.execute(RESET_INGESTION_TABLES)
         session.commit()
         yield session
         session.rollback()
-        session.execute(text("TRUNCATE collector_failure, raw_item, source RESTART IDENTITY CASCADE"))
+        session.execute(RESET_INGESTION_TABLES)
         session.commit()
     engine.dispose()
 
