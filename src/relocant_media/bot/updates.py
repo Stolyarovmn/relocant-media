@@ -25,6 +25,8 @@ SUPPORTED_UPDATE_KEYS: tuple[UpdateKind, ...] = (
     UpdateKind.CALLBACK_QUERY,
 )
 
+ALLOWED_UPDATE_TYPES: tuple[str, ...] = tuple(kind.value for kind in SUPPORTED_UPDATE_KEYS)
+
 
 def classify_update(payload: Mapping[str, object]) -> UpdateKind:
     for kind in SUPPORTED_UPDATE_KEYS:
