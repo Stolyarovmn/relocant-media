@@ -68,6 +68,7 @@ services:
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
       TELEGRAM_MTPROTO_SESSION_PATH: /run/telegram/analytics.session
       TELEGRAM_MTPROTO_CHANNEL_ID: ${TELEGRAM_MTPROTO_CHANNEL_ID:-}
+      TELEGRAM_BOOTSTRAP_STATE_PATH: /run/telegram/staging-topology.json
     volumes:
       - telegram_analytics_session:/run/telegram
     depends_on:
