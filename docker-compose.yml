@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:17-alpine
-    profiles: ["staging"]
+    profiles: ["staging", "analytics"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-relocant}
       POSTGRES_USER: ${POSTGRES_USER:-relocant}
@@ -18,10 +18,24 @@ services:
   api:
     build: .
     profiles: ["staging"]
-    env_file: .env
     environment:
       APP_ENV: staging
+      CITY_ID: ${CITY_ID:-belgrade}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      TELEGRAM_RUNTIME_ENABLED: ${TELEGRAM_RUNTIME_ENABLED:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      TELEGRAM_WEBHOOK_URL: ${TELEGRAM_WEBHOOK_URL:-}
+      TELEGRAM_STAGING_CHANNEL_ID: ${TELEGRAM_STAGING_CHANNEL_ID:-}
+      TELEGRAM_STAGING_DISCUSSION_GROUP_ID: ${TELEGRAM_STAGING_DISCUSSION_GROUP_ID:-}
+      TELEGRAM_STAGING_FORUM_GROUP_ID: ${TELEGRAM_STAGING_FORUM_GROUP_ID:-}
+      TELEGRAM_CHANNEL_ID: ${TELEGRAM_CHANNEL_ID:-}
+      TELEGRAM_DISCUSSION_GROUP_ID: ${TELEGRAM_DISCUSSION_GROUP_ID:-}
+      TELEGRAM_FORUM_GROUP_ID: ${TELEGRAM_FORUM_GROUP_ID:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
       - "8080:8080"
     depends_on:
@@ -41,5 +55,30 @@ services:
     restart: unless-stopped
     init: true
 
+  analytics:
+    build: .
+    profiles: ["analytics"]
+    environment:
+      APP_ENV: staging
+      CITY_ID: ${CITY_ID:-belgrade}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      TELEGRAM_MTPROTO_ENABLED: "true"
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?set TELEGRAM_API_ID in .env}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?set TELEGRAM_API_HASH in .env}
+      TELEGRAM_MTPROTO_SESSION_PATH: /run/telegram/analytics.session
+      TELEGRAM_MTPROTO_CHANNEL_ID: ${TELEGRAM_MTPROTO_CHANNEL_ID:?set TELEGRAM_MTPROTO_CHANNEL_ID in .env}
+    volumes:
+      - telegram_analytics_session:/run/telegram
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    init: true
+
 volumes:
   pgdata:
+  telegram_analytics_session:
