@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 
 from relocant_media.services.analytics import Recommendation, RecommendationClass, retained_cpl
 from relocant_media.storage.models import (
-    AIUsageEvent,
     AcquisitionCohort,
+    AIUsageEvent,
     ChannelSnapshot,
     CollectorFailure,
     DailyReport,
