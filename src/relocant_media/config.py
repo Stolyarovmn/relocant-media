@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     telegram_mtproto_session_path: str = "/run/telegram/analytics.session"
     telegram_mtproto_channel_id: str = ""
 
+    # One-shot owner bootstrap state lives beside the MTProto session in the private volume.
+    telegram_bootstrap_state_path: str = "/run/telegram/staging-topology.json"
+
     # Production IDs are intentionally not consumed by the staging runtime.
     telegram_channel_id: str = ""
     telegram_discussion_group_id: str = ""
