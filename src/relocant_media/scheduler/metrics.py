@@ -18,11 +18,11 @@ class PostMetrics:
 
 
 class PostMetricsProvider(Protocol):
-    def fetch_post_metrics(self, post: Post) -> PostMetrics: ...
+    async def fetch_post_metrics(self, post: Post) -> PostMetrics: ...
 
 
 class UnavailablePostMetricsProvider:
-    def fetch_post_metrics(self, post: Post) -> PostMetrics:
+    async def fetch_post_metrics(self, post: Post) -> PostMetrics:
         message_id = post.telegram_message_id
         raise MetricsProviderUnavailable(
             f"post metrics provider is not configured for Telegram message {message_id}"
