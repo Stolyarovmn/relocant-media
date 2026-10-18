@@ -132,6 +132,31 @@ class ModerationAction(Base):
     )
 
 
+class TelegramUpdateReceipt(Base):
+    __tablename__ = "telegram_update_receipt"
+
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="processing", server_default="processing"
+    )
+    error: Mapped[str | None] = mapped_column(Text)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TelegramConversation(Base):
+    __tablename__ = "telegram_conversation"
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    pending_kind: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class AdRequest(Base):
     __tablename__ = "ad_request"
 
