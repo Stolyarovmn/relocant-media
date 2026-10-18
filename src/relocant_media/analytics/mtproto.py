@@ -1,6 +1,7 @@
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 from telethon import TelegramClient, functions, types, utils
 from telethon.errors import FloodWaitError
@@ -88,7 +89,9 @@ class MTProtoMetricsProvider:
                 f"Telegram flood wait: retry after {int(error.seconds)} seconds"
             ) from error
         except (TypeError, ValueError) as error:
-            raise MetricsProviderUnavailable(f"Telegram channel resolution failed: {error}") from error
+            raise MetricsProviderUnavailable(
+                f"Telegram channel resolution failed: {error}"
+            ) from error
 
         messages = getattr(response, "messages", [])
         if not messages:
@@ -106,7 +109,9 @@ class MTProtoMetricsProvider:
                 f"Telegram flood wait: retry after {int(error.seconds)} seconds"
             ) from error
         except (TypeError, ValueError) as error:
-            raise MetricsProviderUnavailable(f"Telegram channel resolution failed: {error}") from error
+            raise MetricsProviderUnavailable(
+                f"Telegram channel resolution failed: {error}"
+            ) from error
 
         subscribers = getattr(response.full_chat, "participants_count", None)
         if subscribers is None:
