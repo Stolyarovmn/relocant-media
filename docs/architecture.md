@@ -25,6 +25,15 @@ GitHub stores code, prompts, source registry, city policy and experiment configu
 
 ## Runtime
 
+Редакционный путь без MTProto: collector → `raw_item` → `EditorialService.prepare`
+→ Gemini structured rank/claims/verify/draft → `editorial_run` + `post` →
+`EditorialService.deliver` → staging publisher → Bot API. Снимок evidence и полный
+outcome сохраняются отдельно от изменяемого raw item. CLI `relocant-editorial`
+по умолчанию формирует preview, а fake transport заменяет внешний HTTP-вызов.
+Доставка в staging не заполняет production-поля публикации и не запускает
+сбор метрик опубликованного поста. MTProto используется отдельной аналитикой
+и может оставаться выключенным. Подробности: [редакционный цикл](EDITORIAL_CYCLE.md).
+
 FastAPI handles Telegram webhooks and realtime flows. PostgreSQL stores operational state. Batch collection/analysis can be triggered by GitHub Actions.
 
 ## Safety boundary

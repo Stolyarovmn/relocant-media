@@ -1,38 +1,54 @@
-# Roadmap
+# План развития
 
-## Stage 0 — repository and tests
-- [x] architecture scaffold
-- [x] city policy skeleton
-- [x] AI engineering contracts
-- [ ] verified Belgrade source registry
-- [ ] SQLAlchemy models + Alembic baseline
-- [ ] Telegram update dispatcher
-- [ ] deterministic collector fixtures
+## Этап 0 — основа и проверки
 
-## Stage 1 — staging newsroom
-- [ ] staging Telegram channel
-- [ ] publishing bot
-- [ ] source collectors
-- [ ] Gemini ranking/drafting/verifier interfaces
-- [ ] post provenance storage
-- [ ] manual approval path for high-risk content
+- [x] Архитектура, политика города и инженерные правила.
+- [x] Реестр источников Белграда и детерминированные фикстуры коллекторов.
+- [x] SQLAlchemy, Alembic и PostgreSQL в CI с проверкой отката миграций.
+- [x] Bot API dispatcher и идемпотентность входящих обновлений.
+- [ ] Продолжать проверку покрытия и актуальности реальных источников.
 
-## Stage 2 — community
-- [ ] linked comments group
-- [ ] moderation pipeline
-- [ ] reader news tips
-- [ ] corrections workflow
-- [ ] separate forum group
+## Этап 1 — редакция в staging без MTProto
 
-## Stage 3 — analytics and acquisition
-- [ ] post snapshots
-- [ ] analytics MTProto client
-- [ ] daily report
-- [ ] recommendation -> GitHub issue/PR
-- [ ] campaign attribution and retained CPL
+- [x] Сбор источников и сохранение raw items в PostgreSQL.
+- [x] Gemini structured rank/claims/verify/draft с проверкой цитат и политики.
+- [x] Снимок evidence, полный outcome и связь raw item → черновик.
+- [x] Повторная обработка без повторных AI-вызовов.
+- [x] CLI с dry-run по умолчанию и fake HTTP transport для Bot API.
+- [x] Отдельная staging-квитанция доставки с блокировкой неопределённых исходов.
+- [x] Интеграционные тесты без реальных Gemini и Telegram, включая конкурирующую доставку.
+- [x] Автоматическая блокировка категорий, требующих ручного ревью.
+- [ ] Интерфейс ручного одобрения и исправлений с аудитом редактора.
+- [ ] Автоматический выбор raw item и подключение редакционного шага к scheduler.
+- [ ] Управляемая повторная проверка изменившихся источников и редакционных версий.
+- [ ] Создать/проверить staging-канал и выдать боту права отдельным шагом владельца.
+- [ ] Выполнить реальную staging-проверку Bot API после подключения владельцем.
 
-## Stage 4 — advertising
-- [ ] advertiser intake
-- [ ] suggested-post review flow
-- [ ] pricing policy
-- [ ] owner approval thresholds
+Запуск и ограничения: [EDITORIAL_CYCLE.md](EDITORIAL_CYCLE.md).
+Fake/dry-run доступны без Telegram API ID/hash. Реальный Gemini требует отдельного
+ключа; интеграционные тесты не требуют его. Production не подключается.
+
+## Этап 2 — сообщество
+
+- [x] Интерфейсы модерации, приём новостей, исправлений и рекламных запросов.
+- [ ] Проверить эти процессы с владельцем в staging Telegram.
+- [ ] Подключить обсуждения и отдельную форум-группу после настройки ресурсов.
+- [ ] Довести редакционный процесс обработки читательских исправлений.
+
+## Этап 3 — аналитика и привлечение
+
+- [x] Хранение снимков постов/канала и daily report.
+- [x] Scheduler с leases, retry и состоянием blocked для недоступных метрик.
+- [x] Изолированный read-only MTProto adapter и fake-client тесты.
+- [ ] Авторизация MTProto владельцем — optional/blocked до получения credentials.
+- [ ] Проверка реальных метрик после подключения; отсутствующие значения не считать нулями.
+- [ ] Recommendation → issue/PR и проверка attribution/retained CPL на реальных данных.
+
+MTProto не является условием завершения этапа 1.
+
+## Этап 4 — реклама
+
+- [x] Хранение и приём advertiser requests через Bot API.
+- [ ] Suggested-post review flow.
+- [ ] Политика цен и пороги согласования владельцем.
+- [ ] Проверка полного процесса в staging без изменения реальных бюджетов.
