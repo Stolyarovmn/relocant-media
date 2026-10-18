@@ -1,6 +1,5 @@
 from .models import RiskClass
 
-
 HIGH_RISK_CATEGORIES = {
     "immigration",
     "law",
