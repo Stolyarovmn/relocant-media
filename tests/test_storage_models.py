@@ -1,3 +1,4 @@
+from relocant_media.scheduler.models import SchedulerLease, SchedulerRun  # noqa: F401
 from relocant_media.storage.models import Base
 
 
@@ -17,4 +18,6 @@ def test_expected_tables_are_registered() -> None:
         "telegram_conversation",
         "ad_request",
         "daily_report",
+        "scheduler_lease",
+        "scheduler_run",
     }
