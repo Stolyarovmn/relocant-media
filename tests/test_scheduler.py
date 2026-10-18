@@ -11,21 +11,32 @@ from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from relocant_media.scheduler.config import CityOperationsConfig
-from relocant_media.scheduler.metrics import PostMetrics, UnavailablePostMetricsProvider
+from relocant_media.scheduler.metrics import (
+    ChannelMetrics,
+    PostMetrics,
+    UnavailablePostMetricsProvider,
+)
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.scheduler.runner import (
     SchedulerSummary,
     run_scheduler_tick,
+    schedule_channel_snapshot,
     schedule_daily_report,
     schedule_post_snapshots,
 )
 from relocant_media.scheduler.state import claim_lease, release_lease
 from relocant_media.scheduler.timing import parse_interval, retry_backoff
-from relocant_media.storage.models import DailyReport, Post, PostSnapshot, RawItem
+from relocant_media.storage.models import (
+    ChannelSnapshot,
+    DailyReport,
+    Post,
+    PostSnapshot,
+    RawItem,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 RESET_TABLES = text(
-    "TRUNCATE scheduler_run, scheduler_lease, post_snapshot, post, daily_report, "
+    "TRUNCATE scheduler_run, scheduler_lease, channel_snapshot, post_snapshot, post, daily_report, "
     "collector_failure, raw_item, source RESTART IDENTITY CASCADE"
 )
 
@@ -142,9 +153,15 @@ verification:
 
 
 class FakeMetricsProvider:
-    def fetch_post_metrics(self, post: Post) -> PostMetrics:
+    async def fetch_post_metrics(self, post: Post) -> PostMetrics:
         assert post.telegram_message_id == 1234
         return PostMetrics(views=100, reactions=10, comments=4, forwards=3)
+
+    async def fetch_channel_metrics(self) -> ChannelMetrics:
+        return ChannelMetrics(
+            subscribers=12345,
+            source="test:channel_metrics",
+        )
 
 
 def _published_post(session: Session, now: datetime) -> Post:
@@ -163,17 +180,41 @@ def _published_post(session: Session, now: datetime) -> Post:
     return post
 
 
+def test_due_channel_snapshot_records_only_observed_metrics(db_session: Session) -> None:
+    now = datetime(2026, 10, 18, 20, 0, tzinfo=UTC)
+    config = CityOperationsConfig(id="belgrade", timezone="Europe/Belgrade")
+    summary = SchedulerSummary()
+
+    asyncio.run(
+        schedule_channel_snapshot(
+            db_session,
+            city_config=config,
+            now=now,
+            provider=FakeMetricsProvider(),
+            summary=summary,
+        )
+    )
+
+    assert summary.channel_snapshots_recorded == 1
+    snapshot = db_session.scalar(select(ChannelSnapshot).where(ChannelSnapshot.city == "belgrade"))
+    assert snapshot is not None
+    assert snapshot.subscribers == 12345
+    assert snapshot.source == "test:channel_metrics"
+
+
 def test_due_post_snapshot_records_only_observed_metrics(db_session: Session) -> None:
     now = datetime(2026, 10, 18, 20, 0, tzinfo=UTC)
     post = _published_post(db_session, now)
     summary = SchedulerSummary()
 
-    schedule_post_snapshots(
-        db_session,
-        city="belgrade",
-        now=now,
-        provider=FakeMetricsProvider(),
-        summary=summary,
+    asyncio.run(
+        schedule_post_snapshots(
+            db_session,
+            city="belgrade",
+            now=now,
+            provider=FakeMetricsProvider(),
+            summary=summary,
+        )
     )
 
     assert summary.snapshots_recorded == 1
@@ -192,19 +233,23 @@ def test_missing_metrics_provider_is_blocked_with_backoff(db_session: Session) -
     first = SchedulerSummary()
     second = SchedulerSummary()
 
-    schedule_post_snapshots(
-        db_session,
-        city="belgrade",
-        now=now,
-        provider=UnavailablePostMetricsProvider(),
-        summary=first,
+    asyncio.run(
+        schedule_post_snapshots(
+            db_session,
+            city="belgrade",
+            now=now,
+            provider=UnavailablePostMetricsProvider(),
+            summary=first,
+        )
     )
-    schedule_post_snapshots(
-        db_session,
-        city="belgrade",
-        now=now,
-        provider=UnavailablePostMetricsProvider(),
-        summary=second,
+    asyncio.run(
+        schedule_post_snapshots(
+            db_session,
+            city="belgrade",
+            now=now,
+            provider=UnavailablePostMetricsProvider(),
+            summary=second,
+        )
     )
 
     assert first.snapshots_blocked == 1
