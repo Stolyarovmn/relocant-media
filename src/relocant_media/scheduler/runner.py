@@ -7,7 +7,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from relocant_media.analytics.measurements import record_post_snapshot
+from relocant_media.analytics.measurements import record_channel_snapshot, record_post_snapshot
 from relocant_media.analytics.report import build_daily_report, store_daily_report
 from relocant_media.collectors.factory import build_collector
 from relocant_media.ingestion.persistence import (
@@ -17,10 +17,7 @@ from relocant_media.ingestion.persistence import (
     upsert_raw_items,
 )
 from relocant_media.scheduler.config import CityOperationsConfig
-from relocant_media.scheduler.metrics import (
-    MetricsProviderUnavailable,
-    PostMetricsProvider,
-)
+from relocant_media.scheduler.metrics import MetricsProvider, MetricsProviderUnavailable
 from relocant_media.scheduler.state import (
     claim_lease,
     finish_run,
@@ -40,6 +37,9 @@ class SchedulerSummary:
     source_runs: int = 0
     source_failures: int = 0
     source_locked: int = 0
+    channel_snapshots_recorded: int = 0
+    channel_snapshots_blocked: int = 0
+    channel_snapshot_failures: int = 0
     snapshots_recorded: int = 0
     snapshots_blocked: int = 0
     snapshot_failures: int = 0
@@ -152,12 +152,66 @@ async def schedule_sources(
             )
 
 
-def schedule_post_snapshots(
+async def schedule_channel_snapshot(
+    session: Session,
+    *,
+    city_config: CityOperationsConfig,
+    now: datetime,
+    provider: MetricsProvider,
+    summary: SchedulerSummary,
+) -> None:
+    interval = parse_interval(city_config.operations.channel_snapshot_every)
+    task_key = f"channel_snapshot:{city_config.id}"
+    if not _recurring_task_due(session, task_key=task_key, interval=interval, now=now):
+        return
+    scheduled_for = bucket_start(now, interval)
+    if not claim_lease(session, task_key=task_key, now=now):
+        return
+
+    run_id = start_run(
+        session,
+        task_key=task_key,
+        task_type="channel_snapshot",
+        city=city_config.id,
+        scheduled_for=scheduled_for,
+        now=now,
+    )
+    try:
+        metrics = await provider.fetch_channel_metrics()
+        record_channel_snapshot(
+            session,
+            city=city_config.id,
+            captured_at=now,
+            subscribers=metrics.subscribers,
+            source=metrics.source,
+        )
+        session.commit()
+        finish_run(
+            session,
+            run_id=run_id,
+            status="success",
+            now=now,
+            details={"subscribers": metrics.subscribers, "source": metrics.source},
+        )
+        summary.channel_snapshots_recorded += 1
+    except MetricsProviderUnavailable as error:
+        session.rollback()
+        finish_run(session, run_id=run_id, status="blocked", now=now, error=error)
+        summary.channel_snapshots_blocked += 1
+    except Exception as error:
+        session.rollback()
+        finish_run(session, run_id=run_id, status="failed", now=now, error=error)
+        summary.channel_snapshot_failures += 1
+    finally:
+        release_lease(session, task_key=task_key, now=now)
+
+
+async def schedule_post_snapshots(
     session: Session,
     *,
     city: str,
     now: datetime,
-    provider: PostMetricsProvider,
+    provider: MetricsProvider,
     summary: SchedulerSummary,
 ) -> None:
     posts = list(
@@ -201,7 +255,7 @@ def schedule_post_snapshots(
                 now=now,
             )
             try:
-                metrics = provider.fetch_post_metrics(post)
+                metrics = await provider.fetch_post_metrics(post)
                 record_post_snapshot(
                     session,
                     post_id=post.id,
@@ -330,7 +384,7 @@ async def run_scheduler_tick(
     city_config: CityOperationsConfig,
     source_directory: Path,
     now: datetime,
-    metrics_provider: PostMetricsProvider,
+    metrics_provider: MetricsProvider,
 ) -> SchedulerSummary:
     _require_aware(now)
     summary = SchedulerSummary()
@@ -342,7 +396,14 @@ async def run_scheduler_tick(
         now=now,
         summary=summary,
     )
-    schedule_post_snapshots(
+    await schedule_channel_snapshot(
+        session,
+        city_config=city_config,
+        now=now,
+        provider=metrics_provider,
+        summary=summary,
+    )
+    await schedule_post_snapshots(
         session,
         city=city_config.id,
         now=now,

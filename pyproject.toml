@@ -15,6 +15,7 @@ dependencies = [
   "beautifulsoup4>=4.13,<5",
   "PyYAML>=6.0,<7",
   "google-genai>=2.31,<3",
+  "Telethon>=1.45,<2",
 ]
 
 [project.scripts]
@@ -23,6 +24,7 @@ relocant-measure = "relocant_media.analytics.cli:main"
 relocant-smoke = "relocant_media.ops.smoke:main"
 relocant-webhook = "relocant_media.ops.webhook:main"
 relocant-schedule = "relocant_media.scheduler.cli:main"
+relocant-mtproto = "relocant_media.analytics.mtproto_cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -48,3 +50,7 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 strict = true
 packages = ["relocant_media"]
+
+[[tool.mypy.overrides]]
+module = ["telethon", "telethon.*"]
+ignore_missing_imports = true

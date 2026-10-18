@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class OperationsConfig(BaseModel):
     daily_report_local_time: time = time(hour=0, minute=15)
+    channel_snapshot_every: str = "1h"
 
     @field_validator("daily_report_local_time", mode="before")
     @classmethod
@@ -15,6 +16,14 @@ class OperationsConfig(BaseModel):
         if isinstance(value, str):
             return time.fromisoformat(value)
         return value
+
+    @field_validator("channel_snapshot_every")
+    @classmethod
+    def validate_channel_snapshot_interval(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("channel_snapshot_every must not be empty")
+        return normalized
 
 
 class CityOperationsConfig(BaseModel):
