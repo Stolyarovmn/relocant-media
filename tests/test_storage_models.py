@@ -5,6 +5,7 @@ from relocant_media.storage.models import Base
 def test_expected_tables_are_registered() -> None:
     assert set(Base.metadata.tables) == {
         "source",
+        "editorial_run",
         "raw_item",
         "collector_failure",
         "post",

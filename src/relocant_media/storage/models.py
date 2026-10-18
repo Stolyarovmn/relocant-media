@@ -87,6 +87,20 @@ class Post(Base):
     )
 
 
+class EditorialRun(Base):
+    __tablename__ = "editorial_run"
+
+    raw_item_id: Mapped[int] = mapped_column(ForeignKey("raw_item.id"), primary_key=True)
+    outcome: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    post_id: Mapped[int | None] = mapped_column(ForeignKey("post.id"), unique=True)
+    delivery_status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    staging_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class PostSnapshot(Base):
     __tablename__ = "post_snapshot"
 
