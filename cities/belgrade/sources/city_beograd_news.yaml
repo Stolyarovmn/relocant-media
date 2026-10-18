@@ -1,0 +1,22 @@
+id: city_beograd_news
+name: Grad Beograd — Vesti
+publisher: City of Belgrade
+ownership: official
+url: https://www.beograd.rs/lat/vesti
+language: sr-Latn
+source_type: official_city_news
+trust: 1.0
+check_every: 10m
+categories:
+  - city
+  - transport
+  - utilities
+  - events
+  - health
+  - schools
+extraction:
+  strategy: beograd_news_list
+  status: active
+verification:
+  checked_at: 2026-10-18
+  note: Official city news list; article links expose stable numeric article IDs.
