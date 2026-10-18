@@ -2,7 +2,18 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -20,11 +31,16 @@ class Source(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(String, nullable=False)
     trust: Mapped[Decimal] = mapped_column(Numeric(4, 3), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
 
 
 class RawItem(Base):
     __tablename__ = "raw_item"
+    __table_args__ = (
+        UniqueConstraint("source_id", "external_id", name="uq_raw_item_source_external"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     source_id: Mapped[str] = mapped_column(ForeignKey("source.id"), nullable=False)
@@ -60,10 +76,16 @@ class PostSnapshot(Base):
 
     post_id: Mapped[int] = mapped_column(ForeignKey("post.id"), primary_key=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
-    views: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    reactions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    comments: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    forwards: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    views: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    reactions: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    comments: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    forwards: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
     subscriber_delta: Mapped[int | None] = mapped_column(BigInteger)
 
 
@@ -75,7 +97,9 @@ class Submission(Base):
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    status: Mapped[str] = mapped_column(String, nullable=False, default="new")
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="new", server_default="new"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -101,7 +125,9 @@ class AdRequest(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    status: Mapped[str] = mapped_column(String, nullable=False, default="new")
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="new", server_default="new"
+    )
     quoted_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     currency: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(
