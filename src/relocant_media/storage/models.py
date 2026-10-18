@@ -224,6 +224,7 @@ class ModerationAction(Base):
     __tablename__ = "moderation_action"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    city: Mapped[str | None] = mapped_column(String)
     telegram_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     action: Mapped[str] = mapped_column(String, nullable=False)
