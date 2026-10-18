@@ -45,4 +45,12 @@ python -m pytest
 
 ## Status
 
-Initial scaffold only. No production Telegram resources or credentials are created by this repository.
+Реализован редакционный цикл без MTProto: источник → PostgreSQL → Gemini
+structured rank/claims/verify/draft → сохранённый черновик → staging publisher.
+По умолчанию используется dry-run; fake transport проверяет Bot API без Telegram.
+Интеграционные тесты заменяют Gemini и Telegram и используют отдельный PostgreSQL.
+
+Запуск и восстановление: [редакционный цикл](docs/EDITORIAL_CYCLE.md).
+Оставшиеся этапы: [план развития](docs/roadmap.md).
+Реальная отправка в staging требует явного включения; production Telegram
+в инженерных задачах не используется.

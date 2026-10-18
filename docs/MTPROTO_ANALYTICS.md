@@ -1,5 +1,12 @@
 # Temporary personal-account MTProto analytics
 
+Текущий статус: MTProto опционален. При отсутствии credentials или сессии
+метрики остаются `blocked`; сбор источников, PostgreSQL, Gemini и staging Bot API
+продолжают работать. Для редакционного цикла оставьте
+`TELEGRAM_MTPROTO_ENABLED=false` и следуйте [инструкции](EDITORIAL_CYCLE.md).
+Отсутствующие метрики не заменяются нулями. Создание и авторизация сессии —
+отдельный шаг владельца.
+
 This is a launch-time exception. The analytics worker temporarily uses an additional Telegram session of the owner's existing personal account because a second phone number is not available yet.
 
 The session is a **user credential**. Telegram executes MTProto calls with the identity and permissions of the authorized user, so treat the session file like a password.
