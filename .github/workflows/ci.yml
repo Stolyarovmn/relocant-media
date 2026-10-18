@@ -41,3 +41,9 @@ jobs:
           alembic downgrade base
           alembic upgrade head
       - run: pytest -q
+      - name: Validate staging Compose configuration
+        run: |
+          cp .env.example .env
+          docker compose --profile staging config >/dev/null
+      - name: Build staging API image
+        run: docker build -t relocant-media:ci .
