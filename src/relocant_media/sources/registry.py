@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,7 +17,7 @@ class SourcePolicy(BaseModel):
 
 
 class VerificationMetadata(BaseModel):
-    checked_at: str | None = None
+    checked_at: date | None = None
     note: str | None = None
 
 
