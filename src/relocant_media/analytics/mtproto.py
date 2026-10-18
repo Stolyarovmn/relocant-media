@@ -1,5 +1,4 @@
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -8,14 +7,12 @@ from telethon.errors import FloodWaitError
 from telethon.sessions import SQLiteSession
 
 from relocant_media.config import Settings, mtproto_setup_errors
-from relocant_media.scheduler.metrics import MetricsProviderUnavailable, PostMetrics
+from relocant_media.scheduler.metrics import (
+    ChannelMetrics,
+    MetricsProviderUnavailable,
+    PostMetrics,
+)
 from relocant_media.storage.models import Post
-
-
-@dataclass(frozen=True, slots=True)
-class ChannelMetrics:
-    subscribers: int
-    source: str = "telegram_mtproto:channels.getFullChannel"
 
 
 def _peer_reference(value: str) -> str | int:
@@ -114,7 +111,10 @@ class MTProtoMetricsProvider:
         subscribers = getattr(response.full_chat, "participants_count", None)
         if subscribers is None:
             raise MetricsProviderUnavailable("Telegram did not expose the channel subscriber count")
-        return ChannelMetrics(subscribers=int(subscribers))
+        return ChannelMetrics(
+            subscribers=int(subscribers),
+            source="telegram_mtproto:channels.getFullChannel",
+        )
 
 
 async def _connected_client(config: Settings) -> TelegramClient:
