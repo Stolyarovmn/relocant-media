@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 _INTERVAL = re.compile(r"^([1-9][0-9]*)([mhd])$")
 
@@ -23,9 +23,9 @@ def bucket_start(value: datetime, interval: timedelta) -> datetime:
     seconds = int(interval.total_seconds())
     if seconds <= 0:
         raise ValueError("interval must be positive")
-    timestamp = int(value.astimezone(timezone.utc).timestamp())
+    timestamp = int(value.astimezone(UTC).timestamp())
     bucket = timestamp - (timestamp % seconds)
-    return datetime.fromtimestamp(bucket, tz=timezone.utc)
+    return datetime.fromtimestamp(bucket, tz=UTC)
 
 
 def retry_backoff(attempt: int) -> timedelta:
