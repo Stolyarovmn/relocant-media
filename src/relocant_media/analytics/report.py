@@ -153,6 +153,7 @@ def build_daily_report(
     moderation = list(
         session.scalars(
             select(ModerationAction).where(
+                ModerationAction.city == city,
                 ModerationAction.created_at >= start,
                 ModerationAction.created_at < end,
             )
