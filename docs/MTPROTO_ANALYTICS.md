@@ -29,6 +29,8 @@ The Bot API runtime and the personal MTProto session are isolated:
 - the session lives in the named Docker volume `telegram_analytics_session` at `/run/telegram/analytics.session`;
 - the session file is never committed, stored in PostgreSQL or printed by the setup CLI.
 
+The separate `relocant-telegram-bootstrap` command is an explicit owner-only provisioning tool. It can create the staging Telegram topology, but it is not imported or invoked by the analytics scheduler; analytics remain read-only after provisioning.
+
 ## 1. Obtain Telegram API credentials
 
 Log in to `https://my.telegram.org`, create an API application if needed and obtain:
@@ -41,10 +43,7 @@ Put them only in the host `.env` file:
 ```dotenv
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=...
-TELEGRAM_MTPROTO_CHANNEL_ID=@your_staging_channel
 ```
-
-For a private channel, use a peer identifier that the authorized account can resolve. The account must be a member/admin of the channel whose analytics are being collected.
 
 Do not put the phone number, login code or 2FA password in `.env`.
 
@@ -72,7 +71,27 @@ All three prompts are interactive; none are command-line arguments or stored in 
 
 Telegram may show a new-session notification in another client. Confirm that the login was yours.
 
-## 4. Verify read-only analytics access
+## 4. Create the staging Telegram topology if it does not exist yet
+
+Preview first:
+
+```bash
+docker compose --profile analytics run --rm analytics \
+  relocant-telegram-bootstrap --city Belgrade plan
+```
+
+Then create/resume it:
+
+```bash
+docker compose --profile analytics run --rm analytics \
+  relocant-telegram-bootstrap --city Belgrade apply --confirm-create-staging
+```
+
+The command prints the resulting `TELEGRAM_STAGING_*` and `TELEGRAM_MTPROTO_CHANNEL_ID` mappings. Copy those values into host environment/secret management. See `docs/TELEGRAM_STAGING_BOOTSTRAP.md` for the full runbook.
+
+## 5. Verify read-only analytics access
+
+After `TELEGRAM_MTPROTO_CHANNEL_ID` is configured:
 
 ```bash
 docker compose --profile analytics run --rm analytics relocant-mtproto check
@@ -87,7 +106,7 @@ Expected output contains:
 
 No messages are sent during this check.
 
-## 5. Run one scheduler tick with MTProto metrics
+## 6. Run one scheduler tick with MTProto metrics
 
 ```bash
 docker compose --profile analytics run --rm analytics \
