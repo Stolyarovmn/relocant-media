@@ -80,13 +80,23 @@ def test_daily_report_uses_only_observed_metrics_and_keeps_currencies_separate(
         subscribers=1012,
         source="manual",
     )
-    db_session.add(
-        ModerationAction(
-            telegram_chat_id=-1001,
-            telegram_message_id=7,
-            action="delete",
-            reason="rules-v1",
-        )
+    db_session.add_all(
+        [
+            ModerationAction(
+                city="belgrade",
+                telegram_chat_id=-1001,
+                telegram_message_id=7,
+                action="delete",
+                reason="rules-v1",
+            ),
+            ModerationAction(
+                city="singapore",
+                telegram_chat_id=-1002,
+                telegram_message_id=8,
+                action="delete",
+                reason="rules-v1",
+            ),
+        ]
     )
     upsert_acquisition_cohort(
         db_session,
