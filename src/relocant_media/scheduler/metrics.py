@@ -23,6 +23,7 @@ class PostMetricsProvider(Protocol):
 
 class UnavailablePostMetricsProvider:
     def fetch_post_metrics(self, post: Post) -> PostMetrics:
+        message_id = post.telegram_message_id
         raise MetricsProviderUnavailable(
-            f"post metrics provider is not configured for Telegram message {post.telegram_message_id}"
+            f"post metrics provider is not configured for Telegram message {message_id}"
         )
