@@ -1,7 +1,7 @@
 import asyncio
 import os
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -61,7 +61,7 @@ def test_interval_and_retry_parsing() -> None:
 
 
 def test_lease_prevents_overlap_and_expires(db_session: Session) -> None:
-    now = datetime(2026, 10, 18, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 18, 20, 0, tzinfo=UTC)
     assert claim_lease(db_session, task_key="source:belgrade:test", now=now)
     assert not claim_lease(db_session, task_key="source:belgrade:test", now=now)
     assert claim_lease(
@@ -107,7 +107,7 @@ verification:
         return httpx.Response(200, text=html, request=request)
 
     config = CityOperationsConfig(id="belgrade", timezone="Europe/Belgrade")
-    now = datetime(2026, 10, 18, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 18, 20, 0, tzinfo=UTC)
 
     async def run_twice() -> tuple[SchedulerSummary, SchedulerSummary]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -164,7 +164,7 @@ def _published_post(session: Session, now: datetime) -> Post:
 
 
 def test_due_post_snapshot_records_only_observed_metrics(db_session: Session) -> None:
-    now = datetime(2026, 10, 18, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 18, 20, 0, tzinfo=UTC)
     post = _published_post(db_session, now)
     summary = SchedulerSummary()
 
@@ -187,7 +187,7 @@ def test_due_post_snapshot_records_only_observed_metrics(db_session: Session) ->
 
 
 def test_missing_metrics_provider_is_blocked_with_backoff(db_session: Session) -> None:
-    now = datetime(2026, 10, 18, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 18, 20, 0, tzinfo=UTC)
     post = _published_post(db_session, now)
     first = SchedulerSummary()
     second = SchedulerSummary()
@@ -220,7 +220,7 @@ def test_missing_metrics_provider_is_blocked_with_backoff(db_session: Session) -
 
 def test_daily_report_is_created_once_for_local_day(db_session: Session) -> None:
     config = CityOperationsConfig(id="belgrade", timezone="Europe/Belgrade")
-    now = datetime(2026, 10, 18, 22, 20, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 18, 22, 20, tzinfo=UTC)
     first = SchedulerSummary()
     second = SchedulerSummary()
 
