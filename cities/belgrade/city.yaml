@@ -10,6 +10,8 @@ source_languages:
 operations:
   # Build the previous local day's report after the calendar day is closed.
   daily_report_local_time: "00:15"
+  # Subscriber count is sampled independently from per-post horizons.
+  channel_snapshot_every: "1h"
 
 publishing:
   target_posts_per_day:
