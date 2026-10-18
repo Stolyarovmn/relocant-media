@@ -5,9 +5,12 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
+    Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -89,6 +92,7 @@ class PostSnapshot(Base):
 
     post_id: Mapped[int] = mapped_column(ForeignKey("post.id"), primary_key=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    horizon_hours: Mapped[int | None] = mapped_column(Integer)
     views: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     reactions: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
@@ -100,6 +104,104 @@ class PostSnapshot(Base):
         BigInteger, nullable=False, default=0, server_default="0"
     )
     subscriber_delta: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class ChannelSnapshot(Base):
+    __tablename__ = "channel_snapshot"
+    __table_args__ = (
+        CheckConstraint(
+            "subscribers >= 0",
+            name="ck_channel_snapshot_subscribers_nonnegative",
+        ),
+        Index("ix_channel_snapshot_city_captured_at", "city", "captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    city: Mapped[str] = mapped_column(String, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    subscribers: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="observed",
+        server_default="observed",
+    )
+    note: Mapped[str | None] = mapped_column(Text)
+
+
+class AcquisitionCohort(Base):
+    __tablename__ = "acquisition_cohort"
+    __table_args__ = (
+        CheckConstraint("joins >= 0", name="ck_acquisition_joins_nonnegative"),
+        CheckConstraint(
+            "retained_d1 is null or (retained_d1 >= 0 and retained_d1 <= joins)",
+            name="ck_acquisition_retained_d1_range",
+        ),
+        CheckConstraint(
+            "retained_d7 is null or (retained_d7 >= 0 and retained_d7 <= joins)",
+            name="ck_acquisition_retained_d7_range",
+        ),
+        CheckConstraint(
+            "retained_d30 is null or (retained_d30 >= 0 and retained_d30 <= joins)",
+            name="ck_acquisition_retained_d30_range",
+        ),
+        UniqueConstraint(
+            "city",
+            "campaign",
+            "cohort_date",
+            name="uq_acquisition_city_campaign_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    city: Mapped[str] = mapped_column(String, nullable=False)
+    campaign: Mapped[str] = mapped_column(String, nullable=False)
+    cohort_date: Mapped[date] = mapped_column(Date, nullable=False)
+    spend: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    currency: Mapped[str | None] = mapped_column(String)
+    joins: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    retained_d1: Mapped[int | None] = mapped_column(BigInteger)
+    retained_d7: Mapped[int | None] = mapped_column(BigInteger)
+    retained_d30: Mapped[int | None] = mapped_column(BigInteger)
+    source: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="manual",
+        server_default="manual",
+    )
+
+
+class AIUsageEvent(Base):
+    __tablename__ = "ai_usage_event"
+    __table_args__ = (
+        CheckConstraint(
+            "input_tokens is null or input_tokens >= 0",
+            name="ck_ai_input_tokens_nonnegative",
+        ),
+        CheckConstraint(
+            "output_tokens is null or output_tokens >= 0",
+            name="ck_ai_output_tokens_nonnegative",
+        ),
+        CheckConstraint(
+            "cost_amount is null or cost_amount >= 0",
+            name="ck_ai_cost_nonnegative",
+        ),
+        Index("ix_ai_usage_event_city_occurred_at", "city", "occurred_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    city: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    task: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    currency: Mapped[str | None] = mapped_column(String)
+    error_type: Mapped[str | None] = mapped_column(String)
 
 
 class Submission(Base):

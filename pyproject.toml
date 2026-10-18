@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 relocant-ingest = "relocant_media.ingestion.cli:main"
+relocant-measure = "relocant_media.analytics.cli:main"
 
 [project.optional-dependencies]
 dev = [
