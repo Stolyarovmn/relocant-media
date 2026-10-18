@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from sqlalchemy.dialects.postgresql import insert
@@ -45,13 +45,18 @@ def _claim_update(session: Session, telegram_update_id: int, kind: UpdateKind) -
     return claimed is not None
 
 
-def _finish_update(session: Session, telegram_update_id: int, status: str, error: str | None) -> None:
+def _finish_update(
+    session: Session,
+    telegram_update_id: int,
+    status: str,
+    error: str | None,
+) -> None:
     receipt = session.get(TelegramUpdateReceipt, telegram_update_id)
     if receipt is None:
         raise RuntimeError("Telegram update receipt disappeared during processing")
     receipt.status = status
     receipt.error = error
-    receipt.processed_at = datetime.now(timezone.utc)
+    receipt.processed_at = datetime.now(UTC)
     session.commit()
 
 
