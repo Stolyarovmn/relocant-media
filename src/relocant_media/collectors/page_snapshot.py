@@ -37,7 +37,11 @@ class PageSnapshotCollector:
 
         content_hash = sha256(body.encode("utf-8")).hexdigest()
         soup = BeautifulSoup(response.text, "html.parser")
-        title = soup.title.get_text(" ", strip=True) if soup.title is not None else self._source.name
+        title = (
+            soup.title.get_text(" ", strip=True)
+            if soup.title is not None
+            else self._source.name
+        )
 
         return [
             RawItem(
