@@ -7,13 +7,15 @@ from sqlalchemy.orm import Session
 from relocant_media.scheduler.models import SchedulerLease, SchedulerRun
 from relocant_media.scheduler.timing import retry_backoff
 
+DEFAULT_LEASE_DURATION = timedelta(minutes=15)
+
 
 def claim_lease(
     session: Session,
     *,
     task_key: str,
     now: datetime,
-    lease_for: timedelta = timedelta(minutes=15),
+    lease_for: timedelta = DEFAULT_LEASE_DURATION,
 ) -> bool:
     lease_until = now + lease_for
     statement = insert(SchedulerLease).values(
@@ -55,7 +57,7 @@ def retry_is_due(run: SchedulerRun | None, now: datetime) -> bool:
     if run.status == "success":
         return False
     if run.status == "running":
-        return False
+        return run.started_at + DEFAULT_LEASE_DURATION <= now
     if run.finished_at is None:
         return True
     return run.finished_at + retry_backoff(run.attempt) <= now
