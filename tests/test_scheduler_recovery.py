@@ -1,11 +1,11 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.scheduler.state import DEFAULT_LEASE_DURATION, retry_is_due
 
 
 def test_running_task_becomes_retryable_after_lease_window() -> None:
-    started_at = datetime(2026, 10, 18, 20, 0, tzinfo=timezone.utc)
+    started_at = datetime(2026, 10, 18, 20, 0, tzinfo=UTC)
     run = SchedulerRun(
         task_key="source:belgrade:test",
         task_type="source_ingestion",
