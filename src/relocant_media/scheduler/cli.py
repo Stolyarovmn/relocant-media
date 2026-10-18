@@ -9,8 +9,14 @@ from typing import Any
 import httpx
 from sqlalchemy import select
 
+from relocant_media.analytics.mtproto import open_mtproto_metrics_provider
+from relocant_media.config import Settings
 from relocant_media.scheduler.config import load_city_operations
-from relocant_media.scheduler.metrics import UnavailablePostMetricsProvider
+from relocant_media.scheduler.metrics import (
+    MetricsProvider,
+    MetricsProviderUnavailable,
+    UnavailableMetricsProvider,
+)
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.scheduler.runner import run_scheduler_tick
 from relocant_media.storage.db import SessionFactory
@@ -38,8 +44,12 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _tick(args: argparse.Namespace) -> dict[str, Any]:
-    now = args.now or datetime.now(UTC)
+async def _run_tick(
+    args: argparse.Namespace,
+    *,
+    now: datetime,
+    provider: MetricsProvider,
+) -> dict[str, Any]:
     city_config = load_city_operations(args.city_config)
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(30.0),
@@ -52,9 +62,38 @@ async def _tick(args: argparse.Namespace) -> dict[str, Any]:
                 city_config=city_config,
                 source_directory=args.sources,
                 now=now,
-                metrics_provider=UnavailablePostMetricsProvider(),
+                metrics_provider=provider,
             )
     return {"ok": True, "now": now.isoformat(), **asdict(summary)}
+
+
+async def _tick(args: argparse.Namespace) -> dict[str, Any]:
+    now = args.now or datetime.now(UTC)
+    config = Settings()
+    if not config.telegram_mtproto_enabled:
+        return await _run_tick(
+            args,
+            now=now,
+            provider=UnavailableMetricsProvider("Telegram MTProto analytics is disabled"),
+        )
+
+    try:
+        async with open_mtproto_metrics_provider(config) as provider:
+            return await _run_tick(args, now=now, provider=provider)
+    except MetricsProviderUnavailable as error:
+        return await _run_tick(
+            args,
+            now=now,
+            provider=UnavailableMetricsProvider(str(error)),
+        )
+    except Exception as error:
+        return await _run_tick(
+            args,
+            now=now,
+            provider=UnavailableMetricsProvider(
+                f"Telegram MTProto analytics connection failed: {type(error).__name__}"
+            ),
+        )
 
 
 def _status(args: argparse.Namespace) -> dict[str, Any]:
