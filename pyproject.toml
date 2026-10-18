@@ -16,6 +16,9 @@ dependencies = [
   "PyYAML>=6.0,<7",
 ]
 
+[project.scripts]
+relocant-ingest = "relocant_media.ingestion.cli:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3,<9",

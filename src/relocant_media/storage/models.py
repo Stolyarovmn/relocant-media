@@ -54,6 +54,19 @@ class RawItem(Base):
     )
 
 
+class CollectorFailure(Base):
+    __tablename__ = "collector_failure"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("source.id"), nullable=False)
+    strategy: Mapped[str] = mapped_column(String, nullable=False)
+    error_type: Mapped[str] = mapped_column(String, nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class Post(Base):
     __tablename__ = "post"
 
