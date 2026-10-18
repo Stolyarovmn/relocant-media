@@ -43,6 +43,7 @@ async def telegram_webhook(
             runtime = TelegramRuntime(
                 session,
                 bot,
+                city=settings.city_id,
                 staging_discussion_group_id=settings.telegram_staging_discussion_group_id,
             )
             result = await runtime.process(payload)
