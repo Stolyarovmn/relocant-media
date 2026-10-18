@@ -17,6 +17,14 @@ class Settings(BaseSettings):
     telegram_staging_discussion_group_id: str = ""
     telegram_staging_forum_group_id: str = ""
 
+    # Temporary MTProto analytics access. The session file is a user credential and must
+    # stay outside the repository and outside the Bot API container.
+    telegram_mtproto_enabled: bool = False
+    telegram_api_id: int = 0
+    telegram_api_hash: str = ""
+    telegram_mtproto_session_path: str = "/run/telegram/analytics.session"
+    telegram_mtproto_channel_id: str = ""
+
     # Production IDs are intentionally not consumed by the staging runtime.
     telegram_channel_id: str = ""
     telegram_discussion_group_id: str = ""
@@ -62,6 +70,22 @@ def telegram_setup_errors(config: Settings) -> list[str]:
         if staging_id and production_id and staging_id == production_id:
             errors.append(f"staging {label} must not equal production {label}")
 
+    return errors
+
+
+def mtproto_setup_errors(config: Settings) -> list[str]:
+    if not config.telegram_mtproto_enabled:
+        return []
+
+    errors: list[str] = []
+    if config.telegram_api_id <= 0:
+        errors.append("TELEGRAM_API_ID is not configured")
+    if not config.telegram_api_hash:
+        errors.append("TELEGRAM_API_HASH is not configured")
+    if not config.telegram_mtproto_session_path:
+        errors.append("TELEGRAM_MTPROTO_SESSION_PATH is not configured")
+    if not config.telegram_mtproto_channel_id:
+        errors.append("TELEGRAM_MTPROTO_CHANNEL_ID is not configured")
     return errors
 
 
