@@ -1,6 +1,5 @@
 import json
 from collections.abc import Iterable
-from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -22,8 +21,6 @@ from relocant_media.ai.prompts import (
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.domain.policy import requires_human_review
 
-ModelT = TypeVar("ModelT", bound=BaseModel)
-
 
 def _json_payload(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -37,7 +34,7 @@ def _documents_payload(documents: tuple[EvidenceDocument, ...]) -> list[dict[str
     return [document.model_dump(mode="json") for document in documents]
 
 
-def _ask(
+def _ask[ModelT: BaseModel](
     provider: StructuredAIProvider,
     *,
     task: str,
