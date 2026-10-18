@@ -91,7 +91,7 @@ class MTProtoMetricsProvider:
             raise MetricsProviderUnavailable(f"Telegram channel resolution failed: {error}") from error
 
         messages = getattr(response, "messages", [])
-        if not messages or not isinstance(messages[0], types.Message):
+        if not messages:
             raise MetricsProviderUnavailable(f"Telegram message {message_id} is unavailable")
         return _post_metrics_from_message(messages[0])
 
