@@ -73,7 +73,7 @@ async def test_private_intake_state_is_persistent_and_update_is_idempotent(
     db_session: Session,
 ) -> None:
     bot = FakeBot()
-    runtime = TelegramRuntime(db_session, bot)
+    runtime = TelegramRuntime(db_session, bot, city="belgrade")
 
     started = await runtime.process(_private_message(100, 10, "/tip"))
     submitted = await runtime.process(_private_message(101, 11, "Новость от читателя"))
@@ -91,7 +91,7 @@ async def test_private_intake_state_is_persistent_and_update_is_idempotent(
 @pytest.mark.asyncio
 async def test_ad_command_creates_submission_and_ad_request(db_session: Session) -> None:
     bot = FakeBot()
-    runtime = TelegramRuntime(db_session, bot)
+    runtime = TelegramRuntime(db_session, bot, city="belgrade")
 
     result = await runtime.process(_private_message(200, 20, "/ad Реклама сервиса"))
 
@@ -103,7 +103,12 @@ async def test_ad_command_creates_submission_and_ad_request(db_session: Session)
 @pytest.mark.asyncio
 async def test_staging_discussion_spam_is_deleted_and_audited(db_session: Session) -> None:
     bot = FakeBot()
-    runtime = TelegramRuntime(db_session, bot, staging_discussion_group_id="-100777")
+    runtime = TelegramRuntime(
+        db_session,
+        bot,
+        city="belgrade",
+        staging_discussion_group_id="-100777",
+    )
     payload: dict[str, object] = {
         "update_id": 300,
         "message": {
@@ -120,5 +125,6 @@ async def test_staging_discussion_spam_is_deleted_and_audited(db_session: Sessio
     assert bot.deleted == [(-100777, 31)]
     audit = db_session.scalar(select(ModerationAction))
     assert audit is not None
+    assert audit.city == "belgrade"
     assert audit.action == "delete"
     assert audit.reason == "rules-v1"
