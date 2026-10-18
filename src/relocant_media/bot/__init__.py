@@ -1,0 +1,1 @@
+"""Telegram bot update handling."""
