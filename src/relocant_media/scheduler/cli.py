@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import json
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +39,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def _tick(args: argparse.Namespace) -> dict[str, Any]:
-    now = args.now or datetime.now(timezone.utc)
+    now = args.now or datetime.now(UTC)
     city_config = load_city_operations(args.city_config)
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(30.0),
