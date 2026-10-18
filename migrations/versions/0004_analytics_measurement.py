@@ -16,6 +16,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("post_snapshot", sa.Column("horizon_hours", sa.Integer()))
+    op.add_column("moderation_action", sa.Column("city", sa.String()))
 
     op.create_table(
         "channel_snapshot",
@@ -108,4 +109,5 @@ def downgrade() -> None:
     op.drop_table("acquisition_cohort")
     op.drop_index("ix_channel_snapshot_city_captured_at", table_name="channel_snapshot")
     op.drop_table("channel_snapshot")
+    op.drop_column("moderation_action", "city")
     op.drop_column("post_snapshot", "horizon_hours")
