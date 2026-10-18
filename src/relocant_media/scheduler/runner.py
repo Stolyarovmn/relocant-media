@@ -152,7 +152,7 @@ async def schedule_sources(
             )
 
 
-def schedule_post_snapshots(
+async def schedule_post_snapshots(
     session: Session,
     *,
     city: str,
@@ -201,7 +201,7 @@ def schedule_post_snapshots(
                 now=now,
             )
             try:
-                metrics = provider.fetch_post_metrics(post)
+                metrics = await provider.fetch_post_metrics(post)
                 record_post_snapshot(
                     session,
                     post_id=post.id,
@@ -342,7 +342,7 @@ async def run_scheduler_tick(
         now=now,
         summary=summary,
     )
-    schedule_post_snapshots(
+    await schedule_post_snapshots(
         session,
         city=city_config.id,
         now=now,
