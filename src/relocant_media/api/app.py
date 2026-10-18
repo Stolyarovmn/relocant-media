@@ -2,13 +2,14 @@ from dataclasses import asdict
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.bot.runtime import TelegramRuntime
 from relocant_media.bot.updates import classify_update, update_id
 from relocant_media.config import settings
-from relocant_media.storage.db import SessionFactory
+from relocant_media.ops.readiness import build_readiness
+from relocant_media.storage.db import SessionFactory, engine
 
 app = FastAPI(title="Relocant Media API", version="0.1.0")
 
@@ -16,6 +17,14 @@ app = FastAPI(title="Relocant Media API", version="0.1.0")
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "environment": settings.app_env}
+
+
+@app.get("/ready")
+def ready(response: Response) -> dict[str, object]:
+    snapshot = build_readiness(settings, engine)
+    if snapshot["status"] != "ready":
+        response.status_code = 503
+    return snapshot
 
 
 @app.post("/telegram/webhook")
@@ -48,6 +57,6 @@ async def telegram_webhook(
             )
             result = await runtime.process(payload)
 
-    response = asdict(result)
-    response["kind"] = result.kind.value
-    return {"ok": True, **response}
+    response_payload = asdict(result)
+    response_payload["kind"] = result.kind.value
+    return {"ok": True, **response_payload}
