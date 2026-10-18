@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from relocant_media.services.analytics import DEFAULT_POST_SNAPSHOT_HOURS
 from relocant_media.storage.models import (
-    AIUsageEvent,
     AcquisitionCohort,
+    AIUsageEvent,
     ChannelSnapshot,
     PostSnapshot,
 )
@@ -139,10 +139,15 @@ def upsert_acquisition_cohort(
         "retained_d30": retained_d30,
         "source": source,
     }
+    update_values = {
+        key: value
+        for key, value in values.items()
+        if key not in {"city", "campaign", "cohort_date"}
+    }
     statement = insert(AcquisitionCohort).values(**values)
     statement = statement.on_conflict_do_update(
         constraint="uq_acquisition_city_campaign_date",
-        set_={key: value for key, value in values.items() if key not in {"city", "campaign", "cohort_date"}},
+        set_=update_values,
     )
     session.execute(statement)
 
