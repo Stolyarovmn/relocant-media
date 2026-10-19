@@ -11,7 +11,7 @@ import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _TRACKING_KEYS = {
@@ -125,7 +125,7 @@ def cluster_events(candidates: list[EventCandidate]) -> list[list[EventCandidate
     ordered = sorted(
         candidates,
         key=lambda item: (
-            item.published_at or datetime.max.replace(tzinfo=None),
+            item.published_at or datetime.max.replace(tzinfo=UTC),
             item.raw_item_id,
         ),
     )
