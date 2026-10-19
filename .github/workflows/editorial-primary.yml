@@ -1,0 +1,170 @@
+name: editorial-primary
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: editorial-primary
+  cancel-in-progress: false
+
+jobs:
+  editorial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APP_ENV: staging
+      CITY_ID: belgrade
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+      TELEGRAM_RUNTIME_ENABLED: "false"
+      TELEGRAM_MTPROTO_ENABLED: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project
+        run: python -m pip install -e .
+
+      - name: Preflight secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${DATABASE_URL:-}" || { echo "DATABASE_URL GitHub secret is required" >&2; exit 1; }
+          test -n "${GEMINI_API_KEY:-}" || { echo "GEMINI_API_KEY GitHub secret is required" >&2; exit 1; }
+
+      - name: Resolve editorial window
+        id: window
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          until="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          since=""
+          if command -v gh >/dev/null 2>&1; then
+            since="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/editorial-primary.yml/runs?status=completed&conclusion=success&per_page=1" \
+              --jq '.workflow_runs[0].run_started_at // empty' 2>/dev/null || true)"
+          fi
+          if [ -z "$since" ]; then
+            since="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          echo "since=$since" >> "$GITHUB_OUTPUT"
+          echo "until=$until" >> "$GITHUB_OUTPUT"
+
+      - name: Ingest official Belgrade sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "outputs/primary/${GITHUB_RUN_ID}"
+          relocant-ingest \
+            --city belgrade \
+            --sources cities/belgrade/sources \
+            | tee "outputs/primary/${GITHUB_RUN_ID}/ingest.json"
+
+      - name: Export up to five new candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          relocant-candidates \
+            --city belgrade \
+            --since '${{ steps.window.outputs.since }}' \
+            --until '${{ steps.window.outputs.until }}' \
+            --limit 5 \
+            --output "outputs/primary/${GITHUB_RUN_ID}/candidates"
+
+      - name: Run Gemini editorial checks with fake Telegram transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          run_dir = Path("outputs/primary") / os.environ["GITHUB_RUN_ID"]
+          manifest = json.loads((run_dir / "candidates" / "manifest.json").read_text(encoding="utf-8"))
+          results = []
+          failed = False
+
+          for candidate in manifest.get("candidates", []):
+              raw_item_id = int(candidate["raw_item_id"])
+              proc = subprocess.run(
+                  ["relocant-editorial", "--raw-item-id", str(raw_item_id), "--transport", "fake"],
+                  text=True,
+                  capture_output=True,
+                  check=False,
+              )
+              result_path = run_dir / f"editorial-{raw_item_id}.json"
+              if proc.stdout.strip():
+                  result_path.write_text(proc.stdout.strip() + "\n", encoding="utf-8")
+              else:
+                  result_path.write_text("{}\n", encoding="utf-8")
+              results.append({
+                  "raw_item_id": raw_item_id,
+                  "returncode": proc.returncode,
+                  "result_file": str(result_path),
+              })
+              if proc.returncode != 0:
+                  failed = True
+                  print(f"editorial failed for raw_item_id={raw_item_id}", flush=True)
+
+          (run_dir / "editorial-results.json").write_text(
+              json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          if failed:
+              raise SystemExit(1)
+          PY
+
+      - name: Write primary heartbeat
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          run_dir = Path("outputs/primary") / os.environ["GITHUB_RUN_ID"]
+          manifest = json.loads((run_dir / "candidates" / "manifest.json").read_text(encoding="utf-8"))
+          heartbeat = {
+              "status": "PRIMARY_OK",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "city": "belgrade",
+              "candidate_count": manifest.get("candidate_count", 0),
+              "window": manifest.get("window", {}),
+              "telegram_transport": "fake",
+          }
+          (run_dir / "heartbeat.json").write_text(
+              json.dumps(heartbeat, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as out:
+              out.write("## PRIMARY_OK\n\n")
+              out.write(f"Candidates: {heartbeat['candidate_count']}\n\n")
+              out.write("Telegram transport: `fake` (no real publication).\n")
+          PY
+
+      - name: Upload editorial run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editorial-primary-${{ github.run_id }}
+          path: outputs/primary/${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
