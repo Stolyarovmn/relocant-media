@@ -116,6 +116,46 @@ def test_unreviewed_urls_are_deduplicated_before_count_and_limit(
     assert [item["article_id"] for item in result["candidates"]] == ["first", "second"]
 
 
+def test_reviewed_event_from_another_source_does_not_reenter_queue(
+    editorial_session: Session,
+) -> None:
+    seed(editorial_session)
+    editorial_session.add(
+        Source(
+            id="d",
+            city="belgrade",
+            name="d",
+            url="https://example.org/d",
+            source_type="media",
+            trust=1,
+            enabled=True,
+        )
+    )
+    editorial_session.add(
+        RawItem(
+            source_id="d",
+            external_id="reviewed-from-d",
+            url="https://example.org/d/reviewed-story",
+            title="Точный заголовок reviewed сегодня",
+            body="Независимый пересказ того же события",
+            published_at=NOW + timedelta(hours=2),
+        )
+    )
+    editorial_session.commit()
+
+    result = select_candidates(
+        editorial_session,
+        city="belgrade",
+        since=NOW,
+        until=NOW + timedelta(days=1),
+        limit=50,
+    )
+
+    assert "reviewed-from-d" not in {
+        item["article_id"] for item in result["candidates"]
+    }
+
+
 @pytest.mark.parametrize("environment", ["production", "prod", "development", ""])
 def test_environment_rejected_before_database(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, environment: str,
