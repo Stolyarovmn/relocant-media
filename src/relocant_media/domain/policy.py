@@ -1,5 +1,7 @@
 from .models import RiskClass
 
+CURRENT_EDITORIAL_RULE_VERSION = "belgrade-editorial-v2"
+
 HIGH_RISK_CATEGORIES = {
     "immigration",
     "law",
