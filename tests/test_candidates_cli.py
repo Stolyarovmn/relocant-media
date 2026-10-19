@@ -137,7 +137,7 @@ def test_reviewed_event_from_another_source_does_not_reenter_queue(
             source_id="d",
             external_id="reviewed-from-d",
             url="https://example.org/d/reviewed-story",
-            title="Точный заголовок reviewed сегодня",
+            title="Точный заголовок reviewed",
             body="Независимый пересказ того же события",
             published_at=NOW + timedelta(hours=2),
         )
