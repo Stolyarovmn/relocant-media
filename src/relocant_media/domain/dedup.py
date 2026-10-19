@@ -63,7 +63,7 @@ def canonicalize_url(value: str) -> str:
 
 
 def content_sha256(title: str, body: str) -> str:
-    payload = f"{normalize_text(title)}\n{normalize_text(body)}".encode("utf-8")
+    payload = f"{normalize_text(title)}\n{normalize_text(body)}".encode()
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -148,4 +148,4 @@ def event_key(candidate: EventCandidate) -> str:
             normalize_text(candidate.title),
         )
     )
-    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return hashlib.sha256(seed.encode()).hexdigest()
