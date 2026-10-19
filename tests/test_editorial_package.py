@@ -171,3 +171,15 @@ def test_package_cli_preview_does_not_load_database(
     monkeypatch.setattr(sys, "argv", ["relocant-package", "--package", str(package_path)])
     main()
     assert json.loads(capsys.readouterr().out)["mode"] == "preview"
+
+
+def test_package_cli_fake_requires_persist(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    from relocant_media.ops.package_cli import main
+
+    monkeypatch.setattr(sys, "argv", [
+        "relocant-package", "--package", "does-not-exist.json", "--transport", "fake",
+    ])
+    with pytest.raises(SystemExit, match="2"):
+        main()
