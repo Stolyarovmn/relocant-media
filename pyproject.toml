@@ -22,6 +22,7 @@ dependencies = [
 relocant-ingest = "relocant_media.ingestion.cli:main"
 relocant-editorial = "relocant_media.ops.editorial_cli:main"
 relocant-package = "relocant_media.ops.package_cli:main"
+relocant-media = "relocant_media.ops.media_cli:main"
 relocant-collect = "relocant_media.ops.collect_cli:main"
 relocant-candidates = "relocant_media.ops.candidates_cli:main"
 relocant-measure = "relocant_media.analytics.cli:main"
