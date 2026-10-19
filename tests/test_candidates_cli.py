@@ -131,6 +131,7 @@ def test_reviewed_event_from_another_source_does_not_reenter_queue(
             enabled=True,
         )
     )
+    editorial_session.flush()
     editorial_session.add(
         RawItem(
             source_id="d",
