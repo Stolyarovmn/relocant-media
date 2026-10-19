@@ -319,7 +319,10 @@ def build_daily_report(
         ],
         "limitations": [
             "Metrics are observational; this report does not infer causality.",
-            "Editorial rule versions are compared descriptively; version labels do not prove causality.",
+            (
+                "Editorial rule versions are compared descriptively; version labels "
+                "do not prove causality."
+            ),
             "Currencies are never converted or combined across currencies.",
             "AI cost is reported only when an explicit observed cost was recorded.",
             "Budget changes require an explicit owner-defined policy and OWNER_APPROVAL.",
