@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -49,6 +49,45 @@ def _document(item: RawItem) -> EvidenceDocument:
         body=item.body,
         published_at=item.published_at,
     )
+
+
+def _reviewed_event_item(
+    session: Session,
+    *,
+    anchor: RawItem,
+    anchor_source: Source,
+) -> RawItem | None:
+    exact_conditions = [RawItem.url == anchor.url]
+    if anchor.canonical_url:
+        exact_conditions.append(RawItem.canonical_url == anchor.canonical_url)
+    if anchor.content_sha256:
+        exact_conditions.append(RawItem.content_sha256 == anchor.content_sha256)
+
+    match_scope = list(exact_conditions)
+    if anchor.published_at is not None:
+        match_scope.append(
+            and_(
+                RawItem.published_at >= anchor.published_at - DEFAULT_EVENT_WINDOW,
+                RawItem.published_at <= anchor.published_at + DEFAULT_EVENT_WINDOW,
+            )
+        )
+
+    reviewed = session.scalars(
+        select(RawItem)
+        .join(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
+        .join(Source, Source.id == RawItem.source_id)
+        .where(
+            RawItem.id != anchor.id,
+            Source.city == anchor_source.city,
+            or_(*match_scope),
+        )
+        .order_by(RawItem.published_at, RawItem.id)
+    )
+    anchor_candidate = _candidate(anchor)
+    for item in reviewed:
+        if same_event(anchor_candidate, _candidate(item)):
+            return item
+    return None
 
 
 def _event_items(
@@ -144,6 +183,15 @@ class EditorialService:
                 raise ValueError("raw item source does not exist")
             if not source.enabled:
                 raise ValueError("raw item source is disabled")
+            reviewed_event = _reviewed_event_item(
+                self.session,
+                anchor=item,
+                anchor_source=source,
+            )
+            if reviewed_event is not None:
+                raise ValueError(
+                    f"event already reviewed via raw item {reviewed_event.id}"
+                )
 
             members = _event_items(self.session, anchor=item, anchor_source=source)
             documents = tuple(_document(member) for member, _member_source in members)
