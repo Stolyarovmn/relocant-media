@@ -85,7 +85,7 @@ class EventCandidate:
     body: str
     published_at: datetime | None
     canonical_url: str | None = None
-    body_sha256: str | None = None
+    content_sha256: str | None = None
 
     @property
     def resolved_canonical_url(self) -> str:
@@ -93,7 +93,7 @@ class EventCandidate:
 
     @property
     def resolved_content_sha256(self) -> str:
-        return self.body_sha256 or content_sha256(self.title, self.body)
+        return self.content_sha256 or content_sha256(self.title, self.body)
 
 
 def same_event(
