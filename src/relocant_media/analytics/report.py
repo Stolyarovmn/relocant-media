@@ -101,6 +101,33 @@ def _recommendations(
     return recommendations
 
 
+def _performance_by_rule_version(
+    session: Session,
+    snapshots: list[PostSnapshot],
+) -> dict[str, dict[str, int | float | None]]:
+    totals: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"snapshots": 0, "views": 0, "interactions": 0}
+    )
+    for snapshot in snapshots:
+        post = session.get(Post, snapshot.post_id)
+        if post is None:
+            continue
+        version = post.editorial_rule_version
+        item = totals[version]
+        item["snapshots"] += 1
+        item["views"] += snapshot.views
+        item["interactions"] += snapshot.reactions + snapshot.comments + snapshot.forwards
+
+    result: dict[str, dict[str, int | float | None]] = {}
+    for version, item in sorted(totals.items()):
+        views = item["views"]
+        result[version] = {
+            **item,
+            "engagement_per_view_observed": item["interactions"] / views if views else None,
+        }
+    return result
+
+
 def build_daily_report(
     session: Session,
     *,
@@ -134,6 +161,8 @@ def build_daily_report(
     total_interactions = sum(
         snapshot.reactions + snapshot.comments + snapshot.forwards for snapshot in snapshots
     )
+    published_by_version = Counter(post.editorial_rule_version for post in posts)
+    performance_by_version = _performance_by_rule_version(session, snapshots)
 
     audience = list(
         session.scalars(
@@ -233,12 +262,14 @@ def build_daily_report(
         "timezone": timezone_name,
         "content": {
             "published_posts": len(posts),
+            "published_posts_by_editorial_rule_version": dict(sorted(published_by_version.items())),
             "post_snapshots": len(snapshots),
             "views_observed": total_views,
             "interactions_observed": total_interactions,
             "engagement_per_view_observed": (
                 total_interactions / total_views if total_views > 0 else None
             ),
+            "performance_by_editorial_rule_version": performance_by_version,
         },
         "audience": {
             "snapshots": len(audience),
@@ -288,6 +319,7 @@ def build_daily_report(
         ],
         "limitations": [
             "Metrics are observational; this report does not infer causality.",
+            "Editorial rule versions are compared descriptively; version labels do not prove causality.",
             "Currencies are never converted or combined across currencies.",
             "AI cost is reported only when an explicit observed cost was recorded.",
             "Budget changes require an explicit owner-defined policy and OWNER_APPROVAL.",
