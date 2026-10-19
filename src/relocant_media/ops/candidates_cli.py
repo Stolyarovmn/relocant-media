@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session, aliased
 
-from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key
+from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key, same_event
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 
 
@@ -75,17 +75,24 @@ def select_candidates(
     eligible = base.where(RawItem.published_at >= since, RawItem.published_at < until)
     rows = session.execute(eligible.order_by(RawItem.published_at, RawItem.id)).all()
 
-    # Do not export a tracking-URL/content copy of evidence that has already been reviewed.
-    reviewed_signatures = session.execute(
-        select(RawItem.url, RawItem.canonical_url, RawItem.content_sha256)
-        .join(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
-    ).all()
-    reviewed_urls = {url for url, _canonical, _fingerprint in reviewed_signatures}
+    # Compare against the full previously reviewed evidence, not only exact URLs/hashes.
+    # Otherwise a later report of the same event from a second publisher could re-enter
+    # the queue even though the event was already reviewed.
+    reviewed_items = list(
+        session.scalars(
+            select(RawItem)
+            .join(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
+            .join(Source, Source.id == RawItem.source_id)
+            .where(Source.city == city)
+        )
+    )
+    reviewed_candidates = [_event_candidate(item) for item in reviewed_items]
+    reviewed_urls = {item.url for item in reviewed_items}
     reviewed_canonical = {
-        canonical for _url, canonical, _fingerprint in reviewed_signatures if canonical
+        candidate.resolved_canonical_url for candidate in reviewed_candidates
     }
     reviewed_hashes = {
-        fingerprint for _url, _canonical, fingerprint in reviewed_signatures if fingerprint
+        candidate.resolved_content_sha256 for candidate in reviewed_candidates
     }
 
     by_id: dict[int, tuple[RawItem, Source]] = {}
@@ -96,6 +103,7 @@ def select_candidates(
             item.url in reviewed_urls
             or candidate.resolved_canonical_url in reviewed_canonical
             or candidate.resolved_content_sha256 in reviewed_hashes
+            or any(same_event(candidate, reviewed) for reviewed in reviewed_candidates)
         ):
             continue
         by_id[item.id] = (item, source)
@@ -166,7 +174,7 @@ def select_candidates(
         "candidates": candidates,
         "deduplication": (
             "canonical URL + normalized content SHA256; cross-source title similarity "
-            "within a 48h event window"
+            "within a 48h event window, including already reviewed events"
         ),
         "missing_published_at_count": missing_count,
         "missing_published_at_scope": "all unreviewed enabled city sources, outside dated window",
