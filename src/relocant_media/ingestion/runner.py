@@ -27,8 +27,15 @@ async def ingest_city(
     source_directory: Path,
     session: Session,
     client: httpx.AsyncClient,
+    *,
+    source_ids: tuple[str, ...] | None = None,
 ) -> IngestionSummary:
     sources = load_source_registry(source_directory)
+    if source_ids is not None:
+        unknown = set(source_ids) - {source.id for source in sources}
+        if not source_ids or unknown:
+            raise ValueError(f"nonempty known source ids required; unknown: {sorted(unknown)}")
+        sources = tuple(source for source in sources if source.id in source_ids)
     for source in sources:
         sync_source(session, city, source)
     session.commit()

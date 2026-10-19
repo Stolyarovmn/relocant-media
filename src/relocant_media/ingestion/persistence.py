@@ -1,11 +1,18 @@
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.sources.registry import SourceConfig
-from relocant_media.storage.models import CollectorFailure, RawItem, Source
+from relocant_media.storage.models import CollectorFailure, EditorialRun, Post, RawItem, Source
+
+
+class ReviewedEvidenceChangedError(ValueError):
+    def __init__(self, raw_item_id: int) -> None:
+        self.raw_item_id = raw_item_id
+        super().__init__(f"reviewed raw item {raw_item_id} changed; new review required")
 
 
 def source_is_enabled(source: SourceConfig) -> bool:
@@ -32,6 +39,14 @@ def sync_source(session: Session, city: str, source: SourceConfig) -> None:
 
 def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
     for item in items:
+        existing = session.scalar(select(RawItem).where(
+            RawItem.source_id == item.source_id, RawItem.external_id == item.external_id,
+        ).with_for_update())
+        if existing is not None and session.get(EditorialRun, existing.id) is not None:
+            if any(getattr(existing, key) != getattr(item, key)
+                   for key in ("url", "title", "body", "published_at")):
+                raise ReviewedEvidenceChangedError(existing.id)
+            continue
         values = {
             "source_id": item.source_id,
             "external_id": item.external_id,
@@ -59,6 +74,14 @@ def record_collector_failure(
     source: SourceConfig,
     error: Exception,
 ) -> None:
+    if isinstance(error, ReviewedEvidenceChangedError):
+        run = session.get(EditorialRun, error.raw_item_id)
+        if run is not None:
+            run.outcome = {**run.outcome, "status": "human_review",
+                           "reason": "source_changed_requires_review"}
+            post = session.get(Post, run.post_id) if run.post_id else None
+            if post is not None and post.published_at is None:
+                post.status = "human_review"
     session.add(
         CollectorFailure(
             source_id=source.id,

@@ -108,3 +108,43 @@ async def test_persisted_package_reviews_expire_before_staging_delivery(
                         lambda package: evaluate(package, now=NOW + timedelta(hours=25)))
     with pytest.raises(DeliveryBlockedError, match="human_review"):
         await service.deliver(item_id)
+
+
+@pytest.mark.asyncio
+async def test_collector_change_blocks_package_even_after_identical_reimport(
+    editorial_session: Session,
+) -> None:
+    from pathlib import Path
+
+    from relocant_media.collectors.base import RawItem as CollectedItem
+    from relocant_media.ingestion.persistence import (
+        ReviewedEvidenceChangedError,
+        record_collector_failure,
+        upsert_raw_items,
+    )
+    from relocant_media.services.editorial import DeliveryBlockedError
+    from relocant_media.sources.registry import load_source_file
+
+    service, provider, item_id = prepare_service(editorial_session)
+    payload = package_payload()
+    payload["raw_item_id"] = item_id
+    for review in payload["reviews"]:
+        review["reviewed_at"] = datetime.now(UTC).isoformat()
+    bind_context(payload)
+    package = parse(payload)
+    original = import_package(editorial_session, package)
+    item = editorial_session.get(RawItem, item_id)
+    incoming = CollectedItem(item.source_id, item.external_id, item.url, item.title,
+                             item.body + " changed", item.published_at)
+    with pytest.raises(ReviewedEvidenceChangedError) as caught:
+        upsert_raw_items(editorial_session, [incoming])
+    editorial_session.rollback()
+    source = load_source_file(Path("cities/belgrade/sources/city_beograd_news.yaml"))
+    record_collector_failure(editorial_session, source, caught.value)
+    editorial_session.commit()
+    repeated = import_package(editorial_session, package)
+    assert repeated.post_id == original.post_id
+    with pytest.raises(DeliveryBlockedError, match="post is no longer ready"):
+        await service.deliver(item_id, dry_run=True)
+    assert repeated.delivery_status == "pending" and repeated.staging_message_id is None
+    assert provider.calls == []
