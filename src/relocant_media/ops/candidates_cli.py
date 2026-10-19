@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session, aliased
 
+from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 
 
@@ -26,6 +27,30 @@ def evidence_sha256(evidence: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _event_candidate(item: RawItem) -> EventCandidate:
+    return EventCandidate(
+        raw_item_id=item.id,
+        source_id=item.source_id,
+        url=item.url,
+        title=item.title,
+        body=item.body,
+        published_at=item.published_at,
+        canonical_url=item.canonical_url,
+        content_sha256=item.content_sha256,
+    )
+
+
+def _evidence(item: RawItem) -> dict[str, Any]:
+    assert item.published_at is not None
+    return {
+        "source_id": item.source_id,
+        "url": item.url,
+        "title": item.title,
+        "body": item.body,
+        "published_at": item.published_at.astimezone(UTC).isoformat(),
+    }
+
+
 def select_candidates(
     session: Session, *, city: str, since: datetime, until: datetime, limit: int,
 ) -> dict[str, Any]:
@@ -36,58 +61,113 @@ def select_candidates(
     until = aware_datetime(until.isoformat())
     if since >= until:
         raise ValueError("Начало окна должно предшествовать концу")
+
     reviewed_item = aliased(RawItem)
-    # URLs must already be canonicalized by collectors; deliberately no fuzzy matching.
     reviewed_url = select(reviewed_item.url).join(
         EditorialRun, EditorialRun.raw_item_id == reviewed_item.id,
     )
     base = select(RawItem, Source).join(Source, Source.id == RawItem.source_id).where(
-        Source.city == city, Source.enabled.is_(True),
+        Source.city == city,
+        Source.enabled.is_(True),
         ~select(EditorialRun.raw_item_id).where(EditorialRun.raw_item_id == RawItem.id).exists(),
         RawItem.url.not_in(reviewed_url),
     )
     eligible = base.where(RawItem.published_at >= since, RawItem.published_at < until)
-    ranked = eligible.with_only_columns(
-        RawItem.id,
-        func.row_number().over(
-            partition_by=RawItem.url, order_by=(RawItem.published_at, RawItem.id),
-        ).label("url_rank"),
-    ).subquery()
-    unique_ids = select(ranked.c.id).where(ranked.c.url_rank == 1)
-    eligible = base.where(RawItem.id.in_(unique_ids))
-    count = session.scalar(select(func.count()).select_from(eligible.subquery())) or 0
-    rows = session.execute(
-        eligible.order_by(RawItem.published_at, RawItem.id).limit(limit)
+    rows = session.execute(eligible.order_by(RawItem.published_at, RawItem.id)).all()
+
+    # Do not export a tracking-URL/content copy of evidence that has already been reviewed.
+    reviewed_signatures = session.execute(
+        select(RawItem.url, RawItem.canonical_url, RawItem.content_sha256)
+        .join(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
     ).all()
-    candidates = []
+    reviewed_urls = {url for url, _canonical, _fingerprint in reviewed_signatures}
+    reviewed_canonical = {
+        canonical for _url, canonical, _fingerprint in reviewed_signatures if canonical
+    }
+    reviewed_hashes = {
+        fingerprint for _url, _canonical, fingerprint in reviewed_signatures if fingerprint
+    }
+
+    by_id: dict[int, tuple[RawItem, Source]] = {}
+    event_inputs: list[EventCandidate] = []
     for item, source in rows:
-        assert item.published_at is not None
-        evidence = {
-            "source_id": item.source_id, "url": item.url, "title": item.title,
-            "body": item.body,
-            "published_at": item.published_at.astimezone(UTC).isoformat(),
-        }
+        candidate = _event_candidate(item)
+        if (
+            item.url in reviewed_urls
+            or candidate.resolved_canonical_url in reviewed_canonical
+            or candidate.resolved_content_sha256 in reviewed_hashes
+        ):
+            continue
+        by_id[item.id] = (item, source)
+        event_inputs.append(candidate)
+
+    clusters = cluster_events(event_inputs)
+    candidates = []
+    for cluster in clusters[:limit]:
+        representative = cluster[0]
+        item, source = by_id[representative.raw_item_id]
+        evidence = _evidence(item)
+        event_evidence = []
+        source_ids: list[str] = []
+        for member in cluster:
+            member_item, member_source = by_id[member.raw_item_id]
+            event_evidence.append({
+                "raw_item_id": member_item.id,
+                "ownership": member_source.ownership,
+                "trust": str(member_source.trust),
+                "evidence": _evidence(member_item),
+            })
+            if member_item.source_id not in source_ids:
+                source_ids.append(member_item.source_id)
         candidates.append({
-            "raw_item_id": item.id, "article_id": item.external_id,
-            "source_id": item.source_id, "evidence": evidence,
+            "raw_item_id": item.id,
+            "article_id": item.external_id,
+            "source_id": item.source_id,
+            "evidence": evidence,
             "evidence_sha256": evidence_sha256(evidence),
-            "source": {"name": source.name, "url": source.url, "type": source.source_type},
+            "source": {
+                "name": source.name,
+                "url": source.url,
+                "type": source.source_type,
+                "ownership": source.ownership,
+                "auto_publish": source.auto_publish,
+                "high_risk": source.high_risk,
+            },
+            "event": {
+                "key": event_key(representative),
+                "member_count": len(cluster),
+                "member_raw_item_ids": [member.raw_item_id for member in cluster],
+                "source_ids": source_ids,
+                "evidence": event_evidence,
+            },
         })
+
     missing = base.where(RawItem.published_at.is_(None))
     missing_count = session.scalar(select(func.count()).select_from(missing.subquery())) or 0
     excluded = [{
-        "raw_item_id": item.id, "source_id": item.source_id,
-        "article_id": item.external_id, "url": item.url,
+        "raw_item_id": item.id,
+        "source_id": item.source_id,
+        "article_id": item.external_id,
+        "url": item.url,
         "status": "excluded_missing_published_at",
     } for item, _source in session.execute(missing.order_by(RawItem.id).limit(limit)).all()]
     return {
-        "version": 1, "city": city,
-        "window": {"since": since.isoformat(), "until": until.isoformat(),
-                   "semantics": "published_at >= since AND published_at < until"},
+        "version": 2,
+        "city": city,
+        "window": {
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+            "semantics": "published_at >= since AND published_at < until",
+        },
         "exported_at": datetime.now(UTC).isoformat(),
-        "candidate_count": len(candidates), "eligible_count": count,
-        "truncated": count > limit, "candidates": candidates,
-        "deduplication": "exact URL within window; earliest published_at then raw_item_id",
+        "candidate_count": len(candidates),
+        "eligible_count": len(clusters),
+        "truncated": len(clusters) > limit,
+        "candidates": candidates,
+        "deduplication": (
+            "canonical URL + normalized content SHA256; cross-source title similarity "
+            "within a 48h event window"
+        ),
         "missing_published_at_count": missing_count,
         "missing_published_at_scope": "all unreviewed enabled city sources, outside dated window",
         "excluded_missing_published_at": excluded,
@@ -141,9 +221,11 @@ def main() -> None:
     except Exception:
         # Database/driver exceptions can contain credentials; never print their contents.
         parser.exit(1, "Экспорт не выполнен: проверьте staging, параметры, БД и новый каталог.\n")
-    print(json.dumps({"candidate_count": result["candidate_count"],
-                      "missing_published_at_count": result["missing_published_at_count"],
-                      "manifest": str(args.output / "manifest.json")}, ensure_ascii=False))
+    print(json.dumps({
+        "candidate_count": result["candidate_count"],
+        "missing_published_at_count": result["missing_published_at_count"],
+        "manifest": str(args.output / "manifest.json"),
+    }, ensure_ascii=False))
 
 
 if __name__ == "__main__":
