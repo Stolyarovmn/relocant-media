@@ -3,6 +3,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.test-public-preview/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -11,3 +12,4 @@ dist/
 build/
 *.egg-info/
 .DS_Store
+.test-*/
