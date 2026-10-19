@@ -1,0 +1,18 @@
+id: cukarica_news
+name: Градска општина Чукарица — вести
+publisher: Градска општина Чукарица
+ownership: official
+url: https://www.cukarica.rs/
+language: sr-Cyrl
+source_type: official_municipal_news
+trust: 1.0
+check_every: 1h
+categories: [city, events, transport, utilities]
+extraction:
+  strategy: cukarica_news
+  status: active
+policy:
+  auto_publish: false
+verification:
+  checked_at: 2026-10-19
+  note: Полные официальные статьи; источник не заменяет независимое ревью. Публичные главная и статья655 проверены по HTTPS.

@@ -13,6 +13,10 @@ Initial verified official sources were checked on 2026-10-18:
 
 The registry deliberately starts with primary sources. Commercial media sources will be added only after a separate quality/terms/duplication review.
 
+19.10.2026 проверен официальный сайт городской общины Чукарица:
+`cukarica_news` собирает главную и полные статьи с явным отказом при изменении
+шаблона. Источник не разрешает публикацию и не заменяет редакционные проверки.
+
 Each source file captures:
 - stable source id;
 - publisher and ownership/type;

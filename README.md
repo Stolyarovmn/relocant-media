@@ -53,6 +53,7 @@ structured rank/claims/verify/draft → сохранённый черновик 
 Запуск и восстановление: [редакционный цикл](docs/EDITORIAL_CYCLE.md).
 Альтернатива без AI API и текущее рабочее состояние:
 [редакция по подписке](docs/OPERATIONAL_STATE.md).
+[Автоматический сбор и выбор кандидатов без AI API](docs/SUBSCRIPTION_PIPELINE.md).
 Оставшиеся этапы: [план развития](docs/roadmap.md).
 Реальная отправка в staging требует явного включения; production Telegram
 в инженерных задачах не используется.
