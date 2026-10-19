@@ -125,7 +125,7 @@ def test_direct_review_rejects_same_event_from_second_source(
         source_id="second-source",
         external_id="same-event",
         url="https://media.example/same-event",
-        title="Servisna informacija danas",
+        title="Servisna informacija",
         body="Drugi tekst o istoj servisnoj informaciji.",
         published_at=original.published_at + timedelta(hours=2),
     )
