@@ -121,6 +121,7 @@ def test_direct_review_rejects_same_event_from_second_source(
             enabled=True,
         )
     )
+    editorial_session.flush()
     duplicate = RawItem(
         source_id="second-source",
         external_id="same-event",
