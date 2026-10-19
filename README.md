@@ -51,6 +51,8 @@ structured rank/claims/verify/draft → сохранённый черновик 
 Интеграционные тесты заменяют Gemini и Telegram и используют отдельный PostgreSQL.
 
 Запуск и восстановление: [редакционный цикл](docs/EDITORIAL_CYCLE.md).
+Альтернатива без AI API и текущее рабочее состояние:
+[редакция по подписке](docs/OPERATIONAL_STATE.md).
 Оставшиеся этапы: [план развития](docs/roadmap.md).
 Реальная отправка в staging требует явного включения; production Telegram
 в инженерных задачах не используется.
