@@ -40,7 +40,18 @@ jobs:
               {...context.repo, name: 'editorial-sqlite', per_page: 100});
             const candidates = artifacts.filter(a => a.workflow_run?.head_branch === branch)
               .sort((a,b) => b.id - a.id);
-            const latest = candidates[0];
+            const repository = await github.rest.repos.get(context.repo);
+            let latest;
+            for (const artifact of candidates) {
+              const {data: run} = await github.rest.actions.getWorkflowRun({
+                ...context.repo, run_id: artifact.workflow_run.id});
+              if (run.head_repository?.id !== repository.data.id ||
+                  !['schedule', 'workflow_dispatch'].includes(run.event) ||
+                  !['.github/workflows/daily-analysis.yml',
+                    '.github/workflows/source-health.yml'].includes(run.path)) continue;
+              latest = artifact;
+              break;
+            }
             if (latest) {
               if (latest.expired) throw new Error('Состояние истекло: требуется восстановление БД');
               const response = await github.rest.actions.downloadArtifact({
@@ -49,7 +60,7 @@ jobs:
             } else {
               for (const workflow_id of ['daily-analysis.yml', 'source-health.yml']) {
                 const runs = await github.rest.actions.listWorkflowRuns({
-                  ...context.repo, workflow_id, branch, status: 'success', per_page: 1});
+                  ...context.repo, workflow_id, branch, status: 'completed', per_page: 1});
                 for (const run of runs.data.workflow_runs) {
                   try {
                     await github.rest.repos.getContent({...context.repo,
@@ -102,5 +113,7 @@ jobs:
           name: editorial-report
           path: reports/summary.json
           retention-days: 30
+
+
 
 
