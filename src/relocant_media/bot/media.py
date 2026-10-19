@@ -13,7 +13,7 @@ class MediaAsset(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     file_name: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    origin: Literal["self_authored_card", "licensed_photo"]
+    origin: Literal["self_authored_card", "licensed_photo", "official_poster"]
     source_url: str = Field(min_length=8)
     rights_basis: str = Field(min_length=10)
     rights_verified: bool
@@ -84,7 +84,9 @@ def validate_media(
             if (str(asset.archive_year) not in asset.archive_label
                     or asset.archive_label not in release.caption):
                 raise ValueError("archive year and exact label required in caption")
-        if asset.origin == "licensed_photo" and asset.attribution not in release.caption:
+        if asset.origin in {"licensed_photo", "official_poster"} and (
+            asset.attribution not in release.caption
+        ):
             raise ValueError("photo attribution required in caption")
         paths.append(path)
     if {r.role for r in release.reviews} != {"facts", "utility"}:

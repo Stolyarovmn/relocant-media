@@ -56,7 +56,13 @@ async def deliver_media_release(
     # No prepare/generation is used: normal policy, evidence and expiry checks still apply.
     service = EditorialService(session, cast(EditorialPipeline, None))
     preview = await service.deliver(release.raw_item_id, dry_run=True)
-    if release.caption != preview.text:
+    credits = list(dict.fromkeys(
+        value for asset in release.assets
+        if asset.origin in {"licensed_photo", "official_poster"}
+        for value in (asset.archive_label, asset.attribution) if value
+    ))
+    expected_caption = preview.text + ("\n\n" + "\n".join(credits) if credits else "")
+    if release.caption != expected_caption:
         raise ValueError("media caption must equal the independently reviewed editorial text")
     digest = hashlib.sha256(canonical_json(release.model_dump(mode="json")).encode()).hexdigest()
     if dry_run:
