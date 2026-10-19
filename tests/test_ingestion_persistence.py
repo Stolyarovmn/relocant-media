@@ -84,7 +84,7 @@ def test_ingest_city_runs_active_strategy_and_stays_idempotent(
 name: Test City News
 publisher: Test City
 ownership: official
-url: https://example.test/lat/vesti
+url: https://www.beograd.rs/lat/vesti
 language: sr-Latn
 source_type: official_city_news
 trust: 1.0

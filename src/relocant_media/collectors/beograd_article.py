@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -8,13 +9,32 @@ from bs4 import BeautifulSoup, Tag
 from relocant_media.collectors.base import RawItem
 from relocant_media.sources.registry import SourceConfig
 
-ARTICLE_ID_RE = re.compile(r"/lat/beoinfo-vesti/a(?P<article_id>\d+)/[^?#]+\.html(?:[?#].*)?$")
+ARTICLE_ID_RE = re.compile(
+    r"/lat/(?:beoinfo-vesti|servisne-informacije/saobracaj-i-prevoz)/"
+    r"a(?P<article_id>\d+)/[^/?#]+\.html"
+)
 DATE_RE = re.compile(r"\b(?P<day>\d{2})\.(?P<month>\d{2})\.(?P<year>\d{4})\.")
 BELGRADE_TZ = ZoneInfo("Europe/Belgrade")
 
 
 class ArticleExtractionError(ValueError):
     pass
+
+
+def match_beograd_article_url(url: str) -> re.Match[str] | None:
+    try:
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in {"www.beograd.rs", "beograd.rs"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in {None, 443}
+        ):
+            return None
+    except ValueError:
+        return None
+    return ARTICLE_ID_RE.fullmatch(parsed.path)
 
 
 def _parse_day_only_date(text: str) -> datetime | None:
@@ -62,7 +82,7 @@ def _paragraphs_after_heading(root: Tag | BeautifulSoup, h1: Tag) -> list[str]:
 
 
 def parse_beograd_article(html: str, source: SourceConfig, url: str) -> RawItem:
-    match = ARTICLE_ID_RE.search(url)
+    match = match_beograd_article_url(url)
     if match is None:
         raise ArticleExtractionError(f"unsupported article url: {url}")
 
@@ -102,6 +122,8 @@ class BelgradeArticleCollector:
         self._client = client
 
     async def collect_url(self, url: str) -> RawItem:
+        if match_beograd_article_url(url) is None:
+            raise ArticleExtractionError(f"unsupported article url: {url}")
         response = await self._client.get(url, follow_redirects=True)
         response.raise_for_status()
         return parse_beograd_article(response.text, self._source, str(response.url))

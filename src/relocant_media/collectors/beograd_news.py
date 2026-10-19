@@ -7,9 +7,9 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.beograd_article import match_beograd_article_url
 from relocant_media.sources.registry import SourceConfig
 
-ARTICLE_HREF_RE = re.compile(r"/lat/beoinfo-vesti/a(?P<article_id>\d+)/[^?#]+\.html(?:[?#].*)?$")
 DATE_RE = re.compile(r"\b(?P<day>\d{2})\.(?P<month>\d{2})\.(?P<year>\d{4})\.")
 LABEL_RE = re.compile(r"\bBeoinfo\s+vesti\b", re.IGNORECASE)
 BELGRADE_TZ = ZoneInfo("Europe/Belgrade")
@@ -50,7 +50,8 @@ def parse_beograd_news_list(html: str, source: SourceConfig) -> list[RawItem]:
         if not isinstance(href_value, str):
             continue
 
-        match = ARTICLE_HREF_RE.search(href_value)
+        article_url = urljoin(str(source.url), href_value)
+        match = match_beograd_article_url(article_url)
         if match is None:
             continue
 
@@ -67,7 +68,7 @@ def parse_beograd_news_list(html: str, source: SourceConfig) -> list[RawItem]:
             RawItem(
                 source_id=source.id,
                 external_id=article_id,
-                url=urljoin(str(source.url), href_value),
+                url=article_url,
                 title=title,
                 body=raw_text,
                 published_at=_parse_day_only_date(raw_text),

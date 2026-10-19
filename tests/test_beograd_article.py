@@ -18,6 +18,48 @@ ARTICLE_URL = (
     "https://www.beograd.rs/lat/beoinfo-vesti/"
     "a116232/Bez-vode-sutra-delovi-Zvezdare.html"
 )
+TRANSPORT_URL = (
+    "https://www.beograd.rs/lat/servisne-informacije/saobracaj-i-prevoz/"
+    "a116238/Informacija-o-radovima-u-ulici-Slanacki-put.html"
+)
+
+
+def test_parse_transport_service_article_preserves_url_and_id() -> None:
+    html = (FIXTURES / "beograd_article_nuxt.html").read_text(encoding="utf-8")
+    item = parse_beograd_article(html, load_source_file(SOURCE_PATH), TRANSPORT_URL)
+
+    assert item.external_id == "116238"
+    assert item.url == TRANSPORT_URL
+    assert item.body.startswith("Najavljeni su novi projekti.")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        TRANSPORT_URL.replace("www.beograd.rs", "foreign.example"),
+        TRANSPORT_URL.replace("www.beograd.rs", "www.beograd.rs.foreign.example"),
+        TRANSPORT_URL.replace("saobracaj-i-prevoz", "unknown-section"),
+        TRANSPORT_URL.replace("/lat/", "/prefix/lat/"),
+        TRANSPORT_URL.replace("https://", "http://"),
+        TRANSPORT_URL.replace("www.beograd.rs", "user@www.beograd.rs"),
+    ],
+)
+def test_article_rejects_foreign_hosts_and_unsupported_paths(url: str) -> None:
+    with pytest.raises(ArticleExtractionError, match="unsupported article url"):
+        parse_beograd_article("<main><h1>Title</h1><p>Body</p></main>",
+                             load_source_file(SOURCE_PATH), url)
+
+
+@pytest.mark.asyncio
+async def test_article_collector_rejects_foreign_host_before_request() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("unsupported URL must not be requested")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ArticleExtractionError, match="unsupported article url"):
+            await BelgradeArticleCollector(load_source_file(SOURCE_PATH), client).collect_url(
+                TRANSPORT_URL.replace("www.beograd.rs", "foreign.example")
+            )
 
 
 def test_parse_beograd_article_extracts_normalized_evidence() -> None:
