@@ -26,6 +26,28 @@ async def test_changed_evidence_blocks_delivery(editorial_session: Session, fiel
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["title", "body"])
+async def test_edited_post_cannot_send_previously_verified_draft(
+    editorial_session: Session, field: str,
+) -> None:
+    service, _, item_id = prepare_service(editorial_session)
+    run = service.prepare(item_id)
+    post = editorial_session.get(Post, run.post_id)
+    assert post is not None
+    setattr(post, field, getattr(post, field) + " edited after verification")
+    editorial_session.commit()
+
+    class MustNotPublish:
+        async def publish(self, text: str) -> int:
+            raise AssertionError("changed draft must be blocked before publisher invocation")
+
+    with pytest.raises(DeliveryBlockedError, match="post draft changed"):
+        await service.deliver(item_id, MustNotPublish(), dry_run=False)
+    editorial_session.refresh(run)
+    assert run.delivery_status == "pending"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["disabled", "city", "post_status"])
 async def test_changed_policy_context_blocks_delivery(
     editorial_session: Session, change: str,

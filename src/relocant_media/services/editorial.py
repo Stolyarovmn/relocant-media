@@ -1,5 +1,6 @@
 """Persisted editorial processing and conservative, at-most-once staging delivery."""
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -90,6 +91,13 @@ class EditorialService:
         if run is None:
             raise ValueError("prepare the raw item before delivery")
         outcome = EditorialOutcome.model_validate(run.outcome)
+        if "_package" in run.outcome:
+            from relocant_media.ai.package import EditorialPackage, evaluate_package
+
+            package = EditorialPackage.model_validate_json(
+                json.dumps(run.outcome["_package"])
+            )
+            outcome = evaluate_package(package)
         if outcome.status != PublicationStatus.READY or outcome.draft is None:
             raise DeliveryBlockedError(f"editorial policy blocks delivery: {outcome.status}")
         item = self.session.get(RawItem, raw_item_id, populate_existing=True)
@@ -101,6 +109,8 @@ class EditorialService:
             raise DeliveryBlockedError("editorial city does not match the source")
         if post.status != PublicationStatus.READY:
             raise DeliveryBlockedError("post is no longer ready for delivery")
+        if (post.title, post.body) != (outcome.draft.title, outcome.draft.body):
+            raise DeliveryBlockedError("post draft changed after verification")
         if any(run.evidence.get(key) != value for key, value in {
             "source_id": item.source_id, "url": item.url,
             "title": item.title, "body": item.body,
