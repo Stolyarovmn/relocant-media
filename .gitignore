@@ -13,3 +13,7 @@ build/
 *.egg-info/
 .DS_Store
 .test-*/
+
+state/
+reports/
+state.zip

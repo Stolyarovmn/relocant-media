@@ -1,8 +1,10 @@
 from datetime import date, datetime
 from decimal import Decimal
+from sqlite3 import Connection as SQLiteConnection
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -15,10 +17,18 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+@event.listens_for(Engine, "connect")
+def _enable_sqlite_foreign_keys(connection: object, record: object) -> None:
+    if isinstance(connection, SQLiteConnection):
+        connection.execute("PRAGMA foreign_keys=ON")
 
 
 class Base(DeclarativeBase):
@@ -45,7 +55,9 @@ class RawItem(Base):
         UniqueConstraint("source_id", "external_id", name="uq_raw_item_source_external"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     source_id: Mapped[str] = mapped_column(ForeignKey("source.id"), nullable=False)
     external_id: Mapped[str] = mapped_column(String, nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -60,7 +72,9 @@ class RawItem(Base):
 class CollectorFailure(Base):
     __tablename__ = "collector_failure"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     source_id: Mapped[str] = mapped_column(ForeignKey("source.id"), nullable=False)
     strategy: Mapped[str] = mapped_column(String, nullable=False)
     error_type: Mapped[str] = mapped_column(String, nullable=False)
@@ -73,7 +87,9 @@ class CollectorFailure(Base):
 class Post(Base):
     __tablename__ = "post"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     city: Mapped[str] = mapped_column(String, nullable=False)
     category: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
@@ -91,8 +107,12 @@ class EditorialRun(Base):
     __tablename__ = "editorial_run"
 
     raw_item_id: Mapped[int] = mapped_column(ForeignKey("raw_item.id"), primary_key=True)
-    outcome: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    outcome: Mapped[dict[str, Any]] = mapped_column(
+        JSONB().with_variant(JSON, "sqlite"), nullable=False
+    )
+    evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSONB().with_variant(JSON, "sqlite"), nullable=False
+    )
     post_id: Mapped[int | None] = mapped_column(ForeignKey("post.id"), unique=True)
     delivery_status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     staging_message_id: Mapped[int | None] = mapped_column(BigInteger)
@@ -130,7 +150,9 @@ class ChannelSnapshot(Base):
         Index("ix_channel_snapshot_city_captured_at", "city", "captured_at"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     city: Mapped[str] = mapped_column(String, nullable=False)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     subscribers: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -168,7 +190,9 @@ class AcquisitionCohort(Base):
         ),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     city: Mapped[str] = mapped_column(String, nullable=False)
     campaign: Mapped[str] = mapped_column(String, nullable=False)
     cohort_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -204,7 +228,9 @@ class AIUsageEvent(Base):
         Index("ix_ai_usage_event_city_occurred_at", "city", "occurred_at"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     city: Mapped[str] = mapped_column(String, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     provider: Mapped[str] = mapped_column(String, nullable=False)
@@ -221,11 +247,15 @@ class AIUsageEvent(Base):
 class Submission(Base):
     __tablename__ = "submission"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     kind: Mapped[str] = mapped_column(String, nullable=False)
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB().with_variant(JSON, "sqlite"), nullable=False
+    )
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="new", server_default="new"
     )
@@ -237,7 +267,9 @@ class Submission(Base):
 class ModerationAction(Base):
     __tablename__ = "moderation_action"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     city: Mapped[str | None] = mapped_column(String)
     telegram_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -277,9 +309,13 @@ class TelegramConversation(Base):
 class AdRequest(Base):
     __tablename__ = "ad_request"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB().with_variant(JSON, "sqlite"), nullable=False
+    )
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="new", server_default="new"
     )
@@ -295,7 +331,9 @@ class DailyReport(Base):
 
     report_date: Mapped[date] = mapped_column(Date, primary_key=True)
     city: Mapped[str] = mapped_column(String, primary_key=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB().with_variant(JSON, "sqlite"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
