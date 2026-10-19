@@ -19,6 +19,19 @@ relocant-package --package work/editorial-package.json
 relocant-package --package work/editorial-package.json --persist
 ```
 
+После записи по умолчанию выполняется `dry-run` доставки с повторной проверкой
+редакционных ограничений. Для проверки сериализации Bot API без Telegram:
+
+```powershell
+relocant-package --package work/editorial-package.json --persist --transport fake
+```
+
+`fake` требует `--persist` и использует только `httpx.MockTransport`, фиктивный
+токен и фиктивный chat id. Обе разновидности не вызывают AI, не используют реальные
+Telegram credentials и не расходуют квитанцию: `delivery_status=pending`,
+`staging_message_id=null`. Повторный запуск не создаёт новый черновик.
+Пакеты, заблокированные политикой, сохраняются без имитации доставки.
+
 Импорт запрещён при `APP_ENV=prod` и `production`. Он создаёт `EditorialRun` и
 черновик `Post`, сохраняя полный пакет и его SHA256 в дополнительных полях
 `outcome._package` и `outcome._package_sha256`. Новая миграция не нужна.
