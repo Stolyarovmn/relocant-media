@@ -111,9 +111,10 @@ class FakePublisher:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("fail,poster", [(False, False), (True, False), (False, True)])
 async def test_reviewed_media_delivery_durable_at_most_once(
-    editorial_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool,
+    editorial_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    fail: bool, poster: bool,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "staging")
     service, provider, raw_id = prepare_service(editorial_session)
@@ -126,7 +127,13 @@ async def test_reviewed_media_delivery_durable_at_most_once(
     run = import_package(editorial_session, package)
     release = release_for(tmp_path, raw_id, run.post_id, package.model_dump(mode="json"))
     preview = await service.deliver(raw_id, dry_run=True)
-    release = rebind_caption(release, preview.text)
+    if poster:
+        release = release.model_copy(update={"assets": tuple(
+            asset.model_copy(update={"origin": "official_poster", "attribution": "Афиша: ГО"})
+            for asset in release.assets
+        )})
+    caption = preview.text + ("\n\nАфиша: ГО" if poster else "")
+    release = rebind_caption(release, caption)
     publisher = FakePublisher(fail=fail)
     kwargs = {"assets": tmp_path, "receipts": tmp_path / "receipts", "publisher": publisher,
               "production_id": "-100999", "dry_run": False}
