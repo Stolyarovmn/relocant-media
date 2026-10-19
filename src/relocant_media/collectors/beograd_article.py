@@ -30,6 +30,12 @@ def _parse_day_only_date(text: str) -> datetime | None:
 
 
 def _article_root(h1: Tag, soup: BeautifulSoup) -> Tag | BeautifulSoup:
+    # The city's Nuxt template puts the heading and body in sibling story blocks.
+    # Bind the body to this heading rather than falling back to the entire page.
+    document = soup.find(None, attrs={"document-title": " ".join(h1.stripped_strings)})
+    if isinstance(document, Tag):
+        content = document.find_parent(class_="story__full-content")
+        return content if isinstance(content, Tag) else document
     article = h1.find_parent("article")
     if isinstance(article, Tag):
         return article
@@ -41,12 +47,14 @@ def _article_root(h1: Tag, soup: BeautifulSoup) -> Tag | BeautifulSoup:
 
 def _paragraphs_after_heading(root: Tag | BeautifulSoup, h1: Tag) -> list[str]:
     paragraphs: list[str] = []
+    following = {id(paragraph) for paragraph in h1.find_all_next("p")}
     for paragraph in root.find_all("p"):
         if not isinstance(paragraph, Tag):
             continue
-        if paragraph.sourceline is not None and h1.sourceline is not None:
-            if paragraph.sourceline <= h1.sourceline:
-                continue
+        if id(paragraph) not in following:
+            continue
+        if paragraph.find_parent(["footer", "nav", "aside", "form"]) is not None:
+            continue
         text = " ".join(paragraph.stripped_strings)
         if text:
             paragraphs.append(text)
@@ -73,7 +81,10 @@ def parse_beograd_article(html: str, source: SourceConfig, url: str) -> RawItem:
         raise ArticleExtractionError("article body paragraphs not found")
 
     article_text = "\n\n".join(body_parts)
-    root_text = " ".join(root.stripped_strings)
+    date = h1.find_next(class_="story__time")
+    root_text = date.get_text(" ", strip=True) if isinstance(date, Tag) else " ".join(
+        root.stripped_strings
+    )
 
     return RawItem(
         source_id=source.id,

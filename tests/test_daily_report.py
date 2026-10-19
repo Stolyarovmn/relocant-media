@@ -88,6 +88,7 @@ def test_daily_report_uses_only_observed_metrics_and_keeps_currencies_separate(
                 telegram_message_id=7,
                 action="delete",
                 reason="rules-v1",
+                created_at=datetime(2026, 10, 18, 12, tzinfo=UTC),
             ),
             ModerationAction(
                 city="singapore",
@@ -95,6 +96,7 @@ def test_daily_report_uses_only_observed_metrics_and_keeps_currencies_separate(
                 telegram_message_id=8,
                 action="delete",
                 reason="rules-v1",
+                created_at=datetime(2026, 10, 18, 12, tzinfo=UTC),
             ),
         ]
     )
