@@ -1,6 +1,7 @@
 import json
 import os
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -25,7 +26,7 @@ from relocant_media.collectors.beograd_article import BelgradeArticleCollector
 from relocant_media.ingestion.persistence import sync_source, upsert_raw_items
 from relocant_media.services.editorial import DeliveryBlockedError, EditorialService
 from relocant_media.sources.registry import load_source_file
-from relocant_media.storage.models import EditorialRun, Post, RawItem
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 
 @pytest.fixture
@@ -96,6 +97,45 @@ async def test_db_to_structured_ai_to_fake_bot_api_is_durable_and_idempotent(
     post = editorial_session.scalar(select(Post))
     assert post is not None
     assert post.telegram_message_id is None and post.published_at is None
+
+
+def test_direct_review_rejects_same_event_from_second_source(
+    editorial_session: Session,
+) -> None:
+    service, provider, item_id = prepare_service(editorial_session)
+    original = editorial_session.get(RawItem, item_id)
+    assert original is not None
+    original.published_at = datetime(2026, 10, 19, 12, tzinfo=UTC)
+    editorial_session.commit()
+    service.prepare(item_id)
+
+    editorial_session.add(
+        Source(
+            id="second-source",
+            city="belgrade",
+            name="Second source",
+            url="https://media.example",
+            source_type="media",
+            trust=1,
+            ownership="media",
+            enabled=True,
+        )
+    )
+    editorial_session.flush()
+    duplicate = RawItem(
+        source_id="second-source",
+        external_id="same-event",
+        url="https://media.example/same-event",
+        title="Servisna informacija",
+        body="Drugi tekst o istoj servisnoj informaciji.",
+        published_at=original.published_at + timedelta(hours=2),
+    )
+    editorial_session.add(duplicate)
+    editorial_session.commit()
+
+    with pytest.raises(ValueError, match="event already reviewed"):
+        service.prepare(duplicate.id)
+    assert provider.calls == ["rank", "claims", "verify", "draft"]
 
 
 @pytest.mark.asyncio

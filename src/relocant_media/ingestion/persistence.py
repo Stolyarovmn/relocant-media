@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.base import RawItem as CollectedRawItem
+from relocant_media.domain.dedup import canonicalize_url, content_sha256
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.models import CollectorFailure, EditorialRun, Post, RawItem, Source
 
@@ -27,6 +28,9 @@ def sync_source(session: Session, city: str, source: SourceConfig) -> None:
         "url": str(source.url),
         "source_type": source.source_type,
         "trust": Decimal(str(source.trust)),
+        "ownership": source.ownership,
+        "high_risk": source.policy.high_risk,
+        "auto_publish": source.policy.auto_publish,
         "enabled": source_is_enabled(source),
     }
     statement = insert(Source).values(**values)
@@ -37,8 +41,13 @@ def sync_source(session: Session, city: str, source: SourceConfig) -> None:
     session.execute(statement)
 
 
+def _derived_metadata(item: CollectedRawItem) -> tuple[str, str]:
+    return canonicalize_url(item.url), content_sha256(item.title, item.body)
+
+
 def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
     for item in items:
+        canonical_url, fingerprint = _derived_metadata(item)
         existing = session.scalar(select(RawItem).where(
             RawItem.source_id == item.source_id, RawItem.external_id == item.external_id,
         ).with_for_update())
@@ -46,11 +55,17 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
             if any(getattr(existing, key) != getattr(item, key)
                    for key in ("url", "title", "body", "published_at")):
                 raise ReviewedEvidenceChangedError(existing.id)
+            # Derived metadata is safe to backfill: it is deterministic from the exact
+            # evidence already reviewed and does not change the evidence snapshot itself.
+            existing.canonical_url = canonical_url
+            existing.content_sha256 = fingerprint
             continue
         values = {
             "source_id": item.source_id,
             "external_id": item.external_id,
             "url": item.url,
+            "canonical_url": canonical_url,
+            "content_sha256": fingerprint,
             "title": item.title,
             "body": item.body,
             "published_at": item.published_at,
@@ -60,6 +75,8 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
             constraint="uq_raw_item_source_external",
             set_={
                 "url": item.url,
+                "canonical_url": canonical_url,
+                "content_sha256": fingerprint,
                 "title": item.title,
                 "body": item.body,
                 "published_at": item.published_at,

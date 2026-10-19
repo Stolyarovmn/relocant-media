@@ -20,6 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
+
 
 class Base(DeclarativeBase):
     pass
@@ -34,6 +36,15 @@ class Source(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(String, nullable=False)
     trust: Mapped[Decimal] = mapped_column(Numeric(4, 3), nullable=False)
+    ownership: Mapped[str] = mapped_column(
+        String, nullable=False, default="unknown", server_default="unknown"
+    )
+    high_risk: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    auto_publish: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
     )
@@ -43,12 +54,16 @@ class RawItem(Base):
     __tablename__ = "raw_item"
     __table_args__ = (
         UniqueConstraint("source_id", "external_id", name="uq_raw_item_source_external"),
+        Index("ix_raw_item_canonical_url", "canonical_url"),
+        Index("ix_raw_item_content_sha256", "content_sha256"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     source_id: Mapped[str] = mapped_column(ForeignKey("source.id"), nullable=False)
     external_id: Mapped[str] = mapped_column(String, nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_url: Mapped[str | None] = mapped_column(Text)
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
     title: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -80,6 +95,9 @@ class Post(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    editorial_rule_version: Mapped[str] = mapped_column(
+        String, nullable=False, default=CURRENT_EDITORIAL_RULE_VERSION, server_default="legacy-v1"
+    )
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
@@ -94,6 +112,9 @@ class EditorialRun(Base):
     outcome: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     post_id: Mapped[int | None] = mapped_column(ForeignKey("post.id"), unique=True)
+    editorial_rule_version: Mapped[str] = mapped_column(
+        String, nullable=False, default=CURRENT_EDITORIAL_RULE_VERSION, server_default="legacy-v1"
+    )
     delivery_status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     staging_message_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(

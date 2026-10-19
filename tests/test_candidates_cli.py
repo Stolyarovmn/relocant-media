@@ -39,9 +39,14 @@ def seed(session: Session) -> None:
         ("reviewed", "a", NOW, "reviewed"),
         ("duplicate", "a", NOW, "reviewed"),
     ]:
-        session.add(RawItem(source_id=source_id, external_id=external_id,
-                            url=f"https://example.org/{url}", title="Точный заголовок",
-                            body="Точный\nтекст с пробелами  ", published_at=date))
+        session.add(RawItem(
+            source_id=source_id,
+            external_id=external_id,
+            url=f"https://example.org/{url}",
+            title=f"Точный заголовок {url}",
+            body=f"Точный\nтекст с пробелами  {url}",
+            published_at=date,
+        ))
     session.flush()
     reviewed = session.scalar(select(RawItem.id).where(RawItem.external_id == "reviewed"))
     assert reviewed is not None
@@ -57,8 +62,9 @@ def test_export_selects_exact_window_and_excludes_reviewed_url(editorial_session
     assert result["eligible_count"] == 2 and result["truncated"] is True
     assert [item["article_id"] for item in result["candidates"]] == ["first"]
     evidence = result["candidates"][0]["evidence"]
-    assert evidence["body"] == "Точный\nтекст с пробелами  "
+    assert evidence["body"] == "Точный\nтекст с пробелами  first"
     assert result["candidates"][0]["evidence_sha256"] == evidence_sha256(evidence)
+    assert result["candidates"][0]["event"]["member_count"] == 1
     assert result["missing_published_at_count"] == 1
     assert result["excluded_missing_published_at"][0]["article_id"] == "missing"
     assert editorial_session.scalar(select(func.count()).select_from(EditorialRun)) == 1
@@ -108,6 +114,47 @@ def test_unreviewed_urls_are_deduplicated_before_count_and_limit(
     assert result["eligible_count"] == result["candidate_count"] == 2
     assert result["truncated"] is False
     assert [item["article_id"] for item in result["candidates"]] == ["first", "second"]
+
+
+def test_reviewed_event_from_another_source_does_not_reenter_queue(
+    editorial_session: Session,
+) -> None:
+    seed(editorial_session)
+    editorial_session.add(
+        Source(
+            id="d",
+            city="belgrade",
+            name="d",
+            url="https://example.org/d",
+            source_type="media",
+            trust=1,
+            enabled=True,
+        )
+    )
+    editorial_session.flush()
+    editorial_session.add(
+        RawItem(
+            source_id="d",
+            external_id="reviewed-from-d",
+            url="https://example.org/d/reviewed-story",
+            title="Точный заголовок reviewed",
+            body="Независимый пересказ того же события",
+            published_at=NOW + timedelta(hours=2),
+        )
+    )
+    editorial_session.commit()
+
+    result = select_candidates(
+        editorial_session,
+        city="belgrade",
+        since=NOW,
+        until=NOW + timedelta(days=1),
+        limit=50,
+    )
+
+    assert "reviewed-from-d" not in {
+        item["article_id"] for item in result["candidates"]
+    }
 
 
 @pytest.mark.parametrize("environment", ["production", "prod", "development", ""])

@@ -1,7 +1,8 @@
 # Редакционный цикл без MTProto
 
-Путь: официальный источник → `relocant-ingest` → PostgreSQL `raw_item` →
-`relocant-editorial` → Gemini structured rank/claims/verify/draft →
+Путь: официальный/разрешённый источник → `relocant-ingest` → PostgreSQL `raw_item` →
+canonical URL + normalized content SHA256 → event-level dedup/evidence bundle →
+`relocant-editorial` → Gemini structured rank/claims/verify/draft → deterministic guards →
 `editorial_run` и `post` → staging publisher через Bot API.
 
 ## Безопасный запуск
@@ -26,6 +27,48 @@ Telegram не вызывается. Fake заменяет HTTP-транспор�
 Оставьте `TELEGRAM_MTPROTO_ENABLED=false`. Аналитика с отсутствующим провайдером
 остаётся `blocked`, не мешая редакционному циклу.
 
+## Event-level deduplication
+
+При ingest сохраняются исходный URL, canonical URL и SHA256 нормализованного
+`title + body`. Экспорт кандидатов и редакционный сервис используют их как
+детерминированные признаки дубля. Для разных источников дополнительно допускается
+консервативное объединение похожих заголовков в пределах 48 часов. Похожесть
+заголовка никогда не объединяет две разные публикации одного и того же источника.
+
+Один event может содержать несколько независимых `raw_item`. В AI pipeline передаётся
+не более одного документа от каждого источника. В `editorial_run.evidence.documents`
+сохраняется полный использованный bundle вместе с `raw_item_id` и source-policy.
+Перед отправкой каждый его элемент повторно сверяется с текущей БД. Изменение текста,
+URL, даты публикации, удаление или отключение любого использованного источника
+блокирует доставку.
+
+## Детерминированные publication guards
+
+LLM не определяет право на автоматическую публикацию. Даже если AI pipeline вернул
+`READY`, приложение переводит материал в `human_review`, если выполняется хотя бы
+одно условие:
+
+- anchor-source имеет `auto_publish: false`;
+- любой использованный источник имеет `policy.high_risk: true`;
+- среди evidence нет источника с `ownership: official`.
+
+Эти же условия проверяются ещё раз непосредственно перед Telegram-вызовом. Для строки
+`Источник:` выбирается официальный документ из evidence bundle, если он есть.
+
+Высокорисковые категории (`immigration`, `law`, `tax`, `medicine`, `banking`,
+`politics`) по-прежнему требуют human review независимо от source-policy. Таким
+образом, хороший ответ одной модели или даже согласие writer/verifier не обходят
+программные ограничения.
+
+## Версии редакционных правил
+
+Новые `post` и `editorial_run` получают `editorial_rule_version=belgrade-editorial-v2`.
+Записи, созданные до миграции `0007`, честно маркируются `legacy-v1`. Daily report
+показывает число публикаций, views/interactions и observed engagement отдельно по
+`editorial_rule_version`. Это позволяет сравнивать версии правил, но не доказывает
+причинность: на метрики одновременно влияют тема, время публикации, охват и другие
+факторы.
+
 ## Отдельное подключение staging
 
 Только по отдельному решению владельца и с тестовым каналом:
@@ -42,7 +85,7 @@ relocant-editorial --raw-item-id 1 --transport bot-api --send-staging
 
 ## Гарантии и восстановление
 
-- Сохраняются снимок доказательств, URL, цитаты, решения и черновик.
+- Сохраняются event evidence bundle, URL, цитаты, решения и черновик.
 - Повторная обработка того же raw item возвращает сохранённый результат без Gemini.
 - `human_review`, `blocked`, `skipped` никогда не отправляются автоматически.
   Интерфейс ручного одобрения пока не реализован.
@@ -56,6 +99,9 @@ relocant-editorial --raw-item-id 1 --transport bot-api --send-staging
   Владелец должен сверить фактическое сообщение в staging с квитанцией в БД.
   Нельзя сбрасывать состояние в `pending` без проверки: это может создать дубль.
 - Длинные сообщения свыше 4096 UTF-16 единиц блокируются целиком.
+- Scheduler отдельно ведёт leases, run journal и экспоненциальный retry/backoff для
+  безопасно повторяемых внутренних задач. Этот retry не применяется к неопределённой
+  внешней доставке Telegram.
 
 ## Проверки без внешних сервисов
 
