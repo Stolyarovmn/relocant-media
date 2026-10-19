@@ -7,6 +7,8 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from google import genai
+from google.genai import types
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -35,6 +37,9 @@ def run(*, analyze: bool, limit: int = 5) -> dict[str, object]:
         if analyze:
             pipeline = EditorialPipeline(GeminiStructuredProvider(
                 settings.gemini_api_key, model=settings.gemini_model,
+                client=genai.Client(api_key=settings.gemini_api_key, http_options=types.HttpOptions(
+                    timeout=60_000, retry_options=types.HttpRetryOptions(attempts=1),
+                )),
             ))
             with Session(engine) as session:
                 ids = list(session.scalars(select(RawItem.id).join(Source).where(
@@ -57,7 +62,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--analyze", action="store_true")
     args = parser.parse_args()
-    result = run(analyze=args.analyze)
+    try:
+        result = run(analyze=args.analyze)
+    except Exception as error:
+        # Не выводить ответ SDK: он может содержать запрос или служебные данные.
+        Path("reports").mkdir(exist_ok=True)
+        Path("reports/summary.json").write_text(json.dumps({
+            "error_type": type(error).__name__, "publication": "Не публиковалось",
+        }, ensure_ascii=False), encoding="utf-8")
+        parser.exit(1, "Обработка не выполнена; тип ошибки сохранён в отчёте.\n")
     Path("reports").mkdir(exist_ok=True)
     Path("reports/summary.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8",

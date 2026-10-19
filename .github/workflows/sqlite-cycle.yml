@@ -94,7 +94,7 @@ jobs:
           ANALYZE: ${{ inputs.analyze }}
         run: |
           if [ "$ANALYZE" = true ]; then
-            python -m relocant_media.ops.actions_cycle --analyze
+            timeout --kill-after=30s 10m python -m relocant_media.ops.actions_cycle --analyze
           else
             python -m relocant_media.ops.actions_cycle
           fi
@@ -113,6 +113,7 @@ jobs:
           name: editorial-report
           path: reports/summary.json
           retention-days: 30
+
 
 
 

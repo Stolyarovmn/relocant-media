@@ -35,3 +35,19 @@ def test_cycle_rejects_external_database(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://example.invalid/db")
     with pytest.raises(ValueError, match="SQLite"):
         actions_cycle.run(analyze=False)
+
+
+def test_main_redacts_provider_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["actions_cycle"])
+
+    def fail(**kwargs):
+        raise RuntimeError("секретное-значение-из-ответа")
+
+    monkeypatch.setattr(actions_cycle, "run", fail)
+    with pytest.raises(SystemExit) as error:
+        actions_cycle.main()
+    assert error.value.code == 1
+    report = (tmp_path / "reports/summary.json").read_text(encoding="utf-8")
+    assert "RuntimeError" in report
+    assert "секретное-значение" not in report + capsys.readouterr().err
