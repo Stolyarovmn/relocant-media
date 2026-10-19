@@ -15,6 +15,25 @@ FIXTURES = Path(__file__).parent / "fixtures"
 SOURCE_PATH = Path("cities/belgrade/sources/city_beograd_news.yaml")
 
 
+def test_news_list_accepts_transport_section_but_not_foreign_or_unknown_paths() -> None:
+    path = (
+        "/lat/servisne-informacije/saobracaj-i-prevoz/"
+        "a116238/Informacija-o-radovima-u-ulici-Slanacki-put.html"
+    )
+    html = (
+        f'<a href="https://foreign.example{path}">Foreign host</a>'
+        f'<a href="{path.replace("saobracaj-i-prevoz", "unknown")}">Unknown path</a>'
+        f'<a href="{path}">Radovi 19.10.2026.</a>'
+    )
+
+    items = parse_beograd_news_list(html, load_source_file(SOURCE_PATH))
+
+    assert len(items) == 1
+    assert items[0].external_id == "116238"
+    assert items[0].url == f"https://www.beograd.rs{path}"
+    assert items[0].title == "Radovi"
+
+
 def test_parse_beograd_news_list_extracts_stable_ids_and_dates() -> None:
     html = (FIXTURES / "beograd_news_list.html").read_text(encoding="utf-8")
     source = load_source_file(SOURCE_PATH)

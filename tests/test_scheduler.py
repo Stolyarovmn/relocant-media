@@ -98,7 +98,7 @@ def test_source_schedule_is_idempotent_within_interval(
 name: Scheduled City News
 publisher: Test City
 ownership: official
-url: https://example.test/lat/vesti
+url: https://www.beograd.rs/lat/vesti
 language: sr-Latn
 source_type: official_city_news
 trust: 1.0
