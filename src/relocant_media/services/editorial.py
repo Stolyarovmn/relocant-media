@@ -226,7 +226,9 @@ class EditorialService:
                 raise DeliveryBlockedError("event evidence changed after verification")
             saved = EvidenceDocument.model_validate(snapshot)
             if _timestamp(saved.published_at) != _timestamp(member.published_at):
-                raise DeliveryBlockedError("event evidence publication time changed after verification")
+                raise DeliveryBlockedError(
+                    "event evidence publication time changed after verification"
+                )
             current.append((member, source))
         return current
 
