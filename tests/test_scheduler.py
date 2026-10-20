@@ -113,9 +113,11 @@ verification:
         encoding="utf-8",
     )
     html = (FIXTURES / "beograd_news_list.html").read_text(encoding="utf-8")
+    article = (FIXTURES / "beograd_article.html").read_text(encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=html, request=request)
+        content = html if request.url.path == "/lat/vesti" else article
+        return httpx.Response(200, text=content, request=request)
 
     config = CityOperationsConfig(id="belgrade", timezone="Europe/Belgrade")
     now = datetime(2026, 10, 18, 20, 0, tzinfo=UTC)
