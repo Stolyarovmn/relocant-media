@@ -12,6 +12,80 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 editorial_session = _editorial_session
 
 
+@pytest.mark.parametrize('peer_kind', ['import', 'prepare'])
+def test_parallel_entry_points_create_only_one_result_for_an_event(
+    editorial_session: Session, monkeypatch: pytest.MonkeyPatch, peer_kind: str,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from time import sleep
+
+    from sqlalchemy import func, select
+
+    from relocant_media.services import editorial, package_import
+
+    service, _, item_id = prepare_service(editorial_session)
+    item = editorial_session.get(RawItem, item_id)
+    assert item is not None
+    duplicate = RawItem(source_id=item.source_id, external_id='concurrent-copy',
+                        url=item.url + '?copy=1', title=item.title, body=item.body)
+    editorial_session.add(duplicate)
+    editorial_session.commit()
+    payload = package_payload()
+    payload['raw_item_id'] = duplicate.id
+    payload['article_id'] = duplicate.external_id
+    payload['evidence']['url'] = duplicate.url
+    for claim in payload['outcome']['claims']['claims']:
+        for citation in claim['citations']:
+            citation['url'] = duplicate.url
+    for review in payload['reviews']:
+        review['article_id'] = duplicate.external_id
+    bind_context(payload)
+    copy_package = parse(payload)
+    original_payload = package_payload()
+    original_payload['raw_item_id'] = item_id
+    bind_context(original_payload)
+    original_package = parse(original_payload)
+    barrier = Barrier(2, timeout=5)
+    lock = editorial._lock_editorial_city
+    check = editorial._reviewed_event_item
+
+    def concurrent_lock(session, city):
+        barrier.wait()
+        lock(session, city)
+
+    def slow_check(*args, **kwargs):
+        result = check(*args, **kwargs)
+        # Keep the check/create gap open while the peer attempts the same lock.
+        sleep(0.2)
+        return result
+
+    monkeypatch.setattr(editorial, '_lock_editorial_city', concurrent_lock)
+    monkeypatch.setattr(package_import, '_lock_editorial_city', concurrent_lock)
+    monkeypatch.setattr(editorial, '_reviewed_event_item', slow_check)
+    monkeypatch.setattr(package_import, '_reviewed_event_item', slow_check)
+    engine = editorial_session.get_bind()
+
+    def worker(is_copy):
+        with Session(engine) as session:
+            try:
+                if not is_copy and peer_kind == 'prepare':
+                    editorial.EditorialService(session, service.pipeline).prepare(item_id)
+                else:
+                    import_package(session, copy_package if is_copy else original_package, now=NOW)
+                return 'created'
+            except ValueError as error:
+                assert 'event already reviewed' in str(error)
+                return 'duplicate'
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(worker, value) for value in (False, True)]
+        results = [future.result(timeout=10) for future in futures]
+    assert sorted(results) == ['created', 'duplicate']
+    assert editorial_session.scalar(select(func.count()).select_from(EditorialRun)) == 1
+    assert editorial_session.scalar(select(func.count()).select_from(Post)) == 1
+
+
 @pytest.mark.parametrize('legacy', [False, True])
 def test_package_import_rejects_an_event_already_reviewed_under_another_url(
     editorial_session: Session, legacy: bool,

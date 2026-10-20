@@ -15,6 +15,7 @@ from relocant_media.services.editorial import (
     _auto_publish_policy_reason,
     _candidate,
     _event_items,
+    _lock_editorial_city,
     _reviewed_event_item,
     _snapshot_member,
     _timestamp,
@@ -67,6 +68,7 @@ def import_package(
                 raise PackageConflictError("stored draft changed after package import")
             session.commit()
             return existing
+        _lock_editorial_city(session, source.city)
         reviewed = _reviewed_event_item(session, anchor=item, anchor_source=source)
         if reviewed is not None:
             raise PackageConflictError(f"event already reviewed via raw item {reviewed.id}")

@@ -1,12 +1,13 @@
 """Persisted editorial processing and conservative, at-most-once staging delivery."""
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,13 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 class DeliveryBlockedError(ValueError):
     pass
+
+
+def _lock_editorial_city(session: Session, city: str) -> None:
+    """Serialize event checks/creation across prepare and external imports."""
+    digest = hashlib.sha256(f"editorial-events:{city}".encode()).digest()
+    key = int.from_bytes(digest[:8], byteorder="big", signed=True)
+    session.execute(select(func.pg_advisory_xact_lock(key)))
 
 
 def _timestamp(value: datetime | None) -> datetime | None:
@@ -187,6 +195,7 @@ class EditorialService:
                 raise ValueError("raw item source does not exist")
             if not source.enabled:
                 raise ValueError("raw item source is disabled")
+            _lock_editorial_city(self.session, source.city)
             reviewed_event = _reviewed_event_item(
                 self.session,
                 anchor=item,
