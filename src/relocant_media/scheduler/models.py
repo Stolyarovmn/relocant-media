@@ -47,3 +47,6 @@ class SchedulerRun(Base):
     details: Mapped[dict[str, Any]] = mapped_column(
         JSON_VALUE, nullable=False, default=dict, server_default="{}"
     )
+
+
+Base.metadata.tables["scheduler_run"].dialect_options["sqlite"]["autoincrement"] = True
