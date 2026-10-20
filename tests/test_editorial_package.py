@@ -53,6 +53,71 @@ def test_ready_requires_valid_independent_reviews() -> None:
     assert evaluate_package(parse(package_payload()), now=NOW).status == "ready"
 
 
+def test_v1_serialization_preserves_historical_hash_contract() -> None:
+    import hashlib
+
+    from relocant_media.ai.package import canonical_json
+
+    package = parse(package_payload())
+    payload = package.model_dump(mode="json", exclude={"reviews"})
+    assert "event" not in payload
+    assert context_sha256(package) == hashlib.sha256(canonical_json(payload).encode()).hexdigest()
+
+
+def event_payload() -> dict:
+    payload = package_payload()
+    payload.update(version=2, policy_version="subscription-editorial-v2")
+    payload["event"] = {
+        "event_key": "a" * 64, "editorial_rule_version": "belgrade-editorial-v2",
+        "documents": [{**payload["evidence"], "raw_item_id": 1,
+                       "ownership": "official", "high_risk": False, "auto_publish": True}],
+    }
+    bind_context(payload)
+    return payload
+
+
+@pytest.mark.parametrize("field", ["body", "high_risk", "event_key"])
+def test_v2_reviews_bind_the_entire_bundle(field: str) -> None:
+    payload = event_payload()
+    # Add a separately reviewed source; a later change invalidates both reviews.
+    other = {**payload["event"]["documents"][0], "raw_item_id": 2,
+             "source_id": "other", "url": "https://other.example/event"}
+    payload["event"]["documents"].append(other)
+    bind_context(payload)
+    if field == "event_key":
+        payload["event"][field] = "b" * 64
+    else:
+        other[field] = "changed" if field == "body" else True
+    with pytest.raises(ValueError, match="review context"):
+        evaluate_package(parse(payload), now=NOW)
+
+
+def test_v2_citations_can_use_reviewed_secondary_source() -> None:
+    payload = event_payload()
+    other = {**payload["event"]["documents"][0], "raw_item_id": 2,
+             "source_id": "other", "url": "https://other.example/event"}
+    payload["event"]["documents"].append(other)
+    citation = payload["outcome"]["claims"]["claims"][0]["citations"][0]
+    citation.update(source_id=other["source_id"], url=other["url"])
+    bind_context(payload)
+    assert evaluate_package(parse(payload), now=NOW).status == "ready"
+
+
+@pytest.mark.parametrize("mutation", ["missing_primary", "duplicate", "wrong_policy", "v1_bundle"])
+def test_v2_rejects_ambiguous_bundle(mutation: str) -> None:
+    payload = event_payload()
+    if mutation == "missing_primary":
+        payload["event"]["documents"][0]["raw_item_id"] = 2
+    elif mutation == "duplicate":
+        payload["event"]["documents"].append(payload["event"]["documents"][0].copy())
+    elif mutation == "wrong_policy":
+        payload["policy_version"] = "subscription-editorial-v1"
+    else:
+        payload.update(version=1, policy_version="subscription-editorial-v1")
+    with pytest.raises(ValidationError):
+        parse(payload)
+
+
 @pytest.mark.parametrize("mutation", [
     "stale", "urgent_stale", "future", "live_unchecked", "live_missing", "flag", "score",
     "hold", "high_risk", "human_status", "not_selected", "other_category", "low_confidence",

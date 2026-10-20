@@ -74,16 +74,26 @@ def import_package(
             raise PackageConflictError(f"event already reviewed via raw item {reviewed.id}")
 
         members = _event_items(session, anchor=item, anchor_source=source)
+        snapshots = [_snapshot_member(member, policy) for member, policy in members]
+        key = event_key(_candidate(item))
+        if package.version == 2:
+            assert package.event is not None  # validated at the JSON boundary
+            expected = {d.raw_item_id: d.model_dump(mode="json")
+                        for d in package.event.documents}
+            actual = {member.id: snapshot for (member, _), snapshot
+                      in zip(members, snapshots, strict=True)}
+            if package.event.event_key != key or expected != actual:
+                raise PackageConflictError("event evidence or source policy changed")
         evidence = {
             **evidence,
-            "event_key": event_key(_candidate(item)),
-            "documents": [_snapshot_member(member, policy) for member, policy in members],
+            "event_key": key,
+            "documents": snapshots,
         }
         if outcome.status == PublicationStatus.READY:
             reason = _auto_publish_policy_reason(members, anchor_source=source)
             # Package v1 reviews bind only the primary document. Never treat
             # them as attestations covering additional event evidence.
-            if reason is None and len(members) > 1:
+            if reason is None and package.version == 1 and len(members) > 1:
                 reason = "package_requires_event_bundle_review"
             if reason is not None:
                 outcome = outcome.model_copy(update={

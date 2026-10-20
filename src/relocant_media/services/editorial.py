@@ -330,6 +330,17 @@ class EditorialService:
             raise DeliveryBlockedError("source publication time changed after verification")
 
         members = self._validate_evidence_bundle(run, anchor_item=item, anchor_source=source)
+        if "_package" in run.outcome and package.version == 2:
+            assert package.event is not None
+            # A new source, changed membership or policy requires fresh bundle reviews.
+            members = _event_items(self.session, anchor=item, anchor_source=source)
+            expected = {d.raw_item_id: d.model_dump(mode="json")
+                        for d in package.event.documents}
+            actual = {member.id: _snapshot_member(member, policy)
+                      for member, policy in members}
+            if (package.event.event_key != event_key(_candidate(item))
+                    or expected != actual):
+                raise DeliveryBlockedError("event evidence or source policy changed")
         policy_reason = _auto_publish_policy_reason(members, anchor_source=source)
         if policy_reason is not None:
             raise DeliveryBlockedError(f"source policy blocks delivery: {policy_reason}")

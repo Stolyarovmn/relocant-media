@@ -124,8 +124,9 @@ def test_package_import_rejects_an_event_already_reviewed_under_another_url(
 
 
 @pytest.mark.parametrize('high_risk', [False, True])
+@pytest.mark.parametrize('version', [1, 2])
 def test_package_v1_does_not_approve_unreviewed_event_bundle(
-    editorial_session: Session, high_risk: bool,
+    editorial_session: Session, high_risk: bool, version: int,
 ) -> None:
     _, _, item_id = prepare_service(editorial_session)
     original = editorial_session.get(RawItem, item_id)
@@ -144,18 +145,129 @@ def test_package_v1_does_not_approve_unreviewed_event_bundle(
     payload = package_payload()
     payload['raw_item_id'] = item_id
     payload['evidence']['published_at'] = NOW.isoformat()
+    if version == 2:
+        from relocant_media.domain.dedup import event_key
+        from relocant_media.services.editorial import _candidate, _snapshot_member
+
+        payload.update(version=2, policy_version='subscription-editorial-v2')
+        payload['event'] = {
+            'event_key': event_key(_candidate(original)),
+            'editorial_rule_version': 'belgrade-editorial-v2',
+            'documents': [_snapshot_member(
+                              original, editorial_session.get(Source, original.source_id)),
+                          _snapshot_member(other, source)],
+        }
     bind_context(payload)
     package = parse(payload)
     run = import_package(editorial_session, package, now=NOW)
-    assert run.outcome['status'] == 'human_review'
+    expected_status = 'ready' if version == 2 and not high_risk else 'human_review'
+    assert run.outcome['status'] == expected_status
     assert run.outcome['reason'] == (
-        'source_policy_requires_review' if high_risk else 'package_requires_event_bundle_review'
+        'source_policy_requires_review' if high_risk else
+        'package_requires_event_bundle_review' if version == 1 else 'package_independently_reviewed'
     )
     assert {d['raw_item_id'] for d in run.evidence['documents']} == {item_id, other.id}
     assert run.evidence['event_key']
     assert run.editorial_rule_version == 'belgrade-editorial-v2'
-    assert editorial_session.get(Post, run.post_id).status == 'human_review'
+    assert editorial_session.get(Post, run.post_id).status == expected_status
     assert import_package(editorial_session, package, now=NOW).post_id == run.post_id
+
+
+@pytest.mark.parametrize('mutation', ['omitted', 'changed', 'policy', 'key', 'unrelated'])
+def test_v2_import_rechecks_complete_event_against_database(
+    editorial_session: Session, mutation: str,
+) -> None:
+    from relocant_media.domain.dedup import event_key
+    from relocant_media.services.editorial import _candidate, _snapshot_member
+
+    _, _, item_id = prepare_service(editorial_session)
+    item = editorial_session.get(RawItem, item_id)
+    item.published_at = NOW
+    source = Source(id='secondary', city='belgrade', name='Secondary',
+                    url='https://secondary.example', source_type='official', trust=1,
+                    ownership='official', high_risk=False, auto_publish=True, enabled=True)
+    editorial_session.add(source)
+    editorial_session.flush()
+    other = RawItem(source_id=source.id, external_id='event', url=source.url + '/event',
+                    title=item.title, body=item.body, published_at=NOW)
+    editorial_session.add(other)
+    editorial_session.commit()
+    payload = package_payload()
+    payload.update(version=2, policy_version='subscription-editorial-v2', raw_item_id=item_id)
+    payload['evidence']['published_at'] = NOW.isoformat()
+    payload['event'] = {
+        'event_key': event_key(_candidate(item)),
+        'editorial_rule_version': 'belgrade-editorial-v2',
+        'documents': [_snapshot_member(item, editorial_session.get(Source, item.source_id)),
+                      _snapshot_member(other, source)],
+    }
+    if mutation == 'omitted':
+        payload['event']['documents'].pop()
+    elif mutation == 'changed':
+        payload['event']['documents'][1]['body'] += ' changed'
+    elif mutation == 'policy':
+        source.high_risk = True
+        editorial_session.commit()
+    elif mutation == 'unrelated':
+        other.title = 'Unrelated subject'
+        other.body = 'Different event entirely'
+        editorial_session.commit()
+    else:
+        payload['event']['event_key'] = 'b' * 64
+    bind_context(payload)
+    with pytest.raises(PackageConflictError, match='event evidence or source policy changed'):
+        import_package(editorial_session, parse(payload), now=NOW)
+    assert editorial_session.get(EditorialRun, item_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mutation', ['new_source', 'policy', 'disabled', 'body'])
+async def test_v2_delivery_rechecks_event_membership_and_policy(
+    editorial_session: Session, mutation: str,
+) -> None:
+    from relocant_media.domain.dedup import event_key
+    from relocant_media.services.editorial import (
+        DeliveryBlockedError,
+        _candidate,
+        _snapshot_member,
+    )
+
+    service, _, item_id = prepare_service(editorial_session)
+    item = editorial_session.get(RawItem, item_id)
+    item.published_at = NOW
+    source = editorial_session.get(Source, item.source_id)
+    payload = package_payload()
+    payload.update(version=2, policy_version='subscription-editorial-v2', raw_item_id=item_id)
+    payload['evidence']['published_at'] = NOW.isoformat()
+    payload['event'] = {
+        'event_key': event_key(_candidate(item)),
+        'editorial_rule_version': 'belgrade-editorial-v2',
+        'documents': [_snapshot_member(item, source)],
+    }
+    for review in payload['reviews']:
+        review['reviewed_at'] = datetime.now(UTC).isoformat()
+    bind_context(payload)
+    run = import_package(editorial_session, parse(payload))
+    assert (await service.deliver(item_id, dry_run=True)).status == 'dry_run'
+    if mutation == 'new_source':
+        other_source = Source(id='later', city='belgrade', name='Later',
+                              url='https://later.example', source_type='official', trust=1,
+                              ownership='official', high_risk=True, auto_publish=True, enabled=True)
+        editorial_session.add(other_source)
+        editorial_session.flush()
+        editorial_session.add(RawItem(source_id=other_source.id, external_id='event',
+                                     url=other_source.url + '/event', title=item.title,
+                                     body=item.body, published_at=NOW))
+    elif mutation == 'policy':
+        source.ownership = 'unknown'
+    elif mutation == 'disabled':
+        source.enabled = False
+    else:
+        item.body += ' Changed'
+    editorial_session.commit()
+    with pytest.raises(DeliveryBlockedError):
+        await service.deliver(item_id, dry_run=True)
+    assert run.delivery_status == 'pending' and run.staging_message_id is None
 
 
 @pytest.mark.asyncio
