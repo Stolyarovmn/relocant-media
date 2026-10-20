@@ -148,9 +148,11 @@ verification:
         ), encoding="utf-8",
     )
     html = (FIXTURES / "beograd_news_list.html").read_text(encoding="utf-8")
+    article = (FIXTURES / "beograd_article.html").read_text(encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=html, request=request)
+        content = html if request.url.path == "/lat/vesti" else article
+        return httpx.Response(200, text=content, request=request)
 
     async def run_twice() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -171,6 +173,8 @@ verification:
 
     assert db_session.scalar(select(func.count()).select_from(Source)) == 1
     assert db_session.scalar(select(func.count()).select_from(RawItem)) == 2
+    rows = db_session.scalars(select(RawItem)).all()
+    assert all(row.body.startswith("Prvi pasus probnog sadržaja vesti.") for row in rows)
 
 
 @pytest.mark.parametrize("source_ids", [(), ("not_registered",)])

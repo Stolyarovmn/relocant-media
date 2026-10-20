@@ -7,7 +7,10 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from relocant_media.collectors.base import RawItem
-from relocant_media.collectors.beograd_article import match_beograd_article_url
+from relocant_media.collectors.beograd_article import (
+    BelgradeArticleCollector,
+    match_beograd_article_url,
+)
 from relocant_media.sources.registry import SourceConfig
 
 DATE_RE = re.compile(r"\b(?P<day>\d{2})\.(?P<month>\d{2})\.(?P<year>\d{4})\.")
@@ -89,4 +92,9 @@ class BelgradeNewsListCollector:
     async def collect(self) -> list[RawItem]:
         response = await self._client.get(str(self._source.url), follow_redirects=True)
         response.raise_for_status()
-        return parse_beograd_news_list(response.text, self._source)
+        candidates = parse_beograd_news_list(response.text, self._source)
+        articles = BelgradeArticleCollector(self._source, self._client)
+        # Cards discover URLs; only full articles are stable editorial evidence.
+        # Any failed article aborts the batch before persistence, without falling
+        # back to a teaser that could invalidate previously reviewed evidence.
+        return [await articles.collect_url(item.url) for item in candidates]
