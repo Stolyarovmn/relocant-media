@@ -10,13 +10,21 @@ from sqlalchemy.orm import Session
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.ingestion.persistence import (
     ReviewedEvidenceChangedError,
+    capture_collected_batch,
     record_collector_failure,
     sync_source,
     upsert_raw_items,
 )
 from relocant_media.ingestion.runner import ingest_city
 from relocant_media.sources.registry import load_source_file
-from relocant_media.storage.models import CollectorFailure, EditorialRun, Post, RawItem, Source
+from relocant_media.storage.models import (
+    CollectorFailure,
+    EditorialRun,
+    Post,
+    RawItem,
+    Source,
+    SourceRevision,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SOURCE_PATH = Path("cities/belgrade/sources/city_beograd_news.yaml")
@@ -113,6 +121,77 @@ def test_reviewed_evidence_change_is_preserved_and_explicitly_blocks_post(
     assert post.status == "human_review"
     assert run.delivery_status == "pending" and run.staging_message_id is None
     assert db_session.scalar(select(func.count()).select_from(CollectorFailure)) == 1
+
+
+@pytest.mark.parametrize("secondary", [False, True])
+def test_changed_reviewed_evidence_is_queued_without_losing_other_articles_or_receipts(
+    db_session: Session, secondary: bool,
+) -> None:
+    from datetime import UTC, datetime
+
+    source = load_source_file(SOURCE_PATH)
+    sync_source(db_session, "belgrade", source)
+    original = CollectedRawItem(source.id, "changed", "https://example.test/changed",
+                                "Original", "Original body", None)
+    anchor = CollectedRawItem(source.id, "anchor", "https://example.test/anchor",
+                              "Anchor", "Anchor body", None)
+    upsert_raw_items(db_session, [original, anchor])
+    db_session.flush()
+    raws = {raw.external_id: raw for raw in db_session.scalars(select(RawItem))}
+    item = raws["changed"]
+    post = Post(city="belgrade", category="events", status="published", title="Пост",
+                body="Проверено", confidence=0.99, telegram_message_id=42,
+                published_at=datetime.now(UTC))
+    db_session.add(post)
+    db_session.flush()
+    run = EditorialRun(raw_item_id=raws["anchor"].id if secondary else item.id,
+                       post_id=post.id, outcome={"status": "ready"},
+                       evidence={"documents": [{"raw_item_id": item.id, "body": item.body}]},
+                       delivery_status="sent", staging_message_id=42)
+    db_session.add(run)
+    db_session.commit()
+    changed = CollectedRawItem(source.id, original.external_id, original.url,
+                               original.title, "New body", None)
+    later = CollectedRawItem(source.id, "later", "https://example.test/later",
+                             "Other news", "Useful new article", None)
+    assert capture_collected_batch(db_session, [changed, later]) == (1, 1)
+    db_session.commit()
+    revision = db_session.scalar(select(SourceRevision))
+    assert revision is not None and revision.evidence["body"] == "New body"
+    assert revision.raw_item_id == item.id
+    assert item.body == "Original body"
+    assert run.evidence["documents"][0]["body"] == "Original body"
+    assert run.outcome["reason"] == "source_changed_requires_review"
+    assert (run.delivery_status, run.staging_message_id, run.post_id) == ("sent", 42, post.id)
+    assert post.status == "published" and post.telegram_message_id == 42
+    assert db_session.scalar(select(func.count()).select_from(RawItem)) == 3
+    # Repeated observations are visible as holds, without duplicate revision rows.
+    assert capture_collected_batch(db_session, [changed, later]) == (1, 1)
+    db_session.commit()
+    assert db_session.scalar(select(func.count()).select_from(SourceRevision)) == 1
+    changed_again = CollectedRawItem(source.id, original.external_id, original.url,
+                                     original.title, "Third version", None)
+    assert capture_collected_batch(db_session, [changed_again]) == (0, 1)
+    db_session.commit()
+    assert db_session.scalar(select(func.count()).select_from(SourceRevision)) == 2
+
+
+def test_revision_capture_rolls_back_atomically(db_session: Session) -> None:
+    source = load_source_file(SOURCE_PATH)
+    sync_source(db_session, "belgrade", source)
+    item = CollectedRawItem(source.id, "rollback", "https://example.test/r", "Title", "Old", None)
+    upsert_raw_items(db_session, [item])
+    db_session.flush()
+    raw = db_session.scalar(select(RawItem))
+    run = EditorialRun(raw_item_id=raw.id, outcome={"status": "ready"}, evidence={"body": "Old"})
+    db_session.add(run)
+    db_session.commit()
+    change = CollectedRawItem(source.id, item.external_id, item.url, item.title, "New", None)
+    capture_collected_batch(db_session, [change])
+    db_session.rollback()
+    assert db_session.scalar(select(func.count()).select_from(SourceRevision)) == 0
+    db_session.refresh(run)
+    assert run.outcome["status"] == "ready"
 
 
 def test_ingest_city_runs_active_strategy_and_stays_idempotent(

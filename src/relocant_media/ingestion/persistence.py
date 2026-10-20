@@ -1,13 +1,24 @@
+import hashlib
+import json
+from datetime import UTC
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.domain.dedup import canonicalize_url, content_sha256
 from relocant_media.sources.registry import SourceConfig
-from relocant_media.storage.models import CollectorFailure, EditorialRun, Post, RawItem, Source
+from relocant_media.storage.locks import lock_editorial_city
+from relocant_media.storage.models import (
+    CollectorFailure,
+    EditorialRun,
+    Post,
+    RawItem,
+    Source,
+    SourceRevision,
+)
 
 
 class ReviewedEvidenceChangedError(ValueError):
@@ -45,13 +56,34 @@ def _derived_metadata(item: CollectedRawItem) -> tuple[str, str]:
     return canonicalize_url(item.url), content_sha256(item.title, item.body)
 
 
+def _referencing_runs(session: Session, raw_item_id: int) -> list[EditorialRun]:
+    return list(session.scalars(select(EditorialRun).where(or_(
+        EditorialRun.raw_item_id == raw_item_id,
+        EditorialRun.evidence["documents"].contains([{"raw_item_id": raw_item_id}]),
+    )).execution_options(populate_existing=True)))
+
+
+def _block_changed_evidence(session: Session, raw_item_id: int) -> None:
+    for run in _referencing_runs(session, raw_item_id):
+        run.outcome = {**run.outcome, "status": "human_review",
+                       "reason": "source_changed_requires_review"}
+        post = session.get(Post, run.post_id) if run.post_id else None
+        if post is not None and post.published_at is None:
+            post.status = "human_review"
+
+
 def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
+    cities = session.scalars(select(Source.city).where(
+        Source.id.in_({item.source_id for item in items}),
+    ).distinct())
+    for city in sorted(cities):
+        lock_editorial_city(session, city)
     for item in items:
         canonical_url, fingerprint = _derived_metadata(item)
         existing = session.scalar(select(RawItem).where(
             RawItem.source_id == item.source_id, RawItem.external_id == item.external_id,
-        ).with_for_update())
-        if existing is not None and session.get(EditorialRun, existing.id) is not None:
+        ).with_for_update().execution_options(populate_existing=True))
+        if existing is not None and _referencing_runs(session, existing.id):
             if any(getattr(existing, key) != getattr(item, key)
                    for key in ("url", "title", "body", "published_at")):
                 raise ReviewedEvidenceChangedError(existing.id)
@@ -86,19 +118,46 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
     return len(items)
 
 
+def capture_collected_batch(
+    session: Session, items: list[CollectedRawItem],
+) -> tuple[int, int]:
+    """Caller commits the entire batch; changes are queued, never approved here."""
+    # Acquire all city locks in a stable order before taking any raw-item locks.
+    cities = session.scalars(select(Source.city).where(
+        Source.id.in_({item.source_id for item in items}),
+    ).distinct())
+    for city in sorted(cities):
+        lock_editorial_city(session, city)
+    written = review_required = 0
+    for item in items:
+        try:
+            written += upsert_raw_items(session, [item])
+        except ReviewedEvidenceChangedError as error:
+            evidence = {
+                "source_id": item.source_id, "article_id": item.external_id,
+                "url": item.url, "title": item.title, "body": item.body,
+                "published_at": (item.published_at.astimezone(UTC).isoformat()
+                                 if item.published_at is not None else None),
+            }
+            encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True,
+                                 separators=(",", ":"))
+            session.execute(insert(SourceRevision).values(
+                raw_item_id=error.raw_item_id,
+                snapshot_sha256=hashlib.sha256(encoded.encode()).hexdigest(),
+                evidence=evidence,
+            ).on_conflict_do_nothing(constraint="uq_source_revision_snapshot"))
+            _block_changed_evidence(session, error.raw_item_id)
+            review_required += 1
+    return written, review_required
+
+
 def record_collector_failure(
     session: Session,
     source: SourceConfig,
     error: Exception,
 ) -> None:
     if isinstance(error, ReviewedEvidenceChangedError):
-        run = session.get(EditorialRun, error.raw_item_id)
-        if run is not None:
-            run.outcome = {**run.outcome, "status": "human_review",
-                           "reason": "source_changed_requires_review"}
-            post = session.get(Post, run.post_id) if run.post_id else None
-            if post is not None and post.published_at is None:
-                post.status = "human_review"
+        _block_changed_evidence(session, error.raw_item_id)
     session.add(
         CollectorFailure(
             source_id=source.id,
