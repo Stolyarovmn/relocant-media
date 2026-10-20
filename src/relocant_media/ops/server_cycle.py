@@ -409,7 +409,8 @@ def main() -> None:
             ServerAI(GeminiStructuredProvider(os.environ["GEMINI_API_KEY"],
                 model=os.environ["GEMINI_MODEL"], client=client),
                 audit_path=args.output / "ai-calls.jsonl"),
-            Path(url.database).parent / "ai-cache", model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v3",
+            Path(url.database).parent / "ai-cache",
+            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v3",
             public_news_only=True,
         )
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
