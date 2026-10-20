@@ -60,6 +60,9 @@ def test_independent_prompts_fetches_and_computed_rubric():
         assert payload["context_sha256"] == context_sha256(original)
         assert "verdict" not in call["prompt"]
         assert "now_utc" in payload
+        assert "[тестовый запуск] — обязательная редакционная пометка владельца" in (
+            call["system_instruction"])
+        assert "Остальной заголовок проверяй по фактам" in call["system_instruction"]
     assert "utility" not in provider.calls[0]["system_instruction"]
 
 
