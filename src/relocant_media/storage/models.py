@@ -72,6 +72,21 @@ class RawItem(Base):
     )
 
 
+class SourceRevision(Base):
+    __tablename__ = "source_revision"
+    __table_args__ = (
+        UniqueConstraint("raw_item_id", "snapshot_sha256", name="uq_source_revision_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    raw_item_id: Mapped[int] = mapped_column(ForeignKey("raw_item.id"), nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
 class CollectorFailure(Base):
     __tablename__ = "collector_failure"
 

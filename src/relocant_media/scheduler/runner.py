@@ -11,10 +11,10 @@ from relocant_media.analytics.measurements import record_channel_snapshot, recor
 from relocant_media.analytics.report import build_daily_report, store_daily_report
 from relocant_media.collectors.factory import build_collector
 from relocant_media.ingestion.persistence import (
+    capture_collected_batch,
     record_collector_failure,
     source_is_enabled,
     sync_source,
-    upsert_raw_items,
 )
 from relocant_media.scheduler.config import CityOperationsConfig
 from relocant_media.scheduler.metrics import MetricsProvider, MetricsProviderUnavailable
@@ -37,6 +37,7 @@ class SchedulerSummary:
     source_runs: int = 0
     source_failures: int = 0
     source_locked: int = 0
+    source_review_required: int = 0
     channel_snapshots_recorded: int = 0
     channel_snapshots_blocked: int = 0
     channel_snapshot_failures: int = 0
@@ -106,16 +107,18 @@ async def _run_source(
     try:
         collector = build_collector(source, client)
         items = await collector.collect()
-        written = upsert_raw_items(session, items)
+        written, changes = capture_collected_batch(session, items)
         session.commit()
         finish_run(
             session,
             run_id=run_id,
             status="success",
             now=now,
-            details={"source_id": source.id, "raw_items_written": written},
+            details={"source_id": source.id, "raw_items_written": written,
+                     "review_required": changes},
         )
         summary.source_runs += 1
+        summary.source_review_required += changes
     except Exception as error:
         session.rollback()
         record_collector_failure(session, source, error)

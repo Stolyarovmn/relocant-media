@@ -15,11 +15,11 @@ from relocant_media.services.editorial import (
     _auto_publish_policy_reason,
     _candidate,
     _event_items,
-    _lock_editorial_city,
     _reviewed_event_item,
     _snapshot_member,
     _timestamp,
 )
+from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 
@@ -36,10 +36,11 @@ def import_package(
     fingerprint = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
     evidence = {**package.evidence.model_dump(mode="json"), "city": package.city}
     try:
+        _lock_editorial_city(session, package.city)
         item = session.scalar(select(RawItem).where(
             RawItem.id == package.raw_item_id,
-        ).with_for_update())
-        source = session.get(Source, package.source_id)
+        ).with_for_update().execution_options(populate_existing=True))
+        source = session.get(Source, package.source_id, populate_existing=True)
         if item is None or source is None or not source.enabled:
             raise PackageConflictError("raw article/source missing or disabled")
         if (item.source_id, item.external_id, source.city) != (
@@ -68,7 +69,6 @@ def import_package(
                 raise PackageConflictError("stored draft changed after package import")
             session.commit()
             return existing
-        _lock_editorial_city(session, source.city)
         reviewed = _reviewed_event_item(session, anchor=item, anchor_source=source)
         if reviewed is not None:
             raise PackageConflictError(f"event already reviewed via raw item {reviewed.id}")
