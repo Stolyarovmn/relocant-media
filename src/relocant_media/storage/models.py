@@ -334,3 +334,8 @@ class DailyReport(Base):
     created_at: Mapped[datetime] = mapped_column(
         UTC_DATE, server_default=func.now(), nullable=False
     )
+
+
+for _table in Base.metadata.tables.values():
+    if any(column.autoincrement is True for column in _table.primary_key.columns):
+        _table.dialect_options["sqlite"]["autoincrement"] = True
