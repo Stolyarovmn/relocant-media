@@ -25,7 +25,10 @@ def triage_queue(engine: Engine, *, now: datetime) -> dict[str, Any]:
             if run is not None and (run.post_id is not None
                     or run.delivery_status != "pending"
                     or run.outcome.get("reason") != "source_auto_publish_disabled"
-                    or run.outcome.get("claims") is not None):
+                    or run.staging_message_id is not None
+                    or any(run.outcome.get(k) is not None
+                           for k in ("claims", "draft", "verification"))
+                    or "_package" in run.outcome or "_autonomous_assessment" in run.outcome):
                 continue
             result = freshness_decision(title=item.title, body=item.body,
                 published_at=item.published_at, now=now)

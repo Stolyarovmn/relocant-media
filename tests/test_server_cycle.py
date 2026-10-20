@@ -227,7 +227,7 @@ def test_failed_or_busy_main_never_enters_publisher(seeded, tmp_path, monkeypatc
         server_cycle.main()
     assert stopped.value.code == 1
     assert clients == [{"api_key": "fake-key", "http_options": {
-        "timeout": 45000, "retry_options": {"attempts": 1}}}]
+        "timeout": 45000, "retry_options": {"attempts": 0}}}]
     report = json.loads((output / "server-report.json").read_text(encoding="utf-8"))
     assert report["status"] == status
     assert report["sent_message_ids"] == []
@@ -256,3 +256,22 @@ def test_triage_old_holds_closes_without_copying_body_or_touching_receipts(seede
         assert run.outcome["status"] == "skipped"
         assert run.outcome["previous_decision"]["status"] == "human_review"
         assert run.evidence == {"original": "retained"}
+
+
+@pytest.mark.parametrize("field", ["receipt", "draft", "verification", "package", "assessed"])
+def test_cheap_triage_never_rewrites_review_or_receipt(seeded, field):
+    from relocant_media.ops.newsroom_triage import triage_queue
+    engine, raw_id, _ = seeded
+    with Session(engine) as session:
+        session.get(RawItem, raw_id).published_at = datetime.now(UTC) - timedelta(days=10)
+        outcome = {"status": "human_review", "reason": "source_auto_publish_disabled"}
+        keys = {"draft": "draft", "verification": "verification", "package": "_package",
+                "assessed": "_autonomous_assessment"}
+        if field in keys:
+            outcome[keys[field]] = {}
+        session.add(EditorialRun(raw_item_id=raw_id, outcome=outcome, evidence={},
+            delivery_status="pending", staging_message_id=42 if field == "receipt" else None))
+        session.commit()
+    assert triage_queue(engine, now=datetime.now(UTC))["discarded"] == 0
+    with Session(engine) as session:
+        assert session.get(EditorialRun, raw_id).outcome == outcome

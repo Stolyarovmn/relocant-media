@@ -391,7 +391,7 @@ def main() -> None:
         engine = create_engine(url)
         verify_sqlite_schema(engine)
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"],
-                              http_options={"timeout": 45000, "retry_options": {"attempts": 1}})
+                              http_options={"timeout": 45000, "retry_options": {"attempts": 0}})
         provider = ServerAI(GeminiStructuredProvider(os.environ["GEMINI_API_KEY"],
             model=os.environ["GEMINI_MODEL"], client=client),
             audit_path=args.output / "ai-calls.jsonl")
