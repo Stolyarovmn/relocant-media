@@ -1,12 +1,13 @@
 """Persisted editorial processing and conservative, at-most-once staging delivery."""
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,13 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 class DeliveryBlockedError(ValueError):
     pass
+
+
+def _lock_editorial_city(session: Session, city: str) -> None:
+    """Serialize event checks/creation across prepare and external imports."""
+    digest = hashlib.sha256(f"editorial-events:{city}".encode()).digest()
+    key = int.from_bytes(digest[:8], byteorder="big", signed=True)
+    session.execute(select(func.pg_advisory_xact_lock(key)))
 
 
 def _timestamp(value: datetime | None) -> datetime | None:
@@ -57,11 +65,16 @@ def _reviewed_event_item(
     anchor: RawItem,
     anchor_source: Source,
 ) -> RawItem | None:
-    exact_conditions = [RawItem.url == anchor.url]
-    if anchor.canonical_url:
-        exact_conditions.append(RawItem.canonical_url == anchor.canonical_url)
-    if anchor.content_sha256:
-        exact_conditions.append(RawItem.content_sha256 == anchor.content_sha256)
+    anchor_candidate = _candidate(anchor)
+    exact_conditions = [
+        RawItem.url == anchor.url,
+        RawItem.canonical_url == anchor_candidate.resolved_canonical_url,
+        RawItem.content_sha256 == anchor_candidate.resolved_content_sha256,
+        # Legacy/directly imported rows may not have persisted fingerprints.
+        # Include them for the exact same_event check rather than skipping them.
+        RawItem.canonical_url.is_(None),
+        RawItem.content_sha256.is_(None),
+    ]
 
     match_scope = list(exact_conditions)
     if anchor.published_at is not None:
@@ -83,7 +96,6 @@ def _reviewed_event_item(
         )
         .order_by(RawItem.published_at, RawItem.id)
     )
-    anchor_candidate = _candidate(anchor)
     for item in reviewed:
         if same_event(anchor_candidate, _candidate(item)):
             return item
@@ -183,6 +195,7 @@ class EditorialService:
                 raise ValueError("raw item source does not exist")
             if not source.enabled:
                 raise ValueError("raw item source is disabled")
+            _lock_editorial_city(self.session, source.city)
             reviewed_event = _reviewed_event_item(
                 self.session,
                 anchor=item,
