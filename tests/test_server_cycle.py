@@ -20,6 +20,25 @@ from relocant_media.storage.sqlite_schema import initialize_sqlite
 reviewed = _reviewed
 
 
+def test_server_roles_receive_russian_policy_without_rewriting_evidence():
+    calls = []
+
+    class Provider:
+        def generate_json(self, **kwargs):
+            calls.append(kwargs)
+            return '{"result":"готово"}'
+
+    result = server_cycle.ServerAI(Provider()).generate_json(
+        task="rank", system_instruction="Исходная инструкция", prompt='{"evidence":"точно"}',
+        response_schema={"type": "object"})
+    assert result == '{"result":"готово"}'
+    assert calls[0]["prompt"] == '{"evidence":"точно"}'
+    assert calls[0]["response_schema"] == {"type": "object"}
+    assert "по-русски" in calls[0]["system_instruction"]
+    assert "Текущий момент UTC:" in calls[0]["system_instruction"]
+    assert calls[0]["system_instruction"].endswith("Исходная инструкция")
+
+
 @pytest.fixture
 def seeded(tmp_path):
     path = tmp_path / "editorial.sqlite3"

@@ -50,6 +50,23 @@ SOURCES = Path("cities/belgrade/sources")
 PREFIX = "[тестовый запуск]"
 
 
+class ServerAI:
+    """Keep server roles Russian and bind relevance decisions to the actual date."""
+    def __init__(self, provider: StructuredAIProvider):
+        self.provider = provider
+
+    def generate_json(self, *, task: str, system_instruction: str, prompt: str,
+                      response_schema: dict[str, Any]) -> str:
+        policy = ("Все пояснения, причины, оценки и тексты пиши по-русски. "
+                  "Сербские топонимы и точные цитаты сохраняй. "
+                  f"Текущий момент UTC: {datetime.now(UTC).isoformat()}. "
+                  "Отличай дату статьи от срока события: истёкшие объявления не выбирай "
+                  "для новой публикации и не выдавай планы за выполненные факты. ")
+        return self.provider.generate_json(
+            task=task, system_instruction=policy + system_instruction,
+            prompt=prompt, response_schema=response_schema)
+
+
 class _CachedOutcome(EditorialPipeline):
     def __init__(self, outcome: EditorialOutcome, documents: tuple[EvidenceDocument, ...]):
         self.outcome, self.documents = outcome, documents
@@ -226,8 +243,8 @@ def main() -> None:
         verify_sqlite_schema(engine)
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"],
                               http_options={"timeout": 120000})
-        provider = GeminiStructuredProvider(os.environ["GEMINI_API_KEY"],
-            model=os.environ["GEMINI_MODEL"], client=client)
+        provider = ServerAI(GeminiStructuredProvider(os.environ["GEMINI_API_KEY"],
+            model=os.environ["GEMINI_MODEL"], client=client))
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=lambda: asyncio.run(collect_sources(engine)),
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output), limit=2)
