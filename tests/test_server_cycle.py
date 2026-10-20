@@ -11,6 +11,7 @@ from test_editorial_integration import prepare_service
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.ai.package import context_sha256, draft_sha256
 from relocant_media.collectors.base import RawItem as CollectedItem
+from relocant_media.domain.freshness import FreshnessDecision
 from relocant_media.ingestion.persistence import capture_collected_batch
 from relocant_media.ops import server_cycle
 from relocant_media.services.editorial import DeliveryBlockedError
@@ -46,6 +47,8 @@ def seeded(tmp_path):
     engine = create_engine(f"sqlite:///{path}")
     with Session(engine) as session:
         _, provider, raw_id = prepare_service(session, category="transport")
+        session.get(RawItem, raw_id).published_at = datetime.now(UTC) - timedelta(hours=1)
+        session.commit()
     yield engine, raw_id, provider
     engine.dispose()
 
@@ -79,28 +82,34 @@ async def test_disabled_delivery_needs_neither_engine_nor_credentials(monkeypatc
     assert await server_cycle.publish_pending(None, enabled=False) == []
 
 
-def test_source_policy_prevents_ai_and_persists_hold(seeded, tmp_path):
+def test_old_source_is_discarded_without_ai(seeded, tmp_path):
     engine, raw_id, _ = seeded
     with Session(engine) as session:
         item = session.get(RawItem, raw_id)
+        item.published_at = datetime.now(UTC) - timedelta(days=10)
         session.get(Source, item.source_id).auto_publish = False
         session.commit()
 
     class ForbiddenProvider:
         def generate_json(self, **kwargs):
-            raise AssertionError("AI не должен вызываться")
+            raise AssertionError("Устаревшая статья не должна тратить AI")
 
     result = server_cycle.prepare_reviewed(engine, raw_id, ForbiddenProvider(), tmp_path)
-    assert result["status"] == "human_review"
+    assert result["status"] == "skipped"
     with Session(engine) as session:
         run = session.get(EditorialRun, raw_id)
-        assert run.outcome["reason"] == "source_auto_publish_disabled"
-        assert run.delivery_status == "pending"
+        assert run.outcome["reason"] == "publication_older_than_seven_days"
+        assert run.post_id is None
 
 
-def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_enabled", [True, False])
+def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch, source_enabled):
     engine, raw_id, provider = seeded
     seen = []
+    with Session(engine) as session:
+        item = session.get(RawItem, raw_id)
+        session.get(Source, item.source_id).auto_publish = source_enabled
+        session.commit()
 
     def review(package, provider, live_documents, **kwargs):
         assert package.version == 2 and package.event is not None
@@ -118,8 +127,10 @@ def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch):
         }) for r in package.reviews)
         return package.model_copy(update={"reviews": reviews})
 
-    monkeypatch.setattr(server_cycle, "reviewed_package", review)
-    assert server_cycle.prepare_reviewed(engine, raw_id, provider, tmp_path)["status"] == "ready"
+    monkeypatch.setattr(server_cycle, "review_with_repairs", review)
+    assert server_cycle.prepare_reviewed(engine, raw_id, provider, tmp_path)["status"] == (
+        "ready" if source_enabled else "human_review")
+    assert provider.calls == ["rank", "claims", "verify", "draft"]
     with Session(engine) as session:
         payload = session.get(EditorialRun, raw_id).outcome["_package"]
     package = server_cycle.EditorialPackage.model_validate_json(json.dumps(payload))
@@ -131,6 +142,8 @@ def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch):
 @pytest.mark.parametrize("mutation", ["expired", "live_changed"])
 async def test_invalid_ready_never_sends(reviewed, monkeypatch, mutation):
     session, run = reviewed
+    monkeypatch.setattr(server_cycle, "freshness_decision",
+                        lambda **kw: FreshnessDecision("keep", "test_current"))
     if mutation == "expired":
         payload = dict(run.outcome)
         package = dict(payload["_package"])
@@ -213,7 +226,8 @@ def test_failed_or_busy_main_never_enters_publisher(seeded, tmp_path, monkeypatc
     with pytest.raises(SystemExit) as stopped:
         server_cycle.main()
     assert stopped.value.code == 1
-    assert clients == [{"api_key": "fake-key", "http_options": {"timeout": 120000}}]
+    assert clients == [{"api_key": "fake-key", "http_options": {
+        "timeout": 45000, "retry_options": {"attempts": 1}}}]
     report = json.loads((output / "server-report.json").read_text(encoding="utf-8"))
     assert report["status"] == status
     assert report["sent_message_ids"] == []
@@ -221,3 +235,24 @@ def test_failed_or_busy_main_never_enters_publisher(seeded, tmp_path, monkeypatc
     assert report["backup_ready"] is True
     assert (output / "snapshot" / "editorial.sqlite3").is_file()
     assert (output / "snapshot" / "manifest.json").is_file()
+
+
+def test_triage_old_holds_closes_without_copying_body_or_touching_receipts(seeded):
+    from relocant_media.ops.newsroom_triage import triage_queue
+    engine, raw_id, _ = seeded
+    with Session(engine) as session:
+        item = session.get(RawItem, raw_id)
+        item.published_at = datetime.now(UTC) - timedelta(days=10)
+        session.add(EditorialRun(raw_item_id=raw_id,
+            outcome={"status": "human_review", "reason": "source_auto_publish_disabled"},
+            evidence={"original": "retained"}, delivery_status="pending"))
+        session.commit()
+    report = triage_queue(engine, now=datetime.now(UTC))
+    assert report["discarded"] == 1
+    assert report["ai_calls"] == 0 and "body" not in json.dumps(report)
+    assert triage_queue(engine, now=datetime.now(UTC))["discarded"] == 0
+    with Session(engine) as session:
+        run = session.get(EditorialRun, raw_id)
+        assert run.outcome["status"] == "skipped"
+        assert run.outcome["previous_decision"]["status"] == "human_review"
+        assert run.evidence == {"original": "retained"}

@@ -20,7 +20,9 @@ from relocant_media.storage.primary_lock import primary_lock
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 
-def begin_window(session: Session, *, city: str, now: datetime) -> SchedulerRun:
+def begin_window(
+    session: Session, *, city: str, now: datetime, refresh_until: bool = False,
+) -> SchedulerRun:
     """Caller must hold the primary session advisory lock across commits."""
     now = aware_datetime(now.isoformat())
     key = f"editorial-primary:{city}"
@@ -35,7 +37,7 @@ def begin_window(session: Session, *, city: str, now: datetime) -> SchedulerRun:
         if previous.status == "success":
             since = old_until - timedelta(minutes=10)
         else:
-            since, until = old_since, old_until
+            since, until = old_since, now if refresh_until else old_until
     if previous is None or previous.status == "success":
         # Late discoveries must not disappear behind a successful watermark.
         oldest = session.scalar(select(func.min(RawItem.published_at)).join(Source).where(
@@ -65,6 +67,9 @@ def run_cycle(
     engine: Engine, *, city: str, output: Path, now: datetime,
     ingest: Callable[[], dict[str, int]],
     process: Callable[[int], dict[str, Any]], limit: int = 5,
+    refresh_until: bool = False, newest_first: bool = False,
+    allow_partial_ingest: bool = False,
+    reassessment_ids: Callable[[], list[int]] | None = None,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
             or not city.strip() or not 1 <= limit <= 5):
@@ -81,7 +86,7 @@ def run_cycle(
         if not acquired:
             return {"status": "PRIMARY_BUSY", "city": city, "window_complete": False}
         with Session(engine) as session:
-            run = begin_window(session, city=city, now=now)
+            run = begin_window(session, city=city, now=now, refresh_until=refresh_until)
             run_id, window = run.id, run.details["window"]
         heartbeat: dict[str, Any] = {
             "status": "PRIMARY_FAILED", "city": city, "run_id": run_id,
@@ -90,12 +95,20 @@ def run_cycle(
         try:
             collection = ingest()
             (output / "ingest.json").write_text(json.dumps(collection), encoding="utf-8")
-            if collection["failures"]:
+            heartbeat["collection_failures"] = collection["failures"]
+            if collection["failures"] and not allow_partial_ingest:
                 raise ValueError("source collection incomplete")
             with Session(engine) as session:
                 manifest = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
-                    until=aware_datetime(window["until"]), limit=limit)
+                    until=aware_datetime(window["until"]), limit=limit, newest_first=newest_first)
+            if reassessment_ids is not None:
+                selected = {candidate["raw_item_id"] for candidate in manifest["candidates"]}
+                extra = [i for i in reassessment_ids() if i not in selected]
+                manifest["candidates"].extend({"raw_item_id": i, "reassessment": True}
+                    for i in extra[:max(0, limit - len(selected))])
+                manifest["candidate_count"] = len(manifest["candidates"])
+                manifest["reassessment_count"] = len(extra)
             (output / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             processed = []
@@ -111,10 +124,11 @@ def run_cycle(
                     until=aware_datetime(window["until"]), limit=1)
                 revision_count = session.scalar(select(func.count()).select_from(
                     SourceRevision).join(RawItem).join(Source).where(Source.city == city))
-            complete = remaining["eligible_count"] == 0
+            additional_remaining = len(reassessment_ids()) if reassessment_ids else 0
+            complete = remaining["eligible_count"] + additional_remaining == 0
             heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
                 window_complete=complete, processed_raw_item_ids=processed,
-                remaining_count=remaining["eligible_count"],
+                remaining_count=remaining["eligible_count"] + additional_remaining,
                 missing_published_at_count=remaining["missing_published_at_count"],
                 review_required=collection.get("review_required", 0),
                 revision_snapshots=revision_count)

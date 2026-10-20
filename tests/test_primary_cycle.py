@@ -196,3 +196,33 @@ def test_late_discovered_old_article_reenters_after_success(queue, tmp_path):
                        now=NOW + timedelta(hours=9), ingest=ingest_ok, process=process)
     assert report["processed_raw_item_ids"] == [raw_id]
     assert report["status"] == "PRIMARY_OK"
+
+
+def test_server_refreshes_until_and_prioritizes_fresh_news(queue, tmp_path):
+    engine, process = queue
+    run_cycle(engine, city="belgrade", output=tmp_path / "old", now=NOW,
+              ingest=ingest_ok, process=process, limit=2)
+    with Session(engine) as session:
+        source_id = session.scalar(select(RawItem.source_id))
+        fresh = RawItem(source_id=source_id, external_id="fresh",
+            url="https://example.test/fresh", title="Fresh transit announcement",
+            body="A new separate transport route announcement",
+            published_at=NOW + timedelta(hours=1))
+        session.add(fresh)
+        session.commit()
+        fresh_id = fresh.id
+    report = run_cycle(engine, city="belgrade", output=tmp_path / "fresh",
+        now=NOW + timedelta(hours=3), ingest=ingest_ok, process=process,
+        limit=2, refresh_until=True, newest_first=True)
+    assert report["window"]["until"] == (NOW + timedelta(hours=3)).isoformat()
+    assert report["processed_raw_item_ids"][0] == fresh_id
+    assert report["remaining_count"] == 9
+
+
+def test_optional_source_failure_does_not_block_verified_other_sources(queue, tmp_path):
+    engine, process = queue
+    report = run_cycle(engine, city="belgrade", output=tmp_path / "degraded", now=NOW,
+        ingest=lambda: {"failures": 1}, process=process, allow_partial_ingest=True)
+    assert report["status"] == "PRIMARY_PARTIAL"
+    assert report["collection_failures"] == 1
+    assert len(report["processed_raw_item_ids"]) == 5

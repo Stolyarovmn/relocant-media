@@ -54,6 +54,7 @@ def _evidence(item: RawItem) -> dict[str, Any]:
 
 def select_candidates(
     session: Session, *, city: str, since: datetime, until: datetime, limit: int,
+    newest_first: bool = False,
 ) -> dict[str, Any]:
     """Only SELECT; the caller supplies a consistent read-only transaction."""
     if not city.strip() or not 1 <= limit <= 50:
@@ -111,6 +112,9 @@ def select_candidates(
         event_inputs.append(candidate)
 
     clusters = cluster_events(event_inputs)
+    if newest_first:
+        clusters.sort(key=lambda group: (
+            by_id[group[0].raw_item_id][0].published_at, group[0].raw_item_id), reverse=True)
     candidates = []
     for cluster in clusters[:limit]:
         representative = cluster[0]
