@@ -26,6 +26,7 @@ def summarize(output: Path) -> dict[str, Any]:
         "ai_calls": len(ai), "ai_failures": [c for c in ai if c["status"] == "failed"],
         "editorial_decisions": decisions, "sent_message_ids": report.get("sent_message_ids", []),
         "remaining_count": report.get("remaining_count"),
+        "processing_errors": report.get("processing_errors", []),
         "note": ("Отложено по правилам или без первоисточника — "
                  "не означает активную проверку человеком.")}
 

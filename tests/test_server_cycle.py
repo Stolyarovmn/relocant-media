@@ -275,3 +275,19 @@ def test_cheap_triage_never_rewrites_review_or_receipt(seeded, field):
     assert triage_queue(engine, now=datetime.now(UTC))["discarded"] == 0
     with Session(engine) as session:
         assert session.get(EditorialRun, raw_id).outcome == outcome
+
+
+def test_rank_uses_machine_categories_while_reasons_stay_russian():
+    from relocant_media.ai.models import RankingResult
+    calls = []
+    class Provider:
+        def generate_json(self, **kw):
+            calls.append(kw)
+            return "{}"
+    original = RankingResult.model_json_schema()
+    server_cycle.ServerAI(Provider()).generate_json(task="rank", system_instruction="Ранжируй",
+        prompt="публичный источник", response_schema=original)
+    assert "category — машинный идентификатор" in calls[0]["system_instruction"]
+    assert "events" in calls[0]["response_schema"]["properties"]["category"]["enum"]
+    assert "medicine" in calls[0]["response_schema"]["properties"]["category"]["enum"]
+    assert "enum" not in original["properties"]["category"]

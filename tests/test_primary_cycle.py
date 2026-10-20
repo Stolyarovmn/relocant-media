@@ -226,3 +226,20 @@ def test_optional_source_failure_does_not_block_verified_other_sources(queue, tm
     assert report["status"] == "PRIMARY_PARTIAL"
     assert report["collection_failures"] == 1
     assert len(report["processed_raw_item_ids"]) == 5
+
+
+def test_server_isolates_failed_item_and_keeps_checkpoint_open(queue, tmp_path):
+    engine, process = queue
+    attempted = []
+    def one_failure(raw_id):
+        attempted.append(raw_id)
+        if len(attempted) == 1:
+            raise TimeoutError("Не сохранять сообщение исключения")
+        return process(raw_id)
+    report = run_cycle(engine, city="belgrade", output=tmp_path / "partial-ai", now=NOW,
+        ingest=ingest_ok, process=one_failure, limit=2, continue_on_error=True)
+    assert report["status"] == "PRIMARY_PARTIAL" and not report["window_complete"]
+    assert report["processing_errors"] == [{"raw_item_id": attempted[0],
+                                             "error_type": "TimeoutError"}]
+    assert report["processed_raw_item_ids"] == attempted[1:]
+    assert report["remaining_count"] == 11

@@ -1,6 +1,7 @@
 """Bounded server newsroom; reviewed packages precede any enabled channel delivery."""
 import argparse
 import asyncio
+import copy
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, Publica
 from relocant_media.ai.package import EditorialPackage
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.ai.provider import StructuredAIProvider
+from relocant_media.ai.public_cache import PublicPreparationCache
 from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.collectors.beograd_article import (
@@ -77,6 +79,17 @@ class ServerAI:
                   f"Текущий момент UTC: {datetime.now(UTC).isoformat()}. "
                   "Отличай дату статьи от срока события: истёкшие объявления не выбирай "
                   "для новой публикации и не выдавай планы за выполненные факты. ")
+        if task == "rank":
+            categories = ["transport", "events", "city", "utilities", "schools", "medicine",
+                          "health", "immigration", "law", "tax", "banking", "politics",
+                          "crime", "accusations", "real_estate", "jobs"]
+            policy += ("category — машинный идентификатор на английском из разрешённого списка. "
+                       "Культурные анонсы и афиша относятся к events; движение транспорта — "
+                       "к transport. Не переводить category на русский и не маскировать "
+                       "медицинские, правовые, политические и иные рискованные темы как events. ")
+            response_schema = copy.deepcopy(response_schema)
+            if "category" in response_schema.get("properties", {}):
+                response_schema["properties"]["category"]["enum"] = categories
         started = time.monotonic()
         record: dict[str, Any] = {"task": task}
         try:
@@ -392,15 +405,20 @@ def main() -> None:
         verify_sqlite_schema(engine)
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"],
                               http_options={"timeout": 45000, "retry_options": {"attempts": 0}})
-        provider = ServerAI(GeminiStructuredProvider(os.environ["GEMINI_API_KEY"],
-            model=os.environ["GEMINI_MODEL"], client=client),
-            audit_path=args.output / "ai-calls.jsonl")
+        provider = PublicPreparationCache(
+            ServerAI(GeminiStructuredProvider(os.environ["GEMINI_API_KEY"],
+                model=os.environ["GEMINI_MODEL"], client=client),
+                audit_path=args.output / "ai-calls.jsonl"),
+            Path(url.database).parent / "ai-cache", model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v3",
+            public_news_only=True,
+        )
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=lambda: asyncio.run(collect_sources(engine, output=args.output)),
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output), limit=2,
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
-            reassessment_ids=lambda: policy_reassessment_ids(engine))
-        result["fallback_required"] = result["status"] == "PRIMARY_FAILED"
+            reassessment_ids=lambda: policy_reassessment_ids(engine), continue_on_error=True)
+        result["fallback_required"] = (result["status"] == "PRIMARY_FAILED"
+                                       or bool(result.get("processing_errors")))
         result["sent_message_ids"] = []
         result["channel_transport"] = "disabled"
         if result["status"] in {"PRIMARY_OK", "PRIMARY_PARTIAL"}:

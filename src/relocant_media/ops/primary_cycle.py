@@ -70,6 +70,7 @@ def run_cycle(
     refresh_until: bool = False, newest_first: bool = False,
     allow_partial_ingest: bool = False,
     reassessment_ids: Callable[[], list[int]] | None = None,
+    continue_on_error: bool = False,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
             or not city.strip() or not 1 <= limit <= 5):
@@ -112,9 +113,17 @@ def run_cycle(
             (output / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             processed = []
+            processing_errors = []
             for candidate in manifest["candidates"]:
                 raw_id = candidate["raw_item_id"]
-                result = process(raw_id)
+                try:
+                    result = process(raw_id)
+                except Exception as error:
+                    if not continue_on_error:
+                        raise
+                    processing_errors.append({"raw_item_id": raw_id,
+                                              "error_type": type(error).__name__})
+                    continue
                 (output / f"editorial-{raw_id}.json").write_text(
                     json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
                 processed.append(raw_id)
@@ -125,9 +134,11 @@ def run_cycle(
                 revision_count = session.scalar(select(func.count()).select_from(
                     SourceRevision).join(RawItem).join(Source).where(Source.city == city))
             additional_remaining = len(reassessment_ids()) if reassessment_ids else 0
-            complete = remaining["eligible_count"] + additional_remaining == 0
+            complete = (remaining["eligible_count"] + additional_remaining == 0
+                        and not processing_errors)
             heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
                 window_complete=complete, processed_raw_item_ids=processed,
+                processing_errors=processing_errors,
                 remaining_count=remaining["eligible_count"] + additional_remaining,
                 missing_published_at_count=remaining["missing_published_at_count"],
                 review_required=collection.get("review_required", 0),
