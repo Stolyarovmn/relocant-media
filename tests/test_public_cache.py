@@ -127,3 +127,27 @@ def test_invalid_provider_output_not_cached(tmp_path, invalid):
         call(cache)
     assert len(provider.calls) == 2
     assert not list(tmp_path.iterdir())
+
+
+def test_schema_invalid_model_response_is_not_cached(tmp_path):
+    from relocant_media.ai.models import RankingResult
+    provider = Provider()
+    cache = cache_at(provider, tmp_path)
+    schema = RankingResult.model_json_schema()
+    with pytest.raises(StructuredOutputError):
+        call(cache, response_schema=schema)
+    assert not list(tmp_path.glob("*.json"))
+    provider.response = json.dumps({"should_process": False, "relevance": 0,
+        "category": "city", "confidence": 1, "rationale": "Нет полезной новости"})
+    assert call(cache, response_schema=schema) == provider.response
+    assert call(cache, response_schema=schema) == provider.response
+    assert len(provider.calls) == 2
+
+
+def test_non_json_output_is_not_cached(tmp_path):
+    provider = Provider()
+    provider.response = "Неверный ответ вместо JSON"
+    cache = cache_at(provider, tmp_path)
+    with pytest.raises(StructuredOutputError):
+        call(cache)
+    assert not list(tmp_path.glob("*.json"))

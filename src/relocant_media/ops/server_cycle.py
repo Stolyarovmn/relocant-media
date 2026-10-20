@@ -47,6 +47,7 @@ from relocant_media.ops.primary_cycle import run_cycle
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
 from relocant_media.services.editorial import (
+    DeliveryBlockedError,
     EditorialService,
     _candidate,
     _document,
@@ -349,7 +350,10 @@ class ChannelPublisher:
         return await self.bot.send_message(APPROVED_CHANNEL_ID, text)
 
 
-async def publish_pending(engine: Engine, *, enabled: bool, limit: int = 2) -> list[int]:
+async def publish_pending(
+    engine: Engine, *, enabled: bool, limit: int = 2,
+    blocked: list[dict[str, Any]] | None = None,
+) -> list[int]:
     if not enabled:
         return []
     with Session(engine) as session:
@@ -368,7 +372,13 @@ async def publish_pending(engine: Engine, *, enabled: bool, limit: int = 2) -> l
                 assert run is not None
                 if run.outcome.get("status") != "ready" or "_package" not in run.outcome:
                     continue
-                package = EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))
+                try:
+                    package = EditorialPackage.model_validate_json(
+                        json.dumps(run.outcome["_package"]))
+                except ValueError:
+                    if blocked is not None:
+                        blocked.append({"raw_item_id": raw_id, "reason": "invalid_stored_package"})
+                    continue
                 if package.version != 2:
                     continue
                 assert package.event is not None
@@ -377,15 +387,31 @@ async def publish_pending(engine: Engine, *, enabled: bool, limit: int = 2) -> l
                 fresh = freshness_decision(title=item.title, body=item.body,
                     published_at=item.published_at, now=datetime.now(UTC))
                 if fresh.action != "keep":
+                    if blocked is not None:
+                        blocked.append({"raw_item_id": raw_id, "reason": fresh.reason})
                     continue
                 # Independent reviews and one final exact live-source comparison
                 # must all remain valid before the durable send claim.
-                live = fetch_documents(package)
-                if any(a.model_dump() != b.model_dump(include=set(EvidenceDocument.model_fields))
-                       for a, b in zip(live, package.event.documents, strict=True)):
-                    raise ValueError("live source changed before delivery")
-                result = await deliver_reviewed(session, raw_id, publisher,
-                    target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
+                try:
+                    live = fetch_documents(package)
+                    if any(a.model_dump() != b.model_dump(
+                            include=set(EvidenceDocument.model_fields))
+                           for a, b in zip(live, package.event.documents, strict=True)):
+                        raise ValueError("live source changed before delivery")
+                except (ValueError, httpx.HTTPError) as error:
+                    if blocked is not None:
+                        blocked.append({"raw_item_id": raw_id,
+                                        "reason": "live_source_check_failed",
+                                        "error_type": type(error).__name__})
+                    continue
+                try:
+                    result = await deliver_reviewed(session, raw_id, publisher,
+                        target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
+                except DeliveryBlockedError as error:
+                    if blocked is not None:
+                        blocked.append({"raw_item_id": raw_id, "reason": "delivery_guard_blocked",
+                                        "error_type": type(error).__name__})
+                    continue
                 assert result.message_id is not None
                 sent.append(result.message_id)
     return sent
@@ -425,7 +451,11 @@ def main() -> None:
         if result["status"] in {"PRIMARY_OK", "PRIMARY_PARTIAL"}:
             enabled = os.environ.get("EDITORIAL_SEND_ENABLED") == "true"
             result["channel_transport"] = "bot-api" if enabled else "disabled"
-            result["sent_message_ids"] = asyncio.run(publish_pending(engine, enabled=enabled))
+            blocked: list[dict[str, Any]] = []
+            result["sent_message_ids"] = asyncio.run(
+                publish_pending(engine, enabled=enabled, blocked=blocked))
+            result["channel_blocked"] = blocked
+            result["fallback_required"] = result["fallback_required"] or bool(blocked)
     except Exception as error:
         result = {"status": "SERVER_FAILED", "error_type": type(error).__name__,
                   "fallback_required": True}

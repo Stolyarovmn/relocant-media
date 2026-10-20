@@ -14,7 +14,6 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.freshness import FreshnessDecision
 from relocant_media.ingestion.persistence import capture_collected_batch
 from relocant_media.ops import server_cycle
-from relocant_media.services.editorial import DeliveryBlockedError
 from relocant_media.storage.models import EditorialRun, RawItem, Source, SourceRevision
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
@@ -169,8 +168,10 @@ async def test_invalid_ready_never_sends(reviewed, monkeypatch, mutation):
             return 42
 
     monkeypatch.setattr(server_cycle, "TelegramBotAPI", Bot)
-    with pytest.raises((ValueError, DeliveryBlockedError)):
-        await server_cycle.publish_pending(session.get_bind(), enabled=True)
+    blocked = []
+    assert await server_cycle.publish_pending(
+        session.get_bind(), enabled=True, blocked=blocked) == []
+    assert blocked[0]["raw_item_id"] == run.raw_item_id
     assert calls == []
     session.refresh(run)
     assert run.delivery_status == "pending"

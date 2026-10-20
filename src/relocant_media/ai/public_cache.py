@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from pydantic import BaseModel, ValidationError
+
+from relocant_media.ai.models import ClaimSet, RankingResult, RussianDraft, VerificationResult
 from relocant_media.ai.package import canonical_json
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 
@@ -67,6 +70,19 @@ class PublicPreparationCache:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
+    @staticmethod
+    def _validate(task: str, response: str, schema: dict[str, Any]) -> None:
+        try:
+            json.loads(response)
+            models: dict[str, type[BaseModel]] = {
+                "rank": RankingResult, "claims": ClaimSet,
+                "verify": VerificationResult, "draft": RussianDraft}
+            model = models[task]
+            if schema.get("title") == model.__name__:
+                model.model_validate_json(response)
+        except (ValueError, ValidationError) as error:
+            raise StructuredOutputError("invalid preparation response; not cached") from error
+
     def generate_json(self, *, task: str, system_instruction: str, prompt: str,
                       response_schema: dict[str, Any]) -> str:
         arguments = dict(task=task, system_instruction=system_instruction,
@@ -82,6 +98,11 @@ class PublicPreparationCache:
         path = self.directory / f"{key}.json"
         cached = self._load(path, key, now)
         if cached is not None:
+            try:
+                self._validate(task, cached, response_schema)
+            except StructuredOutputError:
+                cached = None
+        if cached is not None:
             if self.audit is not None:
                 self.audit({"task": task, "cached": True, "key": key})
             return cached
@@ -89,6 +110,7 @@ class PublicPreparationCache:
             prompt=prompt, response_schema=response_schema)
         if not isinstance(response, str) or not response.strip():
             raise StructuredOutputError("preparation provider returned empty or non-text output")
+        self._validate(task, response, response_schema)
         self._save(path, key, response, now)
         if self.audit is not None:
             self.audit({"task": task, "cached": False, "key": key})
