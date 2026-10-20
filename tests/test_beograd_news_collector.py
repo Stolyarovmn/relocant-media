@@ -52,16 +52,44 @@ def test_parse_beograd_news_list_extracts_stable_ids_and_dates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_beograd_news_collector_fetches_list() -> None:
+async def test_beograd_news_collector_fetches_full_articles_once_per_id() -> None:
     html = (FIXTURES / "beograd_news_list.html").read_text(encoding="utf-8")
     source = load_source_file(SOURCE_PATH)
+    article = (FIXTURES / "beograd_article.html").read_text(encoding="utf-8")
+    requested: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == str(source.url)
-        return httpx.Response(200, text=html, request=request)
+        requested.append(str(request.url))
+        content = html if str(request.url) == str(source.url) else article
+        return httpx.Response(200, text=content, request=request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         items = await BelgradeNewsListCollector(source, client).collect()
 
     assert len(items) == 2
     assert {item.external_id for item in items} == {"116232", "116264"}
+    assert len(requested) == len(set(requested)) == 3
+    assert all(item.body.startswith("Prvi pasus probnog sadržaja vesti.") for item in items)
+    assert all("Beoinfo vesti" not in item.body for item in items)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["http", "missing_body"])
+async def test_article_failure_does_not_fall_back_to_list_card(failure: str) -> None:
+    from relocant_media.collectors.beograd_article import ArticleExtractionError
+
+    source = load_source_file(SOURCE_PATH)
+    html = (FIXTURES / "beograd_news_list.html").read_text(encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == str(source.url):
+            return httpx.Response(200, text=html, request=request)
+        return httpx.Response(
+            503 if failure == "http" else 200,
+            text="<main><h1>Article without body</h1></main>", request=request,
+        )
+
+    error = httpx.HTTPStatusError if failure == "http" else ArticleExtractionError
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(error):
+            await BelgradeNewsListCollector(source, client).collect()
