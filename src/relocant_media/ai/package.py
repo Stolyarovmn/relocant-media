@@ -3,9 +3,18 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from relocant_media.ai.models import (
     ClaimSet,
@@ -88,9 +97,22 @@ class ReviewVerdict(StrictModel):
     live_source_checked: bool = False
 
 
+class PackageEventDocument(PackageEvidence):
+    raw_item_id: int = Field(gt=0)
+    ownership: str = Field(min_length=1)
+    high_risk: bool
+    auto_publish: bool
+
+
+class PackageEvent(StrictModel):
+    event_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    editorial_rule_version: Literal["belgrade-editorial-v2"]
+    documents: tuple[PackageEventDocument, ...] = Field(min_length=1)
+
+
 class EditorialPackage(StrictModel):
-    version: Literal[1]
-    policy_version: Literal["subscription-editorial-v1"]
+    version: Literal[1, 2]
+    policy_version: Literal["subscription-editorial-v1", "subscription-editorial-v2"]
     city: str = Field(min_length=1)
     raw_item_id: int = Field(gt=0)
     source_id: str = Field(min_length=1)
@@ -99,6 +121,38 @@ class EditorialPackage(StrictModel):
     evidence: PackageEvidence
     outcome: PackageOutcome
     reviews: tuple[ReviewVerdict, ReviewVerdict]
+    event: PackageEvent | None = None
+
+    @model_validator(mode="after")
+    def validate_version_contract(self) -> Self:
+        if self.policy_version != f"subscription-editorial-v{self.version}":
+            raise ValueError("package policy/version mismatch")
+        if self.version == 1:
+            if self.event is not None:
+                raise ValueError("package v1 cannot attest event evidence")
+        else:
+            if self.event is None:
+                raise ValueError("package v2 requires event evidence")
+            ids = [document.raw_item_id for document in self.event.documents]
+            sources = [document.source_id for document in self.event.documents]
+            if len(ids) != len(set(ids)) or len(sources) != len(set(sources)):
+                raise ValueError("duplicate event document/source")
+            primary = next((d for d in self.event.documents
+                            if d.raw_item_id == self.raw_item_id), None)
+            if primary is None or any(
+                getattr(primary, field) != getattr(self.evidence, field)
+                for field in type(self.evidence).model_fields
+            ):
+                raise ValueError("event evidence must include exact primary document")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_version(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        # Keep historical v1 hashes and persisted receipts byte-for-byte compatible.
+        if self.version == 1:
+            payload.pop("event", None)
+        return payload
 
     @field_validator("version", mode="before")
     @classmethod
@@ -126,7 +180,9 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     assert claims is not None and verification is not None and draft is not None
     if package.source_id != package.evidence.source_id:
         raise ValueError("package source does not match evidence")
-    if not _citations_are_grounded(claims, (package.evidence,)):
+    documents = (tuple(package.event.documents) if package.event is not None
+                 else (package.evidence,))
+    if not _citations_are_grounded(claims, documents):
         raise ValueError("package contains ungrounded citations")
     verdicts = _verification_map(verification, claims)
     if verdicts is None:
