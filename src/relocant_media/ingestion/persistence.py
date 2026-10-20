@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.base import RawItem as CollectedRawItem
@@ -44,7 +45,8 @@ def sync_source(session: Session, city: str, source: SourceConfig) -> None:
         "auto_publish": source.policy.auto_publish,
         "enabled": source_is_enabled(source),
     }
-    statement = insert(Source).values(**values)
+    statement = (sqlite_insert(Source) if session.get_bind().dialect.name == "sqlite"
+                 else insert(Source)).values(**values)
     statement = statement.on_conflict_do_update(
         index_elements=["id"],
         set_={key: value for key, value in values.items() if key != "id"},
@@ -57,6 +59,15 @@ def _derived_metadata(item: CollectedRawItem) -> tuple[str, str]:
 
 
 def _referencing_runs(session: Session, raw_item_id: int) -> list[EditorialRun]:
+    if session.get_bind().dialect.name == "sqlite":
+        # JSONB contains is PostgreSQL-specific. Compare exact integer IDs,
+        # preserving secondary-document holds for the bounded local newsroom.
+        return [run for run in session.scalars(select(EditorialRun).execution_options(
+            populate_existing=True,
+        )) if run.raw_item_id == raw_item_id or any(
+            isinstance(document, dict) and document.get("raw_item_id") == raw_item_id
+            for document in run.evidence.get("documents", [])
+        )]
     return list(session.scalars(select(EditorialRun).where(or_(
         EditorialRun.raw_item_id == raw_item_id,
         EditorialRun.evidence["documents"].contains([{"raw_item_id": raw_item_id}]),
@@ -102,9 +113,10 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
             "body": item.body,
             "published_at": item.published_at,
         }
-        statement = insert(RawItem).values(**values)
+        statement = (sqlite_insert(RawItem) if session.get_bind().dialect.name == "sqlite"
+                     else insert(RawItem)).values(**values)
         statement = statement.on_conflict_do_update(
-            constraint="uq_raw_item_source_external",
+            index_elements=["source_id", "external_id"],
             set_={
                 "url": item.url,
                 "canonical_url": canonical_url,
@@ -141,11 +153,13 @@ def capture_collected_batch(
             }
             encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True,
                                  separators=(",", ":"))
-            session.execute(insert(SourceRevision).values(
+            statement = (sqlite_insert(SourceRevision)
+                         if session.get_bind().dialect.name == "sqlite" else insert(SourceRevision))
+            session.execute(statement.values(
                 raw_item_id=error.raw_item_id,
                 snapshot_sha256=hashlib.sha256(encoded.encode()).hexdigest(),
                 evidence=evidence,
-            ).on_conflict_do_nothing(constraint="uq_source_revision_snapshot"))
+            ).on_conflict_do_nothing(index_elements=["raw_item_id", "snapshot_sha256"]))
             _block_changed_evidence(session, error.raw_item_id)
             review_required += 1
     return written, review_required

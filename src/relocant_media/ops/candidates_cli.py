@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, aliased
 
 from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key, same_event
 from relocant_media.storage.models import EditorialRun, RawItem, Source
+from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 
 def aware_datetime(value: str) -> datetime:
@@ -199,12 +200,20 @@ def export_candidates(
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise ValueError("DATABASE_URL не задан")
-    engine = create_engine(database_url, isolation_level="REPEATABLE READ")
+    engine = create_engine(database_url)
     try:
-        if engine.dialect.name != "postgresql":
-            raise ValueError("Экспорт требует PostgreSQL")
+        if engine.dialect.name == "postgresql":
+            engine = engine.execution_options(isolation_level="REPEATABLE READ")
+        elif engine.dialect.name == "sqlite":
+            verify_sqlite_schema(engine)
+        else:
+            raise ValueError("unsupported export database")
         with Session(engine) as session, session.begin():
-            session.execute(text("SET TRANSACTION READ ONLY"))
+            if engine.dialect.name == "sqlite":
+                session.execute(text("PRAGMA query_only=ON"))
+                session.execute(text("BEGIN"))
+            else:
+                session.execute(text("SET TRANSACTION READ ONLY"))
             result = select_candidates(session, city=city, since=since, until=until, limit=limit)
         # Exclusive directory creation prevents a concurrent export from overwriting evidence.
         output.mkdir(parents=True, exist_ok=False)

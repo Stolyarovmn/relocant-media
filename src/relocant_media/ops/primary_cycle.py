@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 from relocant_media.ops.candidates_cli import aware_datetime, select_candidates
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.storage.models import EditorialRun, RawItem, Source, SourceRevision
+from relocant_media.storage.primary_lock import primary_lock
+from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 
 def begin_window(session: Session, *, city: str, now: datetime) -> SchedulerRun:
@@ -64,81 +66,73 @@ def run_cycle(
     ingest: Callable[[], dict[str, int]],
     process: Callable[[int], dict[str, Any]], limit: int = 5,
 ) -> dict[str, Any]:
-    if engine.dialect.name != "postgresql" or not city.strip() or not 1 <= limit <= 5:
-        raise ValueError("PostgreSQL, city and limit 1..5 required")
+    if (engine.dialect.name not in {"postgresql", "sqlite"}
+            or not city.strip() or not 1 <= limit <= 5):
+        raise ValueError("supported database, city and limit 1..5 required")
     if output.exists():
         raise ValueError("new output directory required")
+    verify_sqlite_schema(engine)
     output.mkdir(parents=True, exist_ok=False)
     # A session-level lock survives commits performed by EditorialService. The
     # connection remains checked out until release; a crashed worker releases it.
     lock_key = int.from_bytes(hashlib.sha256(f"primary-cycle:{city}".encode()).digest()[:8],
                               "big", signed=True)
-    with engine.connect() as connection:
-        acquired = connection.scalar(select(func.pg_try_advisory_lock(lock_key)))
-        connection.commit()
+    with primary_lock(engine, lock_key) as acquired:
         if not acquired:
             return {"status": "PRIMARY_BUSY", "city": city, "window_complete": False}
+        with Session(engine) as session:
+            run = begin_window(session, city=city, now=now)
+            run_id, window = run.id, run.details["window"]
+        heartbeat: dict[str, Any] = {
+            "status": "PRIMARY_FAILED", "city": city, "run_id": run_id,
+            "window": window, "window_complete": False, "telegram_transport": "fake",
+        }
         try:
+            collection = ingest()
+            (output / "ingest.json").write_text(json.dumps(collection), encoding="utf-8")
+            if collection["failures"]:
+                raise ValueError("source collection incomplete")
             with Session(engine) as session:
-                run = begin_window(session, city=city, now=now)
-                run_id, window = run.id, run.details["window"]
-            heartbeat: dict[str, Any] = {
-                "status": "PRIMARY_FAILED", "city": city, "run_id": run_id,
-                "window": window, "window_complete": False, "telegram_transport": "fake",
-            }
-            try:
-                collection = ingest()
-                (output / "ingest.json").write_text(json.dumps(collection), encoding="utf-8")
-                if collection["failures"]:
-                    raise ValueError("source collection incomplete")
-                with Session(engine) as session:
-                    manifest = select_candidates(session, city=city,
-                        since=aware_datetime(window["since"]),
-                        until=aware_datetime(window["until"]), limit=limit)
-                (output / "manifest.json").write_text(
-                    json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-                processed = []
-                for candidate in manifest["candidates"]:
-                    raw_id = candidate["raw_item_id"]
-                    result = process(raw_id)
-                    (output / f"editorial-{raw_id}.json").write_text(
-                        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-                    processed.append(raw_id)
-                with Session(engine) as session:
-                    remaining = select_candidates(session, city=city,
-                        since=aware_datetime(window["since"]),
-                        until=aware_datetime(window["until"]), limit=1)
-                    revision_count = session.scalar(select(func.count()).select_from(
-                        SourceRevision).join(RawItem).join(Source).where(Source.city == city))
-                complete = remaining["eligible_count"] == 0
-                heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
-                    window_complete=complete, processed_raw_item_ids=processed,
-                    remaining_count=remaining["eligible_count"],
-                    missing_published_at_count=remaining["missing_published_at_count"],
-                    review_required=collection.get("review_required", 0),
-                    revision_snapshots=revision_count)
-            except Exception as error:
-                # Do not persist exception messages: API errors can contain secrets.
-                heartbeat["error_type"] = type(error).__name__
+                manifest = select_candidates(session, city=city,
+                    since=aware_datetime(window["since"]),
+                    until=aware_datetime(window["until"]), limit=limit)
+            (output / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            processed = []
+            for candidate in manifest["candidates"]:
+                raw_id = candidate["raw_item_id"]
+                result = process(raw_id)
+                (output / f"editorial-{raw_id}.json").write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                processed.append(raw_id)
             with Session(engine) as session:
-                stored = session.get(SchedulerRun, run_id)
-                assert stored is not None
-                stored.status = ("success" if heartbeat["window_complete"] else
-                                 "partial" if heartbeat["status"] == "PRIMARY_PARTIAL"
-                                 else "failed")
-                stored.finished_at = datetime.now(UTC)
-                stored.details = heartbeat
-                session.commit()
-            (output / "heartbeat.json").write_text(
-                json.dumps(heartbeat, ensure_ascii=False, indent=2), encoding="utf-8")
-            return heartbeat
-        finally:
-            try:
-                connection.execute(select(func.pg_advisory_unlock(lock_key)))
-                connection.commit()
-            except Exception:
-                connection.invalidate()
-                raise
+                remaining = select_candidates(session, city=city,
+                    since=aware_datetime(window["since"]),
+                    until=aware_datetime(window["until"]), limit=1)
+                revision_count = session.scalar(select(func.count()).select_from(
+                    SourceRevision).join(RawItem).join(Source).where(Source.city == city))
+            complete = remaining["eligible_count"] == 0
+            heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
+                window_complete=complete, processed_raw_item_ids=processed,
+                remaining_count=remaining["eligible_count"],
+                missing_published_at_count=remaining["missing_published_at_count"],
+                review_required=collection.get("review_required", 0),
+                revision_snapshots=revision_count)
+        except Exception as error:
+            # Do not persist exception messages: API errors can contain secrets.
+            heartbeat["error_type"] = type(error).__name__
+        with Session(engine) as session:
+            stored = session.get(SchedulerRun, run_id)
+            assert stored is not None
+            stored.status = ("success" if heartbeat["window_complete"] else
+                             "partial" if heartbeat["status"] == "PRIMARY_PARTIAL"
+                             else "failed")
+            stored.finished_at = datetime.now(UTC)
+            stored.details = heartbeat
+            session.commit()
+        (output / "heartbeat.json").write_text(
+            json.dumps(heartbeat, ensure_ascii=False, indent=2), encoding="utf-8")
+        return heartbeat
 
 
 def main() -> None:

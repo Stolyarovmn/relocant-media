@@ -12,6 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from relocant_media.ingestion.runner import ingest_city
+from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 
 async def collect(city: str, sources: Path, source_ids: tuple[str, ...]) -> dict[str, int]:
@@ -22,6 +23,7 @@ async def collect(city: str, sources: Path, source_ids: tuple[str, ...]) -> dict
         raise ValueError("explicit DATABASE_URL is required")
     engine = create_engine(database_url)
     try:
+        verify_sqlite_schema(engine)
         async with httpx.AsyncClient(
             timeout=30, trust_env=False,
             headers={"User-Agent": "relocant-media/0.1 (+source-monitoring)"},

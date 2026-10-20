@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from relocant_media.storage.models import RawItem, Source, SourceRevision
+from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 
 def export_revisions(*, city: str, output: Path) -> dict[str, Any]:
@@ -18,12 +19,20 @@ def export_revisions(*, city: str, output: Path) -> dict[str, Any]:
     url = os.environ.get("DATABASE_URL")
     if not url or not city.strip() or output.exists():
         raise ValueError("explicit database, city and new output directory required")
-    engine = create_engine(url, isolation_level="REPEATABLE READ")
+    engine = create_engine(url)
     try:
-        if engine.dialect.name != "postgresql":
-            raise ValueError("PostgreSQL required")
+        if engine.dialect.name == "postgresql":
+            engine = engine.execution_options(isolation_level="REPEATABLE READ")
+        elif engine.dialect.name == "sqlite":
+            verify_sqlite_schema(engine)
+        else:
+            raise ValueError("unsupported export database")
         with Session(engine) as session, session.begin():
-            session.execute(text("SET TRANSACTION READ ONLY"))
+            if engine.dialect.name == "sqlite":
+                session.execute(text("PRAGMA query_only=ON"))
+                session.execute(text("BEGIN"))
+            else:
+                session.execute(text("SET TRANSACTION READ ONLY"))
             rows = session.execute(select(SourceRevision, RawItem, Source).join(
                 RawItem, RawItem.id == SourceRevision.raw_item_id,
             ).join(Source, Source.id == RawItem.source_id).where(
