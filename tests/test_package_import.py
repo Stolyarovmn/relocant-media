@@ -7,9 +7,81 @@ from test_editorial_integration import prepare_service
 from test_editorial_package import NOW, bind_context, package_payload, parse
 
 from relocant_media.services.package_import import PackageConflictError, import_package
-from relocant_media.storage.models import RawItem
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 editorial_session = _editorial_session
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_package_import_rejects_an_event_already_reviewed_under_another_url(
+    editorial_session: Session, legacy: bool,
+) -> None:
+    _, _, item_id = prepare_service(editorial_session)
+    payload = package_payload()
+    payload['raw_item_id'] = item_id
+    bind_context(payload)
+    first = import_package(editorial_session, parse(payload), now=NOW)
+    first.delivery_status = 'sent'
+    first.staging_message_id = 42
+    original = editorial_session.get(RawItem, item_id)
+    assert original is not None
+    if legacy:
+        original.canonical_url = None
+        original.content_sha256 = None
+    duplicate = RawItem(source_id=original.source_id, external_id='another-url',
+                        url=original.url + '?copy=1', title=original.title,
+                        body=original.body, published_at=original.published_at)
+    editorial_session.add(duplicate)
+    editorial_session.commit()
+    payload['raw_item_id'] = duplicate.id
+    payload['article_id'] = duplicate.external_id
+    payload['evidence']['url'] = duplicate.url
+    for claim in payload['outcome']['claims']['claims']:
+        for citation in claim['citations']:
+            citation['url'] = duplicate.url
+    for review in payload['reviews']:
+        review['article_id'] = duplicate.external_id
+    bind_context(payload)
+    with pytest.raises(PackageConflictError, match='event already reviewed'):
+        import_package(editorial_session, parse(payload), now=NOW)
+    assert editorial_session.get(EditorialRun, duplicate.id) is None
+    editorial_session.refresh(first)
+    assert first.delivery_status == 'sent' and first.staging_message_id == 42
+
+
+@pytest.mark.parametrize('high_risk', [False, True])
+def test_package_v1_does_not_approve_unreviewed_event_bundle(
+    editorial_session: Session, high_risk: bool,
+) -> None:
+    _, _, item_id = prepare_service(editorial_session)
+    original = editorial_session.get(RawItem, item_id)
+    assert original is not None
+    original.published_at = NOW
+    source = Source(id='other-event-source', city='belgrade', name='Other source',
+                    url='https://other.example', source_type='official', trust=1,
+                    ownership='official', high_risk=high_risk, auto_publish=True, enabled=True)
+    editorial_session.add(source)
+    editorial_session.flush()
+    other = RawItem(source_id=source.id, external_id='same-event',
+                    url='https://other.example/event', title=original.title,
+                    body=original.body, published_at=NOW)
+    editorial_session.add(other)
+    editorial_session.commit()
+    payload = package_payload()
+    payload['raw_item_id'] = item_id
+    payload['evidence']['published_at'] = NOW.isoformat()
+    bind_context(payload)
+    package = parse(payload)
+    run = import_package(editorial_session, package, now=NOW)
+    assert run.outcome['status'] == 'human_review'
+    assert run.outcome['reason'] == (
+        'source_policy_requires_review' if high_risk else 'package_requires_event_bundle_review'
+    )
+    assert {d['raw_item_id'] for d in run.evidence['documents']} == {item_id, other.id}
+    assert run.evidence['event_key']
+    assert run.editorial_rule_version == 'belgrade-editorial-v2'
+    assert editorial_session.get(Post, run.post_id).status == 'human_review'
+    assert import_package(editorial_session, package, now=NOW).post_id == run.post_id
 
 
 @pytest.mark.asyncio
