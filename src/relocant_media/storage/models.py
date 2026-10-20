@@ -7,7 +7,6 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Date,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -17,10 +16,10 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
+from relocant_media.storage.types import AUTOINCREMENT_ID, JSON_VALUE, UTC_DATE
 
 
 class Base(DeclarativeBase):
@@ -58,7 +57,7 @@ class RawItem(Base):
         Index("ix_raw_item_content_sha256", "content_sha256"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     source_id: Mapped[str] = mapped_column(ForeignKey("source.id"), nullable=False)
     external_id: Mapped[str] = mapped_column(String, nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -66,9 +65,9 @@ class RawItem(Base):
     content_sha256: Mapped[str | None] = mapped_column(String(64))
     title: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(UTC_DATE)
     ingested_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )
 
 
@@ -78,32 +77,32 @@ class SourceRevision(Base):
         UniqueConstraint("raw_item_id", "snapshot_sha256", name="uq_source_revision_snapshot"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     raw_item_id: Mapped[int] = mapped_column(ForeignKey("raw_item.id"), nullable=False)
     snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, nullable=False)
     observed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False,
+        UTC_DATE, server_default=func.now(), nullable=False,
     )
 
 
 class CollectorFailure(Base):
     __tablename__ = "collector_failure"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     source_id: Mapped[str] = mapped_column(ForeignKey("source.id"), nullable=False)
     strategy: Mapped[str] = mapped_column(String, nullable=False)
     error_type: Mapped[str] = mapped_column(String, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )
 
 
 class Post(Base):
     __tablename__ = "post"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     city: Mapped[str] = mapped_column(String, nullable=False)
     category: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
@@ -114,9 +113,9 @@ class Post(Base):
         String, nullable=False, default=CURRENT_EDITORIAL_RULE_VERSION, server_default="legacy-v1"
     )
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(UTC_DATE)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )
 
 
@@ -124,8 +123,8 @@ class EditorialRun(Base):
     __tablename__ = "editorial_run"
 
     raw_item_id: Mapped[int] = mapped_column(ForeignKey("raw_item.id"), primary_key=True)
-    outcome: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    outcome: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, nullable=False)
     post_id: Mapped[int | None] = mapped_column(ForeignKey("post.id"), unique=True)
     editorial_rule_version: Mapped[str] = mapped_column(
         String, nullable=False, default=CURRENT_EDITORIAL_RULE_VERSION, server_default="legacy-v1"
@@ -133,7 +132,7 @@ class EditorialRun(Base):
     delivery_status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     staging_message_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )
 
 
@@ -141,7 +140,7 @@ class PostSnapshot(Base):
     __tablename__ = "post_snapshot"
 
     post_id: Mapped[int] = mapped_column(ForeignKey("post.id"), primary_key=True)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    captured_at: Mapped[datetime] = mapped_column(UTC_DATE, primary_key=True)
     horizon_hours: Mapped[int | None] = mapped_column(Integer)
     views: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     reactions: Mapped[int] = mapped_column(
@@ -166,9 +165,9 @@ class ChannelSnapshot(Base):
         Index("ix_channel_snapshot_city_captured_at", "city", "captured_at"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     city: Mapped[str] = mapped_column(String, nullable=False)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(UTC_DATE, nullable=False)
     subscribers: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)
     kind: Mapped[str] = mapped_column(
@@ -204,7 +203,7 @@ class AcquisitionCohort(Base):
         ),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     city: Mapped[str] = mapped_column(String, nullable=False)
     campaign: Mapped[str] = mapped_column(String, nullable=False)
     cohort_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -240,9 +239,9 @@ class AIUsageEvent(Base):
         Index("ix_ai_usage_event_city_occurred_at", "city", "occurred_at"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     city: Mapped[str] = mapped_column(String, nullable=False)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(UTC_DATE, nullable=False)
     provider: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     task: Mapped[str] = mapped_column(String, nullable=False)
@@ -257,23 +256,23 @@ class AIUsageEvent(Base):
 class Submission(Base):
     __tablename__ = "submission"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     kind: Mapped[str] = mapped_column(String, nullable=False)
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, nullable=False)
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="new", server_default="new"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )
 
 
 class ModerationAction(Base):
     __tablename__ = "moderation_action"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     city: Mapped[str | None] = mapped_column(String)
     telegram_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -281,7 +280,7 @@ class ModerationAction(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     model: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )
 
 
@@ -295,9 +294,9 @@ class TelegramUpdateReceipt(Base):
     )
     error: Mapped[str | None] = mapped_column(Text)
     received_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )
-    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processed_at: Mapped[datetime | None] = mapped_column(UTC_DATE)
 
 
 class TelegramConversation(Base):
@@ -306,23 +305,23 @@ class TelegramConversation(Base):
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     pending_kind: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 
 class AdRequest(Base):
     __tablename__ = "ad_request"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, nullable=False)
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="new", server_default="new"
     )
     quoted_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     currency: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )
 
 
@@ -331,7 +330,7 @@ class DailyReport(Base):
 
     report_date: Mapped[date] = mapped_column(Date, primary_key=True)
     city: Mapped[str] = mapped_column(String, primary_key=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )

@@ -124,7 +124,7 @@ def test_reviewed_evidence_change_is_preserved_and_explicitly_blocks_post(
 
 
 @pytest.mark.parametrize("secondary", [False, True])
-def test_changed_reviewed_evidence_is_queued_without_losing_other_articles_or_receipts(
+def test_reviewed_changes_preserve_evidence_and_receipts(
     db_session: Session, secondary: bool,
 ) -> None:
     from datetime import UTC, datetime

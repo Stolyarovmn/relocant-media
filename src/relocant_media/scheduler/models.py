@@ -1,20 +1,20 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, Index, Integer, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from relocant_media.storage.models import Base
+from relocant_media.storage.types import AUTOINCREMENT_ID, JSON_VALUE, UTC_DATE
 
 
 class SchedulerLease(Base):
     __tablename__ = "scheduler_lease"
 
     task_key: Mapped[str] = mapped_column(String, primary_key=True)
-    lease_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_until: Mapped[datetime] = mapped_column(UTC_DATE, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 
@@ -31,19 +31,19 @@ class SchedulerRun(Base):
         Index("ix_scheduler_run_city_started", "city", "started_at"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(AUTOINCREMENT_ID, primary_key=True, autoincrement=True)
     task_key: Mapped[str] = mapped_column(String, nullable=False)
     task_type: Mapped[str] = mapped_column(String, nullable=False)
     city: Mapped[str] = mapped_column(String, nullable=False)
-    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(UTC_DATE, nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     status: Mapped[str] = mapped_column(String, nullable=False)
     started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTC_DATE, server_default=func.now(), nullable=False
     )
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(UTC_DATE)
     error_type: Mapped[str | None] = mapped_column(String)
     error_message: Mapped[str | None] = mapped_column(Text)
     details: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JSON_VALUE, nullable=False, default=dict, server_default="{}"
     )

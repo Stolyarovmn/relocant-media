@@ -4,7 +4,7 @@ from pathlib import Path
 from threading import Event
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 from test_editorial_integration import editorial_session as _editorial_session
 
@@ -13,14 +13,21 @@ from relocant_media.ops.primary_cycle import begin_window, run_cycle
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.sources.registry import load_source_file
 from relocant_media.storage.models import EditorialRun, RawItem
+from relocant_media.storage.sqlite_schema import initialize_sqlite
 
 editorial_session = _editorial_session
 NOW = datetime(2026, 10, 20, 8, tzinfo=UTC)
 
 
-@pytest.fixture
-def queue(editorial_session: Session):
-    session = editorial_session
+@pytest.fixture(params=["postgresql", "sqlite"])
+def queue(request, tmp_path):
+    sqlite_engine = None
+    if request.param == "sqlite":
+        sqlite_engine = create_engine(f"sqlite:///{tmp_path / 'primary.sqlite3'}")
+        initialize_sqlite(tmp_path / "primary.sqlite3")
+        session = Session(sqlite_engine)
+    else:
+        session = request.getfixturevalue("editorial_session")
     session.execute(delete(SchedulerRun).where(SchedulerRun.task_type == "editorial_primary"))
     source = load_source_file(Path("cities/belgrade/sources/city_beograd_news.yaml"))
     sync_source(session, "belgrade", source)
@@ -39,7 +46,10 @@ def queue(editorial_session: Session):
             worker.commit()
         return {"transport": "fake", "raw_item_id": raw_id}
 
-    return engine, process
+    yield engine, process
+    if sqlite_engine is not None:
+        session.close()
+        sqlite_engine.dispose()
 
 
 def ingest_ok():
