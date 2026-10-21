@@ -104,7 +104,11 @@ class LexicalSemanticScorer:
         )
         left_anchors = _anchors(f"{left.title} {left.body}")
         right_anchors = _anchors(f"{right.title} {right.body}")
-        anchor_overlap = _jaccard(left_anchors, right_anchors) if left_anchors or right_anchors else 0.0
+        anchor_overlap = (
+            _jaccard(left_anchors, right_anchors)
+            if left_anchors or right_anchors
+            else 0.0
+        )
         score = (
             0.50 * title_overlap
             + 0.20 * body_overlap
@@ -185,7 +189,13 @@ def find_shadow_duplicates(
                     threshold=threshold,
                 )
             )
-    signals.sort(key=lambda item: (-item.score.score, item.left_raw_item_id, item.right_raw_item_id))
+    signals.sort(
+        key=lambda item: (
+            -item.score.score,
+            item.left_raw_item_id,
+            item.right_raw_item_id,
+        )
+    )
     return signals[:limit]
 
 
@@ -216,6 +226,8 @@ def evaluate_shadow_labels(
         "true_negative": true_negative,
         "precision": true_positive / precision_denominator if precision_denominator else None,
         "recall": true_positive / recall_denominator if recall_denominator else None,
-        "false_positive_rate": false_positive / negative_denominator if negative_denominator else None,
+        "false_positive_rate": (
+            false_positive / negative_denominator if negative_denominator else None
+        ),
         "false_negative_rate": false_negative / recall_denominator if recall_denominator else None,
     }
