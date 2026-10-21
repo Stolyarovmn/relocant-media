@@ -76,9 +76,17 @@ def _referencing_runs(session: Session, raw_item_id: int) -> list[EditorialRun]:
 
 def _block_changed_evidence(session: Session, raw_item_id: int) -> None:
     for run in _referencing_runs(session, raw_item_id):
+        post = session.get(Post, run.post_id) if run.post_id else None
+        already_sent = run.delivery_status == "sent" or bool(
+            post is not None
+            and (post.published_at is not None or post.telegram_message_id is not None)
+        )
+        if already_sent:
+            # Source history may evolve after publication. Keep the immutable receipt/outcome
+            # of what was actually sent; the new snapshot is handled as a separate revision.
+            continue
         run.outcome = {**run.outcome, "status": "human_review",
                        "reason": "source_changed_requires_review"}
-        post = session.get(Post, run.post_id) if run.post_id else None
         if post is not None and post.published_at is None:
             post.status = "human_review"
 
