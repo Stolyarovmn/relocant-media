@@ -39,6 +39,8 @@ def test_source_yield_counts_public_and_staging_delivery_separately() -> None:
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         session.add_all([_source("alpha"), _source("beta"), _source("zero")])
+        session.flush()
+
         alpha_raw = [_raw("alpha", str(index), 10 + index) for index in range(1, 5)]
         beta_raw = _raw("beta", "1", 15)
         excluded = _raw("alpha", "outside", 9)
