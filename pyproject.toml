@@ -34,6 +34,7 @@ relocant-webhook = "relocant_media.ops.webhook:main"
 relocant-schedule = "relocant_media.scheduler.cli:main"
 relocant-mtproto = "relocant_media.analytics.mtproto_cli:main"
 relocant-telegram-bootstrap = "relocant_media.ops.telegram_bootstrap_cli:main"
+relocant-ads-analyze = "relocant_media.ops.ads_analysis_cli:main"
 
 [project.optional-dependencies]
 dev = [
