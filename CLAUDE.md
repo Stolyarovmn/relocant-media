@@ -9,11 +9,20 @@ Never:
 - publish directly to a production Telegram channel from an engineering task;
 - change production secrets or commit credentials;
 - alter advertising budgets;
-- merge your own PR;
+- merge a PR before its required checks pass;
 - weaken source provenance or factual-verification requirements;
 - silently turn a human-review category into an auto-publish category;
 - use the personal MTProto analytics session for sending/editing/deleting messages, joining chats, invitations, DMs, moderation or advertising actions;
 - expose, copy, log or persist the MTProto session file outside its dedicated secret volume.
+
+## Постоянное разрешение владельца на PR
+
+21.10.2026 владелец прямо разрешил слияние PR55 и последующих PR этого проекта:
+«Разрешаю и больше не спрашивай разрешения на ПРы в этом проекте».
+Это заменяет прежний запрет `merge your own PR` для Stolyarovmn/relocant-media.
+Создавай и сливай PR без повторного запроса, после успешных обязательных проверок
+и проверки актуального head и возможности слияния. После слияния проверяй CI main.
+Остальные ограничения проекта этим разрешением не отменены.
 
 ## Stack
 
