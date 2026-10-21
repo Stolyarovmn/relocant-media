@@ -156,3 +156,21 @@ def test_already_reviewed_linked_tips_are_not_new_work(engine):
             city='belgrade',raw_item_ids=[])))
         s.commit()
         assert batch_submissions(s) == []
+
+
+@pytest.mark.asyncio
+async def test_different_raw_id_of_reviewed_event_does_not_retrigger_batch(runtime):
+    engine, _, _, _, _ = runtime
+    await server_cycle.collect_sources(engine)
+    with Session(engine) as s:
+        original = s.scalar(select(RawItem))
+        s.add(EditorialRun(raw_item_id=original.id,outcome={'status':'skipped'},evidence={}))
+        clone = RawItem(source_id=original.source_id,external_id='another-url',
+            url='https://museum.example/another/',title=original.title,body=original.body,
+            published_at=original.published_at,canonical_url=original.url)
+        s.add(clone)
+        s.flush()
+        s.add(Submission(kind='news_tip',status='source_linked',payload=dict(
+            city='belgrade',raw_item_ids=[clone.id])))
+        s.commit()
+        assert batch_submissions(s) == []
