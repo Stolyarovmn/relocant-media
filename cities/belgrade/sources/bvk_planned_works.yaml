@@ -1,0 +1,21 @@
+id: bvk_planned_works
+name: JKP Beogradski vodovod i kanalizacija — Planirani radovi
+publisher: JKP Beogradski vodovod i kanalizacija
+ownership: official
+url: https://www.bvk.rs/planirani-radovi/
+language: sr-Cyrl
+source_type: official_utility_service_info
+trust: 1.0
+check_every: 30m
+categories:
+  - utilities
+  - water
+extraction:
+  strategy: page_change_detection
+  status: active
+policy:
+  high_risk: false
+  auto_publish: false
+verification:
+  checked_at: 2026-10-21
+  note: Official BVK planned-works page lists municipality/street, outage time and water-tanker information. Collected as a whole-page shadow snapshot until a structured outage parser is validated on real snapshots.
