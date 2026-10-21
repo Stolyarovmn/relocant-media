@@ -20,7 +20,7 @@ MAX_BYTES = 2_000_000
 
 
 def _entry_id(date_text: str, title: str) -> str:
-    seed = f"{date_text}\n{normalize_text(title)}".encode("utf-8")
+    seed = f"{date_text}\n{normalize_text(title)}".encode()
     return "bvk-" + hashlib.sha256(seed).hexdigest()[:24]
 
 
@@ -32,7 +32,12 @@ def _internal_canonical_url(url: str, external_id: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
 
 
-def parse_bvk_planned_works(html: str, source: SourceConfig, *, page_url: str | None = None) -> list[RawItem]:
+def parse_bvk_planned_works(
+    html: str,
+    source: SourceConfig,
+    *,
+    page_url: str | None = None,
+) -> list[RawItem]:
     """Split the live BVK list into independent notices without inventing publication dates."""
     if len(html.encode("utf-8")) > MAX_BYTES:
         raise ValueError("BVK planned-works response too large")
