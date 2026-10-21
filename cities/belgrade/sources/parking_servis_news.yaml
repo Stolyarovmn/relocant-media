@@ -1,0 +1,22 @@
+id: parking_servis_news
+name: JKP Parking servis Beograd — Vesti
+publisher: JKP Parking servis Beograd
+ownership: official
+url: https://www.parking-servis.co.rs/lat/vesti
+language: sr-Latn
+source_type: official_parking_service_news
+trust: 1.0
+check_every: 1h
+categories:
+  - parking
+  - transport
+  - city
+extraction:
+  strategy: page_change_detection
+  status: active
+policy:
+  high_risk: false
+  auto_publish: false
+verification:
+  checked_at: 2026-10-21
+  note: Official Parking servis news page publishes parking-zone changes, holiday operating rules, garage works and service alerts. Shadow snapshot only until full dated-article extraction is validated.
