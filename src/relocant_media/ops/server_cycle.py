@@ -4,7 +4,6 @@ import asyncio
 import copy
 import json
 import os
-import re
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,12 +26,10 @@ from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.collectors.beograd_article import (
     BelgradeArticleCollector,
-    match_beograd_article_url,
     parse_beograd_article,
 )
 from relocant_media.collectors.beograd_news import parse_beograd_news_list
 from relocant_media.collectors.cukarica_news import (
-    ARTICLE_PATH,
     CukaricaNewsCollector,
     parse_cukarica_article,
     parse_cukarica_news_list,
@@ -42,6 +39,11 @@ from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import freshness_decision
+from relocant_media.domain.presentation import (
+    presentation_title,
+    title_instruction,
+    valid_title_presentation,
+)
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops.cycle_audit import audit_cycle
 from relocant_media.ops.newsroom_status import summarize
@@ -65,12 +67,29 @@ from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
     persist_policy_reassessment,
 )
+from relocant_media.services.primary_discovery import (
+    public_search_plan,
+    source_for_url,
+    topic_matches,
+)
+from relocant_media.services.private_intake import receive_private_tips
+from relocant_media.services.published_watch import (
+    evidence_changed,
+    published_sources,
+    recent_source_load,
+)
+from relocant_media.services.submission_feedback import reply_to_submissions, resolve_submission
+from relocant_media.services.submission_queue import (
+    batch_submissions,
+    pending_submissions,
+    priority_raw_ids,
+    tip_urls,
+)
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
-from relocant_media.storage.models import EditorialRun, RawItem, Source
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 SOURCES = Path("cities/belgrade/sources")
-PREFIX = "[тестовый запуск]"
 
 
 class ServerAI:
@@ -96,6 +115,7 @@ class ServerAI:
                   "язык и возрастные ограничения укажи, если они важны и известны. "
                   "Не выдумывай отсутствующие детали, не выдавай медицинские обещания "
                   "и обычные скидки/пакеты проживания за городское событие. ")
+        policy += title_instruction()
         if task == "rank":
             categories = ["transport", "events", "city", "utilities", "schools", "medicine",
                           "health", "immigration", "law", "tax", "banking", "politics",
@@ -176,9 +196,11 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     return tuple(documents)
 
 
-async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict[str, int]:
+async def collect_sources(
+    engine: Engine, *, output: Path | None = None, submissions_only: bool = False,
+) -> dict[str, Any]:
     now = datetime.now(UTC)
-    result = {"sources_synced": 2, "sources_skipped": 0, "raw_items_written": 0,
+    result: dict[str, Any] = {"sources_synced": 2, "sources_skipped": 0, "raw_items_written": 0,
               "failures": 0, "review_required": 0, "discarded_before_article_fetch": 0,
               "discarded_before_persistence": 0, "channel_failures": 0, "channel_leads": 0}
     venues = venue_sources()
@@ -189,6 +211,10 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     result["venue_sources"] = len(venues)
     result["venue_items"] = 0
     result["venue_deferred"] = 0
+    result["venue_article_failures"] = 0
+    result["priority_submissions"] = 0
+    result["primary_searches"] = 0
+    result["private_link_fetches"] = 0
     with Session(engine) as session:
         for source in sources.values():
             sync_source(session, "belgrade", source)
@@ -196,8 +222,21 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     attention_leads = []
     topics: list[dict[str, Any]] = []
     channel_errors: list[dict[str, str]] = []
+    venue_errors: list[dict[str, str]] = []
     articles = []
     fetched: dict[str, str] = {}
+    submission_links: dict[int, list[str]] = {}
+    attempted_tips: set[int] = set()
+    watch: dict[str, Any] = {"checked": 0, "changed": [], "failures": []}
+    with Session(engine) as session:
+        rows = batch_submissions(session) if submissions_only else pending_submissions(session)
+        tips = [(row.id, row.payload) for row in rows]
+        published = [] if submissions_only else published_sources(session, now=now)
+    result["submission_ids"] = [sid for sid, _ in tips]
+    result["submission_raw_ids"] = []
+    aliases_path = SOURCES.parent / "event-aliases.json"
+    aliases = json.loads(aliases_path.read_text(encoding="utf-8")) if aliases_path.is_file() else {}
+    searches: set[tuple[str, str]] = set()
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
         collectors: dict[
             str, BelgradeArticleCollector | CukaricaNewsCollector | VenueFeedCollector
@@ -224,10 +263,56 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
             fetched[url] = "primary_source_collected"
             return "primary_source_collected"
 
+        async def resolve_link(url: str) -> str | None:
+            source_id = source_for_url(url, sources)
+            if source_id is None:
+                return None
+            try:
+                return await full_article(source_id, url)
+            except (httpx.HTTPError, ValueError):
+                fetched[url] = "primary_source_unavailable"
+                return fetched[url]
+
+        # Private text stays in Submission. Only separately fetched public evidence is ingested.
+        for submission_id, payload in tips:
+            linked = []
+            for url in tip_urls(payload):
+                if source_for_url(url, sources) is None:
+                    attempted_tips.add(submission_id)
+                    continue
+                if urlsplit(url).query:
+                    attempted_tips.add(submission_id)
+                    continue
+                if url not in fetched:
+                    if result["private_link_fetches"] >= 10:
+                        continue
+                    result["private_link_fetches"] += 1
+                attempted_tips.add(submission_id)
+                if await resolve_link(url) == "primary_source_collected":
+                    linked.append(url)
+            if not tip_urls(payload):
+                attempted_tips.add(submission_id)
+            submission_links[submission_id] = linked
+
+        for original in published:
+            if original.source_id not in collectors:
+                continue
+            try:
+                current = await collectors[original.source_id].collect_url(original.url)
+                watch["checked"] += 1
+                if evidence_changed(original, current):
+                    articles.append(current)
+                    watch["changed"].append(original.id)
+            except (httpx.HTTPError, ValueError) as error:
+                watch["failures"].append({"raw_item_id": original.id,
+                                          "error_type": type(error).__name__})
+
         pages = [("city_beograd_news", str(sources["city_beograd_news"].url)),
                  ("cukarica_news", str(sources["cukarica_news"].url)),
                  ("city_beograd_news",
                   "https://www.beograd.rs/lat/servisne-informacije/saobracaj-i-prevoz")]
+        if submissions_only:
+            pages = []
         for source_id, url in pages:
             try:
                 page = await client.get(url, follow_redirects=False)
@@ -248,9 +333,10 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                     await full_article(source_id, item.url)
             except Exception:
                 result["failures"] += 1
-        for source_id in venues:
+        for source_id in (() if submissions_only else venues):
+            collector = VenueFeedCollector(venues[source_id], client)
             try:
-                for item in await VenueFeedCollector(venues[source_id], client).collect():
+                for item in await collector.collect():
                     result["venue_items"] += 1
                     reason = event_content_reason(item.title, item.body, now=now)
                     fresh = freshness_decision(item.title, item.body, item.published_at, now)
@@ -261,7 +347,11 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                     fetched[item.url] = "primary_source_collected"
             except Exception:
                 result["failures"] += 1
-        for channel in DEFAULT_CHANNELS:
+            finally:
+                result["venue_article_failures"] += len(collector.item_failures)
+                venue_errors.extend({"source_id": source_id, **error}
+                                    for error in collector.item_failures)
+        for channel in (() if submissions_only else DEFAULT_CHANNELS):
             try:
                 leads = await collect_topics(channel, client, now=now)
                 attention_leads.extend(leads)
@@ -272,35 +362,42 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                     for url in lead.outbound_urls[:10]:
                         # Telegram text never becomes evidence. Fetch only independently
                         # parsed article URLs from the explicitly approved sources.
-                        if match_beograd_article_url(url):
-                            resolved.append(await full_article("city_beograd_news", url))
+                        resolution = await resolve_link(url)
+                        if resolution is not None:
+                            resolved.append(resolution)
                             primary_urls.append(url)
-                        else:
-                            parts = urlsplit(url)
-                            if (parts.scheme == "https"
-                                    and parts.hostname in {"cukarica.rs", "www.cukarica.rs"}
-                                    and parts.username is None and parts.password is None
-                                    and parts.port in {None, 443}
-                                    and ARTICLE_PATH.fullmatch(parts.path)):
-                                resolved.append(await full_article("cukarica_news", url))
-                                primary_urls.append(url)
-                        if url not in primary_urls:
-                            for source_id, venue in venues.items():
-                                parts = urlsplit(url)
-                                hosts = {urlsplit(str(venue.url)).hostname,
-                                         *venue.extraction.approved_hosts}
-                                if parts.hostname in hosts:
-                                    resolved.append(await full_article(source_id, url))
-                                    primary_urls.append(url)
-                                    break
                     # A matching official title is a discovery pointer only. The
                     # pipeline still has to check every claim against the full article.
-                    words = set(re.findall(r"[^\W\d_]{5,}", lead.text.casefold()))
                     for article in articles:
-                        title_words = set(re.findall(r"[^\W\d_]{5,}", article.title.casefold()))
-                        if len(words & title_words) >= 3 and article.url not in primary_urls:
+                        if (topic_matches(lead.text, article.title)
+                                and article.url not in primary_urls):
                             primary_urls.append(article.url)
                             resolved.append("primary_source_collected")
+                    if not any(r == "primary_source_collected" for r in resolved):
+                        for source_id, search_url in public_search_plan(lead.text, venues, aliases):
+                            key = (source_id, search_url)
+                            if key in searches or len(searches) >= 4:
+                                continue
+                            searches.add(key)
+                            result["primary_searches"] += 1
+                            search_source = venues[source_id].model_copy(update={"extraction":
+                                venues[source_id].extraction.model_copy(
+                                    update={"feed_url": search_url})})
+                            try:
+                                found = await VenueFeedCollector(search_source, client).collect()
+                            except (httpx.HTTPError, ValueError):
+                                continue
+                            for item in found:
+                                if (not topic_matches(lead.text, item.title)
+                                        or freshness_decision(item.title, item.body,
+                                            item.published_at, now).action != "keep"
+                                        or event_content_reason(item.title, item.body, now=now)):
+                                    continue
+                                if item.url not in fetched:
+                                    articles.append(item)
+                                    fetched[item.url] = "primary_source_collected"
+                                primary_urls.append(item.url)
+                                resolved.append("primary_source_collected")
                     topics.append({"url": lead.url, "channel": channel,
                         "published_at": lead.published_at.isoformat(),
                         "status": "primary_source_resolved" if any(
@@ -312,12 +409,36 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                 channel_errors.append({"channel": channel, "error_type": type(error).__name__})
     with Session(engine) as session:
         written, changes = capture_collected_batch(session, articles)
+        for submission_id, payload in tips:
+            urls = submission_links[submission_id]
+            urls.extend(url for url in tip_urls(payload)
+                        if fetched.get(url) == "primary_source_collected")
+            # Local matching sends no private text to a search engine or model.
+            for article in articles:
+                if topic_matches(str(payload.get("text", "")), article.title):
+                    urls.append(article.url)
+            ids = list(session.scalars(select(RawItem.id).where(RawItem.url.in_(set(urls)))))
+            if not ids and submission_id not in attempted_tips:
+                continue
+            from relocant_media.storage.models import Submission
+            stored_tip = session.get(Submission, submission_id)
+            assert stored_tip is not None
+            resolve_submission(stored_tip, ids, now=now)
+            if ids and session.scalar(select(EditorialRun.raw_item_id).where(
+                    EditorialRun.raw_item_id.in_(ids)).limit(1)) is not None:
+                stored_tip.payload = {**stored_tip.payload, "triage_reason": "already_considered"}
+            result["priority_submissions"] += bool(ids)
+            result["submission_raw_ids"].extend(ids)
         session.commit()
     result["raw_items_written"] = written
     result["review_required"] = changes
     triage = triage_queue(engine, now=now)
     result["discarded_queue"] = triage["discarded"]
     if output is not None:
+        (output / "published-source-watch.json").write_text(
+            json.dumps(watch, ensure_ascii=False, indent=2), encoding="utf-8")
+        (output / "venue-article-failures.json").write_text(
+            json.dumps({"items": venue_errors}, ensure_ascii=False, indent=2), encoding="utf-8")
         aliases_path = SOURCES.parent / "event-aliases.json"
         aliases = (
             json.loads(aliases_path.read_text(encoding="utf-8"))
@@ -379,7 +500,7 @@ def prepare_reviewed(
                     "resolution": "deferred_policy" if run.outcome["status"] == "human_review"
                                   else "rejected"}
     draft = outcome.draft.model_copy(update={
-        "title": PREFIX + " " + outcome.draft.title.removeprefix(PREFIX).strip(),
+        "title": presentation_title(outcome.draft.title),
     })
     outcome = outcome.model_copy(update={"draft": draft})
     placeholders = [dict(reviewer_id=f"pending-{role}", role=role,
@@ -425,15 +546,21 @@ class ChannelPublisher:
         self.bot = bot
 
     async def publish(self, text: str) -> int:
-        if not text.startswith(PREFIX):
-            raise ValueError("required title prefix missing")
+        if not valid_title_presentation(text.split("\n", 1)[0]):
+            raise ValueError("title presentation does not match channel mode")
         return await self.bot.send_message(APPROVED_CHANNEL_ID, text)
 
 
-async def cleanup_news_pins() -> dict[str, Any]:
+async def cleanup_news_pins(engine: Engine) -> dict[str, Any]:
     policy = json.loads((SOURCES.parent / "pin-policy.json").read_text(encoding="utf-8"))
+    with Session(engine) as session:
+        news_ids = set(session.scalars(select(Post.telegram_message_id).join(
+            EditorialRun, EditorialRun.post_id == Post.id).where(
+                Post.city == "belgrade", EditorialRun.delivery_status == "sent",
+                Post.telegram_message_id.is_not(None))))
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
-        return await maintain_pins(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client), policy)
+        return await maintain_pins(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client),
+                                   policy, news_message_ids={i for i in news_ids if i is not None})
 
 
 async def audience_observation() -> dict[str, Any]:
@@ -444,13 +571,17 @@ async def audience_observation() -> dict[str, Any]:
 async def publish_pending(
     engine: Engine, *, enabled: bool, limit: int = 2,
     blocked: list[dict[str, Any]] | None = None,
+    only_raw_ids: set[int] | None = None,
 ) -> list[int]:
-    if not enabled:
+    if not enabled or only_raw_ids == set():
         return []
     with Session(engine) as session:
-        ids = list(session.scalars(select(EditorialRun.raw_item_id).where(
+        query = select(EditorialRun.raw_item_id).where(
             EditorialRun.delivery_status == "pending",
-        ).order_by(EditorialRun.raw_item_id)))
+        )
+        if only_raw_ids is not None:
+            query = query.where(EditorialRun.raw_item_id.in_(only_raw_ids))
+        ids = list(session.scalars(query.order_by(EditorialRun.raw_item_id)))
     sent: list[int] = []
     async with httpx.AsyncClient(timeout=30, trust_env=False,
                                   transport=httpx.AsyncHTTPTransport(retries=0)) as client:
@@ -511,6 +642,7 @@ async def publish_pending(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Серверная редакция с двумя ревью и квитанциями")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--submissions-only", action="store_true")
     args = parser.parse_args()
     engine = None
     try:
@@ -527,17 +659,62 @@ def main() -> None:
                 model=os.environ["GEMINI_MODEL"], client=client),
                 audit_path=args.output / "ai-calls.jsonl"),
             Path(url.database).parent / "ai-cache",
-            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v6-observed-feedback",
+            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v7-local-venue-style",
             public_news_only=True,
         )
+        async def intake() -> dict[str, Any]:
+            if os.environ.get("EDITORIAL_INTAKE_MODE") == "batch":
+                return dict(status="batch_collector", received=0, owner_action_required=False)
+            async with httpx.AsyncClient(timeout=25, trust_env=False) as intake_client:
+                return await receive_private_tips(engine,
+                    TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], intake_client),
+                    enabled=os.environ.get("EDITORIAL_PRIVATE_INTAKE_ENABLED") == "true")
+        try:
+            intake_status = asyncio.run(intake())
+        except Exception as intake_error:
+            intake_status = {"status": "failed", "error_type": type(intake_error).__name__,
+                             "received": 0, "owner_action_required": False}
+        def private_priorities() -> set[int]:
+            with Session(engine) as private_session:
+                return priority_raw_ids(private_session)
+        def source_load() -> dict[str, int]:
+            with Session(engine) as load_session:
+                return recent_source_load(load_session, now=datetime.now(UTC))
+        scope: dict[str, Any] = {}
+        def ingest() -> dict[str, Any]:
+            stats = asyncio.run(collect_sources(engine, output=args.output,
+                                               submissions_only=args.submissions_only))
+            scope.update(stats)
+            return stats
+        def allowed_items() -> set[int]:
+            return set(scope.get("submission_raw_ids", []))
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
-            ingest=lambda: asyncio.run(collect_sources(engine, output=args.output)),
+            ingest=ingest,
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output), limit=2,
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
-            reassessment_ids=lambda: policy_reassessment_ids(engine), continue_on_error=True,
+            priority_items=private_priorities,
+            recent_source_counts=source_load,
+            reassessment_ids=(None if args.submissions_only
+                              else lambda: policy_reassessment_ids(engine)),
+            continue_on_error=True, submissions_only=args.submissions_only,
+            allowed_items=allowed_items if args.submissions_only else None,
             candidate_priorities=lambda: source_priorities(json.loads(
                 (args.output / "venue-attention.json").read_text(encoding="utf-8")))
                 if (args.output / "venue-attention.json").is_file() else {})
+        result["private_intake"] = intake_status
+        result["submissions_only"] = args.submissions_only
+        async def feedback() -> dict[str, Any]:
+            async with httpx.AsyncClient(timeout=25, trust_env=False) as feedback_client:
+                return await reply_to_submissions(engine,
+                    TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], feedback_client),
+                    enabled=os.environ.get("EDITORIAL_PRIVATE_FEEDBACK_ENABLED") == "true",
+                    only_ids=(set(scope.get("submission_ids", []))
+                              if args.submissions_only else None))
+        try:
+            result["private_feedback"] = asyncio.run(feedback())
+        except Exception as feedback_error:
+            result["private_feedback"] = {"status": "failed",
+                "error_type": type(feedback_error).__name__}
         result["fallback_required"] = (result["status"] == "PRIMARY_FAILED"
                                        or bool(result.get("processing_errors")))
         result["sent_message_ids"] = []
@@ -547,11 +724,12 @@ def main() -> None:
             result["channel_transport"] = "bot-api" if enabled else "disabled"
             blocked: list[dict[str, Any]] = []
             result["sent_message_ids"] = asyncio.run(
-                publish_pending(engine, enabled=enabled, blocked=blocked))
+                publish_pending(engine, enabled=enabled, blocked=blocked,
+                    only_raw_ids=allowed_items() if args.submissions_only else None))
             result["channel_blocked"] = blocked
             result["fallback_required"] = result["fallback_required"] or bool(blocked)
             if enabled:
-                result["pin_maintenance"] = asyncio.run(cleanup_news_pins())
+                result["pin_maintenance"] = asyncio.run(cleanup_news_pins(engine))
                 audience = asyncio.run(audience_observation())
                 (args.output / "audience-observation.json").write_text(
                     json.dumps(audience, ensure_ascii=False, indent=2), encoding="utf-8")

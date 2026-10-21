@@ -10,11 +10,13 @@ from sqlalchemy.orm import Session
 
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import draft_date_reason
+from relocant_media.domain.presentation import valid_title_presentation
 from relocant_media.storage.models import EditorialRun, Post
 
 
 def audit_cycle(session: Session, report: dict[str, Any]) -> dict[str, Any]:
     pins = report.get("pin_maintenance", {})
+    intake = report.get("private_intake", {})
     checks = dict(
         primary_completed=report.get("status") in {"PRIMARY_OK", "PRIMARY_PARTIAL"},
         no_processing_errors=not report.get("processing_errors"),
@@ -26,6 +28,10 @@ def audit_cycle(session: Session, report: dict[str, Any]) -> dict[str, Any]:
         russian_copy=True,
         title_prefix=True,
         absolute_dates=True,
+        private_intake_healthy=intake.get("status") in
+            (None, "disabled", "ready", "batch_collector"),
+        private_feedback_healthy=report.get("private_feedback", {}).get("status")
+            in (None, "disabled", "ready"),
     )
     ids = report.get("sent_message_ids", [])
     checks["unique_receipts"] = len(ids) == len(set(ids))
@@ -46,7 +52,7 @@ def audit_cycle(session: Session, report: dict[str, Any]) -> dict[str, Any]:
         post, run = rows[0]
         language_reason = draft_language_reason(post.title, post.body)
         checks["russian_copy"] &= language_reason is None
-        checks["title_prefix"] &= post.title.startswith("[тестовый запуск]")
+        checks["title_prefix"] &= valid_title_presentation(post.title)
         checks["absolute_dates"] &= draft_date_reason(post.title,post.body) is None
         messages.append(
             dict(

@@ -64,6 +64,8 @@ def test_independent_prompts_fetches_and_computed_rubric():
             call["system_instruction"])
         assert "Остальной заголовок проверяй по фактам" in call["system_instruction"]
     assert "utility" not in provider.calls[0]["system_instruction"]
+    assert "один пост — один конкретный повод" in provider.calls[1]["system_instruction"]
+    assert "это ориентир" in provider.calls[1]["system_instruction"]
 
 
 @pytest.mark.parametrize("changed_fetch", [1, 2])

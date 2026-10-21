@@ -1,0 +1,28 @@
+id: venue_children_centre
+name: Дечји културни центар Београд
+publisher: Дечји културни центар Београд
+ownership: official
+url: https://www.dkcb.rs/
+language: sr
+source_type: official_venue_events
+trust: 0.95
+check_every: 3h
+categories:
+- events
+extraction:
+  strategy: venue_feed
+  status: active
+  feed_url: https://www.dkcb.rs/feed/
+  article_selectors:
+  - .entry-content
+  approved_hosts:
+  - dkcb.rs
+  - www.dkcb.rs
+policy:
+  auto_publish: true
+  high_risk: false
+verification:
+  checked_at: '2026-10-21'
+  note: Официальный сайт центра подтверждён страницами организации и контактов,
+    домен также указан МИД Сербии. Проверены RSS pubDate и полный текст entry-content.
+    Отчёты о прошедших событиях не становятся свежей афишей.

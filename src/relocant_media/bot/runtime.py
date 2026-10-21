@@ -115,7 +115,7 @@ class TelegramRuntime:
         chat_type = chat.get("type")
         chat_id = _int(chat.get("id"))
         if chat_type == "private":
-            result = handle_private_message(self._session, message)
+            result = handle_private_message(self._session, message, city=self._city or None)
             self._session.commit()
             if result.reply is not None and chat_id is not None:
                 await self._bot.send_message(chat_id, result.reply)

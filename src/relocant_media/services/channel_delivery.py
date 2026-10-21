@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.package import EditorialPackage
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.publisher import Publisher
+from relocant_media.domain.presentation import valid_title_presentation
 from relocant_media.services.editorial import DeliveryBlockedError, DeliveryResult, EditorialService
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
@@ -56,8 +57,8 @@ async def deliver_reviewed(
             raise DeliveryBlockedError("reviewed package identity does not match")
         if package.version != 2 or any(review.verdict != "approve" for review in package.reviews):
             raise DeliveryBlockedError("two event bundle approvals are required")
-        if not post.title.startswith("[тестовый запуск]"):
-            raise DeliveryBlockedError("test launch title prefix is required")
+        if not valid_title_presentation(post.title):
+            raise DeliveryBlockedError("title presentation does not match channel mode")
         service = EditorialService(session, cast(EditorialPipeline, None))
         preview = await service.deliver(raw_item_id, dry_run=True)
         claimed = cast(CursorResult[object], session.execute(update(EditorialRun).where(

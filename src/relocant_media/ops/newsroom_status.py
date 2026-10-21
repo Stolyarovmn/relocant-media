@@ -22,6 +22,12 @@ def summarize(output: Path) -> dict[str, Any]:
         "channel_topics_deferred": sum(t["status"] == "deferred_missing_primary_source"
                                        for t in topics.get("topics", [])),
         "source_failures": ingest.get("failures", 0),
+        "venue_article_failures": ingest.get("venue_article_failures", 0),
+        "priority_submissions": ingest.get("priority_submissions", 0),
+        "primary_searches": ingest.get("primary_searches", 0),
+        "private_intake": report.get("private_intake", {}),
+        "private_feedback": report.get("private_feedback", {}),
+        "published_source_watch": read("published-source-watch.json"),
         "channel_failures": ingest.get("channel_failures", 0),
         "ai_calls": len(ai), "ai_failures": [c for c in ai if c["status"] == "failed"],
         "editorial_decisions": decisions, "sent_message_ids": report.get("sent_message_ids", []),

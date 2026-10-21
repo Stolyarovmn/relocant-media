@@ -1,0 +1,28 @@
+id: venue_kolarac
+name: Коларчева задужбина
+publisher: Коларчева задужбина
+ownership: official
+url: https://www.kolarac.rs/
+language: sr
+source_type: official_venue_events
+trust: 0.95
+check_every: 3h
+categories:
+- events
+extraction:
+  strategy: venue_feed
+  status: active
+  feed_url: https://www.kolarac.rs/feed/
+  article_selectors:
+  - .entry-content
+  approved_hosts:
+  - kolarac.rs
+  - www.kolarac.rs
+policy:
+  auto_publish: true
+  high_risk: false
+verification:
+  checked_at: '2026-10-21'
+  note: Официальная билетарница подтверждает домен и адрес Студентски трг 5.
+    RSS содержит настоящую pubDate и собственные анонсы концертов; неполные карточки
+    исключаются с диагностикой, остальные проходят отсев и два независимых ревью.
