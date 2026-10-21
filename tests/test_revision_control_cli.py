@@ -73,6 +73,8 @@ def test_cli_requires_explicit_write_confirmation(monkeypatch: pytest.MonkeyPatc
             "needs_context",
             "--idempotency-key",
             "cli-test",
+            "--expected-decision-count",
+            "0",
         ],
     )
     with pytest.raises(SystemExit) as exc:
@@ -105,6 +107,8 @@ def test_cli_queues_fresh_candidate_without_approval_or_telegram(
             "test",
             "--idempotency-key",
             "cli-confirmed",
+            "--expected-decision-count",
+            "0",
             "--confirm-write",
         ],
     )
@@ -118,4 +122,59 @@ def test_cli_queues_fresh_candidate_without_approval_or_telegram(
         assert session.scalar(select(func.count()).select_from(SourceRevisionDecision)) == 1
         assert session.scalar(select(func.count()).select_from(SourceRevisionMaterialization)) == 1
         assert session.scalar(select(func.count()).select_from(RawItem)) == 2
+    engine.dispose()
+
+
+def test_cli_rejects_stale_expected_decision_count(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine, factory, revision_id = _database()
+    monkeypatch.setattr(revision_control_cli, "SessionFactory", factory)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "relocant-revision-control",
+            "--revision-id",
+            str(revision_id),
+            "--decision",
+            "hold",
+            "--reason-code",
+            "first",
+            "--idempotency-key",
+            "first-write",
+            "--expected-decision-count",
+            "0",
+            "--confirm-write",
+        ],
+    )
+    revision_control_cli.main()
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "relocant-revision-control",
+            "--revision-id",
+            str(revision_id),
+            "--decision",
+            "superseded",
+            "--reason-code",
+            "stale",
+            "--idempotency-key",
+            "stale-write",
+            "--expected-decision-count",
+            "0",
+            "--confirm-write",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        revision_control_cli.main()
+    assert exc.value.code == 1
+    assert "stale source revision control snapshot" in capsys.readouterr().err
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(SourceRevisionDecision)) == 1
     engine.dispose()
