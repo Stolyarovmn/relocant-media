@@ -1,11 +1,13 @@
 from datetime import timedelta
 
+import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_venue_runtime import NOW, URL
 from test_venue_runtime import runtime as _runtime
 
+from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.ops import server_cycle
 from relocant_media.ops.candidates_cli import select_candidates
 from relocant_media.services.submission_queue import pending_submissions, priority_raw_ids
@@ -68,3 +70,20 @@ async def test_malformed_private_url_does_not_break_public_collection(runtime):
     assert stats['private_link_fetches'] == 0 and stats['venue_items'] == 1
     with Session(engine) as session:
         assert session.scalar(select(Submission)).status == 'waiting_primary'
+
+
+@pytest.mark.asyncio
+async def test_later_successful_feed_resolves_tip_after_transient_direct_fetch_failure(
+    runtime, monkeypatch,
+):
+    engine, _, _, _, _ = runtime
+    async def unavailable(*args, **kwargs):
+        raise httpx.ConnectError('temporary failure')
+    monkeypatch.setattr(VenueFeedCollector, 'collect_url', unavailable)
+    with Session(engine) as session:
+        session.add(Submission(kind='news_tip',status='new',payload=dict(city='belgrade',text=URL)))
+        session.commit()
+    stats = await server_cycle.collect_sources(engine)
+    assert stats['priority_submissions'] == 1
+    with Session(engine) as session:
+        assert session.scalar(select(Submission)).status == 'source_linked'

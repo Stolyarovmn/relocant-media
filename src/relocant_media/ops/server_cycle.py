@@ -393,6 +393,8 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
         written, changes = capture_collected_batch(session, articles)
         for submission_id, payload in tips:
             urls = submission_links[submission_id]
+            urls.extend(url for url in tip_urls(payload)
+                        if fetched.get(url) == "primary_source_collected")
             # Local matching sends no private text to a search engine or model.
             for article in articles:
                 if topic_matches(str(payload.get("text", "")), article.title):
