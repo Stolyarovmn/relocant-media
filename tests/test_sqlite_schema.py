@@ -21,6 +21,8 @@ def legacy_database(path):
             for column in columns:
                 connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
         connection.execute("DROP TABLE source_revision")
+        connection.execute("DROP TABLE experiment_assignment")
+        connection.execute("DROP TABLE editorial_experiment")
         connection.execute("INSERT INTO source(id,city,name,url,source_type,trust,enabled) "
                            "VALUES('s','belgrade','Official','https://example.test','official',1,1)")
         connection.execute("INSERT INTO raw_item(id,source_id,external_id,url,title,body) "
@@ -38,15 +40,56 @@ def test_legacy_schema_keeps_ids_receipts_and_backup(tmp_path):
     backup = initialize_sqlite(path, legacy_utc_confirmed=True)
     assert backup is not None and backup.is_file()
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         assert connection.execute("SELECT id,telegram_message_id,editorial_rule_version FROM post"
                                   ).fetchone() == (3, 9, "legacy-v1")
         assert connection.execute(
             "SELECT delivery_status FROM editorial_run").fetchone() == ("sent",)
         assert connection.execute("SELECT body FROM raw_item").fetchone() == ('Original',)
+        tables = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert {"editorial_experiment", "experiment_assignment"} <= tables
     with sqlite3.connect(backup) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
     assert initialize_sqlite(path) is None
+
+
+def test_v1_schema_upgrades_to_v2_with_backup_and_keeps_queue(tmp_path):
+    path = tmp_path / "v1.sqlite3"
+    engine = create_engine(f"sqlite:///{path}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DROP TABLE experiment_assignment")
+        connection.execute("DROP TABLE editorial_experiment")
+        connection.execute("PRAGMA user_version=1")
+        connection.execute(
+            "INSERT INTO source(id,city,name,url,source_type,trust,enabled) "
+            "VALUES('s','belgrade','Official','https://example.test','official',1,1)"
+        )
+        connection.execute(
+            "INSERT INTO raw_item(id,source_id,external_id,url,title,body) "
+            "VALUES(7,'s','article','https://example.test/7','Title','Body')"
+        )
+
+    backup = initialize_sqlite(path)
+    assert backup is not None and backup.name.endswith(".before-v2.backup")
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("SELECT id FROM raw_item").fetchone() == (7,)
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='editorial_experiment'"
+        ).fetchone() is None
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("SELECT id FROM raw_item").fetchone() == (7,)
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='editorial_experiment'"
+        ).fetchone() == ("editorial_experiment",)
 
 
 def test_ambiguous_legacy_dates_are_not_silently_assigned_utc(tmp_path):
@@ -127,7 +170,7 @@ def test_checked_snapshot_contains_committed_wal_and_does_not_overwrite(tmp_path
         assert manifest["upload_ready"]
         with sqlite3.connect(snapshot) as restored:
             assert restored.execute("SELECT id FROM source").fetchone()[0] == 's'
-            assert restored.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert restored.execute("PRAGMA user_version").fetchone()[0] == 2
         with pytest.raises(ValueError):
             create_snapshot(path, output)
     finally:
