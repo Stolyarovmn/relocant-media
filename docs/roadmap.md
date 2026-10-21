@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #55–58.
+Состояние на 21 октября 2026 года после PR #55–59.
 
 ## Этап 0 — основа и проверки
 
@@ -45,7 +45,7 @@
 - [x] Не превращать частный текст/контакты/вложения в evidence или публичный search query.
 - [ ] Проверить native DM с отдельного внешнего аккаунта в эксплуатационном контуре.
 - [ ] Довести обработку читательских исправлений до явного статуса/аудита редакционного решения.
-- [ ] Расширить модерацию обсуждения: reason codes, spam/scam/flooding/repeated links, безопасный REVIEW для неоднозначного, audit trail и dry-run/fake side effects.
+- [x] Детерминированная moderation pipeline v2: reason codes, high-confidence scam/spam delete, REVIEW для неоднозначной рекламы/harassment/flood hints, повторные ссылки, audit trail и application-level idempotency; см. [MODERATION.md](MODERATION.md).
 
 ## Этап 3 — аналитика и развитие правил
 
