@@ -15,6 +15,11 @@ The discussion group and forum group are intentionally separate.
 
 GitHub stores code, prompts, source registry, city policy and experiment configuration. Changes should flow through PRs.
 
+For `Stolyarovmn/relocant-media` the owner granted standing permission on 21.10.2026 for
+agents working under the project contract to create and merge project PRs without asking again,
+but only after required checks pass, the current head and mergeability are verified, and `main`
+CI is checked after merge. This delegation does not override any other safety boundary.
+
 ## AI roles
 
 - Gemini API: routine production inference and web-grounded research.
@@ -31,22 +36,29 @@ normal application code.
 
 Редакционный путь без MTProto: collector → `raw_item` → canonical URL/content hash →
 event-level dedup/evidence bundle → `EditorialService.prepare` → Gemini structured
-rank/claims/verify/draft → deterministic source-policy guards → `editorial_run` + `post` →
-`EditorialService.deliver` → staging publisher → Bot API.
+rank/claims/verify/draft → deterministic source-policy and audience guards →
+`editorial_run` + `post` → `EditorialService.deliver` / channel publisher → Bot API.
 
 `READY` допускается к автоматической доставке только когда в evidence bundle присутствует
-официальный источник, anchor-source разрешает `auto_publish`, а использованные источники не
-помечены `high_risk`. Снимок всего evidence bundle повторно сверяется с БД непосредственно
-перед отправкой. Каждый `editorial_run` и `post` хранит `editorial_rule_version`, поэтому
-аналитика может сравнивать наблюдаемые метрики разных наборов правил, не выдавая корреляцию
-за причинность.
+официальный источник, anchor-source разрешает `auto_publish`, использованные источники не
+помечены `high_risk`, а текущая политика аудитории считает материал достаточно полезным.
+Снимок всего evidence bundle повторно сверяется с БД непосредственно перед отправкой.
+Каждый `editorial_run` и `post` хранит `editorial_rule_version`, поэтому аналитика может
+сравнивать наблюдаемые метрики разных наборов правил, не выдавая корреляцию за причинность.
 
-CLI `relocant-editorial` по умолчанию формирует preview, а fake transport заменяет внешний
-HTTP-вызов. Доставка в staging не заполняет production-поля публикации и не запускает сбор
-метрик опубликованного поста. MTProto используется отдельной аналитикой и может оставаться
-выключенным. Подробности: [редакционный цикл](EDITORIAL_CYCLE.md).
+Рабочий серверный контур использует SQLite и запускает редакционный цикл systemd раз в три
+часа. Отдельный пятиминутный intake-процесс собирает закрытую предложку и использует ту же
+редакционную очередь и общую блокировку. Несколько одновременно пишущих копий SQLite не
+поддерживаются.
 
-FastAPI handles Telegram webhooks and realtime flows. PostgreSQL stores operational state. Batch collection/analysis can be triggered by GitHub Actions.
+CLI и инженерные тесты по умолчанию используют preview/fake transport. Реальная отправка
+осуществляется только явным операционным контуром и не должна быть побочным эффектом CI или
+engineering task. MTProto используется отдельной read-only аналитикой и может оставаться
+выключенным. Подробности: [редакционный цикл](EDITORIAL_CYCLE.md) и
+[серверная редакция](SERVER_EDITORIAL.md).
+
+FastAPI handles Telegram webhooks and realtime flows. Batch collection/analysis can also be
+triggered by GitHub Actions where this does not create a second canonical editorial state.
 
 ## Ads isolation
 
@@ -59,9 +71,10 @@ spend advertising money.
 
 ## Safety boundary
 
-No AI may autonomously:
+No AI or engineering agent may autonomously:
 - increase ad budget outside an owner-defined cap or bypass `OWNER_APPROVAL`;
 - publish high-risk legal/medical/financial content;
 - auto-publish an event without an official primary source;
 - change production secrets;
-- merge its own engineering changes.
+- merge a PR before required checks pass or without the standing/project-specific owner delegation described above;
+- weaken source provenance, factual verification, delivery idempotency or human-review category boundaries.
