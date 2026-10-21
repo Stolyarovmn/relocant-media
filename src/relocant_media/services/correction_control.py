@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from relocant_media.storage.correction_control import ReaderCorrectionDecision
@@ -29,10 +29,11 @@ def record_reader_correction_decision(
     reason_code: str,
     actor: str,
     idempotency_key: str,
+    expected_decision_count: int,
     note: str | None = None,
     decided_at: datetime | None = None,
 ) -> ReaderCorrectionDecision:
-    """Append a bounded correction decision without editing Telegram or editorial content."""
+    """Append a decision only if the caller still has the current control snapshot."""
     normalized_decision = decision.strip().casefold()
     normalized_reason = reason_code.strip()
     normalized_actor = actor.strip()
@@ -43,8 +44,14 @@ def record_reader_correction_decision(
         raise ValueError("reason_code, actor and idempotency_key are required")
     if len(normalized_key) > 128:
         raise ValueError("idempotency_key is too long")
+    if expected_decision_count < 0:
+        raise ValueError("expected_decision_count cannot be negative")
 
-    submission = session.get(Submission, submission_id)
+    submission = session.scalar(
+        select(Submission)
+        .where(Submission.id == submission_id)
+        .with_for_update()
+    )
     if submission is None:
         raise ValueError("submission does not exist")
     if submission.kind != "correction":
@@ -52,6 +59,8 @@ def record_reader_correction_decision(
     if submission.payload.get("city") != "belgrade":
         raise ValueError("reader correction is outside the configured city")
 
+    # Exact replay wins over the compare-and-set precondition. This keeps retries safe
+    # after a timeout while rejecting a distinct decision based on stale control state.
     existing = session.scalar(
         select(ReaderCorrectionDecision).where(
             ReaderCorrectionDecision.idempotency_key == normalized_key
@@ -67,6 +76,18 @@ def record_reader_correction_decision(
         ):
             raise ValueError("idempotency_key already belongs to another correction decision")
         return existing
+
+    current_decision_count = session.scalar(
+        select(func.count())
+        .select_from(ReaderCorrectionDecision)
+        .where(ReaderCorrectionDecision.submission_id == submission_id)
+    )
+    current_count = int(current_decision_count or 0)
+    if current_count != expected_decision_count:
+        raise ValueError(
+            "stale reader correction control snapshot: "
+            f"expected decision_count {expected_decision_count}, found {current_count}"
+        )
 
     row = ReaderCorrectionDecision(
         submission_id=submission_id,
@@ -152,6 +173,7 @@ def build_reader_correction_control(
                     }
                 ),
                 "decision_count": len(history),
+                "write_precondition": {"expected_decision_count": len(history)},
                 "private_text_exposed": False,
                 "telegram_mutation_performed": False,
             }
@@ -164,7 +186,7 @@ def build_reader_correction_control(
     items.sort(key=lambda item: item["decision_status"] == "resolved")
     visible = items[:limit]
     return {
-        "version": 1,
+        "version": 2,
         "city": city,
         "total_corrections": len(items),
         "unresolved_corrections": unresolved,
@@ -176,5 +198,6 @@ def build_reader_correction_control(
             "telegram_edit_capability": False,
             "private_submission_text_in_control_output": False,
             "confirmed_means_audited_editorial_conclusion_only": True,
+            "stale_control_writes_rejected": True,
         },
     }

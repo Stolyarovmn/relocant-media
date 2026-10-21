@@ -81,6 +81,7 @@ def test_queued_source_update_receives_fresh_full_editorial_review() -> None:
             reason_code="official_event_changed",
             actor="editorial-agent",
             idempotency_key="event-lifecycle-reverify",
+            expected_decision_count=0,
         )
         materialization = session.scalar(select(SourceRevisionMaterialization))
         assert materialization is not None

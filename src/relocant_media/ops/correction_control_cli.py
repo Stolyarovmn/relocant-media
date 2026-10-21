@@ -19,6 +19,12 @@ def main() -> None:
     parser.add_argument("--reason-code", required=True)
     parser.add_argument("--actor", default="operator")
     parser.add_argument("--idempotency-key", required=True)
+    parser.add_argument(
+        "--expected-decision-count",
+        type=int,
+        required=True,
+        help="decision_count from the control snapshot this write is based on",
+    )
     parser.add_argument("--note")
     parser.add_argument(
         "--confirm-write",
@@ -38,6 +44,7 @@ def main() -> None:
                 reason_code=args.reason_code,
                 actor=args.actor,
                 idempotency_key=args.idempotency_key,
+                expected_decision_count=args.expected_decision_count,
                 note=args.note,
             )
             session.commit()
