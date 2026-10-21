@@ -1,5 +1,6 @@
 import json
 import sys
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -8,7 +9,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from relocant_media.ops import revision_control_cli
 from relocant_media.storage.models import Base, RawItem, Source, SourceRevision
-from relocant_media.storage.revision_control import SourceRevisionDecision
+from relocant_media.storage.revision_control import (
+    SourceRevisionDecision,
+    SourceRevisionMaterialization,
+)
 
 
 def _database():
@@ -38,7 +42,14 @@ def _database():
         revision = SourceRevision(
             raw_item_id=raw.id,
             snapshot_sha256="a" * 64,
-            evidence={"body": "Changed"},
+            evidence={
+                "source_id": source.id,
+                "article_id": raw.external_id,
+                "url": raw.url,
+                "title": "Changed title",
+                "body": "Changed",
+                "published_at": datetime(2026, 10, 21, 12, tzinfo=UTC).isoformat(),
+            },
         )
         session.add(revision)
         session.commit()
@@ -69,10 +80,11 @@ def test_cli_requires_explicit_write_confirmation(monkeypatch: pytest.MonkeyPatc
     assert exc.value.code == 2
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(SourceRevisionDecision)) == 0
+        assert session.scalar(select(func.count()).select_from(SourceRevisionMaterialization)) == 0
     engine.dispose()
 
 
-def test_cli_records_only_control_decision(
+def test_cli_queues_fresh_candidate_without_approval_or_telegram(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -104,4 +116,6 @@ def test_cli_records_only_control_decision(
     assert payload["telegram_side_effect"] is False
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(SourceRevisionDecision)) == 1
+        assert session.scalar(select(func.count()).select_from(SourceRevisionMaterialization)) == 1
+        assert session.scalar(select(func.count()).select_from(RawItem)) == 2
     engine.dispose()
