@@ -7,6 +7,7 @@ from typing import Any
 
 from relocant_media.config import settings
 from relocant_media.services.newsroom_control import build_newsroom_inbox
+from relocant_media.services.shadow_duplicates import build_shadow_duplicate_report
 from relocant_media.storage.db import SessionFactory
 
 
@@ -77,14 +78,27 @@ def main() -> None:
     )
     parser.add_argument("--city", default=settings.city_id)
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument(
+        "--shadow-duplicates",
+        action="store_true",
+        help="include non-authoritative possible-duplicate signals; never changes decisions",
+    )
     args = parser.parse_args()
 
     if args.database:
         with SessionFactory() as session:
             payload = build_newsroom_inbox(session, city=args.city, limit=args.limit)
+            if args.shadow_duplicates:
+                payload["shadow_duplicates"] = build_shadow_duplicate_report(
+                    session,
+                    city=args.city,
+                    limit=args.limit,
+                )
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return
 
+    if args.shadow_duplicates:
+        parser.error("--shadow-duplicates requires --database")
     assert args.runs is not None
     outputs = sorted(path for path in args.runs.iterdir() if path.is_dir())
     if not outputs:
