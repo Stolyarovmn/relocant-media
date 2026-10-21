@@ -25,6 +25,18 @@ evidence автоматически.
 `idempotency_key`. История append-only: повтор того же вызова с тем же ключом
 идемпотентен, а использовать ключ для другого решения нельзя.
 
+Write-path дополнительно защищён optimistic concurrency. Control projection возвращает
+`decision_count` и `write_precondition.expected_decision_count`. Новое решение обязано
+передать это число. Перед сравнением сервер блокирует строку `Submission` (`FOR UPDATE`
+там, где СУБД поддерживает row locks) и перечитывает число решений. Если после открытия
+control snapshot другой оператор уже записал решение, новый вызов со старым count
+отклоняется как stale и ничего не добавляет.
+
+Точный retry уже успешной операции остаётся безопасным: если `idempotency_key` и весь
+payload совпадают, возвращается существующая запись даже после увеличения
+`decision_count`. Таким образом idempotency отвечает за повтор операции, а CAS — за
+актуальность состояния, на котором основано новое решение.
+
 `confirmed` означает только аудированный редакционный вывод. Он **не редактирует пост,
 не удаляет сообщение, не публикует correction и не вызывает Telegram Bot API**. Реальное
 публичное исправление должно идти отдельным delivery/corrections workflow с собственной
@@ -38,11 +50,13 @@ evidence автоматически.
 - intake status исходного `Submission`;
 - связанные публичные `raw_item_id`, если они уже найдены;
 - последнее решение, reason code, actor и число записей истории;
+- `write_precondition.expected_decision_count` для безопасной записи следующего решения;
 - сначала нерешённые обращения, внутри группы — самые свежие.
 
 Приватный текст, Telegram user/chat ID и вложения в этот вывод не входят.
 
-Явное решение записывается только с подтверждением записи:
+Явное решение записывается только с подтверждением записи. Значение
+`--expected-decision-count` берётся из того же control snapshot:
 
 ```powershell
 relocant-correction-control `
@@ -51,16 +65,19 @@ relocant-correction-control `
   --reason-code official_source_confirms_error `
   --actor editorial-agent `
   --idempotency-key correction-42-confirmed `
+  --expected-decision-count 0 `
   --confirm-write
 ```
 
-Без `--confirm-write` БД не изменяется.
+Без `--confirm-write` БД не изменяется. Если count уже изменился, нужно перечитать control
+state и заново оценить решение, а не механически повторять новую команду со свежим count.
 
 ## Границы безопасности
 
 - Частное сообщение не становится доказательством публикации.
 - Audit decision не меняет `Submission.status` и не обходит обычный factual/source review.
 - Никакого автоматического Telegram edit/delete/send в этом модуле нет.
+- Новая distinct-операция по устаревшему control snapshot не записывается.
 - `not_supported` не означает, что читатель сознательно сообщил ложь; это только состояние
   доступных редакции проверяемых доказательств.
 - Новое уточнение можно зарегистрировать отдельно; старую audit history не перезаписывать.
