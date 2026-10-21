@@ -5,7 +5,7 @@ from relocant_media.sources.registry import load_source_registry
 
 def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    assert len(sources) == 13
+    assert len(sources) == 15
     assert len({source.id for source in sources}) == len(sources)
 
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")
@@ -21,7 +21,7 @@ def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
 def test_venue_sources_are_explicit_first_party_events():
     sources = load_source_registry(Path("cities/belgrade/sources"))
     venues = [s for s in sources if s.source_type == "official_venue_events"]
-    assert len(venues) == 5
+    assert len(venues) == 7
     assert all(s.ownership == "official" and s.categories == ("events",) for s in venues)
     assert all(s.extraction.feed_url and s.extraction.status == "active" for s in venues)
     assert all(s.verification.checked_at is not None for s in venues)

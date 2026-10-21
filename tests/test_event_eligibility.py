@@ -40,3 +40,12 @@ def test_belgrade_local_date() -> None:
 def test_naive_clock_refused() -> None:
     with pytest.raises(ValueError):
         event_content_reason("Анонс", "21.10.2026", now=NOW.replace(tzinfo=None))
+
+
+@pytest.mark.parametrize(('text', 'expected'), [
+    ('Концерт 31. 10. 2026. у 11', None),
+    ('Концерт 10. 10. 2026. у 11', 'venue_event_expired'),
+    ('Концерт 40. 10. 2026.', 'venue_event_date_missing'),
+])
+def test_spaced_numeric_dates(text, expected):
+    assert event_content_reason(text, '', now=datetime(2026, 10, 21, tzinfo=UTC)) == expected

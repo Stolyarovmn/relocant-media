@@ -36,7 +36,7 @@ _MONTH_PATTERN = "|".join(sorted(_MONTH_LOOKUP, key=len, reverse=True))
 _DATE = re.compile(
     rf"(?<!\d)(?P<day>\d{{1,2}})\.?\s*(?P<month>{_MONTH_PATTERN})"
     r"[a-zа-яёј]*\b(?:\s+(?P<year>20\d{2})\b)?"
-    r"|(?<!\d)(?P<numday>\d{1,2})\.(?P<nummonth>\d{1,2})\."
+    r"|(?<!\d)(?P<numday>\d{1,2})\.[ \t]*(?P<nummonth>\d{1,2})\."
     r"\s*(?P<numyear>20\d{2})\b",
     re.IGNORECASE,
 )

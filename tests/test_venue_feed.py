@@ -134,6 +134,43 @@ def test_future_pubdate_is_not_announcement_date(source: SourceConfig) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bad_article_does_not_hide_other_fresh_announcements(source: SourceConfig) -> None:
+    date = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    xml = feed(date).replace('</channel>',
+        f'<item><title>Concert</title><link>https://museum.example/good/</link>'
+        f'<pubDate>{date}</pubDate></item></channel>')
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        text = xml if request.url.path == '/feed/' else (
+            '<h1>Concert 31. 10. 2026.</h1><article>' + 'Complete verified details. ' * 10
+            + '</article>' if request.url.path == '/good/' else '<h1>Teaser</h1>')
+        return httpx.Response(200, text=text)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = VenueFeedCollector(source, client)
+        items = await collector.collect()
+        assert len(items) == 1 and items[0].url.endswith('/good/')
+        assert collector.item_failures == [dict(
+            url='https://museum.example/event/', error_type='ValueError')]
+        # Discovery skips an unusable page; a live evidence check still fails closed.
+        with pytest.raises(ValueError):
+            await collector.collect_url('https://museum.example/event/')
+
+
+@pytest.mark.asyncio
+async def test_all_bad_fresh_articles_are_a_failure_not_empty_success(source: SourceConfig) -> None:
+    date = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    def handler(request: httpx.Request) -> httpx.Response:
+        text = feed(date) if request.url.path == '/feed/' else '<h1>X</h1>'
+        return httpx.Response(200, text=text)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = VenueFeedCollector(source, client)
+        with pytest.raises(ValueError, match='all fresh venue articles'):
+            await collector.collect()
+        assert len(collector.item_failures) == 1
+
+
+@pytest.mark.asyncio
 async def test_jsonld_publication_date_when_entry_has_disappeared(source: SourceConfig) -> None:
     article = ('<script type="application/ld+json">'
                '{"@type":"Article","headline":"Full title",'

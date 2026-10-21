@@ -27,7 +27,7 @@ _NAMED_DATE = re.compile(
     r"\b(\d{1,2})\.?\s+(" + "|".join(_MONTHS) + r")(?:\s+(\d{4}))?\b",
     re.IGNORECASE,
 )
-_NUMERIC_DATE = re.compile(r"\b(\d{1,2})[./](\d{1,2})[./](\d{4})\b")
+_NUMERIC_DATE = re.compile(r"\b(\d{1,2})[./][ \t]*(\d{1,2})[./][ \t]*(\d{4})\b")
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 
 

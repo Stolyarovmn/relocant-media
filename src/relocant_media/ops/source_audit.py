@@ -29,7 +29,9 @@ async def audit_sources(directory: Path, *, online: bool = False,
                 "status": "configured" if source.extraction.status == "active" else "planned"}
             if row["status"] == "configured" and online:
                 try:
-                    items = await build_collector(source, client).collect()
+                    collector = build_collector(source, client)
+                    items = await collector.collect()
+                    item_failures = getattr(collector, "item_failures", [])
                     fresh = [i for i in items if freshness_decision(
                         i.title, i.body, i.published_at, datetime.now(UTC)).action == "keep"]
                     row.update(status="ok" if fresh else "empty", fetched_items=len(items),
@@ -37,13 +39,17 @@ async def audit_sources(directory: Path, *, online: bool = False,
                                    {"title": i.title, "url": i.url,
                                     "published_at": i.published_at.isoformat()
                                     if i.published_at else None} for i in fresh[:2]])
+                    row["item_failures"] = item_failures
+                    if item_failures:
+                        row["status"] = "partial"
                 except Exception as error:
                     row.update(status="error", error_type=type(error).__name__)
             rows.append(row)
     return {"checked_at": datetime.now(UTC).isoformat(), "online": online,
             "ai_calls": 0, "sources": rows,
             "active_count": sum(r["status"] != "planned" for r in rows),
-            "working_count": sum(r["status"] in {"ok", "empty"} for r in rows),
+            "working_count": sum(r["status"] in {"ok", "empty", "partial"} for r in rows),
+            "partial_count": sum(r["status"] == "partial" for r in rows),
             "error_count": sum(r["status"] == "error" for r in rows)}
 
 

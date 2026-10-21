@@ -189,6 +189,7 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     result["venue_sources"] = len(venues)
     result["venue_items"] = 0
     result["venue_deferred"] = 0
+    result["venue_article_failures"] = 0
     with Session(engine) as session:
         for source in sources.values():
             sync_source(session, "belgrade", source)
@@ -196,6 +197,7 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     attention_leads = []
     topics: list[dict[str, Any]] = []
     channel_errors: list[dict[str, str]] = []
+    venue_errors: list[dict[str, str]] = []
     articles = []
     fetched: dict[str, str] = {}
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
@@ -249,8 +251,9 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
             except Exception:
                 result["failures"] += 1
         for source_id in venues:
+            collector = VenueFeedCollector(venues[source_id], client)
             try:
-                for item in await VenueFeedCollector(venues[source_id], client).collect():
+                for item in await collector.collect():
                     result["venue_items"] += 1
                     reason = event_content_reason(item.title, item.body, now=now)
                     fresh = freshness_decision(item.title, item.body, item.published_at, now)
@@ -261,6 +264,10 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                     fetched[item.url] = "primary_source_collected"
             except Exception:
                 result["failures"] += 1
+            finally:
+                result["venue_article_failures"] += len(collector.item_failures)
+                venue_errors.extend({"source_id": source_id, **error}
+                                    for error in collector.item_failures)
         for channel in DEFAULT_CHANNELS:
             try:
                 leads = await collect_topics(channel, client, now=now)
@@ -318,6 +325,8 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     triage = triage_queue(engine, now=now)
     result["discarded_queue"] = triage["discarded"]
     if output is not None:
+        (output / "venue-article-failures.json").write_text(
+            json.dumps({"items": venue_errors}, ensure_ascii=False, indent=2), encoding="utf-8")
         aliases_path = SOURCES.parent / "event-aliases.json"
         aliases = (
             json.loads(aliases_path.read_text(encoding="utf-8"))
@@ -527,7 +536,7 @@ def main() -> None:
                 model=os.environ["GEMINI_MODEL"], client=client),
                 audit_path=args.output / "ai-calls.jsonl"),
             Path(url.database).parent / "ai-cache",
-            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v6-observed-feedback",
+            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v7-local-venue-style",
             public_news_only=True,
         )
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),

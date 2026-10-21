@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from relocant_media.ai.channel_style import CHANNEL_DRAFT_STYLE
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.ai.package import (
     EditorialPackage,
@@ -104,6 +105,7 @@ def reviewed_package(
                 "Обязательная рубрика: local_relevance, practical_value, timeliness, clarity "
                 "каждая целое 0–4. score = round(100 * сумма оценок / 16)."
             )
+            instructions += CHANNEL_DRAFT_STYLE
         raw = provider.generate_json(
             task=f"independent_{role}", system_instruction=instructions,
             prompt=canonical_json({

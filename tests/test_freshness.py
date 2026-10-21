@@ -125,3 +125,9 @@ def test_expiry_uses_belgrade_calendar_after_midnight() -> None:
     )
     assert decision.action == "discard"
     assert decision.reason == "event_expired"
+
+
+def test_spaced_numeric_concert_date_preserves_future_and_discards_expired() -> None:
+    published = NOW - timedelta(days=3)
+    assert freshness_decision('Концерт 31. 10. 2026.', '', published, NOW).action == 'keep'
+    assert freshness_decision('Концерт 10. 10. 2026.', '', NOW, NOW).reason == 'event_expired'

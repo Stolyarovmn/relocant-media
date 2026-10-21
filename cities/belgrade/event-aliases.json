@@ -3,5 +3,7 @@
   "venue_yugoslavia": ["Музей Югославии", "Muzej Jugoslavije", "Музеј Југославије"],
   "venue_youth_centre": ["Дом молодёжи Белграда", "Дом молодежи Белграда", "Дом омладине Београда", "Dom omladine Beograda"],
   "venue_bitefartcafe": ["BitefArtCafe", "Bitef Art Cafe"],
-  "venue_musicology": ["Musicology", "Musicology Barcaffè Sessions"]
+  "venue_musicology": ["Musicology", "Musicology Barcaffè Sessions"],
+  "venue_kolarac": ["Kolarac", "Коларац", "Коларчева задужбина"],
+  "venue_children_centre": ["Дечји културни центар Београд", "Dečji kulturni centar Beograd", "Детский культурный центр Белграда"]
 }

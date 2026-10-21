@@ -131,10 +131,11 @@
       "name": "Детский культурный центр Белграда",
       "homepage": "https://www.dkcb.rs/",
       "feed_url": "https://www.dkcb.rs/feed/",
-      "official_identity_verified": false,
-      "status": "planned",
+      "official_identity_verified": true,
+      "status": "registered",
       "checked_at": "2026-10-21",
-      "reason": "Кандидат семейных анонсов: проверка стандартного адаптера дала ValueError. Полный текст и настоящий момент публикации не подтверждены; не включён."
+      "reason": "21.10: RSS pubDate и полный entry-content подтверждены. Неполная карточка изолируется с диагностикой; прошедшие и недатированные события отсекаются до ИИ.",
+      "active_source_id": "venue_children_centre"
     },
     {
       "id": "venue_kolarac_rs",
@@ -142,9 +143,10 @@
       "homepage": "https://www.kolarac.rs/",
       "feed_url": "https://www.kolarac.rs/feed/",
       "official_identity_verified": true,
-      "status": "planned",
+      "status": "registered",
       "checked_at": "2026-10-21",
-      "reason": "Официальный домен подтверждён страницей билетарницы. Проверка RSS адаптера дала ValueError; полный датированный анонс не подтверждён, не включён."
+      "reason": "21.10: проверены собственные анонсы, настоящая pubDate, полный текст и условия входа. Неполные карточки не обрывают ленту; даты с пробелами распознаются.",
+      "active_source_id": "venue_kolarac"
     }
   ]
 }

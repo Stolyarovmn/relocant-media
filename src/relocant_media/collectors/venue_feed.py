@@ -129,6 +129,7 @@ class VenueFeedCollector:
     def __init__(self, source: SourceConfig, client: httpx.AsyncClient) -> None:
         self._source = source
         self._client = client
+        self.item_failures: list[dict[str, str]] = []
 
     async def _fetch(self, url: str) -> str:
         for _ in range(5):
@@ -157,12 +158,22 @@ class VenueFeedCollector:
         return parse_venue_feed(await self._fetch(url), self._source)
 
     async def collect(self) -> list[RawItem]:
+        self.item_failures = []
         now = datetime.now(UTC)
         entries = [entry for entry in await self._entries()
                    if entry.published_at and now - timedelta(days=7) <= entry.published_at <= now]
-        return [entry if entry.body else _article(
-            await self._fetch(entry.url), entry.url, self._source, entry.published_at
-        ) for entry in entries[:20]]
+        items = []
+        for entry in entries[:20]:
+            try:
+                item = entry if entry.body else _article(
+                    await self._fetch(entry.url), entry.url, self._source, entry.published_at
+                )
+                items.append(item)
+            except (ValueError, httpx.HTTPError) as error:
+                self.item_failures.append({"url": entry.url, "error_type": type(error).__name__})
+        if self.item_failures and not items:
+            raise ValueError("all fresh venue articles failed extraction")
+        return items
 
     async def collect_url(self, url: str) -> RawItem:
         _allowed(url, self._source)
