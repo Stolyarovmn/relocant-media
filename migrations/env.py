@@ -4,8 +4,8 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from relocant_media.config import settings
-from relocant_media.storage.models import Base
 from relocant_media.storage import revision_control as revision_control_models  # noqa: F401
+from relocant_media.storage.models import Base
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
