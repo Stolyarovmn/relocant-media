@@ -11,7 +11,28 @@ import httpx
 
 from relocant_media.collectors.factory import build_collector
 from relocant_media.domain.freshness import freshness_decision
-from relocant_media.sources.registry import load_source_registry
+from relocant_media.sources.registry import SourceConfig, load_source_registry
+
+_TRANSPORT_ATTEMPTS = 3
+_TRANSPORT_RETRY_DELAYS = (1.0, 3.0)
+
+
+async def _collect_with_transport_retry(
+    source: SourceConfig,
+    client: httpx.AsyncClient,
+) -> tuple[list[Any], list[dict[str, str]], int]:
+    """Retry bounded transport failures; extraction/data errors remain immediate."""
+    for attempt in range(1, _TRANSPORT_ATTEMPTS + 1):
+        collector = build_collector(source, client)
+        try:
+            items = await collector.collect()
+            failures = getattr(collector, "item_failures", [])
+            return items, failures, attempt
+        except httpx.TransportError:
+            if attempt >= _TRANSPORT_ATTEMPTS:
+                raise
+            await asyncio.sleep(_TRANSPORT_RETRY_DELAYS[attempt - 1])
+    raise AssertionError("unreachable")
 
 
 async def audit_sources(
@@ -40,9 +61,10 @@ async def audit_sources(
             }
             if row["status"] == "configured" and online:
                 try:
-                    collector = build_collector(source, client)
-                    items = await collector.collect()
-                    item_failures = getattr(collector, "item_failures", [])
+                    items, item_failures, attempts = await _collect_with_transport_retry(
+                        source,
+                        client,
+                    )
                     fresh = [
                         item
                         for item in items
@@ -58,6 +80,7 @@ async def audit_sources(
                         status="ok" if fresh else "empty",
                         fetched_items=len(items),
                         fresh_items=len(fresh),
+                        attempts=attempts,
                         examples=[
                             {
                                 "title": item.title,
@@ -109,12 +132,48 @@ def source_health_exit_code(
     return 0
 
 
+def render_source_health_markdown(result: dict[str, Any]) -> str:
+    """Render a compact Actions summary without relying on artifact storage."""
+    lines = [
+        "## Source health",
+        "",
+        f"- checked_at: `{result.get('checked_at', 'unknown')}`",
+        f"- active: **{result.get('active_count', 0)}**",
+        f"- working: **{result.get('working_count', 0)}**",
+        f"- partial: **{result.get('partial_count', 0)}**",
+        f"- errors: **{result.get('error_count', 0)}**",
+        "",
+        "| Source | Status | Fresh | Details |",
+        "|---|---|---:|---|",
+    ]
+    for row in result.get("sources", []):
+        if row.get("status") == "planned":
+            continue
+        details = ""
+        if row.get("status") == "error":
+            details = str(row.get("error_type", "error"))
+        elif row.get("status") == "partial":
+            details = f"item_failures={len(row.get('item_failures', []))}"
+        elif row.get("attempts", 1) > 1:
+            details = f"attempts={row['attempts']}"
+        lines.append(
+            "| {id} | {status} | {fresh} | {details} |".format(
+                id=row.get("id", "unknown"),
+                status=row.get("status", "unknown"),
+                fresh=row.get("fresh_items", "-"),
+                details=details,
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sources", type=Path, default=Path("cities/belgrade/sources"))
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--source-id", action="append", default=[])
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--summary", type=Path)
     parser.add_argument("--fail-on-error", action="store_true")
     parser.add_argument("--fail-on-partial", action="store_true")
     parser.add_argument("--require-active", action="store_true")
@@ -132,6 +191,8 @@ def main() -> None:
             json.dumps(result, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+    if args.summary:
+        args.summary.write_text(render_source_health_markdown(result), encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False))
 
     exit_code = source_health_exit_code(
