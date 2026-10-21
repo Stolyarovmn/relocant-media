@@ -44,6 +44,17 @@ def _experiment(**updates):
     return EditorialExperiment(**values)
 
 
+def _source() -> Source:
+    return Source(
+        id="official",
+        city="belgrade",
+        name="Official",
+        url="https://example.test",
+        source_type="official",
+        trust=Decimal("1"),
+    )
+
+
 def test_assignment_is_deterministic_and_bounded_by_window():
     experiment = _experiment()
     observed = datetime(2026, 10, 21, tzinfo=UTC)
@@ -71,16 +82,12 @@ def test_assignment_requires_real_rule_provenance_and_is_immutable():
     Base.metadata.create_all(engine)
     observed = datetime(2026, 10, 21, tzinfo=UTC)
     with Session(engine) as session:
-        source = Source(
-            id="official",
-            city="belgrade",
-            name="Official",
-            url="https://example.test",
-            source_type="official",
-            trust=Decimal("1"),
-        )
+        source = _source()
+        session.add(source)
+        session.flush()
+
         raw = RawItem(
-            source_id="official",
+            source_id=source.id,
             external_id="1",
             url="https://example.test/1",
             title="Title",
@@ -88,8 +95,9 @@ def test_assignment_requires_real_rule_provenance_and_is_immutable():
             published_at=observed,
         )
         experiment = _experiment()
-        session.add_all([source, raw, experiment])
+        session.add_all([raw, experiment])
         session.flush()
+
         decision = choose_assignment(experiment, raw_item_id=raw.id, observed_at=observed)
         assert decision is not None
         post = Post(
@@ -140,6 +148,10 @@ def test_evaluation_is_read_only_observational_and_has_noise_floor():
     Base.metadata.create_all(engine)
     now = datetime(2026, 10, 21, tzinfo=UTC)
     with Session(engine) as session:
+        source = _source()
+        session.add(source)
+        session.flush()
+
         experiment = _experiment()
         session.add(experiment)
         session.flush()
@@ -149,12 +161,23 @@ def test_evaluation_is_read_only_observational_and_has_noise_floor():
             (3, "treatment", "style-treatment-v1", 100, 14),
             (4, "treatment", "style-treatment-v1", 100, 16),
         ]
-        for raw_id, arm, rule_version, views, interactions in rows:
+        for external_id, arm, rule_version, views, interactions in rows:
+            raw = RawItem(
+                source_id=source.id,
+                external_id=str(external_id),
+                url=f"https://example.test/{external_id}",
+                title=f"Source {external_id}",
+                body="Body",
+                published_at=now,
+            )
+            session.add(raw)
+            session.flush()
+
             post = Post(
                 city="belgrade",
                 category="events",
                 status="published",
-                title=f"Post {raw_id}",
+                title=f"Post {external_id}",
                 body="Body",
                 confidence=Decimal("0.9"),
                 editorial_rule_version=rule_version,
@@ -164,7 +187,7 @@ def test_evaluation_is_read_only_observational_and_has_noise_floor():
             session.add(
                 ExperimentAssignment(
                     experiment_id=experiment.id,
-                    raw_item_id=raw_id,
+                    raw_item_id=raw.id,
                     post_id=post.id,
                     arm=arm,
                     rule_version=rule_version,
