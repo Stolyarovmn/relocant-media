@@ -20,13 +20,16 @@ The registry deliberately starts with primary sources. Commercial media sources 
 21.10.2026 отдельно проверены официальные коммунальные первоисточники:
 
 - `bvk_planned_works` — JKP Beogradski vodovod i kanalizacija, плановые и срочные работы по водоснабжению с районами, улицами и временем;
-- `eds_belgrade_outages_today` / `tomorrow` / `day2` / `day3` — Elektrodistribucija Srbije, официальные таблицы плановых отключений электричества для распределительного района Белграда.
+- `eds_belgrade_outages_today` / `tomorrow` / `day2` / `day3` — Elektrodistribucija Srbije, официальные таблицы плановых отключений электричества для распределительного района Белграда;
+- `beoelektrane_network_works` — JKP Beogradske elektrane, текущие работы теплосети по районам и улицам;
+- `parking_servis_news` — JKP Parking servis Beograd, изменения парковочных зон, режима работы, гаражные работы и сервисные предупреждения.
 
-Коммунальные источники сначала включены только как `page_change_detection` snapshots с
-`auto_publish: false`. Это намеренный shadow-этап: система уже сохраняет изменения официальных
-страниц, но не превращает whole-page snapshot в готовую новость. Структурированный outage parser
-может быть включён только после проверки на накопленных реальных снимках и отдельных regression
-fixtures.
+Новые коммунальные/сервисные источники сначала включаются только как
+`page_change_detection` snapshots с `auto_publish: false`. Это намеренный shadow-этап: система
+сохраняет изменения официальных страниц, но не превращает whole-page snapshot в готовую новость.
+Полноценный датированный article/outage parser включается только после проверки на реальных
+снимках и отдельных regression fixtures. Неподтверждённый RSS/feed URL не считается допустимым
+основанием для production collector.
 
 Each source file captures:
 - stable source id;
