@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #55–57.
+Состояние на 21 октября 2026 года после PR #55–58.
 
 ## Этап 0 — основа и проверки
 
@@ -29,7 +29,7 @@
 - [x] Публичный режим канала без `[тестовый запуск]`, формируемый до ревью.
 - [x] Защита доставки `sending/sent/uncertain` без автоматического повторения неопределённой отправки.
 - [x] `cycle-audit` после серверного прохода.
-- [ ] Единый newsroom state/control inbox поверх существующих `raw_item/editorial_run/post/source_revision/submission`, без второй очереди.
+- [x] Единый read-only newsroom state/control inbox поверх существующих `raw_item/editorial_run/post/source_revision/submission`, без второй очереди; см. [NEWSROOM_CONTROL.md](NEWSROOM_CONTROL.md).
 - [ ] Управляемый workflow повторного рассмотрения `source_revision`, где решение и причина видны в одном control plane.
 
 Подробности: [SERVER_EDITORIAL.md](SERVER_EDITORIAL.md), [EDITORIAL_CYCLE.md](EDITORIAL_CYCLE.md), [OPERATIONAL_STATE.md](OPERATIONAL_STATE.md).
