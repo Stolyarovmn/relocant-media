@@ -4,7 +4,11 @@ import httpx
 import pytest
 
 from relocant_media.analytics.public_preview import PreviewError
-from relocant_media.collectors.telegram_topics import collect_topics, parse_topics
+from relocant_media.collectors.telegram_topics import (
+    DEFAULT_CHANNELS,
+    collect_topics,
+    parse_topics,
+)
 
 NOW = datetime(2026, 10, 20, 18, tzinfo=UTC)
 
@@ -13,6 +17,22 @@ def card(number: int, date: str, text: str = "Новость") -> str:
     return f'''<div class="tgme_widget_message" data-post="example/{number}">
     <time datetime="{date}"></time><div class="tgme_widget_message_text">{text}</div>
     <span class="tgme_widget_message_views">1.2K</span></div>'''
+
+
+def test_default_channels_are_popular_discovery_sources_only() -> None:
+    assert DEFAULT_CHANNELS == (
+        "Serbia",
+        "SerbiaInMyMind",
+        "novostiserbii",
+        "beogradske_vesti",
+        "ruserbia",
+        "sta_imas_beograd",
+        "relocate_serbia",
+        "volna_srbjia",
+        "vstrechi_v_belgrade",
+        "afisha_rs",
+    )
+    assert len(DEFAULT_CHANNELS) == len(set(DEFAULT_CHANNELS))
 
 
 def test_only_recent_posts_extract_text_and_public_links() -> None:
@@ -66,7 +86,9 @@ async def test_public_get_only_no_redirects_or_account() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handle), trust_env=False
     ) as client:
-        assert len(await collect_topics("example", client, now=NOW)) == 1
+        leads = await collect_topics("example", client, now=NOW)
+    assert len(leads) == 1
+    assert leads[0].requires_independent_verification is True
     assert len(requests) == 1
     assert str(requests[0].url) == "https://t.me/s/example"
     assert requests[0].method == "GET"
