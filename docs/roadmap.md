@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #55–59.
+Состояние на 21 октября 2026 года после PR #55–60.
 
 ## Этап 0 — основа и проверки
 
@@ -56,7 +56,7 @@
 - [x] Наблюдения 24/48/168 часов без синтетических нулей.
 - [x] Версионирование редакционных правил и наблюдаемая производительность по версии.
 - [ ] Накопить достаточное число сопоставимых собственных публикаций до каких-либо заявлений об обучении.
-- [ ] Добавить shadow semantic dedup только как сигнал possible_duplicate; deterministic dedup остаётся authoritative.
+- [x] Shadow semantic dedup только как `possible_duplicate`: local pluggable scorer, отдельные score components и метрики false-positive/false-negative; deterministic dedup остаётся authoritative. См. [SHADOW_DEDUP.md](SHADOW_DEDUP.md).
 - [ ] Добавить experiment registry: `experiment_id`, control/treatment, eligibility, заранее заданная метрика успеха, статус и rollback marker.
 - [ ] Не позволять LLM самостоятельно объявлять победителя эксперимента; оценка должна учитывать noise floor и устойчивость результата.
 - [ ] Recommendation → issue/PR и проверка attribution/retained CPL на реальных данных.
