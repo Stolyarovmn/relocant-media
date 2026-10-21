@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from relocant_media.domain.dedup import EventCandidate
-from relocant_media.domain.shadow_dedup import find_shadow_duplicates
+from relocant_media.domain.shadow_dedup import LexicalSemanticScorer, find_shadow_duplicates
 from relocant_media.storage.models import RawItem, Source
 
 
@@ -38,14 +38,23 @@ def build_shadow_duplicate_report(
         .where(Source.city == city)
         .order_by(RawItem.published_at, RawItem.id)
     ).all()
+    scorer = LexicalSemanticScorer()
     signals = find_shadow_duplicates(
         [_candidate(item) for item, _source in rows],
+        scorer=scorer,
         limit=limit,
     )
+    metadata = scorer.metadata
     return {
         "mode": "shadow_only",
         "authoritative": False,
         "decision_effect": "none",
+        "scorer": {
+            "id": metadata.scorer_id,
+            "version": metadata.scorer_version,
+            "embedding_model": metadata.embedding_model,
+            "embedding_dimension": metadata.embedding_dimension,
+        },
         "signals": [
             {
                 "left_raw_item_id": signal.left_raw_item_id,
@@ -54,6 +63,12 @@ def build_shadow_duplicate_report(
                 "right_source_id": signal.right_source_id,
                 "score": signal.score.score,
                 "threshold": signal.threshold,
+                "scorer": {
+                    "id": signal.scorer.scorer_id,
+                    "version": signal.scorer.scorer_version,
+                    "embedding_model": signal.scorer.embedding_model,
+                    "embedding_dimension": signal.scorer.embedding_dimension,
+                },
                 "components": {
                     "title_overlap": signal.score.title_overlap,
                     "body_overlap": signal.score.body_overlap,
