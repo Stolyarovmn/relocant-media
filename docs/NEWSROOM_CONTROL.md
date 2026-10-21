@@ -50,6 +50,20 @@ relocant-newsroom --database --city belgrade --limit 100
 - точную retry policy: `manual_reconciliation`, `fresh_review_required`,
   `scheduler_or_operator` или `none`.
 
+## Управляющие решения и stale snapshots
+
+Основной event inbox остаётся read-only. Отдельные секции `source_revision_control` и
+`reader_correction_control` показывают разрешённые append-only решения и состояние их
+истории. Для каждой строки они возвращают `decision_count` и
+`write_precondition.expected_decision_count`.
+
+Mutation-команда обязана передать значение из того же snapshot. Сервер блокирует целевую
+строку и заново проверяет count перед записью; distinct-операция со старым значением
+отклоняется. Это предотвращает ситуацию, когда два оператора открыли один и тот же inbox,
+первый уже записал решение, а второй позднее записал противоречащее решение по устаревшему
+экрану. При этом точный повтор уже выполненной операции остаётся идемпотентным по
+`idempotency_key` и не требует искусственно подменять expected count после timeout.
+
 ## Инварианты
 
 - Команда не создаёт и не изменяет `EditorialRun`, `Post`, `Submission` или delivery receipt.
@@ -58,5 +72,6 @@ relocant-newsroom --database --city belgrade --limit 100
   решение было положительным.
 - Private submission payload не входит в control output; показываются только безопасные
   метаданные связи.
+- Distinct write по устаревшему control snapshot отклоняется до append-only записи.
 - Проекция не ослабляет event dedup, source/category/audience/factual guards и не отправляет
   сообщения Telegram.
