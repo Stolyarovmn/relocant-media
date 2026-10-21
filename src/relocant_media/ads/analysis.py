@@ -184,8 +184,14 @@ def analyze_ads(
         },
         "limitations": [
             "Recommendations are proposals only and cannot mutate Telegram Ads.",
-            "Bid, budget, spend, campaign creation and pause/resume require a separate future executor.",
-            "Any future money-changing action remains OWNER_APPROVAL until an explicit bounded policy exists.",
+            (
+                "Bid, budget, spend, campaign creation and pause/resume require "
+                "a separate future executor."
+            ),
+            (
+                "Any future money-changing action remains OWNER_APPROVAL until "
+                "an explicit bounded policy exists."
+            ),
             "Observed campaign performance is descriptive and does not prove causal lift.",
         ],
     }
