@@ -1,0 +1,21 @@
+id: eds_belgrade_outages_day3
+name: Elektrodistribucija Srbije — Beograd planirana isključenja treći dan
+publisher: Elektrodistribucija Srbije d.o.o. Beograd
+ownership: official
+url: https://elektrodistribucija.rs/planirana-iskljucenja-beograd/Dan_3_Iskljucenja.htm
+language: sr-Cyrl
+source_type: official_utility_service_info
+trust: 1.0
+check_every: 30m
+categories:
+  - utilities
+  - electricity
+extraction:
+  strategy: page_change_detection
+  status: active
+policy:
+  high_risk: false
+  auto_publish: false
+verification:
+  checked_at: 2026-10-21
+  note: Official EDS Belgrade day-3 schedule with municipality, outage interval and affected streets. Shadow snapshot only; not eligible for automatic publication.
