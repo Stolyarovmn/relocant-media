@@ -44,6 +44,8 @@ def test_cli_requires_explicit_write_confirmation(monkeypatch: pytest.MonkeyPatc
             "needs_evidence",
             "--idempotency-key",
             "cli-test",
+            "--expected-decision-count",
+            "0",
         ],
     )
     with pytest.raises(SystemExit) as exc:
@@ -75,6 +77,8 @@ def test_cli_records_audit_only(
             "test",
             "--idempotency-key",
             "cli-confirmed",
+            "--expected-decision-count",
+            "0",
             "--confirm-write",
         ],
     )
@@ -88,4 +92,59 @@ def test_cli_records_audit_only(
         assert session.scalar(select(func.count()).select_from(ReaderCorrectionDecision)) == 1
         row = session.get(Submission, submission_id)
         assert row is not None and row.status == "new"
+    engine.dispose()
+
+
+def test_cli_rejects_stale_expected_decision_count(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine, factory, submission_id = _database()
+    monkeypatch.setattr(correction_control_cli, "SessionFactory", factory)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "relocant-correction-control",
+            "--submission-id",
+            str(submission_id),
+            "--decision",
+            "hold",
+            "--reason-code",
+            "first",
+            "--idempotency-key",
+            "first-write",
+            "--expected-decision-count",
+            "0",
+            "--confirm-write",
+        ],
+    )
+    correction_control_cli.main()
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "relocant-correction-control",
+            "--submission-id",
+            str(submission_id),
+            "--decision",
+            "confirmed",
+            "--reason-code",
+            "stale",
+            "--idempotency-key",
+            "stale-write",
+            "--expected-decision-count",
+            "0",
+            "--confirm-write",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        correction_control_cli.main()
+    assert exc.value.code == 1
+    assert "stale reader correction control snapshot" in capsys.readouterr().err
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(ReaderCorrectionDecision)) == 1
     engine.dispose()
