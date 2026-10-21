@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #55–61.
+Состояние на 21 октября 2026 года после PR #55–62.
 
 ## Этап 0 — основа и проверки
 
@@ -69,6 +69,6 @@ MTProto не является условием работы редакции и�
 - [x] Базовый prompt review рекламного кандидата с запретом автоодобрения рискованных категорий.
 - [ ] Suggested-post review flow.
 - [ ] Политика цен и пороги согласования владельцем.
-- [ ] Read-only Telegram Ads analyst в отдельном trust domain: импорт метрик и recommendations без spend capability.
+- [x] Read-only Telegram Ads analyst в отдельном trust domain: offline/imported snapshots → deterministic metrics → `proposed_only` recommendations, без spend/bid/budget mutation API; см. [ADS_ANALYST.md](ADS_ANALYST.md).
 - [ ] Только после отдельной политики владельца рассматривать executor для bid/budget/spend; любые изменения денег остаются за `OWNER_APPROVAL` до явного bounded policy.
 - [ ] Проверить полный рекламный процесс в staging без изменения реальных бюджетов.
