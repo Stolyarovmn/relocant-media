@@ -68,6 +68,18 @@ def _private_message(update_id: int, message_id: int, text_value: str) -> dict[s
     }
 
 
+def _group_message(update_id: int, message_id: int, text_value: str) -> dict[str, object]:
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": message_id,
+            "from": {"id": 700},
+            "chat": {"id": -100777, "type": "supergroup"},
+            "text": text_value,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_private_intake_state_is_persistent_and_update_is_idempotent(
     db_session: Session,
@@ -109,17 +121,10 @@ async def test_staging_discussion_spam_is_deleted_and_audited(db_session: Sessio
         city="belgrade",
         staging_discussion_group_id="-100777",
     )
-    payload: dict[str, object] = {
-        "update_id": 300,
-        "message": {
-            "message_id": 31,
-            "from": {"id": 700},
-            "chat": {"id": -100777, "type": "supergroup"},
-            "text": "100% доход без риска, пишите в лс заработок",
-        },
-    }
 
-    result = await runtime.process(payload)
+    result = await runtime.process(
+        _group_message(300, 31, "100% доход без риска, пишите в лс заработок")
+    )
 
     assert result.action == "moderation_delete"
     assert bot.deleted == [(-100777, 31)]
@@ -127,4 +132,50 @@ async def test_staging_discussion_spam_is_deleted_and_audited(db_session: Sessio
     assert audit is not None
     assert audit.city == "belgrade"
     assert audit.action == "delete"
-    assert audit.reason == "rules-v1"
+    assert audit.reason is not None
+    assert audit.reason.startswith("rules-v2:")
+    assert "percent_income_claim" in audit.reason
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_group_promo_is_reviewed_without_delete(db_session: Session) -> None:
+    bot = FakeBot()
+    runtime = TelegramRuntime(
+        db_session,
+        bot,
+        city="belgrade",
+        staging_discussion_group_id="-100777",
+    )
+
+    result = await runtime.process(_group_message(301, 32, "Есть подработка, пишите мне в лс"))
+
+    assert result.action == "moderation_review"
+    assert bot.deleted == []
+    audit = db_session.scalar(select(ModerationAction))
+    assert audit is not None
+    assert audit.action == "review"
+    assert audit.reason == "rules-v2:suspicious_direct_message_promo"
+
+
+@pytest.mark.asyncio
+async def test_same_group_message_is_not_deleted_twice_with_different_update_id(
+    db_session: Session,
+) -> None:
+    bot = FakeBot()
+    runtime = TelegramRuntime(
+        db_session,
+        bot,
+        city="belgrade",
+        staging_discussion_group_id="-100777",
+    )
+    payload = _group_message(302, 33, "100% доход без риска")
+
+    first = await runtime.process(payload)
+    payload["update_id"] = 303
+    second = await runtime.process(payload)
+
+    assert first.action == "moderation_delete"
+    assert second.action == "moderation_delete"
+    assert bot.deleted == [(-100777, 33)]
+    assert db_session.scalar(select(func.count()).select_from(ModerationAction)) == 1
+    assert db_session.scalar(select(func.count()).select_from(TelegramUpdateReceipt)) == 2
