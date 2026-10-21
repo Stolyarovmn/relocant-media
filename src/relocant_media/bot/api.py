@@ -20,7 +20,12 @@ class PhotoUpload:
 
 
 class TelegramBot(Protocol):
-    async def send_message(self, chat_id: int | str, text: str) -> int: ...
+    async def send_message(
+        self,
+        chat_id: int | str,
+        text: str,
+        entities: Sequence[Mapping[str, object]] = (),
+    ) -> int: ...
 
     async def delete_message(self, chat_id: int | str, message_id: int) -> None: ...
 
@@ -90,29 +95,44 @@ class TelegramBotAPI:
         return message_id
 
     async def send_photo(
-        self, chat_id: int | str, photo: Path | PhotoUpload, caption: str = ""
+        self,
+        chat_id: int | str,
+        photo: Path | PhotoUpload,
+        caption: str = "",
+        caption_entities: Sequence[Mapping[str, object]] = (),
     ) -> int:
         self._caption(caption)
         upload = self._photo(photo)
+        data = {"chat_id": str(chat_id), "caption": caption}
+        if caption_entities:
+            data["caption_entities"] = json.dumps(
+                list(caption_entities), ensure_ascii=False, separators=(",", ":")
+            )
         response = await self._client.post(
             f"{self._base_url}/sendPhoto",
-            data={"chat_id": str(chat_id), "caption": caption},
+            data=data,
             files={"photo": upload},
         )
         return self._message_id(self._result("sendPhoto", response))
 
     async def send_media_group(
-        self, chat_id: int | str, photos: Sequence[Path | PhotoUpload], caption: str = ""
+        self,
+        chat_id: int | str,
+        photos: Sequence[Path | PhotoUpload],
+        caption: str = "",
+        caption_entities: Sequence[Mapping[str, object]] = (),
     ) -> list[int]:
         self._caption(caption)
         if not 2 <= len(photos) <= 10:
             raise ValueError("photo album requires 2 to 10 photos")
         files = {f"photo{index}": self._photo(path) for index, path in enumerate(photos)}
-        media: list[dict[str, str]] = []
+        media: list[dict[str, object]] = []
         for index in range(len(photos)):
-            item = {"type": "photo", "media": f"attach://photo{index}"}
+            item: dict[str, object] = {"type": "photo", "media": f"attach://photo{index}"}
             if index == 0:
                 item["caption"] = caption
+                if caption_entities:
+                    item["caption_entities"] = list(caption_entities)
             media.append(item)
         response = await self._client.post(
             f"{self._base_url}/sendMediaGroup",
@@ -127,10 +147,20 @@ class TelegramBotAPI:
             raise TelegramAPIError("sendMediaGroup returned duplicate message IDs")
         return ids
 
-    async def send_message(self, chat_id: int | str, text: str) -> int:
-        result = await self._call("sendMessage", {
-            "chat_id": chat_id, "text": text, "link_preview_options": {"is_disabled": True},
-        })
+    async def send_message(
+        self,
+        chat_id: int | str,
+        text: str,
+        entities: Sequence[Mapping[str, object]] = (),
+    ) -> int:
+        payload: dict[str, object] = {
+            "chat_id": chat_id,
+            "text": text,
+            "link_preview_options": {"is_disabled": True},
+        }
+        if entities:
+            payload["entities"] = list(entities)
+        result = await self._call("sendMessage", payload)
         if not isinstance(result, dict):
             raise TelegramAPIError("sendMessage returned no message object")
         message_id = result.get("message_id")
