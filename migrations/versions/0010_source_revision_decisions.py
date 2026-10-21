@@ -25,7 +25,12 @@ def upgrade() -> None:
         sa.Column("note", sa.Text(), nullable=True),
         sa.Column("actor", sa.String(), nullable=False),
         sa.Column("idempotency_key", sa.String(length=128), nullable=False),
-        sa.Column("decided_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "decided_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
         sa.ForeignKeyConstraint(["revision_id"], ["source_revision.id"]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
