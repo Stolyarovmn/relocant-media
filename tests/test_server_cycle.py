@@ -62,7 +62,7 @@ async def test_publisher_fixed_target_and_prefix():
             return 12
 
     publisher = server_cycle.ChannelPublisher(Bot())
-    with pytest.raises(ValueError, match="prefix"):
+    with pytest.raises(ValueError, match="presentation"):
         await publisher.publish("Без маркировки")
     assert calls == []
     assert await publisher.publish("[тестовый запуск] Заголовок") == 12

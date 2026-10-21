@@ -22,7 +22,8 @@ def _ad_active(ad: dict[str, Any], now: datetime) -> bool:
 
 
 async def maintain_pins(bot: TelegramBotAPI, policy: dict[str, Any], *,
-                        now: datetime | None = None) -> dict[str, Any]:
+                        now: datetime | None = None,
+                        news_message_ids: set[int] | None = None) -> dict[str, Any]:
     """No pin/send/delete capability here. Does not consume webhook or poll updates."""
     if policy.get("channel_id") != CHANNEL or policy.get("discussion_id") != DISCUSSION:
         raise ValueError("pin policy targets are not approved")
@@ -59,8 +60,9 @@ async def maintain_pins(bot: TelegramBotAPI, policy: dict[str, Any], *,
                     result["preserved"].append({"chat_id": chat, "message_id": message_id})
                     break
                 known_news = ((chat == CHANNEL or linked)
-                              and str(pin.get("text", pin.get("caption", ""))).startswith(
-                                  "[тестовый запуск]"))
+                              and (original_id in (news_message_ids or set())
+                                   or str(pin.get("text", pin.get("caption", ""))).startswith(
+                                       "[тестовый запуск]")))
                 if not known_news and original_id not in registered_ads:
                     result["blocked"].append({"chat_id": chat, "reason": "unknown_pin"})
                     break

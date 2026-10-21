@@ -39,6 +39,11 @@ from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import freshness_decision
+from relocant_media.domain.presentation import (
+    presentation_title,
+    title_instruction,
+    valid_title_presentation,
+)
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops.cycle_audit import audit_cycle
 from relocant_media.ops.newsroom_status import summarize
@@ -81,11 +86,10 @@ from relocant_media.services.submission_queue import (
     tip_urls,
 )
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
-from relocant_media.storage.models import EditorialRun, RawItem, Source
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 SOURCES = Path("cities/belgrade/sources")
-PREFIX = "[тестовый запуск]"
 
 
 class ServerAI:
@@ -111,6 +115,7 @@ class ServerAI:
                   "язык и возрастные ограничения укажи, если они важны и известны. "
                   "Не выдумывай отсутствующие детали, не выдавай медицинские обещания "
                   "и обычные скидки/пакеты проживания за городское событие. ")
+        policy += title_instruction()
         if task == "rank":
             categories = ["transport", "events", "city", "utilities", "schools", "medicine",
                           "health", "immigration", "law", "tax", "banking", "politics",
@@ -495,7 +500,7 @@ def prepare_reviewed(
                     "resolution": "deferred_policy" if run.outcome["status"] == "human_review"
                                   else "rejected"}
     draft = outcome.draft.model_copy(update={
-        "title": PREFIX + " " + outcome.draft.title.removeprefix(PREFIX).strip(),
+        "title": presentation_title(outcome.draft.title),
     })
     outcome = outcome.model_copy(update={"draft": draft})
     placeholders = [dict(reviewer_id=f"pending-{role}", role=role,
@@ -541,15 +546,21 @@ class ChannelPublisher:
         self.bot = bot
 
     async def publish(self, text: str) -> int:
-        if not text.startswith(PREFIX):
-            raise ValueError("required title prefix missing")
+        if not valid_title_presentation(text.split("\n", 1)[0]):
+            raise ValueError("title presentation does not match channel mode")
         return await self.bot.send_message(APPROVED_CHANNEL_ID, text)
 
 
-async def cleanup_news_pins() -> dict[str, Any]:
+async def cleanup_news_pins(engine: Engine) -> dict[str, Any]:
     policy = json.loads((SOURCES.parent / "pin-policy.json").read_text(encoding="utf-8"))
+    with Session(engine) as session:
+        news_ids = set(session.scalars(select(Post.telegram_message_id).join(
+            EditorialRun, EditorialRun.post_id == Post.id).where(
+                Post.city == "belgrade", EditorialRun.delivery_status == "sent",
+                Post.telegram_message_id.is_not(None))))
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
-        return await maintain_pins(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client), policy)
+        return await maintain_pins(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client),
+                                   policy, news_message_ids={i for i in news_ids if i is not None})
 
 
 async def audience_observation() -> dict[str, Any]:
@@ -718,7 +729,7 @@ def main() -> None:
             result["channel_blocked"] = blocked
             result["fallback_required"] = result["fallback_required"] or bool(blocked)
             if enabled:
-                result["pin_maintenance"] = asyncio.run(cleanup_news_pins())
+                result["pin_maintenance"] = asyncio.run(cleanup_news_pins(engine))
                 audience = asyncio.run(audience_observation())
                 (args.output / "audience-observation.json").write_text(
                     json.dumps(audience, ensure_ascii=False, indent=2), encoding="utf-8")

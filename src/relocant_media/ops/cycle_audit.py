@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import draft_date_reason
+from relocant_media.domain.presentation import valid_title_presentation
 from relocant_media.storage.models import EditorialRun, Post
 
 
@@ -51,7 +52,7 @@ def audit_cycle(session: Session, report: dict[str, Any]) -> dict[str, Any]:
         post, run = rows[0]
         language_reason = draft_language_reason(post.title, post.body)
         checks["russian_copy"] &= language_reason is None
-        checks["title_prefix"] &= post.title.startswith("[тестовый запуск]")
+        checks["title_prefix"] &= valid_title_presentation(post.title)
         checks["absolute_dates"] &= draft_date_reason(post.title,post.body) is None
         messages.append(
             dict(

@@ -16,7 +16,10 @@ from relocant_media.storage.sqlite_schema import initialize_sqlite
 
 
 @pytest.fixture
-def reviewed(tmp_path):
+def reviewed(tmp_path, request, monkeypatch):
+    public = getattr(request, "param", "test") == "public"
+    if public:
+        monkeypatch.setenv("EDITORIAL_CHANNEL_MODE", "public")
     path = tmp_path / "editorial.sqlite3"
     initialize_sqlite(path)
     engine = create_engine(f"sqlite:///{path}")
@@ -26,8 +29,9 @@ def reviewed(tmp_path):
         source = session.get(Source, item.source_id)
         payload = package_payload()
         payload.update(version=2, policy_version="subscription-editorial-v2", raw_item_id=item_id)
-        payload["outcome"]["draft"]["title"] = (
-            "[тестовый запуск] " + payload["outcome"]["draft"]["title"])
+        if not public:
+            payload["outcome"]["draft"]["title"] = (
+                "[тестовый запуск] " + payload["outcome"]["draft"]["title"])
         payload["event"] = {
             "event_key": event_key(_candidate(item)),
             "editorial_rule_version": "belgrade-editorial-v2",
@@ -59,6 +63,28 @@ class FakePublisher:
 async def send(session, run, publisher, **kwargs):
     return await deliver_reviewed(session, run.raw_item_id, publisher,
                                   target_channel_id=APPROVED_CHANNEL_ID, enabled=True, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reviewed", ["public"], indirect=True)
+async def test_public_reviewed_package_delivery_and_at_most_once(reviewed):
+    session, run = reviewed
+    publisher = FakePublisher()
+    result = await send(session, run, publisher)
+    assert result.message_id == 42
+    assert not publisher.calls[0].startswith("[тестовый запуск]")
+    await send(session, run, publisher)
+    assert len(publisher.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_pending_package_is_blocked_after_public_cutover(reviewed, monkeypatch):
+    session, run = reviewed
+    monkeypatch.setenv("EDITORIAL_CHANNEL_MODE", "public")
+    publisher = FakePublisher()
+    with pytest.raises(DeliveryBlockedError, match="presentation"):
+        await send(session, run, publisher)
+    assert not publisher.calls
 
 
 @pytest.mark.asyncio
