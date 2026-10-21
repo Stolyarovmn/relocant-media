@@ -11,11 +11,11 @@ categories:
   - utilities
   - electricity
 extraction:
-  strategy: page_change_detection
+  strategy: eds_belgrade_outages
   status: active
 policy:
   high_risk: false
   auto_publish: false
 verification:
   checked_at: 2026-10-21
-  note: Official EDS Belgrade day-0 schedule with municipality, outage interval and affected streets. Shadow snapshot only; not eligible for automatic publication.
+  note: Official EDS Belgrade rolling day-0 schedule. Structured collector extracts the explicit schedule date and independent municipality/time/street rows while keeping published_at unknown. auto_publish remains false pending live quality measurement.

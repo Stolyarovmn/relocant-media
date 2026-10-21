@@ -27,7 +27,7 @@ def test_venue_sources_are_explicit_first_party_events():
     assert all(s.verification.checked_at is not None for s in venues)
 
 
-def test_utility_sources_keep_shadow_policy_while_bvk_is_structured() -> None:
+def test_utility_sources_keep_shadow_policy_while_bvk_and_eds_are_structured() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
     utility_sources = [s for s in sources if s.source_type == "official_utility_service_info"]
 
@@ -41,7 +41,7 @@ def test_utility_sources_keep_shadow_policy_while_bvk_is_structured() -> None:
     bvk = next(source for source in utility_sources if source.id == "bvk_planned_works")
     eds = [source for source in utility_sources if source.id != "bvk_planned_works"]
     assert bvk.extraction.strategy == "bvk_planned_works"
-    assert all(source.extraction.strategy == "page_change_detection" for source in eds)
+    assert all(source.extraction.strategy == "eds_belgrade_outages" for source in eds)
     assert all(source.ownership == "official" for source in utility_sources)
     assert all(source.trust == 1.0 for source in utility_sources)
     assert all(source.extraction.status == "active" for source in utility_sources)

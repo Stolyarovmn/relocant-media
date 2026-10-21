@@ -37,8 +37,16 @@ The registry deliberately starts with primary sources. Commercial media sources 
 fixture. Каждое уведомление получает стабильный external ID и отдельную внутреннюю canonical
 identity, но публичный evidence URL остаётся точным URL BVK. Страница не показывает надёжный
 publication timestamp, поэтому parser намеренно оставляет `published_at` пустым и
-`auto_publish: false`; дату работ нельзя подменять датой публикации. Следующий этап — измерить
-live extraction/freshness и только затем решать, нужен ли source-specific freshness contract.
+`auto_publish: false`; дату работ нельзя подменять датой публикации.
+
+EDS rolling day-pages (`Dan_0` ... `Dan_3`) также прошли structured shadow-этап 21.10.2026.
+На живых страницах явно присутствуют дата расписания и таблица `Општина / Време / Улице`.
+`eds_belgrade_outages` превращает каждую строку в отдельный raw item со стабильным ID,
+сохраняет точный публичный URL day-page и отдельную внутреннюю canonical identity. Явно пустая
+датированная таблица трактуется как отсутствие запланированных отключений; исчезновение даты или
+ожидаемого заголовка таблицы считается ошибкой структуры. Дата расписания не выдаётся за дату
+публикации: `published_at` остаётся пустым, `auto_publish: false` сохраняется до измерения качества
+live extraction/freshness.
 
 Each source file captures:
 - stable source id;
