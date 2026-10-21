@@ -1,0 +1,14 @@
+{
+  "observed_on": "2026-10-20",
+  "purpose": "topic_discovery_only",
+  "publication_evidence": false,
+  "max_post_age_hours": 24,
+  "account_access": false,
+  "channels": [
+    {"username": "beogradske_vesti", "url": "https://t.me/s/beogradske_vesti", "language": "ru", "http_status": 200, "visible_subscribers": "14.9K", "visible_posts": 19},
+    {"username": "sta_imas_beograd", "url": "https://t.me/s/sta_imas_beograd", "language": "ru", "http_status": 200, "visible_subscribers": "12.5K", "visible_posts": 11},
+    {"username": "afisha_rs", "url": "https://t.me/s/afisha_rs", "language": "ru", "http_status": 200, "visible_subscribers": "4.1K", "visible_posts": 19},
+    {"username": "SerbiaInMyMind", "url": "https://t.me/s/SerbiaInMyMind", "language": "ru", "http_status": 200, "visible_subscribers": "31.1K", "visible_posts": 13},
+    {"username": "sta_ima_u_beogradu", "url": "https://t.me/s/sta_ima_u_beogradu", "language": "sr", "http_status": 200, "visible_subscribers": "408", "visible_posts": 19}
+  ]
+}

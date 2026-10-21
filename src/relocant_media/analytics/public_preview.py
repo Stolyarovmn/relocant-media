@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -41,10 +41,14 @@ def parse_counter(raw: str) -> VisibleCounter | None:
     return VisibleCounter(int(Decimal(number) * multiplier), bool(suffix), raw.strip())
 
 
-def parse_preview(html: str, channel: str, fetched_at: datetime) -> dict[str, Any]:
+def parse_preview(
+    html: str, channel: str, fetched_at: datetime, *, max_age: timedelta | None = None
+) -> dict[str, Any]:
     validate_username(channel)
     if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
         raise PreviewError("Время получения должно содержать часовой пояс")
+    if max_age is not None and max_age <= timedelta(0):
+        raise PreviewError("Окно свежести должно быть положительным")
     soup = BeautifulSoup(html, "html.parser")
     posts: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -62,6 +66,9 @@ def parse_preview(html: str, channel: str, fetched_at: datetime) -> dict[str, An
                 continue
         except ValueError:
             continue
+        # Topic discovery drops stale/future posts before extracting or retaining text.
+        if max_age is not None and not timedelta(0) <= fetched_at - published <= max_age:
+            continue
         text = node.select_one(".tgme_widget_message_text")
         views_node = node.select_one(".tgme_widget_message_views")
         views = parse_counter(views_node.get_text()) if views_node else None
@@ -78,7 +85,7 @@ def parse_preview(html: str, channel: str, fetched_at: datetime) -> dict[str, An
             }
         )
         seen.add(identity.lower())
-    if not posts:
+    if not posts and max_age is None:
         raise PreviewError("Публичный просмотр не содержит поддерживаемых постов")
     return {
         "schema_version": 1,

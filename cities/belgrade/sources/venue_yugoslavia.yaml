@@ -1,0 +1,28 @@
+id: venue_yugoslavia
+name: Музей Югославии
+publisher: Музей Югославии
+ownership: official
+url: https://muzej-jugoslavije.org/
+language: sr
+source_type: official_venue_events
+trust: 0.95
+check_every: 3h
+categories:
+- events
+extraction:
+  strategy: venue_feed
+  status: active
+  feed_url: https://muzej-jugoslavije.org/feed/
+  article_selectors:
+  - .entry-content
+  - .post-content
+  approved_hosts:
+  - muzej-jugoslavije.org
+  - www.muzej-jugoslavije.org
+policy:
+  auto_publish: true
+  high_risk: false
+verification:
+  checked_at: '2026-10-20'
+  note: Официальный сайт организатора подтверждён контактами; RSS и полное содержимое
+    проверены. Это не независимое подтверждение рекламных обещаний.

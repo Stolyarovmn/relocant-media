@@ -1,0 +1,28 @@
+id: venue_youth_centre
+name: Дом омладине Београда
+publisher: Дом омладине Београда
+ownership: official
+url: https://domomladine.org/
+language: sr
+source_type: official_venue_events
+trust: 0.95
+check_every: 3h
+categories:
+- events
+extraction:
+  strategy: venue_feed
+  status: active
+  feed_url: https://domomladine.org/feed/
+  article_selectors:
+  - .entry-content
+  - .post-content
+  approved_hosts:
+  - domomladine.org
+  - www.domomladine.org
+policy:
+  auto_publish: true
+  high_risk: false
+verification:
+  checked_at: '2026-10-20'
+  note: Официальный сайт организатора подтверждён контактами; RSS и полное содержимое
+    проверены. Это не независимое подтверждение рекламных обещаний.

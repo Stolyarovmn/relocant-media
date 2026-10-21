@@ -1,0 +1,150 @@
+{
+  "checked_at": "2026-10-21",
+  "note": "Кандидаты площадок; фактически включённые источники определяются YAML со status active и проверкой source_audit.",
+  "sources": [
+    {
+      "id": "venue_msub_org_rs",
+      "name": "Музей современного искусства",
+      "homepage": "https://msub.org.rs/",
+      "feed_url": "https://msub.org.rs/feed/",
+      "official_identity_verified": true,
+      "status": "planned",
+      "reason": "RSS даёт только краткие описания; последняя запись декабрь 2025; полный HTML требует адаптера."
+    },
+    {
+      "id": "venue_muzej-jugoslavije_org",
+      "name": "Музей Югославии",
+      "homepage": "https://muzej-jugoslavije.org/",
+      "feed_url": "https://muzej-jugoslavije.org/feed/",
+      "official_identity_verified": true,
+      "status": "registered",
+      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ.",
+      "active_source_id": "venue_yugoslavia"
+    },
+    {
+      "id": "venue_narodnimuzej_rs",
+      "name": "Национальный музей Сербии",
+      "homepage": "https://narodnimuzej.rs/",
+      "feed_url": "https://www.narodnimuzej.rs/feed/",
+      "official_identity_verified": true,
+      "status": "planned",
+      "reason": "Проверка21.10: стандартный адаптер не вернул свежих полных материалов. Это ограничение покрытия, а не оценка посещаемости.",
+      "checked_at": "2026-10-21"
+    },
+    {
+      "id": "venue_mpu_rs",
+      "name": "Музей прикладного искусства",
+      "homepage": "https://mpu.rs/",
+      "feed_url": "https://mpu.rs/feed/",
+      "official_identity_verified": true,
+      "status": "planned",
+      "reason": "RSS существует, но единственная запись октябрь 2024; не использовать как актуальную афишу."
+    },
+    {
+      "id": "venue_nhmbeo_rs",
+      "name": "Музей естественной истории",
+      "homepage": "https://nhmbeo.rs/",
+      "feed_url": "https://nhmbeo.rs/feed/",
+      "official_identity_verified": true,
+      "status": "registered",
+      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ.",
+      "active_source_id": "venue_natural_history"
+    },
+    {
+      "id": "venue_dob_rs",
+      "name": "Неподходящий домен: продажа доменного имени",
+      "homepage": "https://dob.rs/",
+      "feed_url": "https://dob.rs/feed/",
+      "official_identity_verified": false,
+      "status": "excluded",
+      "reason": "Домен ведёт на продажу домена Nameshift, это НЕ официальный Дом молодёжи; исключить."
+    },
+    {
+      "id": "venue_kcb_org_rs",
+      "name": "Культурный центр Белграда",
+      "homepage": "https://kcb.org.rs/",
+      "feed_url": "https://www.kcb.org.rs/feed/",
+      "official_identity_verified": true,
+      "status": "planned",
+      "reason": "RSS pubDate 9 ноября 2026 при сегодняшнем 20 октября. Это может быть дата события вместо публикации; нельзя маркировать как datePublished. Нужен отдельный датированный event-адаптер."
+    },
+    {
+      "id": "venue_domomladine_org",
+      "name": "Дом молодёжи Белграда",
+      "homepage": "https://domomladine.org/",
+      "feed_url": "https://domomladine.org/feed/",
+      "official_identity_verified": true,
+      "status": "registered",
+      "reason": "Действующий официальный источник, RSS excerpt и Article JSONLD datePublished; готов для отдельного HTML-адаптера.",
+      "active_source_id": "venue_youth_centre"
+    },
+    {
+      "id": "venue_kcgrad_rs",
+      "name": "KC Grad",
+      "homepage": "https://kcgrad.rs/",
+      "feed_url": "https://www.kcgrad.rs/feed/",
+      "official_identity_verified": true,
+      "status": "planned",
+      "reason": "RSS содержит только Hello world 2017/2021; текущий сайт не имеет проверенного пригодного потока."
+    },
+    {
+      "id": "venue_drugstorebeograd_com",
+      "name": "Drugstore",
+      "homepage": "https://drugstorebeograd.com/",
+      "feed_url": "https://drugstorebeograd.com/feed/",
+      "official_identity_verified": true,
+      "status": "planned",
+      "reason": "Проверка21.10: лента содержит свежие карточки, но доступный HTML статьи не содержит полного анонса; повторный сетевой проход дал ConnectTimeout. До устойчивого полного текста не включать.",
+      "checked_at": "2026-10-21"
+    },
+    {
+      "id": "venue_bitefartcafe_rs",
+      "name": "BitefArtCafe",
+      "homepage": "https://bitefartcafe.rs/",
+      "feed_url": "https://bitefartcafe.rs/feed/",
+      "official_identity_verified": true,
+      "status": "registered",
+      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ.",
+      "active_source_id": "venue_bitefartcafe"
+    },
+    {
+      "id": "venue_musicology_rs",
+      "name": "Musicology Sessions",
+      "homepage": "https://musicology.rs/",
+      "feed_url": "https://musicology.rs/feed/",
+      "official_identity_verified": true,
+      "status": "registered",
+      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ.",
+      "active_source_id": "venue_musicology"
+    },
+    {
+      "id": "venue_frusketerme_com",
+      "name": "Fruške Terme",
+      "homepage": "https://frusketerme.com/",
+      "feed_url": "https://frusketerme.com/feed/",
+      "official_identity_verified": true,
+      "status": "planned",
+      "reason": "Официальный сайт подтверждён адресом и контактами; /feed/ 404. Не найдены проверенные структурированные публикации с datePublished; нужен отдельный адаптер анонсов."
+    },
+    {
+      "id": "venue_dkcb_rs",
+      "name": "Детский культурный центр Белграда",
+      "homepage": "https://www.dkcb.rs/",
+      "feed_url": "https://www.dkcb.rs/feed/",
+      "official_identity_verified": false,
+      "status": "planned",
+      "checked_at": "2026-10-21",
+      "reason": "Кандидат семейных анонсов: проверка стандартного адаптера дала ValueError. Полный текст и настоящий момент публикации не подтверждены; не включён."
+    },
+    {
+      "id": "venue_kolarac_rs",
+      "name": "Коларчева задужбина",
+      "homepage": "https://www.kolarac.rs/",
+      "feed_url": "https://www.kolarac.rs/feed/",
+      "official_identity_verified": true,
+      "status": "planned",
+      "checked_at": "2026-10-21",
+      "reason": "Официальный домен подтверждён страницей билетарницы. Проверка RSS адаптера дала ValueError; полный датированный анонс не подтверждён, не включён."
+    }
+  ]
+}

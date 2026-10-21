@@ -92,7 +92,10 @@ async def test_db_to_structured_ai_to_fake_bot_api_is_durable_and_idempotent(
         again = await service.deliver(item_id, publisher, dry_run=False)
     assert sent.message_id == again.message_id == 42
     assert len(requests) == 1
-    assert json.loads(requests[0].content) == {"chat_id": "-100123", "text": preview.text}
+    assert json.loads(requests[0].content) == {
+        "chat_id": "-100123", "text": preview.text,
+        "link_preview_options": {"is_disabled": True},
+    }
     assert editorial_session.scalar(select(func.count()).select_from(EditorialRun)) == 1
     post = editorial_session.scalar(select(Post))
     assert post is not None

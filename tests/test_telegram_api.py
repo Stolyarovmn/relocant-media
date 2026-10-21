@@ -21,7 +21,9 @@ async def test_send_message_uses_bot_api_and_returns_message_id() -> None:
 
     assert message_id == 42
     assert requests[0].url.path.endswith("/bottest-token/sendMessage")
-    assert json.loads(requests[0].content) == {"chat_id": "-100123", "text": "hello"}
+    assert json.loads(requests[0].content) == {
+        "chat_id": "-100123", "text": "hello", "link_preview_options": {"is_disabled": True},
+    }
 
 
 @pytest.mark.asyncio

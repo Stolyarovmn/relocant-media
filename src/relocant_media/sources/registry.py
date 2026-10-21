@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field, HttpUrl
 class ExtractionConfig(BaseModel):
     strategy: str
     status: str | None = None
+    feed_url: str | None = None
+    article_selectors: tuple[str, ...] = (".entry-content", "article .content", "article")
+    approved_hosts: tuple[str, ...] = ()
 
 
 class SourcePolicy(BaseModel):

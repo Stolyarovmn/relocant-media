@@ -15,6 +15,24 @@ from relocant_media.ai.package import (
 NOW = datetime(2026, 10, 19, 8, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("body", [
+    "Крајњи рок за завршетак изградње моста је пролеће 2027. године.",
+    "С 23 по 25 октября пройдёт такмичење у препонском јахању.",
+])
+def test_two_perfect_reviews_cannot_approve_untranslated_copy(body):
+    payload = package_payload()
+    payload["outcome"]["draft"]["body"] = body
+    from relocant_media.ai.models import RussianDraft
+
+    draft = RussianDraft.model_validate(payload["outcome"]["draft"])
+    for review in payload["reviews"]:
+        review.update(draft_sha256=draft_sha256(draft), score=100)
+    bind_context(payload)
+    result = evaluate_package(parse(payload), now=NOW)
+    assert result.status == "human_review"
+    assert result.reason == "draft_requires_russian_translation"
+
+
 def package_payload() -> dict:
     payload = {
         "version": 1, "policy_version": "subscription-editorial-v1", "city": "belgrade",

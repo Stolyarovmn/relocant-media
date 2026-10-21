@@ -19,6 +19,10 @@ from relocant_media.services.editorial import (
     _snapshot_member,
     _timestamp,
 )
+from relocant_media.services.policy_reassessment import (
+    eligible_empty_policy_hold,
+    policy_hold_audit,
+)
 from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -29,6 +33,7 @@ class PackageConflictError(ValueError):
 
 def import_package(
     session: Session, package: EditorialPackage, *, now: datetime | None = None,
+    replace_empty_hold: bool = False,
 ) -> EditorialRun:
     """Dedicated session required. Matching imports do not reset delivery receipts."""
     outcome = evaluate_package(package, now=now)
@@ -53,7 +58,10 @@ def import_package(
         ):
             raise PackageConflictError("raw evidence changed")
         existing = session.get(EditorialRun, item.id)
-        if existing is not None:
+        replacing = bool(existing is not None and replace_empty_hold
+                         and package.version == 2
+                         and eligible_empty_policy_hold(session, item.id, now=now))
+        if existing is not None and not replacing:
             # Both historical single-document runs and new bundles must keep
             # their original receipt and snapshot on an identical reimport.
             stored_primary = {key: existing.evidence.get(key) for key in evidence}
@@ -90,7 +98,9 @@ def import_package(
             "documents": snapshots,
         }
         if outcome.status == PublicationStatus.READY:
-            reason = _auto_publish_policy_reason(members, anchor_source=source)
+            reason = _auto_publish_policy_reason(
+                members, anchor_source=source, category=outcome.ranking.category,
+            )
             # Package v1 reviews bind only the primary document. Never treat
             # them as attestations covering additional event evidence.
             if reason is None and package.version == 1 and len(members) > 1:
@@ -109,14 +119,24 @@ def import_package(
             )
             session.add(post)
             session.flush()
-        run = EditorialRun(
-            raw_item_id=item.id, evidence=evidence,
-            outcome={**outcome.model_dump(mode="json"),
-                     "_package": payload, "_package_sha256": fingerprint},
-            post_id=post.id if post else None, delivery_status="pending",
-            editorial_rule_version=CURRENT_EDITORIAL_RULE_VERSION,
-        )
-        session.add(run)
+        saved_outcome = {**outcome.model_dump(mode="json"),
+                         "_package": payload, "_package_sha256": fingerprint}
+        if replacing:
+            assert existing is not None
+            saved_outcome["_previous_policy_hold"] = policy_hold_audit(existing)
+            saved_outcome["_autonomous_assessment"] = {"reviewed_package": True}
+            run = existing
+            run.evidence = evidence
+            run.outcome = saved_outcome
+            run.post_id = post.id if post else None
+            run.editorial_rule_version = CURRENT_EDITORIAL_RULE_VERSION
+        else:
+            run = EditorialRun(
+                raw_item_id=item.id, evidence=evidence, outcome=saved_outcome,
+                post_id=post.id if post else None, delivery_status="pending",
+                editorial_rule_version=CURRENT_EDITORIAL_RULE_VERSION,
+            )
+            session.add(run)
         session.commit()
         return run
     except BaseException:
