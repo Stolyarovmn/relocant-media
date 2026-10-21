@@ -7,9 +7,10 @@ from sqlalchemy import DateTime, create_engine, inspect
 from sqlalchemy.engine import Connection, Engine
 
 from relocant_media.scheduler import models as scheduler_models  # noqa: F401
+from relocant_media.storage import revision_control as revision_control_models  # noqa: F401
 from relocant_media.storage.models import Base
 
-SQLITE_SCHEMA_VERSION = 2
+SQLITE_SCHEMA_VERSION = 3
 ADDITIONS = {
     "source": {"ownership": "TEXT NOT NULL DEFAULT 'unknown'",
                "high_risk": "BOOLEAN NOT NULL DEFAULT 0",
@@ -65,7 +66,7 @@ def initialize_sqlite(path: Path, *, legacy_utc_confirmed: bool = False) -> Path
             version = original.execute("PRAGMA user_version").fetchone()[0]
             tables = {row[0] for row in original.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
-            if version not in {0, 1, SQLITE_SCHEMA_VERSION}:
+            if version not in {0, 1, 2, SQLITE_SCHEMA_VERSION}:
                 raise ValueError("unsupported SQLite schema version")
             if version == 0 and tables:
                 if not {"source", "raw_item", "post", "editorial_run"} <= tables:
@@ -92,6 +93,11 @@ def initialize_sqlite(path: Path, *, legacy_utc_confirmed: bool = False) -> Path
                     original,
                     path.with_name(path.name + ".before-v2.backup"),
                 )
+            elif version == 2:
+                backup = _reserve_backup(
+                    original,
+                    path.with_name(path.name + ".before-v3.backup"),
+                )
     engine = create_engine(f"sqlite:///{path.as_posix()}")
     try:
         with engine.begin() as connection:
@@ -117,7 +123,7 @@ def initialize_sqlite(path: Path, *, legacy_utc_confirmed: bool = False) -> Path
                     for index in table.indexes:
                         index.create(connection, checkfirst=True)
                 connection.exec_driver_sql(f"PRAGMA user_version={SQLITE_SCHEMA_VERSION}")
-            elif version == 1:
+            elif version in {1, 2}:
                 Base.metadata.create_all(connection)
                 for table in Base.metadata.tables.values():
                     for index in table.indexes:

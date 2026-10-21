@@ -27,6 +27,7 @@ relocant-media = "relocant_media.ops.media_cli:main"
 relocant-collect = "relocant_media.ops.collect_cli:main"
 relocant-candidates = "relocant_media.ops.candidates_cli:main"
 relocant-newsroom = "relocant_media.ops.newsroom_status:main"
+relocant-revision-control = "relocant_media.ops.revision_control_cli:main"
 relocant-measure = "relocant_media.analytics.cli:main"
 relocant-public-preview = "relocant_media.ops.public_preview_cli:main"
 relocant-smoke = "relocant_media.ops.smoke:main"
@@ -39,7 +40,7 @@ relocant-ads-analyze = "relocant_media.ops.ads_analysis_cli:main"
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3,<9",
-  "pytest-asyncio>=0.25,<1",
+  "pytest-asyncio<1,>=0.25",
   "ruff>=0.9,<1",
   "mypy>=1.14,<2",
   "types-PyYAML>=6.0,<7",
