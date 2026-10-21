@@ -1,8 +1,14 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from relocant_media.domain.dedup import EventCandidate, same_event
 from relocant_media.domain.shadow_dedup import (
+    LexicalSemanticScorer,
     ShadowDuplicateLabel,
+    ShadowDuplicateSignal,
+    ShadowScore,
+    ShadowScorerMetadata,
     evaluate_shadow_labels,
     find_shadow_duplicates,
 )
@@ -51,6 +57,10 @@ def test_cross_script_duplicate_is_shadow_signal_but_not_authoritative_duplicate
     assert signals[0].possible_duplicate is True
     assert signals[0].score.score >= signals[0].threshold
     assert signals[0].score.title_overlap == 1.0
+    assert signals[0].scorer == ShadowScorerMetadata(
+        scorer_id="lexical_semantic",
+        scorer_version="1",
+    )
 
 
 def test_shadow_does_not_repeat_authoritative_duplicate_or_compare_outside_window() -> None:
@@ -132,6 +142,10 @@ def test_reviewed_labels_expose_false_positive_and_false_negative_rates() -> Non
         ],
     )
 
+    assert metrics["scorer_id"] == "lexical_semantic"
+    assert metrics["scorer_version"] == "1"
+    assert metrics["embedding_model"] is None
+    assert metrics["embedding_dimension"] is None
     assert metrics["true_positive"] == 1
     assert metrics["false_positive"] == 0
     assert metrics["false_negative"] == 1
@@ -140,3 +154,52 @@ def test_reviewed_labels_expose_false_positive_and_false_negative_rates() -> Non
     assert metrics["recall"] == 0.5
     assert metrics["false_positive_rate"] == 0.0
     assert metrics["false_negative_rate"] == 0.5
+
+
+def test_embedding_metadata_requires_model_and_dimension_together() -> None:
+    with pytest.raises(ValueError, match="declared together"):
+        ShadowScorerMetadata(
+            scorer_id="embedding",
+            scorer_version="1",
+            embedding_model="example-model",
+        )
+
+    with pytest.raises(ValueError, match="positive"):
+        ShadowScorerMetadata(
+            scorer_id="embedding",
+            scorer_version="1",
+            embedding_model="example-model",
+            embedding_dimension=0,
+        )
+
+
+def test_mixed_scorer_spaces_cannot_be_evaluated_together() -> None:
+    score = ShadowScore(0.9, 0.9, 0.9, 0.9, 0.9)
+    signals = [
+        ShadowDuplicateSignal(
+            1,
+            2,
+            "a",
+            "b",
+            score,
+            0.68,
+            LexicalSemanticScorer.metadata,
+        ),
+        ShadowDuplicateSignal(
+            3,
+            4,
+            "c",
+            "d",
+            score,
+            0.68,
+            ShadowScorerMetadata(
+                scorer_id="embedding",
+                scorer_version="1",
+                embedding_model="model-a",
+                embedding_dimension=384,
+            ),
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="different scorer spaces"):
+        evaluate_shadow_labels(signals, [])
