@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from relocant_media.config import settings
+from relocant_media.services.ad_review import build_suggested_post_review_control
 from relocant_media.services.correction_control import build_reader_correction_control
 from relocant_media.services.newsroom_control import build_newsroom_inbox
 from relocant_media.services.shadow_duplicates import build_shadow_duplicate_report
@@ -96,6 +97,11 @@ def main() -> None:
                 limit=args.limit,
             )
             payload["reader_correction_control"] = build_reader_correction_control(
+                session,
+                city=args.city,
+                limit=args.limit,
+            )
+            payload["suggested_post_review_control"] = build_suggested_post_review_control(
                 session,
                 city=args.city,
                 limit=args.limit,

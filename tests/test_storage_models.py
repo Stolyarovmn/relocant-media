@@ -1,4 +1,5 @@
 from relocant_media.scheduler.models import SchedulerLease, SchedulerRun  # noqa: F401
+from relocant_media.storage import ad_review as ad_review_models  # noqa: F401
 from relocant_media.storage import correction_control as correction_control_models  # noqa: F401
 from relocant_media.storage import revision_control as revision_control_models  # noqa: F401
 from relocant_media.storage.models import Base
@@ -9,6 +10,7 @@ def test_expected_tables_are_registered() -> None:
         "source_revision",
         "source_revision_decision",
         "reader_correction_decision",
+        "suggested_post_review",
         "source",
         "editorial_run",
         "editorial_experiment",

@@ -7,7 +7,12 @@ from sqlalchemy import create_engine
 
 from relocant_media.storage.models import Base
 from relocant_media.storage.primary_lock import primary_lock
-from relocant_media.storage.sqlite_schema import ADDITIONS, initialize_sqlite, verify_sqlite_schema
+from relocant_media.storage.sqlite_schema import (
+    ADDITIONS,
+    SQLITE_SCHEMA_VERSION,
+    initialize_sqlite,
+    verify_sqlite_schema,
+)
 
 
 def legacy_database(path):
@@ -20,6 +25,7 @@ def legacy_database(path):
         for table, columns in ADDITIONS.items():
             for column in columns:
                 connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+        connection.execute("DROP TABLE suggested_post_review")
         connection.execute("DROP TABLE reader_correction_decision")
         connection.execute("DROP TABLE source_revision_decision")
         connection.execute("DROP TABLE source_revision")
@@ -42,7 +48,7 @@ def test_legacy_schema_keeps_ids_receipts_and_backup(tmp_path):
     backup = initialize_sqlite(path, legacy_utc_confirmed=True)
     assert backup is not None and backup.is_file()
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
         assert connection.execute("SELECT id,telegram_message_id,editorial_rule_version FROM post"
                                   ).fetchone() == (3, 9, "legacy-v1")
         assert connection.execute(
@@ -58,19 +64,21 @@ def test_legacy_schema_keeps_ids_receipts_and_backup(tmp_path):
             "experiment_assignment",
             "source_revision_decision",
             "reader_correction_decision",
+            "suggested_post_review",
         } <= tables
     with sqlite3.connect(backup) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
     assert initialize_sqlite(path) is None
 
 
-def test_v1_schema_upgrades_to_v4_with_backup_and_keeps_queue(tmp_path):
+def test_v1_schema_upgrades_to_current_with_backup_and_keeps_queue(tmp_path):
     path = tmp_path / "v1.sqlite3"
     engine = create_engine(f"sqlite:///{path}")
     Base.metadata.create_all(engine)
     engine.dispose()
     with sqlite3.connect(path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DROP TABLE suggested_post_review")
         connection.execute("DROP TABLE reader_correction_decision")
         connection.execute("DROP TABLE source_revision_decision")
         connection.execute("DROP TABLE experiment_assignment")
@@ -94,24 +102,21 @@ def test_v1_schema_upgrades_to_v4_with_backup_and_keeps_queue(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='table' AND name='editorial_experiment'"
         ).fetchone() is None
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
         assert connection.execute("SELECT id FROM raw_item").fetchone() == (7,)
         assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='editorial_experiment'"
-        ).fetchone() == ("editorial_experiment",)
-        assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name='reader_correction_decision'"
-        ).fetchone() == ("reader_correction_decision",)
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='suggested_post_review'"
+        ).fetchone() == ("suggested_post_review",)
 
 
-def test_v2_schema_upgrades_to_v4_with_backup_and_keeps_queue(tmp_path):
+def test_v2_schema_upgrades_to_current_with_backup_and_keeps_queue(tmp_path):
     path = tmp_path / "v2.sqlite3"
     engine = create_engine(f"sqlite:///{path}")
     Base.metadata.create_all(engine)
     engine.dispose()
     with sqlite3.connect(path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DROP TABLE suggested_post_review")
         connection.execute("DROP TABLE reader_correction_decision")
         connection.execute("DROP TABLE source_revision_decision")
         connection.execute("PRAGMA user_version=2")
@@ -134,25 +139,22 @@ def test_v2_schema_upgrades_to_v4_with_backup_and_keeps_queue(tmp_path):
             "AND name='source_revision_decision'"
         ).fetchone() is None
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
         assert connection.execute("SELECT id FROM raw_item").fetchone() == (8,)
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name='source_revision_decision'"
-        ).fetchone() == ("source_revision_decision",)
-        assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name='reader_correction_decision'"
-        ).fetchone() == ("reader_correction_decision",)
+            "AND name='suggested_post_review'"
+        ).fetchone() == ("suggested_post_review",)
 
 
-def test_v3_schema_upgrades_to_v4_with_backup_and_keeps_queue(tmp_path):
+def test_v3_schema_upgrades_to_current_with_backup_and_keeps_queue(tmp_path):
     path = tmp_path / "v3.sqlite3"
     engine = create_engine(f"sqlite:///{path}")
     Base.metadata.create_all(engine)
     engine.dispose()
     with sqlite3.connect(path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DROP TABLE suggested_post_review")
         connection.execute("DROP TABLE reader_correction_decision")
         connection.execute("PRAGMA user_version=3")
         connection.execute(
@@ -170,12 +172,44 @@ def test_v3_schema_upgrades_to_v4_with_backup_and_keeps_queue(tmp_path):
             "AND name='reader_correction_decision'"
         ).fetchone() is None
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
         assert connection.execute("SELECT id FROM submission").fetchone() == (12,)
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name='reader_correction_decision'"
-        ).fetchone() == ("reader_correction_decision",)
+            "AND name='suggested_post_review'"
+        ).fetchone() == ("suggested_post_review",)
+
+
+def test_v4_schema_upgrades_to_v5_with_backup_and_keeps_ad_request(tmp_path):
+    path = tmp_path / "v4.sqlite3"
+    engine = create_engine(f"sqlite:///{path}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DROP TABLE suggested_post_review")
+        connection.execute("PRAGMA user_version=4")
+        connection.execute(
+            "INSERT INTO ad_request(id,payload,status) "
+            "VALUES(21,'{\"city\":\"belgrade\",\"text\":\"private\"}','new')"
+        )
+
+    backup = initialize_sqlite(path)
+    assert backup is not None and backup.name.endswith(".before-v5.backup")
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("SELECT id FROM ad_request").fetchone() == (21,)
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='suggested_post_review'"
+        ).fetchone() is None
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
+        assert connection.execute("SELECT id FROM ad_request").fetchone() == (21,)
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='suggested_post_review'"
+        ).fetchone() == ("suggested_post_review",)
 
 
 def test_ambiguous_legacy_dates_are_not_silently_assigned_utc(tmp_path):
@@ -256,7 +290,7 @@ def test_checked_snapshot_contains_committed_wal_and_does_not_overwrite(tmp_path
         assert manifest["upload_ready"]
         with sqlite3.connect(snapshot) as restored:
             assert restored.execute("SELECT id FROM source").fetchone()[0] == 's'
-            assert restored.execute("PRAGMA user_version").fetchone()[0] == 4
+            assert restored.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
         with pytest.raises(ValueError):
             create_snapshot(path, output)
     finally:
