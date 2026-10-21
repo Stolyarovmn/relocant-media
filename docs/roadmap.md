@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #71.
+Состояние на 22 октября 2026 года после PR #76.
 
 ## Этап 0 — основа и проверки
 
@@ -10,9 +10,12 @@
 - [x] Bot API dispatcher и идемпотентность входящих обновлений.
 - [x] Event-level dedup, evidence bundle, source policy и повторная сверка доказательств перед доставкой.
 - [x] `editorial_rule_version` в редакционных запусках/публикациях и разрез аналитики по версии правил.
-- [x] Добавить проверенные официальные shadow-snapshots плановых отключений воды BVK и электричества EDS для Белграда; `auto_publish=false` до отдельного структурированного parser/regression-набора.
-- [x] Добавить проверенные shadow-sources Parking servis и Beogradske elektrane для изменений парковки и работ теплосети; `auto_publish=false` до проверки полнотекстовой датированной экстракции.
+- [x] Добавить проверенные официальные shadow-snapshots плановых отключений воды BVK и электричества EDS для Белграда.
+- [x] Добавить структурированные collectors BVK/EDS с regression fixtures и внутренними canonical identities там, где это требуется.
+- [x] Добавить проверенные shadow-sources Parking servis и Beogradske elektrane для изменений парковки и работ теплосети.
+- [x] Расширить discovery на популярные Telegram-каналы Сербии без использования их текста как evidence.
 - [ ] Продолжать проверку покрытия и актуальности реальных источников.
+- [ ] Включить техническую защиту `main`: required `ci`, PR-only changes, запрет force-push/delete. На 22.10.2026 GitHub сообщает `protected=false`; текущему GitHub App недоступен admin endpoint. См. [GITHUB_PROTECTION.md](GITHUB_PROTECTION.md).
 
 ## Этап 1 — автономная серверная редакция
 
@@ -28,6 +31,7 @@
 - [x] Gemini primary → подписочный ChatGPT fallback как внешний резервный процесс.
 - [x] Проверяемые изображения/альбомы и выбор обложки из первоисточника.
 - [x] Публичный режим канала без `[тестовый запуск]`, формируемый до ревью.
+- [x] Компактная публичная ссылка «Источник» через Telegram text-link entities вместо длинного raw URL в сообщении/caption.
 - [x] Защита доставки `sending/sent/uncertain` без автоматического повторения неопределённой отправки.
 - [x] `cycle-audit` после серверного прохода.
 - [x] Единый read-only newsroom state/control inbox поверх существующих `raw_item/editorial_run/post/source_revision/submission`, без второй очереди; см. [NEWSROOM_CONTROL.md](NEWSROOM_CONTROL.md).

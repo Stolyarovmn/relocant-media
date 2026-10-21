@@ -1,12 +1,12 @@
 # Защита ветки `main`
 
-Состояние на 21.10.2026: GitHub branch object сообщает `protected=false`, required
-status checks выключены. Подключённый к ChatGPT GitHub App умеет читать ветку и
-работать с файлами/PR, но административный endpoint
-`GET /repos/Stolyarovmn/relocant-media/branches/main/protection` отвечает
-`403 Resource not accessible by integration`. Поэтому эта настройка не должна
-считаться включённой, пока владелец не применит её через GitHub UI или credential
-с repository administration permission.
+Состояние повторно проверено 22.10.2026 на `main` `090891a3`: GitHub branch object
+сообщает `protected=false`, required status checks выключены. Подключённый к ChatGPT
+GitHub App умеет читать ветку и работать с файлами/PR, но административный endpoint
+`GET /repos/Stolyarovmn/relocant-media/branches/main/protection` по-прежнему отвечает
+`403 Resource not accessible by integration`. Поэтому эта настройка не должна считаться
+включённой, пока владелец не применит её через GitHub UI или credential с repository
+administration permission.
 
 ## Требуемая политика
 
