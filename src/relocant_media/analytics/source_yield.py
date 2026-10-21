@@ -158,7 +158,10 @@ def build_source_yield_report(
             },
         },
         "limitations": [
-            "Attribution uses the EditorialRun anchor raw item; supporting event sources are not credited.",
+            (
+                "Attribution uses the EditorialRun anchor raw item; supporting event sources "
+                "are not credited."
+            ),
             "The window is based on raw_item.ingested_at, not source publication time.",
             "Public sends require delivery_status=sent and a positive Post.telegram_message_id.",
             "Staging receipts are reported separately and never counted as public sends.",
