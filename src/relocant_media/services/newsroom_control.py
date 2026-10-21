@@ -42,14 +42,14 @@ _STATE_PRIORITY = {
     NewsroomState.NEEDS_REVERIFY: 1,
     NewsroomState.SENDING: 2,
     NewsroomState.FAILED: 3,
-    NewsroomState.REVIEW: 4,
-    NewsroomState.READY: 5,
-    NewsroomState.EVIDENCE_READY: 6,
-    NewsroomState.DISCOVERED: 7,
-    NewsroomState.HELD: 8,
-    NewsroomState.EXPIRED: 9,
-    NewsroomState.SENT: 10,
-    NewsroomState.DRAFTING: 11,
+    NewsroomState.DRAFTING: 4,
+    NewsroomState.REVIEW: 5,
+    NewsroomState.READY: 6,
+    NewsroomState.EVIDENCE_READY: 7,
+    NewsroomState.DISCOVERED: 8,
+    NewsroomState.HELD: 9,
+    NewsroomState.EXPIRED: 10,
+    NewsroomState.SENT: 11,
 }
 
 
@@ -119,7 +119,9 @@ def _state(
             return NewsroomState.UNCERTAIN, "delivery_uncertain"
         if run.delivery_status == "sending":
             return NewsroomState.SENDING, "delivery_reconciliation_required"
-        if run.delivery_status == "sent" or (post is not None and post.telegram_message_id is not None):
+        if run.delivery_status == "sent" or (
+            post is not None and post.telegram_message_id is not None
+        ):
             return NewsroomState.SENT, "sent"
 
         status = _review_status(run, post)
@@ -142,7 +144,10 @@ def _state(
     return NewsroomState.DISCOVERED, "awaiting_normalization"
 
 
-def _retry_info(state: NewsroomState, last_failure: dict[str, object] | None) -> dict[str, object]:
+def _retry_info(
+    state: NewsroomState,
+    last_failure: dict[str, object] | None,
+) -> dict[str, object]:
     if state in {NewsroomState.SENDING, NewsroomState.UNCERTAIN}:
         return {
             "automatic_retry": False,
@@ -153,7 +158,16 @@ def _retry_info(state: NewsroomState, last_failure: dict[str, object] | None) ->
             "automatic_retry": False,
             "policy": "fresh_review_required",
         }
-    if state == NewsroomState.FAILED or last_failure is not None:
+    if state == NewsroomState.FAILED:
+        return {
+            "automatic_retry": True,
+            "policy": "scheduler_or_operator",
+        }
+    if last_failure is not None and state in {
+        NewsroomState.DISCOVERED,
+        NewsroomState.EVIDENCE_READY,
+        NewsroomState.HELD,
+    }:
         return {
             "automatic_retry": True,
             "policy": "scheduler_or_operator",
@@ -183,12 +197,15 @@ def build_newsroom_inbox(
             "city": city,
             "generated_at": datetime.now(UTC).isoformat(),
             "counts": {},
+            "total_events": 0,
+            "returned_events": 0,
             "items": [],
         }
 
     items_by_id = {item.id: (item, source) for item, source in rows}
+    sources_by_id = {source.id: source for _item, source in rows}
     raw_ids = list(items_by_id)
-    source_ids = {source.id for _item, source in rows}
+    source_ids = set(sources_by_id)
 
     runs = {
         run.raw_item_id: run
@@ -197,10 +214,11 @@ def build_newsroom_inbox(
         )
     }
     post_ids = {run.post_id for run in runs.values() if run.post_id is not None}
-    posts = {
-        post.id: post
-        for post in session.scalars(select(Post).where(Post.id.in_(post_ids)))
-    } if post_ids else {}
+    posts = (
+        {post.id: post for post in session.scalars(select(Post).where(Post.id.in_(post_ids)))}
+        if post_ids
+        else {}
+    )
 
     revisions_by_raw: dict[int, list[SourceRevision]] = defaultdict(list)
     for revision in session.scalars(
@@ -233,7 +251,10 @@ def build_newsroom_inbox(
     control_items: list[dict[str, Any]] = []
     for cluster in clusters:
         member_ids = [candidate.raw_item_id for candidate in cluster]
-        reviewed_member = next((candidate for candidate in cluster if candidate.raw_item_id in runs), None)
+        reviewed_member = next(
+            (candidate for candidate in cluster if candidate.raw_item_id in runs),
+            None,
+        )
         anchor_candidate = reviewed_member or cluster[0]
         anchor, anchor_source = items_by_id[anchor_candidate.raw_item_id]
         run = runs.get(anchor.id)
@@ -257,27 +278,32 @@ def build_newsroom_inbox(
             for raw_id in member_ids
             for submission in submissions_by_raw.get(raw_id, [])
         }
-        source_summaries = []
-        for source_id in sorted({items_by_id[raw_id][1].id for raw_id in member_ids}):
-            source = next(source for _item, source in rows if source.id == source_id)
-            source_summaries.append({
-                "source_id": source.id,
-                "name": source.name,
-                "ownership": source.ownership,
-                "high_risk": source.high_risk,
-                "auto_publish": source.auto_publish,
-                "enabled": source.enabled,
-            })
+        member_source_ids = {items_by_id[raw_id][1].id for raw_id in member_ids}
+        source_summaries = [
+            {
+                "source_id": sources_by_id[source_id].id,
+                "name": sources_by_id[source_id].name,
+                "ownership": sources_by_id[source_id].ownership,
+                "high_risk": sources_by_id[source_id].high_risk,
+                "auto_publish": sources_by_id[source_id].auto_publish,
+                "enabled": sources_by_id[source_id].enabled,
+            }
+            for source_id in sorted(member_source_ids)
+        ]
 
         failure_candidates = [
             last_failure_by_source[source_id]
-            for source_id in {items_by_id[raw_id][1].id for raw_id in member_ids}
+            for source_id in member_source_ids
             if source_id in last_failure_by_source
         ]
-        latest_failure = max(
-            failure_candidates,
-            key=lambda failure: _utc(failure.occurred_at) or datetime.min.replace(tzinfo=UTC),
-            default=None,
+        latest_failure = (
+            max(
+                failure_candidates,
+                key=lambda failure: _utc(failure.occurred_at)
+                or datetime.min.replace(tzinfo=UTC),
+            )
+            if failure_candidates
+            else None
         )
         failure_summary: dict[str, object] | None = None
         if latest_failure is not None:
@@ -301,42 +327,47 @@ def build_newsroom_inbox(
                 stored_ids = [
                     document.get("raw_item_id")
                     for document in documents
-                    if isinstance(document, dict) and type(document.get("raw_item_id")) is int
+                    if isinstance(document, dict)
+                    and type(document.get("raw_item_id")) is int
                 ]
                 if stored_ids:
                     evidence_ids = [int(raw_id) for raw_id in stored_ids]
 
-        control_items.append({
-            "event_key": resolved_event_key,
-            "state": state.value,
-            "reason_code": reason_code,
-            "raw_item_ids": member_ids,
-            "anchor_raw_item_id": anchor.id,
-            "title": anchor.title,
-            "published_at": _iso(anchor.published_at),
-            "review_status": _review_status(run, post),
-            "delivery_status": run.delivery_status if run is not None else "not_started",
-            "post_id": post.id if post is not None else None,
-            "telegram_message_id": post.telegram_message_id if post is not None else None,
-            "editorial_rule_version": run.editorial_rule_version if run is not None else None,
-            "sources": source_summaries,
-            "evidence": {
-                "raw_item_ids": evidence_ids,
-                "document_count": len(evidence_ids),
-            },
-            "source_revision_count": len(revisions),
-            "submissions": [
-                {
-                    "id": submission.id,
-                    "kind": submission.kind,
-                    "status": submission.status,
-                    "created_at": _iso(submission.created_at),
-                }
-                for submission in sorted(submissions.values(), key=lambda item: item.id)
-            ],
-            "last_error": failure_summary,
-            "retry": _retry_info(state, failure_summary),
-        })
+        control_items.append(
+            {
+                "event_key": resolved_event_key,
+                "state": state.value,
+                "reason_code": reason_code,
+                "raw_item_ids": member_ids,
+                "anchor_raw_item_id": anchor.id,
+                "title": anchor.title,
+                "published_at": _iso(anchor.published_at),
+                "review_status": _review_status(run, post),
+                "delivery_status": run.delivery_status if run is not None else "not_started",
+                "post_id": post.id if post is not None else None,
+                "telegram_message_id": post.telegram_message_id if post is not None else None,
+                "editorial_rule_version": (
+                    run.editorial_rule_version if run is not None else None
+                ),
+                "sources": source_summaries,
+                "evidence": {
+                    "raw_item_ids": evidence_ids,
+                    "document_count": len(evidence_ids),
+                },
+                "source_revision_count": len(revisions),
+                "submissions": [
+                    {
+                        "id": submission.id,
+                        "kind": submission.kind,
+                        "status": submission.status,
+                        "created_at": _iso(submission.created_at),
+                    }
+                    for submission in sorted(submissions.values(), key=lambda item: item.id)
+                ],
+                "last_error": failure_summary,
+                "retry": _retry_info(state, failure_summary),
+            }
+        )
 
     control_items.sort(
         key=lambda item: (
