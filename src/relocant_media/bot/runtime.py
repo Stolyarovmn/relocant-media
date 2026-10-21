@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -9,7 +10,7 @@ from relocant_media.bot.api import TelegramBot
 from relocant_media.bot.intake import handle_private_message
 from relocant_media.bot.updates import UpdateKind, classify_update, update_id
 from relocant_media.services.moderation import ModerationAction as RuleAction
-from relocant_media.services.moderation import rule_based_moderation
+from relocant_media.services.moderation import evaluate_moderation
 from relocant_media.storage.models import ModerationAction, TelegramUpdateReceipt
 
 
@@ -131,19 +132,33 @@ class TelegramRuntime:
         if message_id is None or not isinstance(text_value, str):
             return "ignored"
 
-        decision = rule_based_moderation(text_value)
+        existing = self._session.scalar(
+            select(ModerationAction)
+            .where(
+                ModerationAction.telegram_chat_id == chat_id,
+                ModerationAction.telegram_message_id == message_id,
+            )
+            .order_by(ModerationAction.id)
+            .limit(1)
+        )
+        if existing is not None:
+            return f"moderation_{existing.action}"
+
+        decision = evaluate_moderation(text_value)
         self._session.add(
             ModerationAction(
                 city=self._city or None,
                 telegram_chat_id=chat_id,
                 telegram_message_id=message_id,
-                action=decision.value,
-                reason="rules-v1",
+                action=decision.action.value,
+                reason=decision.audit_reason,
                 model=None,
             )
         )
+        # Persist the decision before a destructive Telegram call. If the network outcome is
+        # uncertain, a replay of the same message will not issue a second delete.
         self._session.commit()
 
-        if decision is RuleAction.DELETE:
+        if decision.action is RuleAction.DELETE:
             await self._bot.delete_message(chat_id, message_id)
-        return f"moderation_{decision.value}"
+        return f"moderation_{decision.action.value}"
