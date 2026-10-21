@@ -6,7 +6,7 @@ import re
 from urllib.parse import urlsplit
 
 SOURCE_LABEL = "Источник"
-_SOURCE_LINE = re.compile(r"(?m)^Источник:\s*(https://\S+)\s*$")
+_SOURCE_LINE = re.compile(r"(?m)^Источник:[ \t]*(https://\S+?)[ \t]*$")
 
 
 def _utf16_units(value: str) -> int:
