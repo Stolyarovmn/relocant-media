@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from relocant_media.ai.audience_policy import AUDIENCE_MISMATCH_FLAG
 from relocant_media.ai.independent_reviews import reviewed_package
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.ai.package import EditorialPackage, PackageDraft, canonical_json
@@ -39,6 +40,9 @@ def review_with_repairs(
                 audit({**entry, "repair_attempt": repair_attempt})
 
         current = reviewed_package(current, provider, live_documents, audit=record)
+        if any(AUDIENCE_MISMATCH_FLAG in review.flags for review in current.reviews):
+            # Rewording cannot manufacture a reason for the audience to care.
+            return current
         language_reason = draft_language_reason(current.outcome.draft.title,
                                                current.outcome.draft.body)
         date_reason=draft_date_reason(current.outcome.draft.title,current.outcome.draft.body)

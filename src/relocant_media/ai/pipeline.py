@@ -19,6 +19,7 @@ from relocant_media.ai.prompts import (
     VERIFY_SYSTEM,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
+from relocant_media.domain.audience import audience_relevance_reason
 from relocant_media.domain.freshness import publication_date_context
 from relocant_media.domain.policy import requires_human_review
 
@@ -110,6 +111,15 @@ class EditorialPipeline:
     ) -> EditorialOutcome:
         if not documents:
             raise ValueError("at least one evidence document is required")
+
+        if city == "belgrade":
+            reason = next((reason for document in documents
+                           if (reason := audience_relevance_reason(document.title, document.body))),
+                          None)
+            if reason:
+                return EditorialOutcome(status=PublicationStatus.SKIPPED, reason=reason,
+                    ranking=RankingResult(should_process=False, relevance=0, category="events",
+                                          confidence=1, rationale=reason), confidence=1)
 
         evidence = _documents_payload(documents)
         ranking = _ask(

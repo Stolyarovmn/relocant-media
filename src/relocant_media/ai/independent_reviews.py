@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from relocant_media.ai.audience_policy import AUDIENCE_MISMATCH_FLAG, RELOCANT_AUDIENCE_POLICY
 from relocant_media.ai.channel_style import CHANNEL_DRAFT_STYLE
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.ai.package import (
@@ -97,7 +98,10 @@ def reviewed_package(
         if role == "facts":
             instructions += (
                 "Роль facts: проверь каждое утверждение, цитаты и полный комплект источников, "
-                "точность заголовка и отсутствие неподтверждённых выводов."
+                "точность заголовка и отсутствие неподтверждённых выводов. "
+                "Проверь также существенные пропуски: ограничения участия по полу, возрасту, "
+                "месту жительства или членству, если они указаны в источнике. Анонс для "
+                "определённой группы нельзя подать как доступный всем."
             )
         else:
             instructions += (
@@ -105,7 +109,7 @@ def reviewed_package(
                 "Обязательная рубрика: local_relevance, practical_value, timeliness, clarity "
                 "каждая целое 0–4. score = round(100 * сумма оценок / 16)."
             )
-            instructions += CHANNEL_DRAFT_STYLE
+            instructions += CHANNEL_DRAFT_STYLE + RELOCANT_AUDIENCE_POLICY
         raw = provider.generate_json(
             task=f"independent_{role}", system_instruction=instructions,
             prompt=canonical_json({
@@ -124,6 +128,11 @@ def reviewed_package(
         score = response.score
         if isinstance(response, _UtilityResponse):
             score = round(100 * sum(response.rubric.model_dump().values()) / 16)
+            if (response.verdict == "approve" and
+                    min(response.rubric.local_relevance, response.rubric.practical_value) < 3):
+                response = response.model_copy(update={
+                    "verdict": "hold", "flags": [*response.flags, AUDIENCE_MISMATCH_FLAG],
+                })
         if audit is not None:
             audit({"role": role, **response.model_dump(), "computed_score": score,
                    "context_sha256": context_hash, "draft_sha256": draft_hash})

@@ -28,6 +28,10 @@ def reviewed(tmp_path, request, monkeypatch):
         item = session.get(RawItem, item_id)
         source = session.get(Source, item.source_id)
         payload = package_payload()
+        if getattr(request, "param", "test") == "legacy_procurement":
+            item.body += " Бесплатная мастерская по государственным закупкам 30 октября."
+            payload["evidence"]["body"] = item.body
+            session.commit()
         payload.update(version=2, policy_version="subscription-editorial-v2", raw_item_id=item_id)
         if not public:
             payload["outcome"]["draft"]["title"] = (
@@ -63,6 +67,17 @@ class FakePublisher:
 async def send(session, run, publisher, **kwargs):
     return await deliver_reviewed(session, run.raw_item_id, publisher,
                                   target_channel_id=APPROVED_CHANNEL_ID, enabled=True, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reviewed", ["legacy_procurement"], indirect=True)
+async def test_old_approved_package_cannot_bypass_new_audience_rule(reviewed):
+    session, run = reviewed
+    publisher = FakePublisher()
+    with pytest.raises(DeliveryBlockedError, match="audience policy"):
+        await send(session, run, publisher)
+    assert not publisher.calls
+    assert run.delivery_status == "pending"
 
 
 @pytest.mark.asyncio
