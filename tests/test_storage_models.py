@@ -9,6 +9,7 @@ def test_expected_tables_are_registered() -> None:
     assert set(Base.metadata.tables) == {
         "source_revision",
         "source_revision_decision",
+        "source_revision_materialization",
         "reader_correction_decision",
         "suggested_post_review",
         "source",
