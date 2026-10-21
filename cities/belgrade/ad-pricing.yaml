@@ -1,0 +1,10 @@
+version: ad-pricing-v1
+configured: false
+currency: null
+packages: {}
+approval:
+  mode: owner_always
+
+# No monetary defaults are allowed here. The owner must explicitly configure currency,
+# package prices and bounded approval thresholds before any commercial price candidate
+# can be produced. Until then the pricing service returns owner_configuration_required.

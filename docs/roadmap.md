@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #65.
+Состояние на 21 октября 2026 года после PR #66.
 
 ## Этап 0 — основа и проверки
 
@@ -67,7 +67,8 @@ MTProto не является условием работы редакции и�
 - [x] Хранение и приём advertiser requests через Bot API.
 - [x] Базовый prompt review рекламного кандидата с запретом автоодобрения рискованных категорий.
 - [x] Suggested-post review flow: append-only review точной версии `AdRequest.payload`, deterministic safety floor, privacy-safe control plane и обязательный owner approval; см. [SUGGESTED_POST_REVIEW.md](SUGGESTED_POST_REVIEW.md).
-- [ ] Политика цен и пороги согласования владельцем.
+- [x] Fail-closed pricing/approval framework: никакой цены без явной rate card владельца; configured policy связывается с актуальным suggested-post review и exact policy hash; см. [AD_PRICING.md](AD_PRICING.md).
+- [ ] Владелец должен явно задать реальные rate card: валюту, package IDs, base prices и допустимые bounds. В репозитории эти значения сейчас намеренно отсутствуют.
 - [x] Read-only Telegram Ads analyst в отдельном trust domain: offline/imported snapshots → deterministic metrics → `proposed_only` recommendations, без spend/bid/budget mutation API; см. [ADS_ANALYST.md](ADS_ANALYST.md).
 - [ ] Только после отдельной политики владельца рассматривать executor для bid/budget/spend; любые изменения денег остаются за `OWNER_APPROVAL` до явного bounded policy.
 - [ ] Проверить полный рекламный процесс в staging без изменения реальных бюджетов.
