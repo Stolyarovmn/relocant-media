@@ -349,6 +349,14 @@ class EditorialService:
             raise DeliveryBlockedError("source publication time changed after verification")
 
         members = self._validate_evidence_bundle(run, anchor_item=item, anchor_source=source)
+        from relocant_media.domain.audience import audience_relevance_reason
+
+        if source.city == "belgrade":
+            for member, _ in members:
+                audience_reason = audience_relevance_reason(member.title, member.body)
+                if audience_reason:
+                    raise DeliveryBlockedError(
+                        f"audience policy blocks delivery: {audience_reason}")
         if "_package" in run.outcome and package.version == 2:
             assert package.event is not None
             # A new source, changed membership or policy requires fresh bundle reviews.
