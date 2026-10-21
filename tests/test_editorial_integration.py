@@ -20,6 +20,7 @@ from test_editorial_pipeline import (
 from relocant_media.ai.models import ClaimSet, EvidenceCitation, ExtractedClaim
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.api import TelegramBotAPI
+from relocant_media.bot.formatting import compact_source_link
 from relocant_media.bot.publisher import StagingTelegramPublisher
 from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.collectors.beograd_article import BelgradeArticleCollector
@@ -92,9 +93,12 @@ async def test_db_to_structured_ai_to_fake_bot_api_is_durable_and_idempotent(
         again = await service.deliver(item_id, publisher, dry_run=False)
     assert sent.message_id == again.message_id == 42
     assert len(requests) == 1
+    visible, entities = compact_source_link(preview.text)
     assert json.loads(requests[0].content) == {
-        "chat_id": "-100123", "text": preview.text,
+        "chat_id": "-100123",
+        "text": visible,
         "link_preview_options": {"is_disabled": True},
+        "entities": list(entities),
     }
     assert editorial_session.scalar(select(func.count()).select_from(EditorialRun)) == 1
     post = editorial_session.scalar(select(Post))
