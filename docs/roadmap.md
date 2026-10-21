@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #66.
+Состояние на 21 октября 2026 года после PR #67.
 
 ## Этап 0 — основа и проверки
 
@@ -71,4 +71,4 @@ MTProto не является условием работы редакции и�
 - [ ] Владелец должен явно задать реальные rate card: валюту, package IDs, base prices и допустимые bounds. В репозитории эти значения сейчас намеренно отсутствуют.
 - [x] Read-only Telegram Ads analyst в отдельном trust domain: offline/imported snapshots → deterministic metrics → `proposed_only` recommendations, без spend/bid/budget mutation API; см. [ADS_ANALYST.md](ADS_ANALYST.md).
 - [ ] Только после отдельной политики владельца рассматривать executor для bid/budget/spend; любые изменения денег остаются за `OWNER_APPROVAL` до явного bounded policy.
-- [ ] Проверить полный рекламный процесс в staging без изменения реальных бюджетов.
+- [x] Synthetic staging dry-run рекламного процесса: `/ad` intake → candidate review → fail-closed pricing → read-only Ads analytics, без сети, Telegram mutation и денежных операций. При незаданной rate card ожидаемый результат — `owner_configuration_required`; см. [AD_STAGING_E2E.md](AD_STAGING_E2E.md).
