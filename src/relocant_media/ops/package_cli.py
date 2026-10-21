@@ -23,6 +23,7 @@ class _DisabledAIProvider:
 async def _persist(package: EditorialPackage, transport: str) -> dict[str, object]:
     from relocant_media.ai.pipeline import EditorialPipeline
     from relocant_media.bot.api import TelegramBotAPI
+    from relocant_media.bot.formatting import compact_source_link
     from relocant_media.bot.publisher import StagingTelegramPublisher
     from relocant_media.config import settings
     from relocant_media.services.editorial import EditorialService
@@ -38,7 +39,9 @@ async def _persist(package: EditorialPackage, transport: str) -> dict[str, objec
             return {**result, "delivery": "policy_blocked"}
         service = EditorialService(session, EditorialPipeline(_DisabledAIProvider()))
         preview = await service.deliver(package.raw_item_id, dry_run=True)
-        result["delivery"] = asdict(preview)
+        delivery = asdict(preview)
+        delivery["text"] = compact_source_link(preview.text)[0]
+        result["delivery"] = delivery
         if transport == "fake":
             requests: list[dict[str, object]] = []
 
