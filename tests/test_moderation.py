@@ -15,6 +15,13 @@ def test_obvious_scam_marker_is_deleted() -> None:
     assert rule_based_moderation("Доход 100% доход без риска") is ModerationAction.DELETE
 
 
+def test_direct_message_earnings_spam_keeps_old_delete_behavior() -> None:
+    decision = evaluate_moderation("Пишите в лс заработок")
+
+    assert decision.action is ModerationAction.DELETE
+    assert "direct_message_earnings_spam" in decision.reason_codes
+
+
 def test_risk_free_income_claim_is_deleted_but_generic_risk_phrase_is_not() -> None:
     assert evaluate_moderation("Инвестиции без риска, гарантированный доход").action is (
         ModerationAction.DELETE
