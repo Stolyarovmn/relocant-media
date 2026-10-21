@@ -28,6 +28,16 @@ Shadow слой даёт измеряемый сигнал `possible_duplicate`,
 если реальные размеченные данные покажут необходимость embeddings, новый scorer можно
 подключить отдельно, не меняя `same_event()`.
 
+Каждый scorer обязан объявить стабильный `scorer_id` и `scorer_version`. Embedding-backed
+scorer дополнительно обязан объявить одновременно `embedding_model` и
+`embedding_dimension`. Эти поля входят в каждый shadow signal/report и в результаты
+`evaluate_shadow_labels()`. Сигналы из разных scorer spaces нельзя объединять в одной
+оценке: evaluator завершится ошибкой вместо молчаливого смешивания несовместимых score.
+
+Это важно до подключения embeddings: смена модели, размерности или алгоритма меняет само
+пространство similarity, поэтому исторические precision/recall нельзя считать напрямую
+сопоставимыми без явной версии scorer.
+
 По умолчанию сравниваются только датированные материалы в окне 72 часа. Authoritative
 duplicates исключаются из shadow report. Порог baseline — 0.68; это стартовая гипотеза,
 а не доказанный production threshold.
@@ -45,6 +55,7 @@ relocant-newsroom --database --city belgrade --shadow-duplicates --limit 100
 - `mode=shadow_only`;
 - `authoritative=false`;
 - `decision_effect=none`;
+- `scorer.id` / `scorer.version` и, для embeddings, model/dimension;
 - пары raw item IDs/source IDs;
 - общий score и threshold;
 - компоненты score.
@@ -57,6 +68,7 @@ relocant-newsroom --database --city belgrade --shadow-duplicates --limit 100
 `ShadowDuplicateLabel` хранит внешнюю/тестовую разметку пары как duplicate/non-duplicate.
 `evaluate_shadow_labels()` считает:
 
+- scorer provenance;
 - true/false positive;
 - true/false negative;
 - precision/recall;

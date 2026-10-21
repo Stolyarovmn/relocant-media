@@ -72,6 +72,13 @@ def test_shadow_duplicate_report_is_read_only_and_non_authoritative() -> None:
     assert report["mode"] == "shadow_only"
     assert report["authoritative"] is False
     assert report["decision_effect"] == "none"
+    assert report["scorer"] == {
+        "id": "lexical_semantic",
+        "version": "1",
+        "embedding_model": None,
+        "embedding_dimension": None,
+    }
     assert len(report["signals"]) == 1
     assert report["signals"][0]["left_raw_item_id"] == 1
     assert report["signals"][0]["right_raw_item_id"] == 2
+    assert report["signals"][0]["scorer"] == report["scorer"]

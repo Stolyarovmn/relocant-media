@@ -88,12 +88,42 @@ class ShadowScore:
     anchor_overlap: float
 
 
+@dataclass(frozen=True, slots=True)
+class ShadowScorerMetadata:
+    """Stable provenance for one score space.
+
+    Embedding-backed scorers must identify both model and vector dimension. This prevents
+    labels/metrics from silently mixing scores produced by incompatible representations.
+    """
+
+    scorer_id: str
+    scorer_version: str
+    embedding_model: str | None = None
+    embedding_dimension: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.scorer_id.strip() or not self.scorer_version.strip():
+            raise ValueError("shadow scorer id and version are required")
+        if (self.embedding_model is None) != (self.embedding_dimension is None):
+            raise ValueError("embedding model and dimension must be declared together")
+        if self.embedding_dimension is not None and self.embedding_dimension < 1:
+            raise ValueError("embedding dimension must be positive")
+
+
 class ShadowSemanticScorer(Protocol):
+    @property
+    def metadata(self) -> ShadowScorerMetadata: ...
+
     def score(self, left: EventCandidate, right: EventCandidate) -> ShadowScore: ...
 
 
 class LexicalSemanticScorer:
     """Dependency-free baseline for shadow observation, not event merging."""
+
+    metadata = ShadowScorerMetadata(
+        scorer_id="lexical_semantic",
+        scorer_version="1",
+    )
 
     def score(self, left: EventCandidate, right: EventCandidate) -> ShadowScore:
         title_overlap = _jaccard(_tokens(left.title), _tokens(right.title))
@@ -132,6 +162,7 @@ class ShadowDuplicateSignal:
     right_source_id: str
     score: ShadowScore
     threshold: float
+    scorer: ShadowScorerMetadata
 
     @property
     def possible_duplicate(self) -> bool:
@@ -165,6 +196,11 @@ def find_shadow_duplicates(
     if limit < 1:
         raise ValueError("limit must be positive")
     scorer = scorer or LexicalSemanticScorer()
+    scorer_metadata = scorer.metadata
+    # Force validation at the scoring boundary, including custom/pluggable scorers.
+    if not isinstance(scorer_metadata, ShadowScorerMetadata):
+        raise ValueError("shadow scorer must expose validated metadata")
+
     dated = sorted(
         (candidate for candidate in candidates if candidate.published_at is not None),
         key=lambda item: (item.published_at, item.raw_item_id),
@@ -189,6 +225,7 @@ def find_shadow_duplicates(
                     right_source_id=right.source_id,
                     score=score,
                     threshold=threshold,
+                    scorer=scorer_metadata,
                 )
             )
     signals.sort(
@@ -204,8 +241,13 @@ def find_shadow_duplicates(
 def evaluate_shadow_labels(
     signals: list[ShadowDuplicateSignal],
     labels: list[ShadowDuplicateLabel],
-) -> dict[str, float | int | None]:
+) -> dict[str, float | int | str | None]:
     """Evaluate reviewed pairs so the shadow threshold can be measured, not guessed."""
+    scorer_metadata = {signal.scorer for signal in signals}
+    if len(scorer_metadata) > 1:
+        raise ValueError("shadow signals from different scorer spaces cannot be evaluated together")
+    scorer = next(iter(scorer_metadata), None)
+
     predicted = {
         tuple(sorted((signal.left_raw_item_id, signal.right_raw_item_id)))
         for signal in signals
@@ -221,6 +263,10 @@ def evaluate_shadow_labels(
     recall_denominator = true_positive + false_negative
     negative_denominator = false_positive + true_negative
     return {
+        "scorer_id": scorer.scorer_id if scorer is not None else None,
+        "scorer_version": scorer.scorer_version if scorer is not None else None,
+        "embedding_model": scorer.embedding_model if scorer is not None else None,
+        "embedding_dimension": scorer.embedding_dimension if scorer is not None else None,
         "labels": len(labels),
         "true_positive": true_positive,
         "false_positive": false_positive,
