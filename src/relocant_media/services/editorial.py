@@ -333,9 +333,12 @@ class EditorialService:
         if (post.title, post.body) != (outcome.draft.title, outcome.draft.body):
             raise DeliveryBlockedError("post draft changed after verification")
         from relocant_media.domain.draft_language import draft_language_reason
+        from relocant_media.domain.freshness import draft_date_reason
 
         if draft_language_reason(outcome.draft.title, outcome.draft.body) is not None:
             raise DeliveryBlockedError("draft requires Russian translation")
+        if draft_date_reason(outcome.draft.title,outcome.draft.body) is not None:
+            raise DeliveryBlockedError("draft requires an absolute event date")
         if any(run.evidence.get(key) != value for key, value in {
             "source_id": item.source_id, "url": item.url,
             "title": item.title, "body": item.body,

@@ -15,6 +15,7 @@ from relocant_media.ai.package import (
     draft_sha256,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
+from relocant_media.domain.freshness import publication_date_context
 
 
 class _Response(BaseModel):
@@ -85,6 +86,9 @@ def reviewed_package(
             "В flags включай только блокирующие замечания; ограничения и пояснения пиши "
             "в reason. При approve без блокирующих замечаний flags должен быть пустым. "
             "Причину и флаги пиши по-русски. При сомнении не одобряй. "
+            "Дату объявления и слова sutra/завтра привязывай к календарю Europe/Belgrade, "
+            "а не к UTC-дню. source_local_dates содержит явный местный момент публикации "
+            "и следующий день. В готовом тексте должны быть абсолютные даты. "
             "Основной текст и заголовок должны быть полностью по-русски. Сербский допустим "
             "только в собственных именах. Непереведённое предложение или фрагмент — "
             "блокирующий недостаток даже при верных фактах; требуй исправление, не approve. "
@@ -104,6 +108,8 @@ def reviewed_package(
             task=f"independent_{role}", system_instruction=instructions,
             prompt=canonical_json({
                 "role": role, "package": context,
+                "source_local_dates":[dict(source_id=d.source_id,url=d.url,
+                    **publication_date_context(d.published_at)) for d in package.event.documents],
                 "now_utc": (now or datetime.now(UTC)).astimezone(UTC).isoformat(),
                 "draft_sha256": draft_hash, "context_sha256": context_hash,
             }),

@@ -10,6 +10,7 @@ from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.ai.package import EditorialPackage, PackageDraft, canonical_json
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.domain.draft_language import draft_language_reason
+from relocant_media.domain.freshness import draft_date_reason
 
 
 def review_with_repairs(
@@ -39,10 +40,15 @@ def review_with_repairs(
         current = reviewed_package(current, provider, live_documents, audit=record)
         language_reason = draft_language_reason(current.outcome.draft.title,
                                                current.outcome.draft.body)
+        date_reason=draft_date_reason(current.outcome.draft.title,current.outcome.draft.body)
         if language_reason:
             record({"role": "language_guard", "reason": language_reason,
                     "instruction": "Перевести весь основной текст на русский, сохранив имена."})
-        if language_reason is None and all(r.verdict == "approve" and not r.flags and r.score >= 75
+        if date_reason:
+            record({"role":"date_guard","reason":date_reason,
+                    "instruction":"Укажи абсолютную дату по публикации в Белграде."})
+        if language_reason is None and date_reason is None and all(
+               r.verdict == "approve" and not r.flags and r.score >= 75
                for r in current.reviews):
             if not current.outcome.draft.title.startswith("[тестовый запуск]"):
                 raise ValueError("required editorial title prefix is missing")
@@ -76,6 +82,13 @@ def review_with_repairs(
                 or not set(draft.claim_ids).issubset(supported)
                 or len(draft.claim_ids) != len(set(draft.claim_ids))):
             raise StructuredOutputError("repaired draft violates editorial constraints")
+        if (" ".join(draft.title.split()), " ".join(draft.body.split())) == (
+                " ".join(current.outcome.draft.title.split()),
+                " ".join(current.outcome.draft.body.split())):
+            if audit is not None:
+                audit({"role":"repair_guard","reason":"unchanged_draft",
+                       "repair_attempt":attempt})
+            return current
         outcome = current.outcome.model_copy(update={"draft": draft})
         # Stale approvals are discarded. reviewed_package binds both new reviews to
         # the new context and draft hashes after re-fetching the live documents.

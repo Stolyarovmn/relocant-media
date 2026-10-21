@@ -58,11 +58,20 @@ def test_repair_gets_both_fresh_reviews_and_preserves_all_other_fields():
 def test_two_repairs_maximum_and_last_hold_survives():
     value, provider = initial(), Provider()
     provider.responses = [*reviews(True), repaired(value), *reviews(True),
-                          repaired(value), *reviews(True)]
+                          {**repaired(value),"title":"[тестовый запуск] Ещё одно уточнение"},
+                          *reviews(True)]
     result = review_with_repairs(value, provider, lambda: documents(value))
     assert len(provider.calls) == 8
     assert result.reviews[0].verdict == "hold"
     assert result.reviews[0].flags == ("Неточность",)
+
+
+def test_unchanged_repair_cannot_reroll_failed_reviews():
+    value,provider=initial(),Provider()
+    provider.responses=[*reviews(True),value.outcome.draft.model_dump(mode="json"),*reviews()]
+    result=review_with_repairs(value,provider,lambda: documents(value))
+    assert len(provider.calls)==3
+    assert result.reviews[0].verdict=="hold"
 
 
 @pytest.mark.parametrize("mutation", ["unknown_claim", "duplicate", "prefix", "extra", "invalid"])

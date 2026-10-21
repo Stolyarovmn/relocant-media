@@ -172,6 +172,7 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     """Recompute eligibility; an asserted ready/should_process is never sufficient."""
     from relocant_media.ai.models import PublicationStatus
     from relocant_media.domain.draft_language import draft_language_reason
+    from relocant_media.domain.freshness import draft_date_reason
 
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
@@ -229,4 +230,7 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     language_reason = draft_language_reason(draft.title, draft.body)
     if language_reason is not None:
         status, reason = PublicationStatus.HUMAN_REVIEW, language_reason
+    date_reason=draft_date_reason(draft.title,draft.body)
+    if date_reason is not None:
+        status,reason=PublicationStatus.HUMAN_REVIEW,date_reason
     return outcome.model_copy(update={"status": status, "reason": reason, "confidence": confidence})

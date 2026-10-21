@@ -19,6 +19,7 @@ from relocant_media.ai.prompts import (
     VERIFY_SYSTEM,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
+from relocant_media.domain.freshness import publication_date_context
 from relocant_media.domain.policy import requires_human_review
 
 
@@ -190,6 +191,8 @@ class EditorialPipeline:
             payload={
                 "city": city,
                 "category": ranking.category,
+                "source_local_dates":[dict(source_id=d.source_id,
+                    **publication_date_context(d.published_at)) for d in documents],
                 "claims": [
                     claim.model_dump(mode="json")
                     for claim in claims.claims

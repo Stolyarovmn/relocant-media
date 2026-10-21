@@ -43,10 +43,12 @@ from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import freshness_decision
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
+from relocant_media.ops.cycle_audit import audit_cycle
 from relocant_media.ops.newsroom_status import summarize
 from relocant_media.ops.newsroom_triage import triage_queue
 from relocant_media.ops.primary_cycle import run_cycle
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
+from relocant_media.services.audience_observation import observe_audience
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
@@ -86,6 +88,8 @@ class ServerAI:
                   f"Текущий момент UTC: {datetime.now(UTC).isoformat()}. "
                   "Отличай дату статьи от срока события: истёкшие объявления не выбирай "
                   "для новой публикации и не выдавай планы за выполненные факты. "
+                  "Завтра/sutra и сегодня/danas считай от даты публикации в Белграде; "
+                  "в русском черновике указывай абсолютную дату, а не перенесённое завтра. "
                   "Официальный сайт площадки подтверждает её собственный анонс, "
                   "а не независимую истинность рекламных обещаний. Для events проверь "
                   "дату, время, место, стоимость или условия покупки/бесплатного входа; "
@@ -432,6 +436,11 @@ async def cleanup_news_pins() -> dict[str, Any]:
         return await maintain_pins(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client), policy)
 
 
+async def audience_observation() -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
+        return await observe_audience(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client))
+
+
 async def publish_pending(
     engine: Engine, *, enabled: bool, limit: int = 2,
     blocked: list[dict[str, Any]] | None = None,
@@ -518,7 +527,7 @@ def main() -> None:
                 model=os.environ["GEMINI_MODEL"], client=client),
                 audit_path=args.output / "ai-calls.jsonl"),
             Path(url.database).parent / "ai-cache",
-            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v5-russian-copy",
+            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v6-observed-feedback",
             public_news_only=True,
         )
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
@@ -543,6 +552,15 @@ def main() -> None:
             result["fallback_required"] = result["fallback_required"] or bool(blocked)
             if enabled:
                 result["pin_maintenance"] = asyncio.run(cleanup_news_pins())
+                audience = asyncio.run(audience_observation())
+                (args.output / "audience-observation.json").write_text(
+                    json.dumps(audience, ensure_ascii=False, indent=2), encoding="utf-8")
+                result["audience_observation"] = audience
+            with Session(engine) as audit_session:
+                cycle_checks = audit_cycle(audit_session, result)
+            (args.output / "cycle-audit.json").write_text(
+                json.dumps(cycle_checks, ensure_ascii=False, indent=2), encoding="utf-8")
+            result["cycle_audit_status"] = cycle_checks["status"]
     except Exception as error:
         result = {"status": "SERVER_FAILED", "error_type": type(error).__name__,
                   "fallback_required": True}

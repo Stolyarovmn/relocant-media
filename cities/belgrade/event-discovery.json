@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-10-20",
+  "checked_at": "2026-10-21",
   "note": "Кандидаты площадок; фактически включённые источники определяются YAML со status active и проверкой source_audit.",
   "sources": [
     {
@@ -17,8 +17,9 @@
       "homepage": "https://muzej-jugoslavije.org/",
       "feed_url": "https://muzej-jugoslavije.org/feed/",
       "official_identity_verified": true,
-      "status": "ready_feed",
-      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ."
+      "status": "registered",
+      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ.",
+      "active_source_id": "venue_yugoslavia"
     },
     {
       "id": "venue_narodnimuzej_rs",
@@ -27,7 +28,8 @@
       "feed_url": "https://www.narodnimuzej.rs/feed/",
       "official_identity_verified": true,
       "status": "planned",
-      "reason": "RSS содержит описание, полный текст по .post-content; нужен отдельный адаптер."
+      "reason": "Проверка21.10: стандартный адаптер не вернул свежих полных материалов. Это ограничение покрытия, а не оценка посещаемости.",
+      "checked_at": "2026-10-21"
     },
     {
       "id": "venue_mpu_rs",
@@ -44,8 +46,9 @@
       "homepage": "https://nhmbeo.rs/",
       "feed_url": "https://nhmbeo.rs/feed/",
       "official_identity_verified": true,
-      "status": "ready_feed",
-      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ."
+      "status": "registered",
+      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ.",
+      "active_source_id": "venue_natural_history"
     },
     {
       "id": "venue_dob_rs",
@@ -71,8 +74,9 @@
       "homepage": "https://domomladine.org/",
       "feed_url": "https://domomladine.org/feed/",
       "official_identity_verified": true,
-      "status": "planned",
-      "reason": "Действующий официальный источник, RSS excerpt и Article JSONLD datePublished; готов для отдельного HTML-адаптера."
+      "status": "registered",
+      "reason": "Действующий официальный источник, RSS excerpt и Article JSONLD datePublished; готов для отдельного HTML-адаптера.",
+      "active_source_id": "venue_youth_centre"
     },
     {
       "id": "venue_kcgrad_rs",
@@ -90,7 +94,8 @@
       "feed_url": "https://drugstorebeograd.com/feed/",
       "official_identity_verified": true,
       "status": "planned",
-      "reason": "RSS свежий, но только excerpt; прямой GET статьи вернул RemoteProtocolError. Нужен надёжный полный парсер."
+      "reason": "Проверка21.10: лента содержит свежие карточки, но доступный HTML статьи не содержит полного анонса; повторный сетевой проход дал ConnectTimeout. До устойчивого полного текста не включать.",
+      "checked_at": "2026-10-21"
     },
     {
       "id": "venue_bitefartcafe_rs",
@@ -98,8 +103,9 @@
       "homepage": "https://bitefartcafe.rs/",
       "feed_url": "https://bitefartcafe.rs/feed/",
       "official_identity_verified": true,
-      "status": "ready_feed",
-      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ."
+      "status": "registered",
+      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ.",
+      "active_source_id": "venue_bitefartcafe"
     },
     {
       "id": "venue_musicology_rs",
@@ -107,8 +113,9 @@
       "homepage": "https://musicology.rs/",
       "feed_url": "https://musicology.rs/feed/",
       "official_identity_verified": true,
-      "status": "ready_feed",
-      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ."
+      "status": "registered",
+      "reason": "Прямой GET RSS 200, content:encoded содержит полный текст; дата публикации pubDate отдельно от извлекаемых дат мероприятия. Свежесть проверять до ИИ.",
+      "active_source_id": "venue_musicology"
     },
     {
       "id": "venue_frusketerme_com",
@@ -118,6 +125,26 @@
       "official_identity_verified": true,
       "status": "planned",
       "reason": "Официальный сайт подтверждён адресом и контактами; /feed/ 404. Не найдены проверенные структурированные публикации с datePublished; нужен отдельный адаптер анонсов."
+    },
+    {
+      "id": "venue_dkcb_rs",
+      "name": "Детский культурный центр Белграда",
+      "homepage": "https://www.dkcb.rs/",
+      "feed_url": "https://www.dkcb.rs/feed/",
+      "official_identity_verified": false,
+      "status": "planned",
+      "checked_at": "2026-10-21",
+      "reason": "Кандидат семейных анонсов: проверка стандартного адаптера дала ValueError. Полный текст и настоящий момент публикации не подтверждены; не включён."
+    },
+    {
+      "id": "venue_kolarac_rs",
+      "name": "Коларчева задужбина",
+      "homepage": "https://www.kolarac.rs/",
+      "feed_url": "https://www.kolarac.rs/feed/",
+      "official_identity_verified": true,
+      "status": "planned",
+      "checked_at": "2026-10-21",
+      "reason": "Официальный домен подтверждён страницей билетарницы. Проверка RSS адаптера дала ValueError; полный датированный анонс не подтверждён, не включён."
     }
   ]
 }

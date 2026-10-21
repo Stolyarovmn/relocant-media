@@ -29,6 +29,8 @@ def summarize(output: Path) -> dict[str, Any]:
         "processing_errors": report.get("processing_errors", []),
         "channel_blocked": report.get("channel_blocked", []),
         "pin_maintenance": report.get("pin_maintenance", {}),
+        "audience_observation": report.get("audience_observation", {}),
+        "cycle_audit_status": report.get("cycle_audit_status"),
         "note": ("Отложено по правилам или без первоисточника — "
                  "не означает активную проверку человеком.")}
 

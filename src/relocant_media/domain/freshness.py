@@ -56,6 +56,56 @@ _SINGLE_EVENT = re.compile(
     r"završ|заврш|заверш|оконч|истека|istič|истич",
     re.IGNORECASE,
 )
+_SERVICE = re.compile(
+    r"bez\s+vode|без\s+вод[еы]|отключ|isklju[čc]|искључ|"
+    r"vodosnabdev|водоснаб|без\s+струје|bez\s+struje|снабдева",
+    re.IGNORECASE,
+)
+_RELATIVE = re.compile(
+    r"\b(prekosutra|прекосутра|послезавтра|sutra|сутра|завтра|"
+    r"danas|данас|сегодня)\b",
+    re.IGNORECASE,
+)
+
+
+def _relative_deadlines(text: str, published: datetime) -> list[date]:
+    local_published = published.astimezone(ZoneInfo("Europe/Belgrade")).date()
+    offsets = {
+        "prekosutra": 2,
+        "прекосутра": 2,
+        "послезавтра": 2,
+        "sutra": 1,
+        "сутра": 1,
+        "завтра": 1,
+        "danas": 0,
+        "данас": 0,
+        "сегодня": 0,
+    }
+    result: list[date] = []
+    for clause in re.split(r"[\n;!?]|(?<=[а-яa-z])\.\s+", text.casefold()):
+        if not (_SERVICE.search(clause) or _EVENT.search(clause)):
+            continue
+        # Relative dates belong to the source's publication day, never the run day.
+        result.extend(
+            local_published + timedelta(days=offsets[m[0]]) for m in _RELATIVE.finditer(clause)
+        )
+    return result
+
+
+def publication_date_context(published: datetime | None) -> dict[str, str | None]:
+    if published is None or published.tzinfo is None:
+        return {"published_at_belgrade": None, "tomorrow_belgrade": None}
+    local = published.astimezone(ZoneInfo("Europe/Belgrade"))
+    return {
+        "published_at_belgrade": local.isoformat(),
+        "tomorrow_belgrade": (local.date() + timedelta(days=1)).isoformat(),
+    }
+
+
+def draft_date_reason(title: str, body: str) -> str | None:
+    if re.search(r"\b(?:завтра|послезавтра|сегодня)\b", title + "\n" + body, re.IGNORECASE):
+        return "draft_requires_absolute_event_date"
+    return None
 
 
 def _event_deadlines(text: str, published: datetime) -> list[date]:
@@ -71,7 +121,8 @@ def _event_deadlines(text: str, published: datetime) -> list[date]:
             day = int(match["day"] or match["numday"])
             month = (
                 _MONTH_LOOKUP[match["month"].casefold()]
-                if match["month"] else int(match["nummonth"])
+                if match["month"]
+                else int(match["nummonth"])
             )
             explicit_year = match["year"] or match["numyear"]
             year = int(explicit_year) if explicit_year else published.year
@@ -86,9 +137,9 @@ def _event_deadlines(text: str, published: datetime) -> list[date]:
         # A range's last endpoint or an explicit deadline is stronger than
         # its start. Single dated event clauses also provide an exact day.
         endpoints = [
-            value for value, start, _ in dates
-            if _DEADLINE.search(clause[:start])
-            or _RANGE.search(clause[:start])
+            value
+            for value, start, _ in dates
+            if _DEADLINE.search(clause[:start]) or _RANGE.search(clause[:start])
         ]
         if endpoints:
             deadlines.extend(endpoints)
@@ -120,7 +171,8 @@ def freshness_decision(
         return FreshnessDecision("hold", "publication_date_future")
     if age > timedelta(days=7):
         return FreshnessDecision("discard", "publication_older_than_seven_days")
-    deadlines = _event_deadlines(f"{title}\n{body}", published_at)
+    text = f"{title}\n{body}"
+    deadlines = _event_deadlines(text, published_at) + _relative_deadlines(text, published_at)
     local_date = now.astimezone(ZoneInfo("Europe/Belgrade")).date()
     if deadlines and all(deadline < local_date for deadline in deadlines):
         return FreshnessDecision("discard", "event_expired")
