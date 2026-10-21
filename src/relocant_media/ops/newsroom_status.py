@@ -28,6 +28,7 @@ def summarize(output: Path) -> dict[str, Any]:
         "remaining_count": report.get("remaining_count"),
         "processing_errors": report.get("processing_errors", []),
         "channel_blocked": report.get("channel_blocked", []),
+        "pin_maintenance": report.get("pin_maintenance", {}),
         "note": ("Отложено по правилам или без первоисточника — "
                  "не означает активную проверку человеком.")}
 

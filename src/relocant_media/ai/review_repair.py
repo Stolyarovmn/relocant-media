@@ -9,6 +9,7 @@ from relocant_media.ai.independent_reviews import reviewed_package
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.ai.package import EditorialPackage, PackageDraft, canonical_json
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
+from relocant_media.domain.draft_language import draft_language_reason
 
 
 def review_with_repairs(
@@ -36,7 +37,12 @@ def review_with_repairs(
                 audit({**entry, "repair_attempt": repair_attempt})
 
         current = reviewed_package(current, provider, live_documents, audit=record)
-        if all(r.verdict == "approve" and not r.flags and r.score >= 75
+        language_reason = draft_language_reason(current.outcome.draft.title,
+                                               current.outcome.draft.body)
+        if language_reason:
+            record({"role": "language_guard", "reason": language_reason,
+                    "instruction": "Перевести весь основной текст на русский, сохранив имена."})
+        if language_reason is None and all(r.verdict == "approve" and not r.flags and r.score >= 75
                for r in current.reviews):
             if not current.outcome.draft.title.startswith("[тестовый запуск]"):
                 raise ValueError("required editorial title prefix is missing")

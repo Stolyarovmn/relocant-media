@@ -128,7 +128,9 @@ class TelegramBotAPI:
         return ids
 
     async def send_message(self, chat_id: int | str, text: str) -> int:
-        result = await self._call("sendMessage", {"chat_id": chat_id, "text": text})
+        result = await self._call("sendMessage", {
+            "chat_id": chat_id, "text": text, "link_preview_options": {"is_disabled": True},
+        })
         if not isinstance(result, dict):
             raise TelegramAPIError("sendMessage returned no message object")
         message_id = result.get("message_id")

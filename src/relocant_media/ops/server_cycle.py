@@ -58,6 +58,7 @@ from relocant_media.services.editorial import (
 )
 from relocant_media.services.event_eligibility import event_content_reason
 from relocant_media.services.package_import import import_package
+from relocant_media.services.pin_policy import maintain_pins
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
     persist_policy_reassessment,
@@ -79,7 +80,9 @@ class ServerAI:
     def generate_json(self, *, task: str, system_instruction: str, prompt: str,
                       response_schema: dict[str, Any]) -> str:
         policy = ("Все пояснения, причины, оценки и тексты пиши по-русски. "
-                  "Сербские топонимы и точные цитаты сохраняй. "
+                  "Сербское написание сохраняй только в собственных именах. "
+                  "Все предложения основного текста переводи на русский, включая цитаты; "
+                  "нельзя копировать сербский текст claims в русский черновик. "
                   f"Текущий момент UTC: {datetime.now(UTC).isoformat()}. "
                   "Отличай дату статьи от срока события: истёкшие объявления не выбирай "
                   "для новой публикации и не выдавай планы за выполненные факты. "
@@ -423,6 +426,12 @@ class ChannelPublisher:
         return await self.bot.send_message(APPROVED_CHANNEL_ID, text)
 
 
+async def cleanup_news_pins() -> dict[str, Any]:
+    policy = json.loads((SOURCES.parent / "pin-policy.json").read_text(encoding="utf-8"))
+    async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
+        return await maintain_pins(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client), policy)
+
+
 async def publish_pending(
     engine: Engine, *, enabled: bool, limit: int = 2,
     blocked: list[dict[str, Any]] | None = None,
@@ -509,7 +518,7 @@ def main() -> None:
                 model=os.environ["GEMINI_MODEL"], client=client),
                 audit_path=args.output / "ai-calls.jsonl"),
             Path(url.database).parent / "ai-cache",
-            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v4-first-party",
+            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v5-russian-copy",
             public_news_only=True,
         )
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
@@ -532,6 +541,8 @@ def main() -> None:
                 publish_pending(engine, enabled=enabled, blocked=blocked))
             result["channel_blocked"] = blocked
             result["fallback_required"] = result["fallback_required"] or bool(blocked)
+            if enabled:
+                result["pin_maintenance"] = asyncio.run(cleanup_news_pins())
     except Exception as error:
         result = {"status": "SERVER_FAILED", "error_type": type(error).__name__,
                   "fallback_required": True}

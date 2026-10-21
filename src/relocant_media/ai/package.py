@@ -171,6 +171,7 @@ def context_sha256(package: EditorialPackage) -> str:
 def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) -> EditorialOutcome:
     """Recompute eligibility; an asserted ready/should_process is never sufficient."""
     from relocant_media.ai.models import PublicationStatus
+    from relocant_media.domain.draft_language import draft_language_reason
 
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
@@ -225,4 +226,7 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
         )
         if eligible:
             status, reason = PublicationStatus.READY, "package_independently_reviewed"
+    language_reason = draft_language_reason(draft.title, draft.body)
+    if language_reason is not None:
+        status, reason = PublicationStatus.HUMAN_REVIEW, language_reason
     return outcome.model_copy(update={"status": status, "reason": reason, "confidence": confidence})
