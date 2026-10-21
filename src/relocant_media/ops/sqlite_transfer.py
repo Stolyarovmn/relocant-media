@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
+from relocant_media.storage import correction_control as correction_control_models  # noqa: F401
 from relocant_media.storage import revision_control as revision_control_models  # noqa: F401
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import Base, Source
