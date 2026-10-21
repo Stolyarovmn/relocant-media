@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #55–60.
+Состояние на 21 октября 2026 года после PR #55–61.
 
 ## Этап 0 — основа и проверки
 
@@ -57,8 +57,8 @@
 - [x] Версионирование редакционных правил и наблюдаемая производительность по версии.
 - [ ] Накопить достаточное число сопоставимых собственных публикаций до каких-либо заявлений об обучении.
 - [x] Shadow semantic dedup только как `possible_duplicate`: local pluggable scorer, отдельные score components и метрики false-positive/false-negative; deterministic dedup остаётся authoritative. См. [SHADOW_DEDUP.md](SHADOW_DEDUP.md).
-- [ ] Добавить experiment registry: `experiment_id`, control/treatment, eligibility, заранее заданная метрика успеха, статус и rollback marker.
-- [ ] Не позволять LLM самостоятельно объявлять победителя эксперимента; оценка должна учитывать noise floor и устойчивость результата.
+- [x] Experiment registry: `experiment_id`, control/treatment, eligibility window, заранее заданная метрика, minimum samples, noise floor, concentration guard и явный rollback marker; см. [EXPERIMENTS.md](EXPERIMENTS.md).
+- [x] Evaluation эксперимента детерминирована и read-only: LLM не объявляет победителя, `automatic_winner` всегда отсутствует, а factual/source-risk/safety rules исключены из experiment scope.
 - [ ] Recommendation → issue/PR и проверка attribution/retained CPL на реальных данных.
 
 MTProto не является условием работы редакции или этапа 1.
