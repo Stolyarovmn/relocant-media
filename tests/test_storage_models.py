@@ -7,6 +7,8 @@ def test_expected_tables_are_registered() -> None:
         "source_revision",
         "source",
         "editorial_run",
+        "editorial_experiment",
+        "experiment_assignment",
         "raw_item",
         "collector_failure",
         "post",
