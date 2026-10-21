@@ -146,7 +146,9 @@ class ShadowDuplicateLabel:
 
     @property
     def key(self) -> tuple[int, int]:
-        return tuple(sorted((self.left_raw_item_id, self.right_raw_item_id)))
+        if self.left_raw_item_id <= self.right_raw_item_id:
+            return self.left_raw_item_id, self.right_raw_item_id
+        return self.right_raw_item_id, self.left_raw_item_id
 
 
 def find_shadow_duplicates(
