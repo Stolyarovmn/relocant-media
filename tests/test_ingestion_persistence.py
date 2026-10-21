@@ -161,7 +161,9 @@ def test_reviewed_changes_preserve_evidence_and_receipts(
     assert revision.raw_item_id == item.id
     assert item.body == "Original body"
     assert run.evidence["documents"][0]["body"] == "Original body"
-    assert run.outcome["reason"] == "source_changed_requires_review"
+    # A sent run is immutable history. The revision is handled as a separate follow-up
+    # candidate instead of retroactively changing the outcome that produced the receipt.
+    assert run.outcome == {"status": "ready"}
     assert (run.delivery_status, run.staging_message_id, run.post_id) == ("sent", 42, post.id)
     assert post.status == "published" and post.telegram_message_id == 42
     assert db_session.scalar(select(func.count()).select_from(RawItem)) == 3
