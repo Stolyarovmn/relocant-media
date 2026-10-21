@@ -141,7 +141,9 @@ class EditorialExperiment(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     city: Mapped[str] = mapped_column(String, nullable=False)
-    status: Mapped[str] = mapped_column(String, nullable=False, default="draft", server_default="draft")
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="draft", server_default="draft"
+    )
     scope: Mapped[str] = mapped_column(
         String, nullable=False, default="presentation", server_default="presentation"
     )
@@ -150,7 +152,9 @@ class EditorialExperiment(Base):
     eligibility_start: Mapped[datetime] = mapped_column(UTC_DATE, nullable=False)
     eligibility_end: Mapped[datetime | None] = mapped_column(UTC_DATE)
     success_metric: Mapped[str] = mapped_column(String, nullable=False)
-    horizon_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24, server_default="24")
+    horizon_hours: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=24, server_default="24"
+    )
     minimum_samples_per_arm: Mapped[int] = mapped_column(
         Integer, nullable=False, default=10, server_default="10"
     )
