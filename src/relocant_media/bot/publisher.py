@@ -1,10 +1,11 @@
 from typing import Protocol
 
 from relocant_media.bot.api import TelegramBot
+from relocant_media.bot.formatting import source_link_entities
 
 
 class Publisher(Protocol):
-    async def publish(self, text: str) -> int: ...
+    async def publish(self, text: str, *, source_url: str | None = None) -> int: ...
 
 
 class ProductionTargetBlockedError(ValueError):
@@ -27,7 +28,11 @@ class StagingTelegramPublisher:
         self._bot = bot
         self._channel_id = staging_channel_id
 
-    async def publish(self, text: str) -> int:
+    async def publish(self, text: str, *, source_url: str | None = None) -> int:
         if not text.strip():
             raise ValueError("cannot publish an empty Telegram post")
-        return await self._bot.send_message(self._channel_id, text)
+        return await self._bot.send_message(
+            self._channel_id,
+            text,
+            source_link_entities(text, source_url),
+        )
