@@ -93,6 +93,7 @@ def test_inbox_is_read_only_projection_and_redacts_submission_payload() -> None:
     now = datetime(2026, 10, 21, 10, tzinfo=UTC)
     with Session(engine) as session:
         session.add(_source("city"))
+        session.flush()
         raw = _raw("city", "a", "Fresh transport notice", now)
         session.add(raw)
         session.flush()
@@ -150,6 +151,7 @@ def test_inbox_exposes_delivery_and_reverification_states() -> None:
     now = datetime(2026, 10, 21, 10, tzinfo=UTC)
     with Session(engine) as session:
         session.add(_source("city"))
+        session.flush()
         raws = [
             _raw("city", "b", "Ready transport notice", now),
             _raw("city", "c", "Sent road notice", now + timedelta(minutes=10)),
@@ -226,6 +228,7 @@ def test_inbox_groups_one_event_across_sources_and_prefers_reviewed_anchor() -> 
     now = datetime(2026, 10, 21, 10, tzinfo=UTC)
     with Session(engine) as session:
         session.add_all([_source("city"), _source("venue")])
+        session.flush()
         first = _raw("city", "f", "Closure on Knez Mihailova tonight", now)
         second = _raw(
             "venue",
