@@ -110,15 +110,18 @@ def _state(
 ) -> tuple[NewsroomState, str]:
     reason = _reason(run)
     if run is not None:
+        # Delivery reconciliation always outranks editorial re-verification. If Telegram may
+        # already have accepted a message, the first operator action must be to reconcile it.
+        if run.delivery_status == "uncertain":
+            return NewsroomState.UNCERTAIN, "delivery_uncertain"
+        if run.delivery_status == "sending":
+            return NewsroomState.SENDING, "delivery_reconciliation_required"
+
         created_at = _utc(run.created_at)
         if created_at is not None and any(
             (_utc(revision.observed_at) or created_at) > created_at for revision in revisions
         ):
             return NewsroomState.NEEDS_REVERIFY, "source_revision_after_review"
-        if run.delivery_status == "uncertain":
-            return NewsroomState.UNCERTAIN, "delivery_uncertain"
-        if run.delivery_status == "sending":
-            return NewsroomState.SENDING, "delivery_reconciliation_required"
         if run.delivery_status == "sent" or (
             post is not None and post.telegram_message_id is not None
         ):
