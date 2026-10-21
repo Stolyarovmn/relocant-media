@@ -5,6 +5,13 @@ on:
   schedule:
     # Offset from the top of the hour to reduce scheduled-run contention.
     - cron: "17 */6 * * *"
+  pull_request:
+    paths:
+      - ".github/workflows/source-health.yml"
+      - "cities/belgrade/sources/**"
+      - "src/relocant_media/collectors/**"
+      - "src/relocant_media/ops/source_audit.py"
+      - "src/relocant_media/sources/**"
 
 permissions:
   contents: read
