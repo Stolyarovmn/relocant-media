@@ -28,6 +28,8 @@ def audit_cycle(session: Session, report: dict[str, Any]) -> dict[str, Any]:
         title_prefix=True,
         absolute_dates=True,
         private_intake_healthy=intake.get("status") in (None, "disabled", "ready"),
+        private_feedback_healthy=report.get("private_feedback", {}).get("status")
+            in (None, "disabled", "ready"),
     )
     ids = report.get("sent_message_ids", [])
     checks["unique_receipts"] = len(ids) == len(set(ids))

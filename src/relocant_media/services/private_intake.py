@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.bot.intake import handle_private_message
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
+from relocant_media.services.submission_feedback import save_requested_followup
 from relocant_media.storage.models import Submission, TelegramUpdateReceipt
 
 
@@ -97,7 +98,7 @@ async def receive_private_tips(
                 if parents[cid]:
                     accepted = save_channel_tip(session, message, edited="edited_message" in update)
             elif chat.get("type") == "private" and "message" in update:
-                accepted = handle_private_message(
+                accepted = save_requested_followup(session, message) or handle_private_message(
                     session, message, city="belgrade").outcome == "submitted"
             session.add(TelegramUpdateReceipt(update_id=uid, kind="private_intake",
                 status="processed" if accepted else "ignored", processed_at=datetime.now(UTC)))

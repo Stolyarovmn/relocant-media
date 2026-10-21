@@ -73,6 +73,7 @@ from relocant_media.services.published_watch import (
     published_sources,
     recent_source_load,
 )
+from relocant_media.services.submission_feedback import reply_to_submissions, resolve_submission
 from relocant_media.services.submission_queue import pending_submissions, priority_raw_ids, tip_urls
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
 from relocant_media.storage.models import EditorialRun, RawItem, Source
@@ -405,9 +406,10 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
             from relocant_media.storage.models import Submission
             stored_tip = session.get(Submission, submission_id)
             assert stored_tip is not None
-            stored_tip.payload = {**stored_tip.payload, "raw_item_ids": ids,
-                                  "last_triaged_at": now.isoformat()}
-            stored_tip.status = "source_linked" if ids else "waiting_primary"
+            resolve_submission(stored_tip, ids, now=now)
+            if ids and session.scalar(select(EditorialRun.raw_item_id).where(
+                    EditorialRun.raw_item_id.in_(ids)).limit(1)) is not None:
+                stored_tip.payload = {**stored_tip.payload, "triage_reason": "already_considered"}
             result["priority_submissions"] += bool(ids)
         session.commit()
     result["raw_items_written"] = written
@@ -658,6 +660,16 @@ def main() -> None:
                 (args.output / "venue-attention.json").read_text(encoding="utf-8")))
                 if (args.output / "venue-attention.json").is_file() else {})
         result["private_intake"] = intake_status
+        async def feedback() -> dict[str, Any]:
+            async with httpx.AsyncClient(timeout=25, trust_env=False) as feedback_client:
+                return await reply_to_submissions(engine,
+                    TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], feedback_client),
+                    enabled=os.environ.get("EDITORIAL_PRIVATE_FEEDBACK_ENABLED") == "true")
+        try:
+            result["private_feedback"] = asyncio.run(feedback())
+        except Exception as feedback_error:
+            result["private_feedback"] = {"status": "failed",
+                "error_type": type(feedback_error).__name__}
         result["fallback_required"] = (result["status"] == "PRIMARY_FAILED"
                                        or bool(result.get("processing_errors")))
         result["sent_message_ids"] = []
