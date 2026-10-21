@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from relocant_media.domain.editorial_heuristics import boilerplate_reason
 from relocant_media.domain.freshness import freshness_decision
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
 from relocant_media.storage.locks import lock_editorial_city
@@ -32,10 +33,11 @@ def triage_queue(engine: Engine, *, now: datetime) -> dict[str, Any]:
                 continue
             result = freshness_decision(title=item.title, body=item.body,
                 published_at=item.published_at, now=now)
-            if result.action == "keep":
+            boilerplate = boilerplate_reason(item.title, item.body)
+            if result.action == "keep" and boilerplate is None:
                 continue
-            status = "skipped" if result.action == "discard" else "human_review"
-            outcome = {"status": status, "reason": result.reason,
+            status = "skipped" if result.action == "discard" or boilerplate else "human_review"
+            outcome = {"status": status, "reason": boilerplate or result.reason,
                 "triage_version": "freshness-v1", "ai_calls": 0,
                 "checked_at": now.astimezone(UTC).isoformat(),
                 "autonomous_resolution": "rejected" if status == "skipped" else "deferred_metadata"}
@@ -49,7 +51,7 @@ def triage_queue(engine: Engine, *, now: datetime) -> dict[str, Any]:
             else:
                 run.outcome = {**outcome, "previous_decision": run.outcome}
             decisions.append({"raw_item_id": item.id, "status": status,
-                              "reason": result.reason, "ai_calls": 0})
+                              "reason": boilerplate or result.reason, "ai_calls": 0})
         session.commit()
     return {"version": 1, "ai_calls": 0, "decisions": decisions,
             "discarded": sum(d["status"] == "skipped" for d in decisions),

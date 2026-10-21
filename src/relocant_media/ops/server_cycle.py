@@ -38,6 +38,8 @@ from relocant_media.collectors.cukarica_news import (
     parse_cukarica_news_list,
 )
 from relocant_media.collectors.telegram_topics import DEFAULT_CHANNELS, collect_topics
+from relocant_media.collectors.venue_feed import VenueFeedCollector
+from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import freshness_decision
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
@@ -54,12 +56,13 @@ from relocant_media.services.editorial import (
     _event_items,
     _snapshot_member,
 )
+from relocant_media.services.event_eligibility import event_content_reason
 from relocant_media.services.package_import import import_package
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
     persist_policy_reassessment,
 )
-from relocant_media.sources.registry import load_source_file
+from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -79,7 +82,13 @@ class ServerAI:
                   "Сербские топонимы и точные цитаты сохраняй. "
                   f"Текущий момент UTC: {datetime.now(UTC).isoformat()}. "
                   "Отличай дату статьи от срока события: истёкшие объявления не выбирай "
-                  "для новой публикации и не выдавай планы за выполненные факты. ")
+                  "для новой публикации и не выдавай планы за выполненные факты. "
+                  "Официальный сайт площадки подтверждает её собственный анонс, "
+                  "а не независимую истинность рекламных обещаний. Для events проверь "
+                  "дату, время, место, стоимость или условия покупки/бесплатного входа; "
+                  "язык и возрастные ограничения укажи, если они важны и известны. "
+                  "Не выдумывай отсутствующие детали, не выдавай медицинские обещания "
+                  "и обычные скидки/пакеты проживания за городское событие. ")
         if task == "rank":
             categories = ["transport", "events", "city", "utilities", "schools", "medicine",
                           "health", "immigration", "law", "tax", "banking", "politics",
@@ -120,11 +129,27 @@ class _CachedOutcome(EditorialPipeline):
         return self.outcome
 
 
+def venue_sources() -> dict[str, SourceConfig]:
+    return {source.id: source for source in load_source_registry(SOURCES)
+            if source.extraction.strategy == "venue_feed"
+            and source.extraction.status == "active"
+            and source.source_type == "official_venue_events"}
+
+
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     documents = []
+    venues = venue_sources()
+    async def fetch_venue(source: SourceConfig, url: str) -> Any:
+        async with httpx.AsyncClient(timeout=25, trust_env=False) as venue_client:
+            return await VenueFeedCollector(source, venue_client).collect_url(url)
     with httpx.Client(timeout=25, trust_env=False) as client:
         for document in package.event.documents:
+            if document.source_id in venues:
+                item = asyncio.run(fetch_venue(venues[document.source_id], document.url))
+                documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
+                    title=item.title, body=item.body, published_at=item.published_at))
+                continue
             if document.source_id not in {"city_beograd_news", "cukarica_news"}:
                 raise ValueError("unsupported live source")
             source = load_source_file(SOURCES / f"{document.source_id}.yaml")
@@ -149,31 +174,45 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     result = {"sources_synced": 2, "sources_skipped": 0, "raw_items_written": 0,
               "failures": 0, "review_required": 0, "discarded_before_article_fetch": 0,
               "discarded_before_persistence": 0, "channel_failures": 0, "channel_leads": 0}
+    venues = venue_sources()
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
                for key in ("city_beograd_news", "cukarica_news")}
+    sources.update(venues)
+    result["sources_synced"] = len(sources)
+    result["venue_sources"] = len(venues)
+    result["venue_items"] = 0
+    result["venue_deferred"] = 0
     with Session(engine) as session:
         for source in sources.values():
             sync_source(session, "belgrade", source)
         session.commit()
+    attention_leads = []
     topics: list[dict[str, Any]] = []
     channel_errors: list[dict[str, str]] = []
     articles = []
     fetched: dict[str, str] = {}
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
-        collectors: dict[str, BelgradeArticleCollector | CukaricaNewsCollector] = {
+        collectors: dict[
+            str, BelgradeArticleCollector | CukaricaNewsCollector | VenueFeedCollector
+        ] = {
             "city_beograd_news": BelgradeArticleCollector(sources["city_beograd_news"], client),
             "cukarica_news": CukaricaNewsCollector(sources["cukarica_news"], client),
         }
+
+        collectors.update({key: VenueFeedCollector(source, client)
+                           for key, source in venues.items()})
 
         async def full_article(source_id: str, url: str) -> str:
             if url in fetched:
                 return fetched[url]
             item = await collectors[source_id].collect_url(url)
             fresh = freshness_decision(item.title, item.body, item.published_at, now)
-            if fresh.action != "keep":
+            venue_reason = (event_content_reason(item.title, item.body, now=now)
+                            if source_id in venues else None)
+            if fresh.action != "keep" or venue_reason is not None:
                 result["discarded_before_persistence"] += 1
-                fetched[url] = fresh.reason
-                return fresh.reason
+                fetched[url] = venue_reason or fresh.reason
+                return fetched[url]
             articles.append(item)
             fetched[url] = "primary_source_collected"
             return "primary_source_collected"
@@ -202,9 +241,23 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                     await full_article(source_id, item.url)
             except Exception:
                 result["failures"] += 1
+        for source_id in venues:
+            try:
+                for item in await VenueFeedCollector(venues[source_id], client).collect():
+                    result["venue_items"] += 1
+                    reason = event_content_reason(item.title, item.body, now=now)
+                    fresh = freshness_decision(item.title, item.body, item.published_at, now)
+                    if reason is not None or fresh.action != "keep":
+                        result["venue_deferred"] += 1
+                        continue
+                    articles.append(item)
+                    fetched[item.url] = "primary_source_collected"
+            except Exception:
+                result["failures"] += 1
         for channel in DEFAULT_CHANNELS:
             try:
                 leads = await collect_topics(channel, client, now=now)
+                attention_leads.extend(leads)
                 for lead in leads[:20]:
                     result["channel_leads"] += 1
                     resolved = []
@@ -224,6 +277,15 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                                     and ARTICLE_PATH.fullmatch(parts.path)):
                                 resolved.append(await full_article("cukarica_news", url))
                                 primary_urls.append(url)
+                        if url not in primary_urls:
+                            for source_id, venue in venues.items():
+                                parts = urlsplit(url)
+                                hosts = {urlsplit(str(venue.url)).hostname,
+                                         *venue.extraction.approved_hosts}
+                                if parts.hostname in hosts:
+                                    resolved.append(await full_article(source_id, url))
+                                    primary_urls.append(url)
+                                    break
                     # A matching official title is a discovery pointer only. The
                     # pipeline still has to check every claim against the full article.
                     words = set(re.findall(r"[^\W\d_]{5,}", lead.text.casefold()))
@@ -249,6 +311,14 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     triage = triage_queue(engine, now=now)
     result["discarded_queue"] = triage["discarded"]
     if output is not None:
+        aliases_path = SOURCES.parent / "event-aliases.json"
+        aliases = (
+            json.loads(aliases_path.read_text(encoding="utf-8"))
+            if aliases_path.is_file() else {}
+        )
+        attention = venue_attention(attention_leads, aliases)
+        (output / "venue-attention.json").write_text(
+            json.dumps(attention, ensure_ascii=False, indent=2), encoding="utf-8")
         (output / "triage.json").write_text(json.dumps(triage, ensure_ascii=False, indent=2),
                                            encoding="utf-8")
         (output / "channel-topics.json").write_text(json.dumps({"topics": topics,
@@ -277,13 +347,16 @@ def prepare_reviewed(
         key = event_key(_candidate(raw))
     freshness = freshness_decision(title=raw.title, body=raw.body,
         published_at=raw.published_at, now=datetime.now(UTC))
-    if freshness.action != "keep":
+    venue_reason = (event_content_reason(raw.title, raw.body, now=datetime.now(UTC))
+                    if source.source_type == "official_venue_events" else None)
+    if freshness.action != "keep" or venue_reason is not None:
         from relocant_media.ai.models import RankingResult
         outcome = EditorialOutcome(
             status=(PublicationStatus.SKIPPED if freshness.action == "discard"
-                    else PublicationStatus.HUMAN_REVIEW), reason=freshness.reason,
+                    or venue_reason is not None else PublicationStatus.HUMAN_REVIEW),
+            reason=venue_reason or freshness.reason,
             ranking=RankingResult(should_process=False, relevance=0, category="city",
-                confidence=0, rationale=freshness.reason), confidence=0)
+                confidence=0, rationale=venue_reason or freshness.reason), confidence=0)
     else:
         # Source publication policy is enforced on import and delivery, separately
         # from autonomous editorial assessment. Never turn a source gate into an
@@ -393,7 +466,7 @@ async def publish_pending(
                 # Independent reviews and one final exact live-source comparison
                 # must all remain valid before the durable send claim.
                 try:
-                    live = fetch_documents(package)
+                    live = await asyncio.to_thread(fetch_documents, package)
                     if any(a.model_dump() != b.model_dump(
                             include=set(EvidenceDocument.model_fields))
                            for a, b in zip(live, package.event.documents, strict=True)):
@@ -436,14 +509,17 @@ def main() -> None:
                 model=os.environ["GEMINI_MODEL"], client=client),
                 audit_path=args.output / "ai-calls.jsonl"),
             Path(url.database).parent / "ai-cache",
-            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v3",
+            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v4-first-party",
             public_news_only=True,
         )
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=lambda: asyncio.run(collect_sources(engine, output=args.output)),
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output), limit=2,
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
-            reassessment_ids=lambda: policy_reassessment_ids(engine), continue_on_error=True)
+            reassessment_ids=lambda: policy_reassessment_ids(engine), continue_on_error=True,
+            candidate_priorities=lambda: source_priorities(json.loads(
+                (args.output / "venue-attention.json").read_text(encoding="utf-8")))
+                if (args.output / "venue-attention.json").is_file() else {})
         result["fallback_required"] = (result["status"] == "PRIMARY_FAILED"
                                        or bool(result.get("processing_errors")))
         result["sent_message_ids"] = []

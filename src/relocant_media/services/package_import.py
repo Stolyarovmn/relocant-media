@@ -98,7 +98,9 @@ def import_package(
             "documents": snapshots,
         }
         if outcome.status == PublicationStatus.READY:
-            reason = _auto_publish_policy_reason(members, anchor_source=source)
+            reason = _auto_publish_policy_reason(
+                members, anchor_source=source, category=outcome.ranking.category,
+            )
             # Package v1 reviews bind only the primary document. Never treat
             # them as attestations covering additional event evidence.
             if reason is None and package.version == 1 and len(members) > 1:

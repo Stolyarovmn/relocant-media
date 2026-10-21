@@ -19,6 +19,31 @@ editorial_session = _editorial_session
 NOW = datetime(2026, 10, 19, tzinfo=UTC)
 
 
+def test_local_interest_changes_order_but_transport_warning_stays_first(
+    editorial_session: Session,
+) -> None:
+    session = editorial_session
+    for key, title, hour in [
+        ("warning", "Obustava saobraćaja u Geteovoj ulici", 0),
+        ("mentioned", "Концерт джазового квартета", 1),
+        ("unknown", "Выставка ботанической фотографии", 2),
+    ]:
+        session.add(Source(id=key, city="belgrade", name=key,
+                           url=f"https://{key}.example.org", source_type="official",
+                           trust=1, enabled=True))
+        session.flush()
+        session.add(RawItem(source_id=key, external_id=key,
+                            url=f"https://{key}.example.org/event", title=title,
+                            body=title, published_at=NOW + timedelta(hours=hour)))
+    session.commit()
+    result = select_candidates(session, city="belgrade", since=NOW,
+                               until=NOW + timedelta(days=1), limit=3, newest_first=True,
+                               source_priorities={"mentioned": 2})
+    assert [row["article_id"] for row in result["candidates"]] == [
+        "warning", "mentioned", "unknown"]
+    assert session.scalar(select(func.count()).select_from(EditorialRun)) == 0
+
+
 def seed(session: Session) -> None:
     session.add_all([
         Source(id=key, city=city, name=key, url=f"https://example.org/{key}",

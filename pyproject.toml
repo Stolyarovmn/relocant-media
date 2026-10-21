@@ -13,6 +13,7 @@ dependencies = [
   "alembic>=1.14,<2",
   "httpx>=0.28,<1",
   "beautifulsoup4>=4.13,<5",
+  "feedparser>=6.0.11,<7",
   "PyYAML>=6.0,<7",
   "google-genai>=2.31,<3",
   "Telethon>=1.45,<2",
@@ -59,5 +60,5 @@ strict = true
 packages = ["relocant_media"]
 
 [[tool.mypy.overrides]]
-module = ["telethon", "telethon.*"]
+module = ["telethon", "telethon.*", "feedparser"]
 ignore_missing_imports = true

@@ -71,6 +71,7 @@ def run_cycle(
     allow_partial_ingest: bool = False,
     reassessment_ids: Callable[[], list[int]] | None = None,
     continue_on_error: bool = False,
+    candidate_priorities: Callable[[], dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
             or not city.strip() or not 1 <= limit <= 5):
@@ -102,7 +103,8 @@ def run_cycle(
             with Session(engine) as session:
                 manifest = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
-                    until=aware_datetime(window["until"]), limit=limit, newest_first=newest_first)
+                    until=aware_datetime(window["until"]), limit=limit, newest_first=newest_first,
+                    source_priorities=candidate_priorities() if candidate_priorities else None)
             if reassessment_ids is not None:
                 selected = {candidate["raw_item_id"] for candidate in manifest["candidates"]}
                 extra = [i for i in reassessment_ids() if i not in selected]

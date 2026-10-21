@@ -54,7 +54,7 @@ def _evidence(item: RawItem) -> dict[str, Any]:
 
 def select_candidates(
     session: Session, *, city: str, since: datetime, until: datetime, limit: int,
-    newest_first: bool = False,
+    newest_first: bool = False, source_priorities: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Only SELECT; the caller supplies a consistent read-only transaction."""
     if not city.strip() or not 1 <= limit <= 50:
@@ -113,8 +113,16 @@ def select_candidates(
 
     clusters = cluster_events(event_inputs)
     if newest_first:
-        clusters.sort(key=lambda group: (
-            by_id[group[0].raw_item_id][0].published_at, group[0].raw_item_id), reverse=True)
+        priorities = source_priorities or {}
+        def queue_order(group: list[EventCandidate]) -> tuple[int, datetime | None, int]:
+            item, source = by_id[group[0].raw_item_id]
+            # Direct transport disruptions retain precedence over leisure mentions.
+            import re
+            disruption = re.search(r"obustav|izmen.*saobra|preusmer|затвор|обустав|измен.*саобра",
+                                   item.title.casefold())
+            band = 3 if disruption else priorities.get(source.id, 0)
+            return band, item.published_at, item.id
+        clusters.sort(key=queue_order, reverse=True)
     candidates = []
     for cluster in clusters[:limit]:
         representative = cluster[0]

@@ -30,6 +30,7 @@ def collection(tmp_path, monkeypatch):
             return NOW
 
     monkeypatch.setattr(server_cycle, "datetime", Clock)
+    monkeypatch.setattr(server_cycle, "venue_sources", lambda: {})
     monkeypatch.setattr(server_cycle, "parse_beograd_news_list", lambda *_: cards)
     monkeypatch.setattr(server_cycle, "parse_cukarica_news_list", lambda *_: [])
     real_client = httpx.AsyncClient

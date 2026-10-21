@@ -139,11 +139,14 @@ def _auto_publish_policy_reason(
     members: list[tuple[RawItem, Source]],
     *,
     anchor_source: Source,
+    category: str | None = None,
 ) -> str | None:
     if not anchor_source.auto_publish:
         return "source_auto_publish_disabled"
     if any(source.high_risk for _, source in members):
         return "source_policy_requires_review"
+    if anchor_source.source_type == "official_venue_events" and category != "events":
+        return "venue_events_only"
     if not any(source.ownership.strip().casefold() == "official" for _, source in members):
         return "official_source_required"
     return None
@@ -210,7 +213,9 @@ class EditorialService:
             members = _event_items(self.session, anchor=item, anchor_source=source)
             documents = tuple(_document(member) for member, _member_source in members)
             outcome = self.pipeline.run(city=source.city, documents=documents)
-            policy_reason = _auto_publish_policy_reason(members, anchor_source=source)
+            policy_reason = _auto_publish_policy_reason(
+                members, anchor_source=source, category=outcome.ranking.category,
+            )
             if outcome.status == PublicationStatus.READY and policy_reason is not None:
                 outcome = outcome.model_copy(update={
                     "status": PublicationStatus.HUMAN_REVIEW,
@@ -348,7 +353,9 @@ class EditorialService:
             if (package.event.event_key != event_key(_candidate(item))
                     or expected != actual):
                 raise DeliveryBlockedError("event evidence or source policy changed")
-        policy_reason = _auto_publish_policy_reason(members, anchor_source=source)
+        policy_reason = _auto_publish_policy_reason(
+            members, anchor_source=source, category=outcome.ranking.category,
+        )
         if policy_reason is not None:
             raise DeliveryBlockedError(f"source policy blocks delivery: {policy_reason}")
 

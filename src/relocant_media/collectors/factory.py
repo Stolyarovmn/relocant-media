@@ -4,6 +4,7 @@ from relocant_media.collectors.base import Collector
 from relocant_media.collectors.beograd_news import BelgradeNewsListCollector
 from relocant_media.collectors.cukarica_news import CukaricaNewsCollector
 from relocant_media.collectors.page_snapshot import PageSnapshotCollector
+from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.sources.registry import SourceConfig
 
 
@@ -17,6 +18,8 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return BelgradeNewsListCollector(source, client)
     if strategy == "cukarica_news":
         return CukaricaNewsCollector(source, client)
+    if strategy == "venue_feed":
+        return VenueFeedCollector(source, client)
     if strategy == "page_change_detection":
         return PageSnapshotCollector(source, client)
     raise UnsupportedCollectorStrategyError(strategy)
