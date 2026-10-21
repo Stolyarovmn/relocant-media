@@ -133,10 +133,13 @@ class TelegramRuntime:
             return "ignored"
 
         existing = self._session.scalar(
-            select(ModerationAction).where(
+            select(ModerationAction)
+            .where(
                 ModerationAction.telegram_chat_id == chat_id,
                 ModerationAction.telegram_message_id == message_id,
             )
+            .order_by(ModerationAction.id)
+            .limit(1)
         )
         if existing is not None:
             return f"moderation_{existing.action}"
