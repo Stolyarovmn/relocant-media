@@ -135,19 +135,13 @@ def build_source_revision_control(
                     }
                 ),
                 "decision_count": len(history),
-                "fresh_review_still_required": True,
+                "decision_does_not_clear_fresh_review": True,
             }
         )
 
-    # Undecided revisions are operationally more useful than already classified history.
-    items.sort(
-        key=lambda item: (
-            item["decision_status"] != "undecided",
-            item["observed_at"],
-            item["revision_id"],
-        ),
-        reverse=False,
-    )
+    # Within each operational bucket show the newest revision first, then put undecided first.
+    items.sort(key=lambda item: (str(item["observed_at"]), int(item["revision_id"])), reverse=True)
+    items.sort(key=lambda item: item["decision_status"] != "undecided")
     visible = items[:limit]
     return {
         "version": 1,
@@ -159,6 +153,6 @@ def build_source_revision_control(
         "items": visible,
         "safety": {
             "decision_clears_reverification": False,
-            "fresh_editorial_review_required": True,
+            "fresh_editorial_review_required_after_source_change": True,
         },
     }
