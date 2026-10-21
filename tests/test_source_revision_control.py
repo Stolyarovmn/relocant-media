@@ -83,6 +83,7 @@ def test_queue_reverify_materializes_fresh_candidate_idempotently() -> None:
             reason_code="material_source_change",
             actor="editorial-agent",
             idempotency_key="revision-1-reverify",
+            expected_decision_count=0,
             note="Fresh review required",
             decided_at=datetime(2026, 10, 21, 12, 5, tzinfo=UTC),
         )
@@ -93,6 +94,7 @@ def test_queue_reverify_materializes_fresh_candidate_idempotently() -> None:
             reason_code="material_source_change",
             actor="editorial-agent",
             idempotency_key="revision-1-reverify",
+            expected_decision_count=0,
             note="Fresh review required",
             decided_at=datetime(2026, 10, 21, 12, 10, tzinfo=UTC),
         )
@@ -141,6 +143,7 @@ def test_non_queue_decision_does_not_materialize_revision() -> None:
             reason_code="needs_context",
             actor="operator",
             idempotency_key="hold-key",
+            expected_decision_count=0,
         )
         assert session.query(SourceRevisionMaterialization).count() == 0
         assert session.query(RawItem).count() == 1
@@ -159,6 +162,7 @@ def test_idempotency_key_cannot_be_reused_for_different_payload() -> None:
             reason_code="needs_context",
             actor="operator",
             idempotency_key="same-key",
+            expected_decision_count=0,
         )
         with pytest.raises(ValueError, match="another decision"):
             record_source_revision_decision(
@@ -168,6 +172,7 @@ def test_idempotency_key_cannot_be_reused_for_different_payload() -> None:
                 reason_code="newer_revision_exists",
                 actor="operator",
                 idempotency_key="same-key",
+                expected_decision_count=0,
             )
     engine.dispose()
 
@@ -185,7 +190,58 @@ def test_invalid_decision_is_rejected() -> None:
                 reason_code="unsafe",
                 actor="operator",
                 idempotency_key="unsafe-decision",
+                expected_decision_count=0,
             )
+    engine.dispose()
+
+
+def test_stale_revision_control_snapshot_is_rejected_but_exact_retry_is_safe() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _raw, revision, _run = _seed(session)
+        record_source_revision_decision(
+            session,
+            revision_id=revision.id,
+            decision="hold",
+            reason_code="needs_context",
+            actor="operator-a",
+            idempotency_key="hold-first",
+            expected_decision_count=0,
+        )
+
+        with pytest.raises(ValueError, match="stale source revision control snapshot"):
+            record_source_revision_decision(
+                session,
+                revision_id=revision.id,
+                decision="superseded",
+                reason_code="newer_revision_exists",
+                actor="operator-b",
+                idempotency_key="superseded-second",
+                expected_decision_count=0,
+            )
+        assert session.query(SourceRevisionDecision).count() == 1
+
+        second = record_source_revision_decision(
+            session,
+            revision_id=revision.id,
+            decision="superseded",
+            reason_code="newer_revision_exists",
+            actor="operator-b",
+            idempotency_key="superseded-second",
+            expected_decision_count=1,
+        )
+        repeated = record_source_revision_decision(
+            session,
+            revision_id=revision.id,
+            decision="superseded",
+            reason_code="newer_revision_exists",
+            actor="operator-b",
+            idempotency_key="superseded-second",
+            expected_decision_count=1,
+        )
+        assert repeated.id == second.id
+        assert session.query(SourceRevisionDecision).count() == 2
     engine.dispose()
 
 
@@ -213,16 +269,20 @@ def test_control_projection_prioritizes_undecided_then_newest() -> None:
             reason_code="awaiting_context",
             actor="operator",
             idempotency_key="first-hold",
+            expected_decision_count=0,
         )
 
         report = build_source_revision_control(session, city="belgrade")
-        assert report["version"] == 2
+        assert report["version"] == 3
         assert report["undecided_revisions"] == 1
         assert report["items"][0]["revision_id"] == second.id
         assert report["items"][0]["decision_status"] == "undecided"
+        assert report["items"][0]["write_precondition"] == {"expected_decision_count": 0}
         assert report["items"][1]["latest_decision"]["decision"] == "hold"
+        assert report["items"][1]["write_precondition"] == {"expected_decision_count": 1}
         assert report["items"][1]["decision_does_not_clear_fresh_review"] is True
         assert report["items"][1]["fresh_review_candidate_created"] is False
         assert report["safety"]["decision_clears_reverification"] is False
         assert report["safety"]["queue_reverify_reuses_old_editorial_run"] is False
+        assert report["safety"]["stale_control_writes_rejected"] is True
     engine.dispose()
