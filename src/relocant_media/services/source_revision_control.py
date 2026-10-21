@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from relocant_media.services.event_lifecycle import materialize_source_revision
@@ -30,10 +30,11 @@ def record_source_revision_decision(
     reason_code: str,
     actor: str,
     idempotency_key: str,
+    expected_decision_count: int,
     note: str | None = None,
     decided_at: datetime | None = None,
 ) -> SourceRevisionDecision:
-    """Append one control decision without reusing any old editorial approval."""
+    """Append one control decision only if the caller still has the current control snapshot."""
     normalized_decision = decision.strip().casefold()
     normalized_reason = reason_code.strip()
     normalized_actor = actor.strip()
@@ -44,9 +45,20 @@ def record_source_revision_decision(
         raise ValueError("reason_code, actor and idempotency_key are required")
     if len(normalized_key) > 128:
         raise ValueError("idempotency_key is too long")
-    if session.get(SourceRevision, revision_id) is None:
+    if expected_decision_count < 0:
+        raise ValueError("expected_decision_count cannot be negative")
+
+    revision = session.scalar(
+        select(SourceRevision)
+        .where(SourceRevision.id == revision_id)
+        .with_for_update()
+    )
+    if revision is None:
         raise ValueError("source revision does not exist")
 
+    # Idempotent replay is checked before the compare-and-set precondition. A caller may
+    # safely retry the exact operation after a timeout even though the successful first
+    # attempt has already increased decision_count.
     existing = session.scalar(
         select(SourceRevisionDecision).where(
             SourceRevisionDecision.idempotency_key == normalized_key
@@ -64,6 +76,18 @@ def record_source_revision_decision(
         if existing.decision == "queue_reverify":
             materialize_source_revision(session, revision_id)
         return existing
+
+    current_decision_count = session.scalar(
+        select(func.count())
+        .select_from(SourceRevisionDecision)
+        .where(SourceRevisionDecision.revision_id == revision_id)
+    )
+    current_count = int(current_decision_count or 0)
+    if current_count != expected_decision_count:
+        raise ValueError(
+            "stale source revision control snapshot: "
+            f"expected decision_count {expected_decision_count}, found {current_count}"
+        )
 
     row = SourceRevisionDecision(
         revision_id=revision_id,
@@ -153,6 +177,7 @@ def build_source_revision_control(
                     }
                 ),
                 "decision_count": len(history),
+                "write_precondition": {"expected_decision_count": len(history)},
                 "decision_does_not_clear_fresh_review": True,
                 "materialized_raw_item_id": (
                     None if materialization is None else materialization.raw_item_id
@@ -165,7 +190,7 @@ def build_source_revision_control(
     items.sort(key=lambda item: item["decision_status"] != "undecided")
     visible = items[:limit]
     return {
-        "version": 2,
+        "version": 3,
         "city": city,
         "total_revisions": len(items),
         "undecided_revisions": undecided,
@@ -176,5 +201,6 @@ def build_source_revision_control(
             "decision_clears_reverification": False,
             "fresh_editorial_review_required_after_source_change": True,
             "queue_reverify_reuses_old_editorial_run": False,
+            "stale_control_writes_rejected": True,
         },
     }
