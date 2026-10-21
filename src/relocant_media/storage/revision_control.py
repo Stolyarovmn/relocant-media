@@ -1,6 +1,6 @@
 """Append-only source revision control records.
 
-This table stores operator/agent control decisions about a detected source revision.  A decision
+This table stores operator/agent control decisions about a detected source revision. A decision
 never reuses an old editorial approval and never makes a stale EditorialRun publishable; only a
 fresh editorial run created after the revision can clear the existing re-verification guard.
 """
@@ -29,6 +29,27 @@ class SourceRevisionDecision(Base):
     actor: Mapped[str] = mapped_column(String, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     decided_at: Mapped[datetime] = mapped_column(
+        UTC_DATE,
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class SourceRevisionMaterialization(Base):
+    """Immutable lineage between a source revision and its fresh re-review candidate."""
+
+    __tablename__ = "source_revision_materialization"
+
+    revision_id: Mapped[int] = mapped_column(
+        ForeignKey("source_revision.id"), primary_key=True
+    )
+    raw_item_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_item.id"), unique=True, nullable=False
+    )
+    parent_raw_item_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_item.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
         UTC_DATE,
         server_default=func.now(),
         nullable=False,
