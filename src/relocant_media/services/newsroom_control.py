@@ -327,14 +327,15 @@ def build_newsroom_inbox(
         if run is not None:
             documents = run.evidence.get("documents")
             if isinstance(documents, list):
-                stored_ids = [
-                    document.get("raw_item_id")
-                    for document in documents
-                    if isinstance(document, dict)
-                    and type(document.get("raw_item_id")) is int
-                ]
+                stored_ids: list[int] = []
+                for document in documents:
+                    if not isinstance(document, dict):
+                        continue
+                    raw_id = document.get("raw_item_id")
+                    if type(raw_id) is int:
+                        stored_ids.append(raw_id)
                 if stored_ids:
-                    evidence_ids = [int(raw_id) for raw_id in stored_ids]
+                    evidence_ids = stored_ids
 
         control_items.append(
             {
