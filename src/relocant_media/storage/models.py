@@ -136,6 +136,52 @@ class EditorialRun(Base):
     )
 
 
+class EditorialExperiment(Base):
+    __tablename__ = "editorial_experiment"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    city: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="draft", server_default="draft")
+    scope: Mapped[str] = mapped_column(
+        String, nullable=False, default="presentation", server_default="presentation"
+    )
+    control_rule_version: Mapped[str] = mapped_column(String, nullable=False)
+    treatment_rule_version: Mapped[str] = mapped_column(String, nullable=False)
+    eligibility_start: Mapped[datetime] = mapped_column(UTC_DATE, nullable=False)
+    eligibility_end: Mapped[datetime | None] = mapped_column(UTC_DATE)
+    success_metric: Mapped[str] = mapped_column(String, nullable=False)
+    horizon_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24, server_default="24")
+    minimum_samples_per_arm: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10, server_default="10"
+    )
+    noise_floor: Mapped[Decimal] = mapped_column(
+        Numeric(8, 6), nullable=False, default=Decimal("0.02"), server_default="0.02"
+    )
+    max_single_post_view_share: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), nullable=False, default=Decimal("0.5"), server_default="0.5"
+    )
+    rollback_rule_version: Mapped[str | None] = mapped_column(String)
+    rollback_marked_at: Mapped[datetime | None] = mapped_column(UTC_DATE)
+    created_at: Mapped[datetime] = mapped_column(
+        UTC_DATE, server_default=func.now(), nullable=False
+    )
+
+
+class ExperimentAssignment(Base):
+    __tablename__ = "experiment_assignment"
+
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("editorial_experiment.id"), primary_key=True
+    )
+    raw_item_id: Mapped[int] = mapped_column(ForeignKey("raw_item.id"), primary_key=True)
+    post_id: Mapped[int | None] = mapped_column(ForeignKey("post.id"), unique=True)
+    arm: Mapped[str] = mapped_column(String, nullable=False)
+    rule_version: Mapped[str] = mapped_column(String, nullable=False)
+    assigned_at: Mapped[datetime] = mapped_column(
+        UTC_DATE, server_default=func.now(), nullable=False
+    )
+
+
 class PostSnapshot(Base):
     __tablename__ = "post_snapshot"
 
