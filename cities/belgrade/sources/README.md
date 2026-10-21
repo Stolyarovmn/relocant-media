@@ -31,6 +31,15 @@ The registry deliberately starts with primary sources. Commercial media sources 
 снимках и отдельных regression fixtures. Неподтверждённый RSS/feed URL не считается допустимым
 основанием для production collector.
 
+`bvk_planned_works` прошёл следующий shadow-этап 21.10.2026: живая официальная страница
+подтверждена как список нескольких независимых уведомлений с заголовком формата
+`DD.MM.YYYY. ...`, после чего добавлен структурированный `bvk_planned_works` parser и regression
+fixture. Каждое уведомление получает стабильный external ID и отдельную внутреннюю canonical
+identity, но публичный evidence URL остаётся точным URL BVK. Страница не показывает надёжный
+publication timestamp, поэтому parser намеренно оставляет `published_at` пустым и
+`auto_publish: false`; дату работ нельзя подменять датой публикации. Следующий этап — измерить
+live extraction/freshness и только затем решать, нужен ли source-specific freshness contract.
+
 Each source file captures:
 - stable source id;
 - publisher and ownership/type;
