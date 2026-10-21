@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from relocant_media.config import settings
+from relocant_media.services.correction_control import build_reader_correction_control
 from relocant_media.services.newsroom_control import build_newsroom_inbox
 from relocant_media.services.shadow_duplicates import build_shadow_duplicate_report
 from relocant_media.services.source_revision_control import build_source_revision_control
@@ -90,6 +91,11 @@ def main() -> None:
         with SessionFactory() as session:
             payload = build_newsroom_inbox(session, city=args.city, limit=args.limit)
             payload["source_revision_control"] = build_source_revision_control(
+                session,
+                city=args.city,
+                limit=args.limit,
+            )
+            payload["reader_correction_control"] = build_reader_correction_control(
                 session,
                 city=args.city,
                 limit=args.limit,
