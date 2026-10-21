@@ -1,7 +1,7 @@
 """add append-only source revision decisions
 
-Revision ID: 0010_source_revision_decisions
-Revises: 0009_editorial_experiments
+Revision ID: 0010
+Revises: 0009
 """
 
 from collections.abc import Sequence
@@ -9,8 +9,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0010_source_revision_decisions"
-down_revision: str | None = "0009_editorial_experiments"
+revision: str = "0010"
+down_revision: str | None = "0009"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
