@@ -8,8 +8,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from relocant_media.services.event_lifecycle import materialize_source_revision
 from relocant_media.storage.models import RawItem, Source, SourceRevision
-from relocant_media.storage.revision_control import SourceRevisionDecision
+from relocant_media.storage.revision_control import (
+    SourceRevisionDecision,
+    SourceRevisionMaterialization,
+)
 
 ALLOWED_REVISION_DECISIONS = frozenset({"queue_reverify", "hold", "superseded"})
 
@@ -29,7 +33,7 @@ def record_source_revision_decision(
     note: str | None = None,
     decided_at: datetime | None = None,
 ) -> SourceRevisionDecision:
-    """Append one control decision without changing editorial/delivery state."""
+    """Append one control decision without reusing any old editorial approval."""
     normalized_decision = decision.strip().casefold()
     normalized_reason = reason_code.strip()
     normalized_actor = actor.strip()
@@ -57,6 +61,8 @@ def record_source_revision_decision(
             or existing.note != note
         ):
             raise ValueError("idempotency_key already belongs to another decision")
+        if existing.decision == "queue_reverify":
+            materialize_source_revision(session, revision_id)
         return existing
 
     row = SourceRevisionDecision(
@@ -70,6 +76,8 @@ def record_source_revision_decision(
     )
     session.add(row)
     session.flush()
+    if normalized_decision == "queue_reverify":
+        materialize_source_revision(session, revision_id)
     return row
 
 
@@ -92,6 +100,7 @@ def build_source_revision_control(
     ).all()
     revision_ids = [revision.id for revision, _raw, _source in rows]
     decisions_by_revision: dict[int, list[SourceRevisionDecision]] = {}
+    materializations: dict[int, SourceRevisionMaterialization] = {}
     if revision_ids:
         for decision in session.scalars(
             select(SourceRevisionDecision)
@@ -103,12 +112,21 @@ def build_source_revision_control(
             )
         ):
             decisions_by_revision.setdefault(decision.revision_id, []).append(decision)
+        materializations = {
+            row.revision_id: row
+            for row in session.scalars(
+                select(SourceRevisionMaterialization).where(
+                    SourceRevisionMaterialization.revision_id.in_(revision_ids)
+                )
+            )
+        }
 
     items: list[dict[str, Any]] = []
     undecided = 0
     for revision, raw, source in rows:
         history = decisions_by_revision.get(revision.id, [])
         latest = history[-1] if history else None
+        materialization = materializations.get(revision.id)
         if latest is None:
             undecided += 1
         items.append(
@@ -136,15 +154,18 @@ def build_source_revision_control(
                 ),
                 "decision_count": len(history),
                 "decision_does_not_clear_fresh_review": True,
+                "materialized_raw_item_id": (
+                    None if materialization is None else materialization.raw_item_id
+                ),
+                "fresh_review_candidate_created": materialization is not None,
             }
         )
 
-    # Within each operational bucket show the newest revision first, then put undecided first.
     items.sort(key=lambda item: (str(item["observed_at"]), int(item["revision_id"])), reverse=True)
     items.sort(key=lambda item: item["decision_status"] != "undecided")
     visible = items[:limit]
     return {
-        "version": 1,
+        "version": 2,
         "city": city,
         "total_revisions": len(items),
         "undecided_revisions": undecided,
@@ -154,5 +175,6 @@ def build_source_revision_control(
         "safety": {
             "decision_clears_reverification": False,
             "fresh_editorial_review_required_after_source_change": True,
+            "queue_reverify_reuses_old_editorial_run": False,
         },
     }
