@@ -1,0 +1,21 @@
+id: beoelektrane_network_works
+name: JKP Beogradske elektrane — Radovi na toplovodnoj mreži
+publisher: JKP Beogradske elektrane
+ownership: official
+url: https://beoelektrane.co.rs/planirani-radovi/radovi-na-toplovodnoj-mrezi/
+language: sr-Latn
+source_type: official_heating_service_info
+trust: 1.0
+check_every: 1h
+categories:
+  - utilities
+  - heating
+extraction:
+  strategy: page_change_detection
+  status: active
+policy:
+  high_risk: false
+  auto_publish: false
+verification:
+  checked_at: 2026-10-21
+  note: Official Beogradske elektrane page lists current heating-network works by municipality and street. Shadow snapshot only until structured extraction is validated on real page revisions.
