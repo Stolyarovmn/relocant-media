@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Protocol
 
 from relocant_media.bot.api import PhotoUpload
-from relocant_media.bot.formatting import source_link_entities
+from relocant_media.bot.formatting import compact_source_link
 from relocant_media.bot.publisher import ProductionTargetBlockedError
 
 
@@ -47,32 +47,26 @@ class StagingMediaPublisher:
     def target_id(self) -> str:
         return self._channel_id
 
-    async def publish(
-        self,
-        caption: str,
-        photos: Sequence[Path | PhotoUpload],
-        *,
-        source_url: str | None = None,
-    ) -> list[int]:
+    async def publish(self, caption: str, photos: Sequence[Path | PhotoUpload]) -> list[int]:
         if not caption.strip():
             raise ValueError("media publication requires a caption")
-        if len(caption.encode("utf-16-le")) // 2 > 1024:
+        visible, entities = compact_source_link(caption)
+        if len(visible.encode("utf-16-le")) // 2 > 1024:
             raise ValueError("photo caption exceeds 1024 UTF-16 code units")
         if not 1 <= len(photos) <= 10:
             raise ValueError("media publication requires 1 to 10 photos")
-        entities = source_link_entities(caption, source_url)
         if len(photos) == 1:
             return [
                 await self._bot.send_photo(
                     self._channel_id,
                     photos[0],
-                    caption,
+                    visible,
                     entities,
                 )
             ]
         return await self._bot.send_media_group(
             self._channel_id,
             photos,
-            caption,
+            visible,
             entities,
         )
