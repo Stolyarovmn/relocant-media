@@ -55,7 +55,8 @@ def sync_source(session: Session, city: str, source: SourceConfig) -> None:
 
 
 def _derived_metadata(item: CollectedRawItem) -> tuple[str, str]:
-    return canonicalize_url(item.url), content_sha256(item.title, item.body)
+    canonical_url = item.canonical_url or canonicalize_url(item.url)
+    return canonical_url, content_sha256(item.title, item.body)
 
 
 def _referencing_runs(session: Session, raw_item_id: int) -> list[EditorialRun]:

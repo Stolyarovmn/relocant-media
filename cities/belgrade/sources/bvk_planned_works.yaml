@@ -11,11 +11,11 @@ categories:
   - utilities
   - water
 extraction:
-  strategy: page_change_detection
+  strategy: bvk_planned_works
   status: active
 policy:
   high_risk: false
   auto_publish: false
 verification:
   checked_at: 2026-10-21
-  note: Official BVK planned-works page lists municipality/street, outage time and water-tanker information. Collected as a whole-page shadow snapshot until a structured outage parser is validated on real snapshots.
+  note: Official BVK planned-works page exposes multiple independent notices with municipality/street, outage time and tanker information. Structured collector splits notices conservatively, preserves the exact public page URL, assigns a separate internal canonical identity per notice, and leaves published_at unknown because the page does not expose a reliable publication timestamp. auto_publish remains false until live extraction/freshness quality is measured.
