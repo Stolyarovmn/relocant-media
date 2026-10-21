@@ -24,6 +24,8 @@ def _database():
             source_type="official",
             trust=Decimal("1"),
         )
+        session.add(source)
+        session.flush()
         raw = RawItem(
             source_id=source.id,
             external_id="1",
@@ -31,7 +33,7 @@ def _database():
             title="Title",
             body="Body",
         )
-        session.add_all([source, raw])
+        session.add(raw)
         session.flush()
         revision = SourceRevision(
             raw_item_id=raw.id,
