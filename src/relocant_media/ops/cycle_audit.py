@@ -15,6 +15,7 @@ from relocant_media.storage.models import EditorialRun, Post
 
 def audit_cycle(session: Session, report: dict[str, Any]) -> dict[str, Any]:
     pins = report.get("pin_maintenance", {})
+    intake = report.get("private_intake", {})
     checks = dict(
         primary_completed=report.get("status") in {"PRIMARY_OK", "PRIMARY_PARTIAL"},
         no_processing_errors=not report.get("processing_errors"),
@@ -26,6 +27,7 @@ def audit_cycle(session: Session, report: dict[str, Any]) -> dict[str, Any]:
         russian_copy=True,
         title_prefix=True,
         absolute_dates=True,
+        private_intake_healthy=intake.get("status") in (None, "disabled", "ready"),
     )
     ids = report.get("sent_message_ids", [])
     checks["unique_receipts"] = len(ids) == len(set(ids))

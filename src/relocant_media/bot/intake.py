@@ -43,10 +43,13 @@ def _save_submission(
     message_id: int,
     chat_id: int | None,
     text: str,
+    city: str | None = None,
 ) -> None:
     payload: dict[str, Any] = {"text": text}
     if chat_id is not None:
         payload["chat_id"] = chat_id
+    if city:
+        payload["city"] = city
     session.add(
         Submission(
             kind=kind.value,
@@ -60,7 +63,9 @@ def _save_submission(
         session.add(AdRequest(telegram_user_id=user_id, payload=payload, status="new"))
 
 
-def handle_private_message(session: Session, message: dict[str, Any]) -> IntakeResult:
+def handle_private_message(
+    session: Session, message: dict[str, Any], *, city: str | None = None,
+) -> IntakeResult:
     identity = _message_identity(message)
     text_value = message.get("text")
     if identity is None or not isinstance(text_value, str):
@@ -86,7 +91,7 @@ def handle_private_message(session: Session, message: dict[str, Any]) -> IntakeR
     if selected_kind is not None:
         body = remainder.strip() if separator else ""
         if body:
-            _save_submission(session, selected_kind, user_id, message_id, chat_id, body)
+            _save_submission(session, selected_kind, user_id, message_id, chat_id, body, city)
             conversation = session.get(TelegramConversation, user_id)
             if conversation is not None:
                 session.delete(conversation)
@@ -111,6 +116,6 @@ def handle_private_message(session: Session, message: dict[str, Any]) -> IntakeR
         return IntakeResult(outcome="ignored")
 
     pending_kind = SubmissionKind(conversation.pending_kind)
-    _save_submission(session, pending_kind, user_id, message_id, chat_id, text)
+    _save_submission(session, pending_kind, user_id, message_id, chat_id, text, city)
     session.delete(conversation)
     return IntakeResult(outcome="submitted", reply="Спасибо, сообщение принято.")

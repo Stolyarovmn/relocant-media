@@ -72,6 +72,8 @@ def run_cycle(
     reassessment_ids: Callable[[], list[int]] | None = None,
     continue_on_error: bool = False,
     candidate_priorities: Callable[[], dict[str, int]] | None = None,
+    priority_items: Callable[[], set[int]] | None = None,
+    recent_source_counts: Callable[[], dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
             or not city.strip() or not 1 <= limit <= 5):
@@ -104,6 +106,8 @@ def run_cycle(
                 manifest = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
                     until=aware_datetime(window["until"]), limit=limit, newest_first=newest_first,
+                    priority_raw_ids=priority_items() if priority_items else None,
+                    recent_source_counts=recent_source_counts() if recent_source_counts else None,
                     source_priorities=candidate_priorities() if candidate_priorities else None)
             if reassessment_ids is not None:
                 selected = {candidate["raw_item_id"] for candidate in manifest["candidates"]}

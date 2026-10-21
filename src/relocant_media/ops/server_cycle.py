@@ -4,7 +4,6 @@ import asyncio
 import copy
 import json
 import os
-import re
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,12 +26,10 @@ from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.collectors.beograd_article import (
     BelgradeArticleCollector,
-    match_beograd_article_url,
     parse_beograd_article,
 )
 from relocant_media.collectors.beograd_news import parse_beograd_news_list
 from relocant_media.collectors.cukarica_news import (
-    ARTICLE_PATH,
     CukaricaNewsCollector,
     parse_cukarica_article,
     parse_cukarica_news_list,
@@ -65,6 +62,18 @@ from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
     persist_policy_reassessment,
 )
+from relocant_media.services.primary_discovery import (
+    public_search_plan,
+    source_for_url,
+    topic_matches,
+)
+from relocant_media.services.private_intake import receive_private_tips
+from relocant_media.services.published_watch import (
+    evidence_changed,
+    published_sources,
+    recent_source_load,
+)
+from relocant_media.services.submission_queue import pending_submissions, priority_raw_ids, tip_urls
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
@@ -190,6 +199,9 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     result["venue_items"] = 0
     result["venue_deferred"] = 0
     result["venue_article_failures"] = 0
+    result["priority_submissions"] = 0
+    result["primary_searches"] = 0
+    result["private_link_fetches"] = 0
     with Session(engine) as session:
         for source in sources.values():
             sync_source(session, "belgrade", source)
@@ -200,6 +212,15 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     venue_errors: list[dict[str, str]] = []
     articles = []
     fetched: dict[str, str] = {}
+    submission_links: dict[int, list[str]] = {}
+    attempted_tips: set[int] = set()
+    watch: dict[str, Any] = {"checked": 0, "changed": [], "failures": []}
+    with Session(engine) as session:
+        tips = [(row.id, row.payload) for row in pending_submissions(session)]
+        published = published_sources(session, now=now)
+    aliases_path = SOURCES.parent / "event-aliases.json"
+    aliases = json.loads(aliases_path.read_text(encoding="utf-8")) if aliases_path.is_file() else {}
+    searches: set[tuple[str, str]] = set()
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
         collectors: dict[
             str, BelgradeArticleCollector | CukaricaNewsCollector | VenueFeedCollector
@@ -225,6 +246,50 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
             articles.append(item)
             fetched[url] = "primary_source_collected"
             return "primary_source_collected"
+
+        async def resolve_link(url: str) -> str | None:
+            source_id = source_for_url(url, sources)
+            if source_id is None:
+                return None
+            try:
+                return await full_article(source_id, url)
+            except (httpx.HTTPError, ValueError):
+                fetched[url] = "primary_source_unavailable"
+                return fetched[url]
+
+        # Private text stays in Submission. Only separately fetched public evidence is ingested.
+        for submission_id, payload in tips:
+            linked = []
+            for url in tip_urls(payload):
+                if source_for_url(url, sources) is None:
+                    attempted_tips.add(submission_id)
+                    continue
+                if urlsplit(url).query:
+                    attempted_tips.add(submission_id)
+                    continue
+                if url not in fetched:
+                    if result["private_link_fetches"] >= 10:
+                        continue
+                    result["private_link_fetches"] += 1
+                attempted_tips.add(submission_id)
+                if await resolve_link(url) == "primary_source_collected":
+                    linked.append(url)
+            if not tip_urls(payload):
+                attempted_tips.add(submission_id)
+            submission_links[submission_id] = linked
+
+        for original in published:
+            if original.source_id not in collectors:
+                continue
+            try:
+                current = await collectors[original.source_id].collect_url(original.url)
+                watch["checked"] += 1
+                if evidence_changed(original, current):
+                    articles.append(current)
+                    watch["changed"].append(original.id)
+            except (httpx.HTTPError, ValueError) as error:
+                watch["failures"].append({"raw_item_id": original.id,
+                                          "error_type": type(error).__name__})
 
         pages = [("city_beograd_news", str(sources["city_beograd_news"].url)),
                  ("cukarica_news", str(sources["cukarica_news"].url)),
@@ -279,35 +344,42 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                     for url in lead.outbound_urls[:10]:
                         # Telegram text never becomes evidence. Fetch only independently
                         # parsed article URLs from the explicitly approved sources.
-                        if match_beograd_article_url(url):
-                            resolved.append(await full_article("city_beograd_news", url))
+                        resolution = await resolve_link(url)
+                        if resolution is not None:
+                            resolved.append(resolution)
                             primary_urls.append(url)
-                        else:
-                            parts = urlsplit(url)
-                            if (parts.scheme == "https"
-                                    and parts.hostname in {"cukarica.rs", "www.cukarica.rs"}
-                                    and parts.username is None and parts.password is None
-                                    and parts.port in {None, 443}
-                                    and ARTICLE_PATH.fullmatch(parts.path)):
-                                resolved.append(await full_article("cukarica_news", url))
-                                primary_urls.append(url)
-                        if url not in primary_urls:
-                            for source_id, venue in venues.items():
-                                parts = urlsplit(url)
-                                hosts = {urlsplit(str(venue.url)).hostname,
-                                         *venue.extraction.approved_hosts}
-                                if parts.hostname in hosts:
-                                    resolved.append(await full_article(source_id, url))
-                                    primary_urls.append(url)
-                                    break
                     # A matching official title is a discovery pointer only. The
                     # pipeline still has to check every claim against the full article.
-                    words = set(re.findall(r"[^\W\d_]{5,}", lead.text.casefold()))
                     for article in articles:
-                        title_words = set(re.findall(r"[^\W\d_]{5,}", article.title.casefold()))
-                        if len(words & title_words) >= 3 and article.url not in primary_urls:
+                        if (topic_matches(lead.text, article.title)
+                                and article.url not in primary_urls):
                             primary_urls.append(article.url)
                             resolved.append("primary_source_collected")
+                    if not any(r == "primary_source_collected" for r in resolved):
+                        for source_id, search_url in public_search_plan(lead.text, venues, aliases):
+                            key = (source_id, search_url)
+                            if key in searches or len(searches) >= 4:
+                                continue
+                            searches.add(key)
+                            result["primary_searches"] += 1
+                            search_source = venues[source_id].model_copy(update={"extraction":
+                                venues[source_id].extraction.model_copy(
+                                    update={"feed_url": search_url})})
+                            try:
+                                found = await VenueFeedCollector(search_source, client).collect()
+                            except (httpx.HTTPError, ValueError):
+                                continue
+                            for item in found:
+                                if (not topic_matches(lead.text, item.title)
+                                        or freshness_decision(item.title, item.body,
+                                            item.published_at, now).action != "keep"
+                                        or event_content_reason(item.title, item.body, now=now)):
+                                    continue
+                                if item.url not in fetched:
+                                    articles.append(item)
+                                    fetched[item.url] = "primary_source_collected"
+                                primary_urls.append(item.url)
+                                resolved.append("primary_source_collected")
                     topics.append({"url": lead.url, "channel": channel,
                         "published_at": lead.published_at.isoformat(),
                         "status": "primary_source_resolved" if any(
@@ -319,12 +391,30 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                 channel_errors.append({"channel": channel, "error_type": type(error).__name__})
     with Session(engine) as session:
         written, changes = capture_collected_batch(session, articles)
+        for submission_id, payload in tips:
+            urls = submission_links[submission_id]
+            # Local matching sends no private text to a search engine or model.
+            for article in articles:
+                if topic_matches(str(payload.get("text", "")), article.title):
+                    urls.append(article.url)
+            ids = list(session.scalars(select(RawItem.id).where(RawItem.url.in_(set(urls)))))
+            if not ids and submission_id not in attempted_tips:
+                continue
+            from relocant_media.storage.models import Submission
+            stored_tip = session.get(Submission, submission_id)
+            assert stored_tip is not None
+            stored_tip.payload = {**stored_tip.payload, "raw_item_ids": ids,
+                                  "last_triaged_at": now.isoformat()}
+            stored_tip.status = "source_linked" if ids else "waiting_primary"
+            result["priority_submissions"] += bool(ids)
         session.commit()
     result["raw_items_written"] = written
     result["review_required"] = changes
     triage = triage_queue(engine, now=now)
     result["discarded_queue"] = triage["discarded"]
     if output is not None:
+        (output / "published-source-watch.json").write_text(
+            json.dumps(watch, ensure_ascii=False, indent=2), encoding="utf-8")
         (output / "venue-article-failures.json").write_text(
             json.dumps({"items": venue_errors}, ensure_ascii=False, indent=2), encoding="utf-8")
         aliases_path = SOURCES.parent / "event-aliases.json"
@@ -539,14 +629,33 @@ def main() -> None:
             model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v7-local-venue-style",
             public_news_only=True,
         )
+        async def intake() -> dict[str, Any]:
+            async with httpx.AsyncClient(timeout=25, trust_env=False) as intake_client:
+                return await receive_private_tips(engine,
+                    TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], intake_client),
+                    enabled=os.environ.get("EDITORIAL_PRIVATE_INTAKE_ENABLED") == "true")
+        try:
+            intake_status = asyncio.run(intake())
+        except Exception as intake_error:
+            intake_status = {"status": "failed", "error_type": type(intake_error).__name__,
+                             "received": 0, "owner_action_required": False}
+        def private_priorities() -> set[int]:
+            with Session(engine) as private_session:
+                return priority_raw_ids(private_session)
+        def source_load() -> dict[str, int]:
+            with Session(engine) as load_session:
+                return recent_source_load(load_session, now=datetime.now(UTC))
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=lambda: asyncio.run(collect_sources(engine, output=args.output)),
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output), limit=2,
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
+            priority_items=private_priorities,
+            recent_source_counts=source_load,
             reassessment_ids=lambda: policy_reassessment_ids(engine), continue_on_error=True,
             candidate_priorities=lambda: source_priorities(json.loads(
                 (args.output / "venue-attention.json").read_text(encoding="utf-8")))
                 if (args.output / "venue-attention.json").is_file() else {})
+        result["private_intake"] = intake_status
         result["fallback_required"] = (result["status"] == "PRIMARY_FAILED"
                                        or bool(result.get("processing_errors")))
         result["sent_message_ids"] = []
