@@ -53,6 +53,14 @@ _DELETE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"\bбез\s+риска\b.{0,45}\b(?:доход|прибыл\w*|заработ\w*|инвест\w*)\b)"
         ),
     ),
+    (
+        "direct_message_earnings_spam",
+        re.compile(
+            r"(?i)(?:\bпиш(?:и|ите)\s+(?:мне\s+)?(?:в\s+)?(?:лс|личк\w*)\b.{0,30}"
+            r"\bзаработ\w*\b|\bзаработ\w*\b.{0,30}\bпиш(?:и|ите)\s+(?:мне\s+)?"
+            r"(?:в\s+)?(?:лс|личк\w*)\b)"
+        ),
+    ),
 )
 
 _REVIEW_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
