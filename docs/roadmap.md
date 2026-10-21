@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #55–62.
+Состояние на 21 октября 2026 года после PR #55–63.
 
 ## Этап 0 — основа и проверки
 
@@ -11,7 +11,6 @@
 - [x] Event-level dedup, evidence bundle, source policy и повторная сверка доказательств перед доставкой.
 - [x] `editorial_rule_version` в редакционных запусках/публикациях и разрез аналитики по версии правил.
 - [ ] Продолжать проверку покрытия и актуальности реальных источников.
-- [ ] Включить административную защиту `main`: required CI, запрет force-push/delete; текущий GitHub App не имеет admin-доступа к branch-protection API.
 
 ## Этап 1 — автономная серверная редакция
 
@@ -30,7 +29,7 @@
 - [x] Защита доставки `sending/sent/uncertain` без автоматического повторения неопределённой отправки.
 - [x] `cycle-audit` после серверного прохода.
 - [x] Единый read-only newsroom state/control inbox поверх существующих `raw_item/editorial_run/post/source_revision/submission`, без второй очереди; см. [NEWSROOM_CONTROL.md](NEWSROOM_CONTROL.md).
-- [ ] Управляемый workflow повторного рассмотрения `source_revision`, где решение и причина видны в одном control plane.
+- [x] Управляемый workflow повторного рассмотрения `source_revision`: append-only решение и причина видны в том же control plane; решение не снимает `needs_reverify`, требуется новый редакционный review. См. [SOURCE_REVISIONS.md](SOURCE_REVISIONS.md).
 
 Подробности: [SERVER_EDITORIAL.md](SERVER_EDITORIAL.md), [EDITORIAL_CYCLE.md](EDITORIAL_CYCLE.md), [OPERATIONAL_STATE.md](OPERATIONAL_STATE.md).
 
