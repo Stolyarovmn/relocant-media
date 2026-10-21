@@ -54,6 +54,7 @@ def test_decision_is_append_only_idempotent_and_does_not_mutate_submission() -> 
             reason_code="official_source_confirms_error",
             actor="editorial-agent",
             idempotency_key="correction-7-confirmed",
+            expected_decision_count=0,
             note="Audited conclusion only",
             decided_at=datetime(2026, 10, 21, 12, 5, tzinfo=UTC),
         )
@@ -64,6 +65,7 @@ def test_decision_is_append_only_idempotent_and_does_not_mutate_submission() -> 
             reason_code="official_source_confirms_error",
             actor="editorial-agent",
             idempotency_key="correction-7-confirmed",
+            expected_decision_count=0,
             note="Audited conclusion only",
             decided_at=datetime(2026, 10, 21, 12, 10, tzinfo=UTC),
         )
@@ -73,10 +75,13 @@ def test_decision_is_append_only_idempotent_and_does_not_mutate_submission() -> 
 
         report = build_reader_correction_control(session)
         item = report["items"][0]
+        assert report["version"] == 2
         assert item["decision_status"] == "resolved"
         assert item["effective_decision"] == "confirmed"
+        assert item["write_precondition"] == {"expected_decision_count": 1}
         assert item["telegram_mutation_performed"] is False
         assert item["private_text_exposed"] is False
+        assert report["safety"]["stale_control_writes_rejected"] is True
         assert "private correction" not in str(report)
         assert str(row.telegram_user_id) not in str(report)
     engine.dispose()
@@ -103,6 +108,7 @@ def test_only_correction_submissions_can_receive_decisions() -> None:
                 reason_code="not_applicable",
                 actor="operator",
                 idempotency_key="tip-is-not-correction",
+                expected_decision_count=0,
             )
     engine.dispose()
 
@@ -124,6 +130,7 @@ def test_unsafe_publication_decision_is_rejected() -> None:
                 reason_code="unsafe",
                 actor="operator",
                 idempotency_key="unsafe-edit",
+                expected_decision_count=0,
             )
     engine.dispose()
 
@@ -144,6 +151,7 @@ def test_idempotency_key_cannot_be_reused_for_another_decision() -> None:
             reason_code="needs_evidence",
             actor="operator",
             idempotency_key="same-key",
+            expected_decision_count=0,
         )
         with pytest.raises(ValueError, match="another correction decision"):
             record_reader_correction_decision(
@@ -153,7 +161,62 @@ def test_idempotency_key_cannot_be_reused_for_another_decision() -> None:
                 reason_code="no_public_evidence",
                 actor="operator",
                 idempotency_key="same-key",
+                expected_decision_count=0,
             )
+    engine.dispose()
+
+
+def test_stale_correction_control_snapshot_is_rejected_but_exact_retry_is_safe() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        row = _correction(
+            session,
+            message_id=12,
+            created_at=datetime(2026, 10, 21, 16, tzinfo=UTC),
+        )
+        record_reader_correction_decision(
+            session,
+            submission_id=row.id,
+            decision="hold",
+            reason_code="needs_evidence",
+            actor="operator-a",
+            idempotency_key="hold-first",
+            expected_decision_count=0,
+        )
+
+        with pytest.raises(ValueError, match="stale reader correction control snapshot"):
+            record_reader_correction_decision(
+                session,
+                submission_id=row.id,
+                decision="confirmed",
+                reason_code="verified",
+                actor="operator-b",
+                idempotency_key="confirm-second",
+                expected_decision_count=0,
+            )
+        assert session.scalar(select(func.count()).select_from(ReaderCorrectionDecision)) == 1
+
+        second = record_reader_correction_decision(
+            session,
+            submission_id=row.id,
+            decision="confirmed",
+            reason_code="verified",
+            actor="operator-b",
+            idempotency_key="confirm-second",
+            expected_decision_count=1,
+        )
+        repeated = record_reader_correction_decision(
+            session,
+            submission_id=row.id,
+            decision="confirmed",
+            reason_code="verified",
+            actor="operator-b",
+            idempotency_key="confirm-second",
+            expected_decision_count=1,
+        )
+        assert repeated.id == second.id
+        assert session.scalar(select(func.count()).select_from(ReaderCorrectionDecision)) == 2
     engine.dispose()
 
 
@@ -171,13 +234,18 @@ def test_control_projection_prioritizes_unresolved_and_never_exposes_private_tex
             reason_code="no_public_evidence",
             actor="editorial-agent",
             idempotency_key="newer-resolved",
+            expected_decision_count=0,
         )
         report = build_reader_correction_control(session)
+        assert report["version"] == 2
         assert report["unresolved_corrections"] == 1
         assert report["items"][0]["submission_id"] == older.id
         assert report["items"][0]["effective_decision"] == "unreviewed"
+        assert report["items"][0]["write_precondition"] == {"expected_decision_count": 0}
         assert report["items"][1]["submission_id"] == newer.id
         assert report["items"][1]["decision_status"] == "resolved"
+        assert report["items"][1]["write_precondition"] == {"expected_decision_count": 1}
         assert report["safety"]["telegram_edit_capability"] is False
+        assert report["safety"]["stale_control_writes_rejected"] is True
         assert "private correction" not in str(report)
     engine.dispose()
