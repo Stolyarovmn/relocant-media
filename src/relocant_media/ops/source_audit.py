@@ -95,6 +95,12 @@ async def audit_sources(
                     row["item_failures"] = item_failures
                     if item_failures:
                         row["status"] = "partial"
+                except httpx.TransportError as error:
+                    row.update(
+                        status="transport_error",
+                        error_type=type(error).__name__,
+                        attempts=_TRANSPORT_ATTEMPTS,
+                    )
                 except Exception as error:
                     row.update(status="error", error_type=type(error).__name__)
             rows.append(row)
@@ -107,6 +113,7 @@ async def audit_sources(
         "active_count": sum(row["status"] != "planned" for row in rows),
         "working_count": sum(row["status"] in {"ok", "empty", "partial"} for row in rows),
         "partial_count": sum(row["status"] == "partial" for row in rows),
+        "transport_error_count": sum(row["status"] == "transport_error" for row in rows),
         "error_count": sum(row["status"] == "error" for row in rows),
     }
 
@@ -116,18 +123,24 @@ def source_health_exit_code(
     *,
     fail_on_error: bool = False,
     fail_on_partial: bool = False,
+    fail_on_transport: bool = False,
     require_active: bool = False,
 ) -> int:
     """Return a CI-friendly exit code without changing audit result semantics."""
     active_count = result.get("active_count", 0)
     error_count = result.get("error_count", 0)
     partial_count = result.get("partial_count", 0)
+    transport_error_count = result.get("transport_error_count", 0)
 
     if require_active and (not isinstance(active_count, int) or active_count <= 0):
         return 1
     if fail_on_error and (not isinstance(error_count, int) or error_count > 0):
         return 1
     if fail_on_partial and (not isinstance(partial_count, int) or partial_count > 0):
+        return 1
+    if fail_on_transport and (
+        not isinstance(transport_error_count, int) or transport_error_count > 0
+    ):
         return 1
     return 0
 
@@ -141,7 +154,8 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
         f"- active: **{result.get('active_count', 0)}**",
         f"- working: **{result.get('working_count', 0)}**",
         f"- partial: **{result.get('partial_count', 0)}**",
-        f"- errors: **{result.get('error_count', 0)}**",
+        f"- transport errors: **{result.get('transport_error_count', 0)}**",
+        f"- extraction/protocol errors: **{result.get('error_count', 0)}**",
         "",
         "| Source | Status | Fresh | Details |",
         "|---|---|---:|---|",
@@ -150,8 +164,10 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
         if row.get("status") == "planned":
             continue
         details = ""
-        if row.get("status") == "error":
+        if row.get("status") in {"error", "transport_error"}:
             details = str(row.get("error_type", "error"))
+            if row.get("attempts", 1) > 1:
+                details += f" after {row['attempts']} attempts"
         elif row.get("status") == "partial":
             details = f"item_failures={len(row.get('item_failures', []))}"
         elif row.get("attempts", 1) > 1:
@@ -176,6 +192,7 @@ def main() -> None:
     parser.add_argument("--summary", type=Path)
     parser.add_argument("--fail-on-error", action="store_true")
     parser.add_argument("--fail-on-partial", action="store_true")
+    parser.add_argument("--fail-on-transport", action="store_true")
     parser.add_argument("--require-active", action="store_true")
     args = parser.parse_args()
 
@@ -199,6 +216,7 @@ def main() -> None:
         result,
         fail_on_error=args.fail_on_error,
         fail_on_partial=args.fail_on_partial,
+        fail_on_transport=args.fail_on_transport,
         require_active=args.require_active,
     )
     if exit_code:
