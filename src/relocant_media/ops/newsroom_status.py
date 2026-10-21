@@ -8,6 +8,7 @@ from typing import Any
 from relocant_media.config import settings
 from relocant_media.services.newsroom_control import build_newsroom_inbox
 from relocant_media.services.shadow_duplicates import build_shadow_duplicate_report
+from relocant_media.services.source_revision_control import build_source_revision_control
 from relocant_media.storage.db import SessionFactory
 
 
@@ -88,6 +89,11 @@ def main() -> None:
     if args.database:
         with SessionFactory() as session:
             payload = build_newsroom_inbox(session, city=args.city, limit=args.limit)
+            payload["source_revision_control"] = build_source_revision_control(
+                session,
+                city=args.city,
+                limit=args.limit,
+            )
             if args.shadow_duplicates:
                 payload["shadow_duplicates"] = build_shadow_duplicate_report(
                     session,
