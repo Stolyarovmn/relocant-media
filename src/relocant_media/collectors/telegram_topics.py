@@ -14,9 +14,19 @@ from relocant_media.analytics.public_preview import (
     validate_username,
 )
 
+# Large public Russian-language Serbia/Belgrade channels are useful as a discovery surface only.
+# Inclusion here does not make a channel trusted evidence and does not change publication policy.
 DEFAULT_CHANNELS = (
-    "beogradske_vesti", "sta_imas_beograd", "afisha_rs", "SerbiaInMyMind",
-    "sta_ima_u_beogradu",
+    "Serbia",
+    "SerbiaInMyMind",
+    "novostiserbii",
+    "beogradske_vesti",
+    "ruserbia",
+    "sta_imas_beograd",
+    "relocate_serbia",
+    "volna_srbjia",
+    "vstrechi_v_belgrade",
+    "afisha_rs",
 )
 
 
