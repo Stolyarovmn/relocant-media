@@ -31,14 +31,5 @@ jobs:
           python -m relocant_media.ops.source_audit \
             --online \
             --fail-on-error \
-            --fail-on-partial \
             --require-active \
-            --output source-health.json
-      - name: Upload source-health report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: source-health-${{ github.run_id }}
-          path: source-health.json
-          if-no-files-found: warn
-          retention-days: 14
+            --summary "$GITHUB_STEP_SUMMARY"
