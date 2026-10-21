@@ -27,7 +27,8 @@ def audit_cycle(session: Session, report: dict[str, Any]) -> dict[str, Any]:
         russian_copy=True,
         title_prefix=True,
         absolute_dates=True,
-        private_intake_healthy=intake.get("status") in (None, "disabled", "ready"),
+        private_intake_healthy=intake.get("status") in
+            (None, "disabled", "ready", "batch_collector"),
         private_feedback_healthy=report.get("private_feedback", {}).get("status")
             in (None, "disabled", "ready"),
     )

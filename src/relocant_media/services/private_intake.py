@@ -1,4 +1,6 @@
 """Receive private tips without replies, forwarding or publication capabilities."""
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from typing import Any
 
@@ -53,6 +55,8 @@ def _mapping(value: object) -> dict[str, Any]:
 
 async def receive_private_tips(
     engine: Engine, bot: TelegramBotAPI, *, enabled: bool,
+    poll_timeout: int = 0,
+    store_guard: Callable[[], AbstractContextManager[bool]] | None = None,
 ) -> dict[str, Any]:
     if not enabled:
         return dict(status="disabled", received=0, owner_action_required=False)
@@ -71,13 +75,29 @@ async def receive_private_tips(
             return dict(status="blocked_unresolved_receipts", received=0,
                         owner_action_required=False)
         previous = session.scalar(select(func.max(TelegramUpdateReceipt.update_id)))
-    params: dict[str, Any] = dict(limit=100, timeout=0)
+    if type(poll_timeout) is not int or not 0 <= poll_timeout <= 30:
+        raise ValueError("poll timeout must be between 0 and 30")
+    params: dict[str, Any] = dict(limit=100, timeout=poll_timeout)
     if previous is not None:
         params["offset"] = previous + 1
     # Never drop pending updates or change the server-side allowed_updates filter.
     updates = await bot._call("getUpdates", params)
     if not isinstance(updates, list) or len(updates) > 100:
         raise ValueError("invalid Telegram update batch")
+    if not updates:
+        return dict(status="ready", received=0, inspected=0,
+                    owner_action_required=False, telegram_sends=0)
+    # Long polling never holds worker.lock. A busy worker leaves these updates unacknowledged.
+    with store_guard() if store_guard else nullcontext(True) as acquired:
+        if not acquired:
+            return dict(status="busy", received=0, inspected=0,
+                        owner_action_required=False, telegram_sends=0)
+        return await _store_updates(engine, bot, updates)
+
+
+async def _store_updates(
+    engine: Engine, bot: TelegramBotAPI, updates: list[dict[str, Any]],
+) -> dict[str, Any]:
     received = 0
     parents: dict[int, bool] = {}
     for update in sorted(updates, key=lambda value: value["update_id"]):

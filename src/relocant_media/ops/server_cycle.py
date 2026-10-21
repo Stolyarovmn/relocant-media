@@ -74,7 +74,12 @@ from relocant_media.services.published_watch import (
     recent_source_load,
 )
 from relocant_media.services.submission_feedback import reply_to_submissions, resolve_submission
-from relocant_media.services.submission_queue import pending_submissions, priority_raw_ids, tip_urls
+from relocant_media.services.submission_queue import (
+    batch_submissions,
+    pending_submissions,
+    priority_raw_ids,
+    tip_urls,
+)
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
@@ -186,9 +191,11 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     return tuple(documents)
 
 
-async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict[str, int]:
+async def collect_sources(
+    engine: Engine, *, output: Path | None = None, submissions_only: bool = False,
+) -> dict[str, Any]:
     now = datetime.now(UTC)
-    result = {"sources_synced": 2, "sources_skipped": 0, "raw_items_written": 0,
+    result: dict[str, Any] = {"sources_synced": 2, "sources_skipped": 0, "raw_items_written": 0,
               "failures": 0, "review_required": 0, "discarded_before_article_fetch": 0,
               "discarded_before_persistence": 0, "channel_failures": 0, "channel_leads": 0}
     venues = venue_sources()
@@ -217,8 +224,11 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
     attempted_tips: set[int] = set()
     watch: dict[str, Any] = {"checked": 0, "changed": [], "failures": []}
     with Session(engine) as session:
-        tips = [(row.id, row.payload) for row in pending_submissions(session)]
-        published = published_sources(session, now=now)
+        rows = batch_submissions(session) if submissions_only else pending_submissions(session)
+        tips = [(row.id, row.payload) for row in rows]
+        published = [] if submissions_only else published_sources(session, now=now)
+    result["submission_ids"] = [sid for sid, _ in tips]
+    result["submission_raw_ids"] = []
     aliases_path = SOURCES.parent / "event-aliases.json"
     aliases = json.loads(aliases_path.read_text(encoding="utf-8")) if aliases_path.is_file() else {}
     searches: set[tuple[str, str]] = set()
@@ -296,6 +306,8 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                  ("cukarica_news", str(sources["cukarica_news"].url)),
                  ("city_beograd_news",
                   "https://www.beograd.rs/lat/servisne-informacije/saobracaj-i-prevoz")]
+        if submissions_only:
+            pages = []
         for source_id, url in pages:
             try:
                 page = await client.get(url, follow_redirects=False)
@@ -316,7 +328,7 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                     await full_article(source_id, item.url)
             except Exception:
                 result["failures"] += 1
-        for source_id in venues:
+        for source_id in (() if submissions_only else venues):
             collector = VenueFeedCollector(venues[source_id], client)
             try:
                 for item in await collector.collect():
@@ -334,7 +346,7 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                 result["venue_article_failures"] += len(collector.item_failures)
                 venue_errors.extend({"source_id": source_id, **error}
                                     for error in collector.item_failures)
-        for channel in DEFAULT_CHANNELS:
+        for channel in (() if submissions_only else DEFAULT_CHANNELS):
             try:
                 leads = await collect_topics(channel, client, now=now)
                 attention_leads.extend(leads)
@@ -411,6 +423,7 @@ async def collect_sources(engine: Engine, *, output: Path | None = None) -> dict
                     EditorialRun.raw_item_id.in_(ids)).limit(1)) is not None:
                 stored_tip.payload = {**stored_tip.payload, "triage_reason": "already_considered"}
             result["priority_submissions"] += bool(ids)
+            result["submission_raw_ids"].extend(ids)
         session.commit()
     result["raw_items_written"] = written
     result["review_required"] = changes
@@ -547,13 +560,17 @@ async def audience_observation() -> dict[str, Any]:
 async def publish_pending(
     engine: Engine, *, enabled: bool, limit: int = 2,
     blocked: list[dict[str, Any]] | None = None,
+    only_raw_ids: set[int] | None = None,
 ) -> list[int]:
-    if not enabled:
+    if not enabled or only_raw_ids == set():
         return []
     with Session(engine) as session:
-        ids = list(session.scalars(select(EditorialRun.raw_item_id).where(
+        query = select(EditorialRun.raw_item_id).where(
             EditorialRun.delivery_status == "pending",
-        ).order_by(EditorialRun.raw_item_id)))
+        )
+        if only_raw_ids is not None:
+            query = query.where(EditorialRun.raw_item_id.in_(only_raw_ids))
+        ids = list(session.scalars(query.order_by(EditorialRun.raw_item_id)))
     sent: list[int] = []
     async with httpx.AsyncClient(timeout=30, trust_env=False,
                                   transport=httpx.AsyncHTTPTransport(retries=0)) as client:
@@ -614,6 +631,7 @@ async def publish_pending(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Серверная редакция с двумя ревью и квитанциями")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--submissions-only", action="store_true")
     args = parser.parse_args()
     engine = None
     try:
@@ -634,6 +652,8 @@ def main() -> None:
             public_news_only=True,
         )
         async def intake() -> dict[str, Any]:
+            if os.environ.get("EDITORIAL_INTAKE_MODE") == "batch":
+                return dict(status="batch_collector", received=0, owner_action_required=False)
             async with httpx.AsyncClient(timeout=25, trust_env=False) as intake_client:
                 return await receive_private_tips(engine,
                     TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], intake_client),
@@ -649,22 +669,36 @@ def main() -> None:
         def source_load() -> dict[str, int]:
             with Session(engine) as load_session:
                 return recent_source_load(load_session, now=datetime.now(UTC))
+        scope: dict[str, Any] = {}
+        def ingest() -> dict[str, Any]:
+            stats = asyncio.run(collect_sources(engine, output=args.output,
+                                               submissions_only=args.submissions_only))
+            scope.update(stats)
+            return stats
+        def allowed_items() -> set[int]:
+            return set(scope.get("submission_raw_ids", []))
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
-            ingest=lambda: asyncio.run(collect_sources(engine, output=args.output)),
+            ingest=ingest,
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output), limit=2,
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
             priority_items=private_priorities,
             recent_source_counts=source_load,
-            reassessment_ids=lambda: policy_reassessment_ids(engine), continue_on_error=True,
+            reassessment_ids=(None if args.submissions_only
+                              else lambda: policy_reassessment_ids(engine)),
+            continue_on_error=True, submissions_only=args.submissions_only,
+            allowed_items=allowed_items if args.submissions_only else None,
             candidate_priorities=lambda: source_priorities(json.loads(
                 (args.output / "venue-attention.json").read_text(encoding="utf-8")))
                 if (args.output / "venue-attention.json").is_file() else {})
         result["private_intake"] = intake_status
+        result["submissions_only"] = args.submissions_only
         async def feedback() -> dict[str, Any]:
             async with httpx.AsyncClient(timeout=25, trust_env=False) as feedback_client:
                 return await reply_to_submissions(engine,
                     TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], feedback_client),
-                    enabled=os.environ.get("EDITORIAL_PRIVATE_FEEDBACK_ENABLED") == "true")
+                    enabled=os.environ.get("EDITORIAL_PRIVATE_FEEDBACK_ENABLED") == "true",
+                    only_ids=(set(scope.get("submission_ids", []))
+                              if args.submissions_only else None))
         try:
             result["private_feedback"] = asyncio.run(feedback())
         except Exception as feedback_error:
@@ -679,7 +713,8 @@ def main() -> None:
             result["channel_transport"] = "bot-api" if enabled else "disabled"
             blocked: list[dict[str, Any]] = []
             result["sent_message_ids"] = asyncio.run(
-                publish_pending(engine, enabled=enabled, blocked=blocked))
+                publish_pending(engine, enabled=enabled, blocked=blocked,
+                    only_raw_ids=allowed_items() if args.submissions_only else None))
             result["channel_blocked"] = blocked
             result["fallback_required"] = result["fallback_required"] or bool(blocked)
             if enabled:

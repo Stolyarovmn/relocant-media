@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect private submissions every five minutes
+
+[Timer]
+OnCalendar=*-*-* *:00/5:00 UTC
+AccuracySec=1s
+Persistent=true
+Unit=relocant-intake.service
+
+[Install]
+WantedBy=timers.target

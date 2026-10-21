@@ -22,10 +22,13 @@ from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 def begin_window(
     session: Session, *, city: str, now: datetime, refresh_until: bool = False,
+    submissions_only: bool = False,
 ) -> SchedulerRun:
     """Caller must hold the primary session advisory lock across commits."""
     now = aware_datetime(now.isoformat())
     key = f"editorial-primary:{city}"
+    if submissions_only:
+        key += ":submissions"
     previous = session.scalar(select(SchedulerRun).where(
         SchedulerRun.task_key == key,
     ).order_by(SchedulerRun.id.desc()).limit(1))
@@ -65,7 +68,7 @@ def begin_window(
 
 def run_cycle(
     engine: Engine, *, city: str, output: Path, now: datetime,
-    ingest: Callable[[], dict[str, int]],
+    ingest: Callable[[], dict[str, Any]],
     process: Callable[[int], dict[str, Any]], limit: int = 5,
     refresh_until: bool = False, newest_first: bool = False,
     allow_partial_ingest: bool = False,
@@ -74,6 +77,8 @@ def run_cycle(
     candidate_priorities: Callable[[], dict[str, int]] | None = None,
     priority_items: Callable[[], set[int]] | None = None,
     recent_source_counts: Callable[[], dict[str, int]] | None = None,
+    allowed_items: Callable[[], set[int]] | None = None,
+    submissions_only: bool = False,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
             or not city.strip() or not 1 <= limit <= 5):
@@ -90,7 +95,8 @@ def run_cycle(
         if not acquired:
             return {"status": "PRIMARY_BUSY", "city": city, "window_complete": False}
         with Session(engine) as session:
-            run = begin_window(session, city=city, now=now, refresh_until=refresh_until)
+            run = begin_window(session, city=city, now=now, refresh_until=refresh_until,
+                               submissions_only=submissions_only)
             run_id, window = run.id, run.details["window"]
         heartbeat: dict[str, Any] = {
             "status": "PRIMARY_FAILED", "city": city, "run_id": run_id,
@@ -107,6 +113,7 @@ def run_cycle(
                     since=aware_datetime(window["since"]),
                     until=aware_datetime(window["until"]), limit=limit, newest_first=newest_first,
                     priority_raw_ids=priority_items() if priority_items else None,
+                    allowed_raw_ids=allowed_items() if allowed_items else None,
                     recent_source_counts=recent_source_counts() if recent_source_counts else None,
                     source_priorities=candidate_priorities() if candidate_priorities else None)
             if reassessment_ids is not None:
@@ -136,7 +143,8 @@ def run_cycle(
             with Session(engine) as session:
                 remaining = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
-                    until=aware_datetime(window["until"]), limit=1)
+                    until=aware_datetime(window["until"]), limit=1,
+                    allowed_raw_ids=allowed_items() if allowed_items else None)
                 revision_count = session.scalar(select(func.count()).select_from(
                     SourceRevision).join(RawItem).join(Source).where(Source.city == city))
             additional_remaining = len(reassessment_ids()) if reassessment_ids else 0

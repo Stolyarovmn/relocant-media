@@ -5,9 +5,26 @@ from typing import Any
 from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 
-from relocant_media.storage.models import Submission
+from relocant_media.storage.models import EditorialRun, Submission
 
 NEWS_KINDS = ("correction", "news_tip", "event", "question")
+
+
+def batch_submissions(session: Session, *, limit: int = 20) -> list[Submission]:
+    rows = session.scalars(select(Submission).where(Submission.kind.in_(NEWS_KINDS),
+        Submission.status.in_(("new", "source_linked")),
+        Submission.payload["city"].as_string() == "belgrade",
+        Submission.payload["test_only"].as_boolean().is_not(True),
+    ).order_by(case((Submission.status == "new", 0), else_=1), Submission.id))
+    reviewed = set(session.scalars(select(EditorialRun.raw_item_id)))
+    result = []
+    for row in rows:
+        ids = row.payload.get("raw_item_ids", [])
+        if row.status == "new" or any(raw_id not in reviewed for raw_id in ids):
+            result.append(row)
+            if len(result) >= limit:
+                break
+    return result
 
 
 def pending_submissions(session: Session, *, limit: int = 20) -> list[Submission]:

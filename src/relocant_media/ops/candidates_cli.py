@@ -57,6 +57,7 @@ def select_candidates(
     newest_first: bool = False, source_priorities: dict[str, int] | None = None,
     priority_raw_ids: set[int] | None = None,
     recent_source_counts: dict[str, int] | None = None,
+    allowed_raw_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     """Only SELECT; the caller supplies a consistent read-only transaction."""
     if not city.strip() or not 1 <= limit <= 50:
@@ -76,6 +77,8 @@ def select_candidates(
         ~select(EditorialRun.raw_item_id).where(EditorialRun.raw_item_id == RawItem.id).exists(),
         RawItem.url.not_in(reviewed_url),
     )
+    if allowed_raw_ids is not None:
+        base = base.where(RawItem.id.in_(allowed_raw_ids))
     eligible = base.where(RawItem.published_at >= since, RawItem.published_at < until)
     rows = session.execute(eligible.order_by(RawItem.published_at, RawItem.id)).all()
 
