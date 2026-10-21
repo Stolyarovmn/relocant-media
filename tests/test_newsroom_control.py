@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from relocant_media.services.newsroom_control import build_newsroom_inbox
@@ -17,7 +18,7 @@ from relocant_media.storage.models import (
 )
 
 
-def _engine():  # type: ignore[no-untyped-def]
+def _engine() -> Engine:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     return engine
@@ -64,7 +65,13 @@ def _post(title: str) -> Post:
     )
 
 
-def _run(raw: RawItem, post: Post, *, status: str = "ready", delivery: str = "pending") -> EditorialRun:
+def _run(
+    raw: RawItem,
+    post: Post,
+    *,
+    status: str = "ready",
+    delivery: str = "pending",
+) -> EditorialRun:
     created = raw.published_at + timedelta(minutes=5) if raw.published_at else datetime.now(UTC)
     return EditorialRun(
         raw_item_id=raw.id,
@@ -89,25 +96,29 @@ def test_inbox_is_read_only_projection_and_redacts_submission_payload() -> None:
         raw = _raw("city", "a", "Fresh transport notice", now)
         session.add(raw)
         session.flush()
-        session.add(Submission(
-            kind="news_tip",
-            telegram_user_id=123,
-            telegram_message_id=456,
-            payload={
-                "city": "belgrade",
-                "raw_item_ids": [raw.id],
-                "text": "private user text that must not leave the intake model",
-            },
-            status="source_linked",
-            created_at=now,
-        ))
-        session.add(CollectorFailure(
-            source_id="city",
-            strategy="rss",
-            error_type="TimeoutError",
-            message="private upstream diagnostic",
-            occurred_at=now,
-        ))
+        session.add(
+            Submission(
+                kind="news_tip",
+                telegram_user_id=123,
+                telegram_message_id=456,
+                payload={
+                    "city": "belgrade",
+                    "raw_item_ids": [raw.id],
+                    "text": "private user text that must not leave the intake model",
+                },
+                status="source_linked",
+                created_at=now,
+            )
+        )
+        session.add(
+            CollectorFailure(
+                source_id="city",
+                strategy="rss",
+                error_type="TimeoutError",
+                message="private upstream diagnostic",
+                occurred_at=now,
+            )
+        )
         session.commit()
 
         before = session.query(EditorialRun).count()
@@ -160,19 +171,46 @@ def test_inbox_exposes_delivery_and_reverification_states() -> None:
         posts[1].telegram_message_id = 77
         posts[1].published_at = now + timedelta(minutes=15)
         session.add_all(runs)
-        session.add(SourceRevision(
-            raw_item_id=raws[3].id,
-            snapshot_sha256="f" * 64,
-            evidence={"changed": True},
-            observed_at=runs[3].created_at + timedelta(minutes=1),
-        ))
+        session.add(
+            CollectorFailure(
+                source_id="city",
+                strategy="rss",
+                error_type="TimeoutError",
+                message="old source error",
+                occurred_at=now - timedelta(hours=1),
+            )
+        )
+        session.add_all(
+            [
+                SourceRevision(
+                    raw_item_id=raws[2].id,
+                    snapshot_sha256="e" * 64,
+                    evidence={"changed": True},
+                    observed_at=runs[2].created_at + timedelta(minutes=1),
+                ),
+                SourceRevision(
+                    raw_item_id=raws[3].id,
+                    snapshot_sha256="f" * 64,
+                    evidence={"changed": True},
+                    observed_at=runs[3].created_at + timedelta(minutes=1),
+                ),
+            ]
+        )
         session.commit()
 
         payload = build_newsroom_inbox(session, city="belgrade")
 
     states = {item["title"]: item for item in payload["items"]}
     assert states["Ready transport notice"]["state"] == "ready"
+    assert states["Ready transport notice"]["retry"] == {
+        "automatic_retry": False,
+        "policy": "none",
+    }
     assert states["Sent road notice"]["state"] == "sent"
+    assert states["Sent road notice"]["retry"] == {
+        "automatic_retry": False,
+        "policy": "none",
+    }
     assert states["Uncertain bus notice"]["state"] == "uncertain"
     assert states["Uncertain bus notice"]["retry"] == {
         "automatic_retry": False,
@@ -189,7 +227,12 @@ def test_inbox_groups_one_event_across_sources_and_prefers_reviewed_anchor() -> 
     with Session(engine) as session:
         session.add_all([_source("city"), _source("venue")])
         first = _raw("city", "f", "Closure on Knez Mihailova tonight", now)
-        second = _raw("venue", "g", "Closure on Knez Mihailova tonight", now + timedelta(minutes=5))
+        second = _raw(
+            "venue",
+            "g",
+            "Closure on Knez Mihailova tonight",
+            now + timedelta(minutes=5),
+        )
         session.add_all([first, second])
         session.flush()
         post = _post(second.title)
