@@ -1,6 +1,6 @@
 # План развития
 
-Состояние на 21 октября 2026 года после PR #69.
+Состояние на 21 октября 2026 года после PR #71.
 
 ## Этап 0 — основа и проверки
 
@@ -32,6 +32,7 @@
 - [x] `cycle-audit` после серверного прохода.
 - [x] Единый read-only newsroom state/control inbox поверх существующих `raw_item/editorial_run/post/source_revision/submission`, без второй очереди; см. [NEWSROOM_CONTROL.md](NEWSROOM_CONTROL.md).
 - [x] Управляемый workflow повторного рассмотрения `source_revision`: append-only решение и причина видны в том же control plane; решение не снимает `needs_reverify`, требуется новый редакционный review. См. [SOURCE_REVISIONS.md](SOURCE_REVISIONS.md).
+- [x] Event lifecycle для изменённых первоисточников: `queue_reverify` материализует отдельный fresh `RawItem` с immutable lineage к revision/parent, старый sent-run не переписывается, а новая версия заново проходит полный editorial pipeline. См. [SOURCE_REVISIONS.md](SOURCE_REVISIONS.md).
 
 Подробности: [SERVER_EDITORIAL.md](SERVER_EDITORIAL.md), [EDITORIAL_CYCLE.md](EDITORIAL_CYCLE.md), [OPERATIONAL_STATE.md](OPERATIONAL_STATE.md).
 
@@ -56,6 +57,7 @@
 - [x] Публичные снимки конкурентов без MTProto с явными пропусками и приблизительными счётчиками.
 - [x] Наблюдения 24/48/168 часов без синтетических нулей.
 - [x] Версионирование редакционных правил и наблюдаемая производительность по версии.
+- [x] Read-only source-yield funnel `found → editorial_run → post/ready → public_sent` по anchor-source без автоматического изменения редакционной политики; см. [SOURCE_YIELD.md](SOURCE_YIELD.md).
 - [ ] Накопить достаточное число сопоставимых собственных публикаций до каких-либо заявлений об обучении.
 - [x] Shadow semantic dedup только как `possible_duplicate`: local pluggable scorer, отдельные score components и метрики false-positive/false-negative; deterministic dedup остаётся authoritative. См. [SHADOW_DEDUP.md](SHADOW_DEDUP.md).
 - [x] Experiment registry: `experiment_id`, control/treatment, eligibility window, заранее заданная метрика, minimum samples, noise floor, concentration guard и явный rollback marker; см. [EXPERIMENTS.md](EXPERIMENTS.md).
