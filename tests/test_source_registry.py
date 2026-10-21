@@ -5,7 +5,7 @@ from relocant_media.sources.registry import load_source_registry
 
 def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    assert len(sources) == 20
+    assert len(sources) == 22
     assert len({source.id for source in sources}) == len(sources)
 
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")
@@ -44,3 +44,20 @@ def test_utility_sources_are_verified_shadow_snapshots() -> None:
     assert all(source.extraction.status == "active" for source in utility_sources)
     assert all(source.policy.auto_publish is False for source in utility_sources)
     assert all(source.verification.checked_at is not None for source in utility_sources)
+
+
+def test_parking_and_heating_sources_are_verified_shadow_snapshots() -> None:
+    sources = load_source_registry(Path("cities/belgrade/sources"))
+    selected = [
+        source
+        for source in sources
+        if source.id in {"parking_servis_news", "beoelektrane_network_works"}
+    ]
+
+    assert len(selected) == 2
+    assert all(source.ownership == "official" for source in selected)
+    assert all(source.trust == 1.0 for source in selected)
+    assert all(source.extraction.strategy == "page_change_detection" for source in selected)
+    assert all(source.extraction.status == "active" for source in selected)
+    assert all(source.policy.auto_publish is False for source in selected)
+    assert all(source.verification.checked_at is not None for source in selected)
