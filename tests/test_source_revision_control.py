@@ -27,6 +27,8 @@ def _seed(session: Session) -> tuple[RawItem, SourceRevision, EditorialRun]:
         auto_publish=True,
         enabled=True,
     )
+    session.add(source)
+    session.flush()
     raw = RawItem(
         source_id=source.id,
         external_id="event-1",
@@ -37,7 +39,7 @@ def _seed(session: Session) -> tuple[RawItem, SourceRevision, EditorialRun]:
         body="Original evidence",
         published_at=datetime(2026, 10, 21, 10, tzinfo=UTC),
     )
-    session.add_all([source, raw])
+    session.add(raw)
     session.flush()
     run = EditorialRun(
         raw_item_id=raw.id,
