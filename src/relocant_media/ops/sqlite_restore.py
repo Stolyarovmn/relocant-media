@@ -7,18 +7,25 @@ from typing import Any
 
 from sqlalchemy import create_engine
 
-from relocant_media.storage.sqlite_schema import verify_sqlite_schema
+from relocant_media.storage.sqlite_schema import SQLITE_SCHEMA_VERSION, verify_sqlite_schema
 
 
 def restore(snapshot: Path, manifest_path: Path, output: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if (manifest.get("kind") != "sqlite-backup" or manifest.get("upload_ready") is not True
-            or manifest.get("schema_version") != 1 or not snapshot.is_file() or output.exists()):
+    if (
+        manifest.get("kind") != "sqlite-backup"
+        or manifest.get("upload_ready") is not True
+        or manifest.get("schema_version") != SQLITE_SCHEMA_VERSION
+        or not snapshot.is_file()
+        or output.exists()
+    ):
         raise ValueError("valid snapshot and new restore directory required")
     with snapshot.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if (digest != manifest.get("sha256")
-            or snapshot.stat().st_size != manifest.get("bytes")):
+    if (
+        digest != manifest.get("sha256")
+        or snapshot.stat().st_size != manifest.get("bytes")
+    ):
         raise ValueError("snapshot checksum/size mismatch")
     output.mkdir(parents=True, exist_ok=False)
     target = output / "editorial.sqlite3"

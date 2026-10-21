@@ -9,7 +9,7 @@ from sqlalchemy.engine import Connection, Engine
 from relocant_media.scheduler import models as scheduler_models  # noqa: F401
 from relocant_media.storage.models import Base
 
-SQLITE_SCHEMA_VERSION = 1
+SQLITE_SCHEMA_VERSION = 2
 ADDITIONS = {
     "source": {"ownership": "TEXT NOT NULL DEFAULT 'unknown'",
                "high_risk": "BOOLEAN NOT NULL DEFAULT 0",
@@ -35,6 +35,7 @@ def _verify_connection(connection: Connection) -> None:
         if not set(table.columns.keys()) <= present:
             raise ValueError("SQLite columns are incomplete")
 
+
 def verify_sqlite_schema(engine: Engine) -> None:
     if engine.dialect.name != "sqlite":
         return
@@ -43,6 +44,14 @@ def verify_sqlite_schema(engine: Engine) -> None:
         raise ValueError("existing local SQLite file required")
     with engine.connect() as connection:
         _verify_connection(connection)
+
+
+def _reserve_backup(original: sqlite3.Connection, path: Path) -> Path:
+    with path.open("xb"):
+        pass
+    with closing(sqlite3.connect(path)) as target:
+        original.backup(target)
+    return path
 
 
 def initialize_sqlite(path: Path, *, legacy_utc_confirmed: bool = False) -> Path | None:
@@ -56,7 +65,7 @@ def initialize_sqlite(path: Path, *, legacy_utc_confirmed: bool = False) -> Path
             version = original.execute("PRAGMA user_version").fetchone()[0]
             tables = {row[0] for row in original.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
-            if version not in {0, SQLITE_SCHEMA_VERSION}:
+            if version not in {0, 1, SQLITE_SCHEMA_VERSION}:
                 raise ValueError("unsupported SQLite schema version")
             if version == 0 and tables:
                 if not {"source", "raw_item", "post", "editorial_run"} <= tables:
@@ -74,12 +83,15 @@ def initialize_sqlite(path: Path, *, legacy_utc_confirmed: bool = False) -> Path
                                     'IS NOT NULL LIMIT 1',
                                 ).fetchone() is not None:
                                     raise ValueError("legacy timestamp timezone requires audit")
-                backup = path.with_name(path.name + ".before-v1.backup")
-                # Reserve a new backup without replacing an existing one.
-                with backup.open("xb"):
-                    pass
-                with closing(sqlite3.connect(backup)) as target:
-                    original.backup(target)
+                backup = _reserve_backup(
+                    original,
+                    path.with_name(path.name + ".before-v1.backup"),
+                )
+            elif version == 1:
+                backup = _reserve_backup(
+                    original,
+                    path.with_name(path.name + ".before-v2.backup"),
+                )
     engine = create_engine(f"sqlite:///{path.as_posix()}")
     try:
         with engine.begin() as connection:
@@ -100,6 +112,12 @@ def initialize_sqlite(path: Path, *, legacy_utc_confirmed: bool = False) -> Path
                             if name not in present:
                                 connection.exec_driver_sql(
                                     f'ALTER TABLE "{table_name}" ADD COLUMN "{name}" {ddl}')
+                Base.metadata.create_all(connection)
+                for table in Base.metadata.tables.values():
+                    for index in table.indexes:
+                        index.create(connection, checkfirst=True)
+                connection.exec_driver_sql(f"PRAGMA user_version={SQLITE_SCHEMA_VERSION}")
+            elif version == 1:
                 Base.metadata.create_all(connection)
                 for table in Base.metadata.tables.values():
                     for index in table.indexes:
