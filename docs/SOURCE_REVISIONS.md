@@ -60,6 +60,19 @@ python -m relocant_media.ops.revisions_cli --city belgrade --output work/revisio
 `idempotency_key`. Повтор того же управляющего вызова с тем же ключом идемпотентен;
 использовать ключ для другого решения нельзя. История решений не перезаписывается.
 
+Кроме idempotency, write-path использует optimistic concurrency. Control projection
+показывает `decision_count` и `write_precondition.expected_decision_count`. Новая
+операция обязана передать именно это число. Перед сравнением сервер блокирует строку
+`source_revision` (`FOR UPDATE` там, где СУБД поддерживает row locks), затем заново
+считает решения. Если другой оператор уже успел записать решение, отдельная новая
+операция со старым count отклоняется как stale и ничего не добавляет. Это защищает от
+решений, принятых по устаревшему экрану.
+
+Точный retry уже зафиксированной операции является исключением: тот же
+`idempotency_key` и тот же payload возвращают существующую запись даже если
+`decision_count` после первого успешного вызова уже вырос. Поэтому сетевой timeout не
+заставляет оператора выбирать между дублем и потерей результата.
+
 Миграция `0013` добавляет `source_revision_materialization`. При `queue_reverify`
 создаётся ровно один новый `RawItem` с отдельным ID и неизменяемой lineage:
 `revision_id -> raw_item_id -> parent_raw_item_id`. Публичный URL остаётся точным
@@ -68,7 +81,9 @@ URL первоисточника; для внутреннего dedup испол
 рассмотренная версия. Старый `RawItem`, старый `EditorialRun`, post и delivery
 receipt не переиспользуются новым review.
 
-Явная запись решения выполняется отдельной командой с обязательным подтверждением:
+Явная запись решения выполняется отдельной командой с обязательным подтверждением.
+`--expected-decision-count` берётся из того же control snapshot, по которому оператор
+принимает решение:
 
 ```powershell
 relocant-revision-control `
@@ -77,6 +92,7 @@ relocant-revision-control `
   --reason-code material_source_change `
   --actor editorial-agent `
   --idempotency-key revision-17-reverify `
+  --expected-decision-count 0 `
   --confirm-write
 ```
 
@@ -85,7 +101,8 @@ relocant-revision-control `
 pipeline как новый материал. Само управляющее решение не является одобрением
 публикации и не снимает требования свежего review. В общем
 `relocant-newsroom --database` секция `source_revision_control` показывает историю
-решений, `materialized_raw_item_id` и факт создания свежего кандидата.
+решений, `decision_count`, write precondition, `materialized_raw_item_id` и факт создания
+свежего кандидата.
 
 Критический инвариант: **старое одобрение никогда не переносится на revision**.
 Новый кандидат должен заново пройти rank/claims/verify/draft и все действующие
