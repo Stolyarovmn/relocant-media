@@ -51,5 +51,6 @@ class PageSnapshotCollector:
                 title=title,
                 body=body,
                 published_at=None,
+                source_html=response.text,
             )
         ]

@@ -1,6 +1,7 @@
 from relocant_media.scheduler.models import SchedulerLease, SchedulerRun  # noqa: F401
 from relocant_media.storage import ad_review as ad_review_models  # noqa: F401
 from relocant_media.storage import correction_control as correction_control_models  # noqa: F401
+from relocant_media.storage import media_models  # noqa: F401
 from relocant_media.storage import revision_control as revision_control_models  # noqa: F401
 from relocant_media.storage.models import Base
 
@@ -17,6 +18,7 @@ def test_expected_tables_are_registered() -> None:
         "editorial_experiment",
         "experiment_assignment",
         "raw_item",
+        "raw_item_media_snapshot",
         "collector_failure",
         "post",
         "post_snapshot",

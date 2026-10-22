@@ -77,6 +77,7 @@ def test_parse_beograd_article_extracts_normalized_evidence() -> None:
     assert "Navigation" not in item.body
     assert "Footer" not in item.body
     assert item.published_at == datetime(2026, 10, 15, tzinfo=ZoneInfo("Europe/Belgrade"))
+    assert item.source_html is None
 
 
 def test_parse_beograd_article_fails_closed_without_body() -> None:
@@ -139,3 +140,5 @@ async def test_belgrade_article_collector_fetches_and_extracts() -> None:
 
     assert item.external_id == "116232"
     assert item.url == ARTICLE_URL
+    assert item.source_html == html
+    assert item.approved_image_hosts == ("static.beograd.rs",)

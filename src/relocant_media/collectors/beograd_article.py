@@ -1,4 +1,5 @@
 import re
+from dataclasses import replace
 from datetime import datetime
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -126,4 +127,9 @@ class BelgradeArticleCollector:
             raise ArticleExtractionError(f"unsupported article url: {url}")
         response = await self._client.get(url, follow_redirects=True)
         response.raise_for_status()
-        return parse_beograd_article(response.text, self._source, str(response.url))
+        item = parse_beograd_article(response.text, self._source, str(response.url))
+        return replace(
+            item,
+            source_html=response.text,
+            approved_image_hosts=("static.beograd.rs",),
+        )

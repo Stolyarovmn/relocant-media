@@ -14,6 +14,12 @@ class RawItem:
     # Optional internal identity for list pages where many independent notices share
     # one public citation URL. The public `url` remains untouched for evidence/output.
     canonical_url: str | None = None
+    # Optional HTML from the exact source-page response already used by the collector.
+    # It is inert provenance input only: downstream media discovery must not re-fetch it.
+    source_html: str | None = None
+    # Extra image hosts explicitly bound by a source-specific collector. The source-page
+    # host itself is always allowed by the generic media candidate extractor.
+    approved_image_hosts: tuple[str, ...] = ()
 
 
 class Collector(Protocol):

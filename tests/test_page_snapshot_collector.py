@@ -37,3 +37,5 @@ async def test_page_snapshot_collector_is_deterministic() -> None:
     assert first == second
     assert first[0].source_id == "euprava_foreigner_registration"
     assert first[0].published_at is None
+    assert first[0].source_html == html
+    assert first[0].approved_image_hosts == ()
