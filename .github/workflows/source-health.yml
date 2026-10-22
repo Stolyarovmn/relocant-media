@@ -11,6 +11,7 @@ on:
       - "cities/belgrade/sources/**"
       - "src/relocant_media/collectors/**"
       - "src/relocant_media/ops/source_audit.py"
+      - "src/relocant_media/ops/changed_source_ids.py"
       - "src/relocant_media/sources/**"
 
 permissions:
@@ -22,6 +23,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # PR strict probes compare the real base/head source YAML files.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -33,3 +37,40 @@ jobs:
             --fail-on-error \
             --require-active \
             --summary "$GITHUB_STEP_SUMMARY"
+      - name: Strict audit changed source configs
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          CHANGED_FILES="$RUNNER_TEMP/changed-source-files.txt"
+          CHANGED_IDS="$RUNNER_TEMP/changed-source-ids.txt"
+
+          git diff --name-only --diff-filter=ACMR \
+            "$BASE_SHA" "$HEAD_SHA" \
+            -- 'cities/belgrade/sources/*.yaml' >"$CHANGED_FILES"
+
+          python -m relocant_media.ops.changed_source_ids \
+            <"$CHANGED_FILES" >"$CHANGED_IDS"
+
+          mapfile -t SOURCE_IDS <"$CHANGED_IDS"
+          if (( ${#SOURCE_IDS[@]} == 0 )); then
+            echo "No changed current source YAML files require a strict online probe."
+            exit 0
+          fi
+
+          ARGS=()
+          for SOURCE_ID in "${SOURCE_IDS[@]}"; do
+            echo "Strict online probe: ${SOURCE_ID}"
+            ARGS+=(--source-id "$SOURCE_ID")
+          done
+
+          python -m relocant_media.ops.source_audit \
+            --online \
+            --fail-on-error \
+            --fail-on-partial \
+            --fail-on-transport \
+            "${ARGS[@]}"
