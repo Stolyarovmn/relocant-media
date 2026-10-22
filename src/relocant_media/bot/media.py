@@ -13,7 +13,12 @@ class MediaAsset(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     file_name: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    origin: Literal["self_authored_card", "licensed_photo", "official_poster"]
+    origin: Literal[
+        "self_authored_card",
+        "official_photo",
+        "licensed_photo",
+        "official_poster",
+    ]
     source_url: str = Field(min_length=8)
     rights_basis: str = Field(min_length=10)
     rights_verified: bool
@@ -51,13 +56,20 @@ class MediaRelease(BaseModel):
 
 
 def media_context_sha256(release: MediaRelease) -> str:
-    value = json.dumps(release.model_dump(mode="json", exclude={"reviews"}),
-                       ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    value = json.dumps(
+        release.model_dump(mode="json", exclude={"reviews"}),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(value.encode()).hexdigest()
 
 
 def validate_media(
-    release: MediaRelease, directory: Path, *, now: datetime | None = None,
+    release: MediaRelease,
+    directory: Path,
+    *,
+    now: datetime | None = None,
 ) -> tuple[Path, ...]:
     now = now or datetime.now(UTC)
     if now.utcoffset() is None or len(release.caption.encode("utf-16-le")) // 2 > 1024:
@@ -81,10 +93,12 @@ def validate_media(
         if hashlib.sha256(path.read_bytes()).hexdigest() != asset.sha256:
             raise ValueError("media changed after review")
         if asset.archive_year is not None:
-            if (str(asset.archive_year) not in asset.archive_label
-                    or asset.archive_label not in release.caption):
+            if (
+                str(asset.archive_year) not in asset.archive_label
+                or asset.archive_label not in release.caption
+            ):
                 raise ValueError("archive year and exact label required in caption")
-        if asset.origin in {"licensed_photo", "official_poster"} and (
+        if asset.origin in {"official_photo", "licensed_photo", "official_poster"} and (
             asset.attribution not in release.caption
         ):
             raise ValueError("photo attribution required in caption")
@@ -95,11 +109,15 @@ def validate_media(
         raise ValueError("distinct media reviewers required")
     caption_hash = hashlib.sha256(release.caption.encode()).hexdigest()
     for review in release.reviews:
-        if (review.verdict != "approve" or review.score < 75 or review.flags
-                or not review.live_source_checked
-                or not timedelta(0) <= now - review.checked_at <= timedelta(hours=24)
-                or review.caption_sha256 != caption_hash
-                or review.context_sha256 != media_context_sha256(release)
-                or review.reviewed_asset_sha256 != hashes):
+        if (
+            review.verdict != "approve"
+            or review.score < 75
+            or review.flags
+            or not review.live_source_checked
+            or not timedelta(0) <= now - review.checked_at <= timedelta(hours=24)
+            or review.caption_sha256 != caption_hash
+            or review.context_sha256 != media_context_sha256(release)
+            or review.reviewed_asset_sha256 != hashes
+        ):
             raise ValueError("media review missing, expired, or mismatched")
     return tuple(paths)
