@@ -10,6 +10,7 @@ from relocant_media.collectors.cukarica_news import CukaricaNewsCollector
 from relocant_media.collectors.eds_belgrade_outages import EdsBelgradeOutagesCollector
 from relocant_media.collectors.euprava_service import EupravaServiceCollector
 from relocant_media.collectors.health_duty import HealthDutyCollector
+from relocant_media.collectors.natural_history_news import NaturalHistoryNewsCollector
 from relocant_media.collectors.page_snapshot import PageSnapshotCollector
 from relocant_media.collectors.srbijavoz_news import SrbijavozNewsCollector
 from relocant_media.collectors.tob_events import TobEventsCollector
@@ -55,4 +56,6 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return WelcomeSerbiaGuidanceCollector(source, client)
     if strategy == "yugoslavia_programs":
         return YugoslaviaProgramsCollector(source, client)
+    if strategy == "natural_history_news":
+        return NaturalHistoryNewsCollector(source, client)
     raise UnsupportedCollectorStrategyError(strategy)

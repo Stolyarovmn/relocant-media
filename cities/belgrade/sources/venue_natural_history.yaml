@@ -2,20 +2,16 @@ id: venue_natural_history
 name: Природњачки музеј
 publisher: Природњачки музеј
 ownership: official
-url: https://nhmbeo.rs/
-language: sr
+url: https://nhmbeo.rs/vesti/
+language: sr-Cyrl
 source_type: official_venue_events
 trust: 0.95
 check_every: 3h
 categories:
 - events
 extraction:
-  strategy: venue_feed
-  status: planned
-  feed_url: https://nhmbeo.rs/feed/
-  article_selectors:
-  - .entry-content
-  - .post-content
+  strategy: natural_history_news
+  status: active
   approved_hosts:
   - nhmbeo.rs
   - www.nhmbeo.rs
@@ -24,4 +20,4 @@ policy:
   high_risk: false
 verification:
   checked_at: '2026-10-22'
-  note: Официальный сайт подтверждён. 22.10.2026 live source-health отклонил RSS как unsafe venue feed; источник fail-closed выведен из active ingestion и auto-publish до повторной проверки структуры RSS. Safety guard не ослабляется.
+  note: Official Natural History Museum HTML news list and detail pages. The previously unsafe RSS feed remains unused. Listing dates are explicit publication dates normalized to the start of that Belgrade calendar day; source remains review-only and full article text is required.

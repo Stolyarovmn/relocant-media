@@ -11,6 +11,7 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.page_snapshot import normalize_visible_text
 from relocant_media.sources.registry import SourceConfig
 
 MAX_BYTES = 3_000_000
@@ -70,21 +71,14 @@ def _allowed_url(value: str, source: SourceConfig, *, detail: bool) -> str:
 def _program_links(html: str, source: SourceConfig) -> list[str]:
     if len(html.encode("utf-8")) > MAX_BYTES:
         raise ValueError("Museum of Yugoslavia calendar response too large")
-    soup = BeautifulSoup(html, "html.parser")
-    heading = next(
-        (
-            node
-            for node in soup.find_all(["h1", "h2"])
-            if node.get_text(" ", strip=True) == _CALENDAR_HEADING
-        ),
-        None,
-    )
-    if not isinstance(heading, Tag):
+    visible_lines = normalize_visible_text(html).splitlines()
+    if _CALENDAR_HEADING not in visible_lines:
         raise ValueError("Museum of Yugoslavia calendar heading missing")
+    soup = BeautifulSoup(html, "html.parser")
 
     links: list[str] = []
     seen: set[str] = set()
-    for node in heading.find_all_next("a"):
+    for node in soup.find_all("a"):
         if not isinstance(node, Tag):
             continue
         href = node.get("href")
@@ -237,6 +231,11 @@ class YugoslaviaProgramsCollector:
                         detail=detail,
                     )
                     continue
+                if response.status_code == 525:
+                    raise httpx.ConnectError(
+                        "Museum of Yugoslavia upstream TLS handshake failed",
+                        request=response.request,
+                    )
                 response.raise_for_status()
                 content_length = response.headers.get("content-length")
                 if content_length is not None:
