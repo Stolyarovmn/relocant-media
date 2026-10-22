@@ -83,6 +83,20 @@ def test_bgprevoz_changes_is_structured_shadow_without_publication_date_inferenc
     assert transport.verification.checked_at is not None
 
 
+def test_bgprevoz_news_is_structured_shadow_with_explicit_redirect_host() -> None:
+    sources = load_source_registry(Path("cities/belgrade/sources"))
+    news = next(source for source in sources if source.id == "bgprevoz_news")
+
+    assert news.ownership == "official"
+    assert news.trust == 1.0
+    assert news.extraction.strategy == "bgprevoz_news"
+    assert news.extraction.status == "active"
+    assert news.extraction.approved_hosts == ("www.bgprevoz.rs",)
+    assert news.policy.high_risk is False
+    assert news.policy.auto_publish is False
+    assert news.verification.checked_at is not None
+
+
 def test_new_vertical_sources_remain_shadow_only() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
     rail = next(source for source in sources if source.id == "srbijavoz_news")
