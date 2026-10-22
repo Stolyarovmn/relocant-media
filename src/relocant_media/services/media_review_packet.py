@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from relocant_media.services.cover_selection import CoverAssessment, plan_cover
@@ -78,9 +79,7 @@ def build_media_review_packet(session: Session, raw_item_id: int) -> dict[str, A
     seen: set[tuple[str, str]] = set()
     for document_id in _document_ids(run):
         snapshot = session.get(RawItemMediaSnapshot, document_id)
-        if snapshot is None:
-            continue
-        if not _valid_snapshot(snapshot):
+        if snapshot is None or not _valid_snapshot(snapshot):
             continue
         candidates = snapshot.manifest.get("candidates", [])
         if not isinstance(candidates, list):
@@ -92,9 +91,7 @@ def build_media_review_packet(session: Session, raw_item_id: int) -> dict[str, A
             source_page = candidate.get("source_page")
             if not isinstance(image_url, str) or not isinstance(source_page, str):
                 continue
-            if source_page != snapshot.source_page:
-                continue
-            if candidate.get("event_match") != "unreviewed":
+            if source_page != snapshot.source_page or candidate.get("event_match") != "unreviewed":
                 continue
             key = (image_url, source_page)
             if key in seen:
@@ -126,10 +123,7 @@ def build_media_review_packet(session: Session, raw_item_id: int) -> dict[str, A
 
     if not review_candidates:
         packet = _text_mode(raw_item_id, reason="no_reviewable_media_candidates")
-        packet.update(
-            post_id=run.post_id,
-            editorial_package_sha256=package_sha256,
-        )
+        packet.update(post_id=run.post_id, editorial_package_sha256=package_sha256)
         return packet
     return {
         "version": 1,
@@ -144,6 +138,21 @@ def build_media_review_packet(session: Session, raw_item_id: int) -> dict[str, A
         "publication_permitted": False,
         "generated_media_used": False,
     }
+
+
+def pending_media_review_ids(session: Session, *, limit: int = 20) -> tuple[int, ...]:
+    """Materialize the review queue from READY runs plus immutable media sidecars."""
+    if not 1 <= limit <= 100:
+        raise ValueError("media review queue limit must be between 1 and 100")
+    ids: list[int] = []
+    runs = session.scalars(select(EditorialRun).order_by(EditorialRun.raw_item_id.desc()))
+    for run in runs:
+        if build_media_review_packet(session, run.raw_item_id).get("mode") != "needs_visual_review":
+            continue
+        ids.append(run.raw_item_id)
+        if len(ids) >= limit:
+            break
+    return tuple(ids)
 
 
 def plan_reviewed_packet(
