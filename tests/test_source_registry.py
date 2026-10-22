@@ -116,8 +116,9 @@ def test_new_vertical_sources_remain_shadow_only() -> None:
 
     assert residence.ownership == "official"
     assert residence.trust == 1.0
-    assert residence.extraction.strategy == "page_change_detection"
+    assert residence.extraction.strategy == "welcome_serbia_guidance"
     assert residence.extraction.status == "active"
     assert residence.policy.high_risk is True
     assert residence.policy.auto_publish is False
+    assert residence.verification.checked_at is not None
     assert str(residence.url) == "https://welcometoserbia.gov.rs/privremeni-boravak"
