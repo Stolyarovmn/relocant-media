@@ -10,11 +10,11 @@ check_every: 24h
 categories:
   - immigration
 extraction:
-  strategy: page_change_detection
-  status: planned
+  strategy: euprava_service
+  status: active
 policy:
   high_risk: true
   auto_publish: false
 verification:
-  checked_at: 2026-10-18
-  note: Official e-government service page for registering a foreigner's place of stay; legal/immigration changes require human review.
+  checked_at: 2026-10-22
+  note: Official e-government service block for registering a foreigner's place of stay; scoped change evidence remains human-review-only.
