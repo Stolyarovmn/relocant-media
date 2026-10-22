@@ -124,27 +124,23 @@ async def test_missing_or_ambiguous_card_date_fails_closed() -> None:
             await NaturalHistoryNewsCollector(source, client).collect()
 
 
-def test_publication_dates_must_be_descending() -> None:
+@pytest.mark.asyncio
+async def test_publication_dates_must_be_descending() -> None:
     source = _source()
 
-    async def run() -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/vesti/"
-            return httpx.Response(
-                200,
-                text=_listing(first_date="07.10.2026.", second_date="12.10.2026."),
-            )
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/vesti/"
+        return httpx.Response(
+            200,
+            text=_listing(first_date="07.10.2026.", second_date="12.10.2026."),
+        )
 
-        async with httpx.AsyncClient(
-            trust_env=False,
-            transport=httpx.MockTransport(handler),
-        ) as client:
-            with pytest.raises(ValueError, match="publication dates are not descending"):
-                await NaturalHistoryNewsCollector(source, client).collect()
-
-    import asyncio
-
-    asyncio.run(run())
+    async with httpx.AsyncClient(
+        trust_env=False,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(ValueError, match="publication dates are not descending"):
+            await NaturalHistoryNewsCollector(source, client).collect()
 
 
 @pytest.mark.asyncio
