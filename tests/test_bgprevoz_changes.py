@@ -65,6 +65,17 @@ def test_detail_preserves_effective_period_without_inventing_publication_date() 
     assert item.source_html is not None
 
 
+def test_multi_year_effective_period_is_valid_when_official_page_says_so() -> None:
+    item = parse_bgprevoz_change(
+        _detail(period="02/11/2024 - 02/09/2027"),
+        _source(),
+        page_url="https://www.bgprevoz.rs/linije/aktuelne-izmene/617",
+    )
+    assert item.external_id == "bgprevoz-617"
+    assert item.body.startswith("Период измене: 02.11.2024–02.09.2027.\n")
+    assert item.published_at is None
+
+
 @pytest.mark.parametrize(
     ("period", "message"),
     [
