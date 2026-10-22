@@ -62,6 +62,15 @@ live extraction/freshness.
 article/guidance parser можно включать только после сохранения живых fixture'ов и проверки
 семантики дат, заголовков и canonical URL.
 
+Для `srbijavoz_news` подготовлен fail-closed item-level parser: archive page только обнаруживает
+article URL, а evidence строится из полного текста статьи с явной publication date и canonical
+identity. Публичный web crawl 22.10.2026 подтверждает, что официальный сайт действительно
+публикует отдельные статьи с датами. Но GitHub-hosted runners в двух Azure-регионах получили
+`ConnectError` после трёх попыток, поэтому этот parser намеренно не активирован в registry.
+Активация разрешена только после успешного source-specific online probe без transport error;
+зелёный общий `source-health`, который терпит transport errors, достаточным доказательством не
+считается.
+
 Each source file captures:
 - stable source id;
 - publisher and ownership/type;
