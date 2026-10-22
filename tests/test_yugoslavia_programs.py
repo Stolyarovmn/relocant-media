@@ -11,6 +11,8 @@ from relocant_media.collectors.yugoslavia_programs import (
 from relocant_media.sources.registry import load_source_file
 
 SOURCE_PATH = Path("cities/belgrade/sources/venue_yugoslavia.yaml")
+DETAIL_PATH = "/rs/program/besplatne-projekcije-tv-serije-banjica/"
+DETAIL_URL = f"https://muzej-jugoslavije.org{DETAIL_PATH}"
 
 
 def _source():
@@ -18,10 +20,10 @@ def _source():
 
 
 def _listing() -> str:
-    return """
+    return f"""
     <html><body>
       <h1>ИЗЛОЖБЕ И ПРОГРАМИ</h1>
-      <a href="/rs/program/besplatne-projekcije-tv-serije-banjica/">
+      <a href="{DETAIL_PATH}">
         Програм Бесплатне пројекције ТВ серије „Бањица” 20.10.2026 - 24.10.2026
       </a>
       <a href="/rs/izlozba/citaj-i-deli-dalje/">
@@ -45,7 +47,9 @@ def _detail(*, day: str = "Дан: 20.10-24.10.2026.", include_time: bool = True
       <h1>Бесплатне пројекције ТВ серије „Бањица”</h1>
       <p>{body}</p>
       <p>Улаз на све пратеће програме је слободан.</p>
-      <a href="/rs/lokacija/muzej-25-maj-bioskopska-sala/">Музеј 25. мај - Биоскопска сала</a>
+      <a href="/rs/lokacija/muzej-25-maj-bioskopska-sala/">
+        Музеј 25. мај - Биоскопска сала
+      </a>
       <ul>
         <li>{day}</li>
         {time}
@@ -56,12 +60,7 @@ def _detail(*, day: str = "Дан: 20.10-24.10.2026.", include_time: bool = True
 
 
 def test_detail_extracts_full_program_without_inventing_publication_date() -> None:
-    source = _source()
-    item = parse_yugoslavia_program(
-        _detail(),
-        "https://muzej-jugoslavije.org/rs/program/besplatne-projekcije-tv-serije-banjica/",
-        source,
-    )
+    item = parse_yugoslavia_program(_detail(), DETAIL_URL, _source())
 
     assert item.title == "Бесплатне пројекције ТВ серије „Бањица”"
     assert item.published_at is None
@@ -76,7 +75,7 @@ def test_time_is_optional_but_day_range_is_required() -> None:
     source = _source()
     item = parse_yugoslavia_program(
         _detail(include_time=False),
-        "https://muzej-jugoslavije.org/rs/program/arhitektura-jugoslovenskog-modernizma-beograd-7-1/",
+        "https://muzej-jugoslavije.org/rs/program/arhitektura-modernizma/",
         source,
     )
     assert "Време:" not in item.body
@@ -90,12 +89,11 @@ def test_time_is_optional_but_day_range_is_required() -> None:
 
 
 def test_invalid_or_reversed_day_range_fails_closed() -> None:
-    source = _source()
     with pytest.raises(ValueError, match="end precedes start"):
         parse_yugoslavia_program(
             _detail(day="Дан: 24.10-20.10.2026."),
             "https://muzej-jugoslavije.org/rs/program/test-program/",
-            source,
+            _source(),
         )
 
 
@@ -108,7 +106,7 @@ async def test_factory_uses_calendar_and_ignores_exhibition_links() -> None:
         requested.append(str(request.url))
         if request.url.path == "/rs/kalendar/":
             return httpx.Response(200, text=_listing())
-        if request.url.path == "/rs/program/besplatne-projekcije-tv-serije-banjica/":
+        if request.url.path == DETAIL_PATH:
             return httpx.Response(200, text=_detail())
         raise AssertionError(f"unexpected request: {request.url}")
 
@@ -125,15 +123,15 @@ async def test_factory_uses_calendar_and_ignores_exhibition_links() -> None:
     assert not any("izlozba" in value for value in requested)
 
 
-def test_auto_publish_cannot_be_enabled_without_publication_dates() -> None:
+@pytest.mark.asyncio
+async def test_auto_publish_cannot_be_enabled_without_publication_dates() -> None:
     source = _source()
     unsafe = source.model_copy(
         update={"policy": source.policy.model_copy(update={"auto_publish": True})}
     )
-    with httpx.Client() as _client:
-        pass
-    with pytest.raises(ValueError, match="must stay review-only"):
-        YugoslaviaProgramsCollector(unsafe, httpx.AsyncClient())
+    async with httpx.AsyncClient(trust_env=False) as client:
+        with pytest.raises(ValueError, match="must stay review-only"):
+            YugoslaviaProgramsCollector(unsafe, client)
 
 
 @pytest.mark.asyncio
