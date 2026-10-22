@@ -26,18 +26,21 @@ def test_venue_sources_are_explicit_first_party_events():
     assert len(venues) == 7
     assert all(s.ownership == "official" and s.categories == ("events",) for s in venues)
     assert all(s.verification.checked_at is not None for s in venues)
+    assert all(s.extraction.status == "active" for s in venues)
 
     natural_history = next(s for s in venues if s.id == "venue_natural_history")
     yugoslavia = next(s for s in venues if s.id == "venue_yugoslavia")
 
-    assert {s.id for s in venues if s.extraction.status != "active"} == {
-        "venue_natural_history"
-    }
-    assert natural_history.extraction.feed_url == "https://nhmbeo.rs/feed/"
+    assert natural_history.extraction.strategy == "natural_history_news"
+    assert natural_history.extraction.feed_url is None
+    assert natural_history.extraction.approved_hosts == (
+        "nhmbeo.rs",
+        "www.nhmbeo.rs",
+    )
     assert natural_history.policy.auto_publish is False
+    assert str(natural_history.url) == "https://nhmbeo.rs/vesti/"
 
     assert yugoslavia.extraction.strategy == "yugoslavia_programs"
-    assert yugoslavia.extraction.status == "active"
     assert yugoslavia.extraction.feed_url is None
     assert yugoslavia.extraction.approved_hosts == (
         "muzej-jugoslavije.org",
@@ -45,12 +48,6 @@ def test_venue_sources_are_explicit_first_party_events():
     )
     assert yugoslavia.policy.auto_publish is False
     assert str(yugoslavia.url) == "https://muzej-jugoslavije.org/rs/kalendar/"
-
-    assert all(
-        s.extraction.status == "active"
-        for s in venues
-        if s.id not in {"venue_natural_history"}
-    )
 
 
 def test_utility_sources_keep_shadow_policy_while_bvk_and_eds_are_structured() -> None:
