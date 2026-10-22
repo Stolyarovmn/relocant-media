@@ -105,6 +105,7 @@ async def test_old_entries_do_not_fetch_articles(source: SourceConfig) -> None:
         assert await VenueFeedCollector(source, client).collect() == []
     assert len(requested) == 1
 
+
 @pytest.mark.asyncio
 async def test_encoded_full_content_is_live_evidence(source: SourceConfig) -> None:
     date = datetime.now(UTC) - timedelta(hours=1)
@@ -125,7 +126,6 @@ async def test_encoded_full_content_is_live_evidence(source: SourceConfig) -> No
         assert await collector.collect_url(item.url) == item
     assert all(url.endswith('/feed/') for url in requests)
     assert 'Full first party' in item.body
-
 
 
 def test_future_pubdate_is_not_announcement_date(source: SourceConfig) -> None:
@@ -151,7 +151,10 @@ async def test_bad_article_does_not_hide_other_fresh_announcements(source: Sourc
         items = await collector.collect()
         assert len(items) == 1 and items[0].url.endswith('/good/')
         assert collector.item_failures == [dict(
-            url='https://museum.example/event/', error_type='ValueError')]
+            url='https://museum.example/event/',
+            error_type='ValueError',
+            error_message='venue article lacks full body/title/publication date',
+        )]
         # Discovery skips an unusable page; a live evidence check still fails closed.
         with pytest.raises(ValueError):
             await collector.collect_url('https://museum.example/event/')
@@ -168,6 +171,9 @@ async def test_all_bad_fresh_articles_are_a_failure_not_empty_success(source: So
         with pytest.raises(ValueError, match='all fresh venue articles'):
             await collector.collect()
         assert len(collector.item_failures) == 1
+        assert collector.item_failures[0]['error_message'] == (
+            'venue article lacks full body/title/publication date'
+        )
 
 
 @pytest.mark.asyncio
@@ -217,6 +223,9 @@ async def test_configured_header_lead_requires_article_not_encoded_feed(
         if missing_lead:
             with pytest.raises(ValueError, match='all fresh venue articles'):
                 await collector.collect()
+            assert collector.item_failures[0]['error_message'] == (
+                'venue article lacks configured lead'
+            )
             with pytest.raises(ValueError, match='configured lead'):
                 await collector.collect_url('https://museum.example/event/')
         else:
