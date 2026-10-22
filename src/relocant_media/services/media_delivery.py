@@ -13,6 +13,7 @@ from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.api import PhotoUpload
 from relocant_media.bot.media import MediaRelease, validate_media
 from relocant_media.services.editorial import EditorialService
+from relocant_media.services.production_media import expected_media_caption
 from relocant_media.storage.models import EditorialRun
 
 
@@ -31,8 +32,14 @@ def _write_receipt(path: Path, value: dict[str, object], *, exclusive: bool = Fa
 
 
 async def deliver_media_release(
-    session: Session, release: MediaRelease, *, assets: Path, receipts: Path,
-    publisher: MediaPublisher, production_id: str, dry_run: bool = True,
+    session: Session,
+    release: MediaRelease,
+    *,
+    assets: Path,
+    receipts: Path,
+    publisher: MediaPublisher,
+    production_id: str,
+    dry_run: bool = True,
 ) -> dict[str, object]:
     if os.environ.get("APP_ENV", "").lower() != "staging":
         raise ValueError("APP_ENV=staging required")
@@ -56,12 +63,7 @@ async def deliver_media_release(
     # No prepare/generation is used: normal policy, evidence and expiry checks still apply.
     service = EditorialService(session, cast(EditorialPipeline, None))
     preview = await service.deliver(release.raw_item_id, dry_run=True)
-    credits = list(dict.fromkeys(
-        value for asset in release.assets
-        if asset.origin in {"licensed_photo", "official_poster"}
-        for value in (asset.archive_label, asset.attribution) if value
-    ))
-    expected_caption = preview.text + ("\n\n" + "\n".join(credits) if credits else "")
+    expected_caption = expected_media_caption(release.assets, preview.text)
     if release.caption != expected_caption:
         raise ValueError("media caption must equal the independently reviewed editorial text")
     digest = hashlib.sha256(canonical_json(release.model_dump(mode="json")).encode()).hexdigest()
@@ -70,8 +72,11 @@ async def deliver_media_release(
     receipts.mkdir(parents=True, exist_ok=True)
     path = receipts / f"{release.release_id}.json"
     state: dict[str, object] = {
-        "state": "sending", "release_sha256": digest, "target_id": release.target_id,
-        "raw_item_id": release.raw_item_id, "post_id": release.post_id,
+        "state": "sending",
+        "release_sha256": digest,
+        "target_id": release.target_id,
+        "raw_item_id": release.raw_item_id,
+        "post_id": release.post_id,
     }
     try:
         _write_receipt(path, state, exclusive=True)
@@ -84,8 +89,11 @@ async def deliver_media_release(
         raise ValueError("delivery uncertain; reconcile before another attempt") from None
     try:
         ids = await publisher.publish(release.caption, tuple(uploads))
-        if (len(ids) != len(paths) or len(set(ids)) != len(ids)
-                or any(type(value) is not int or value <= 0 for value in ids)):
+        if (
+            len(ids) != len(paths)
+            or len(set(ids)) != len(ids)
+            or any(type(value) is not int or value <= 0 for value in ids)
+        ):
             raise ValueError("invalid media delivery receipt")
         result = {**state, "state": "sent", "message_ids": ids}
         _write_receipt(path, result)
