@@ -25,16 +25,31 @@ def test_venue_sources_are_explicit_first_party_events():
     venues = [s for s in sources if s.source_type == "official_venue_events"]
     assert len(venues) == 7
     assert all(s.ownership == "official" and s.categories == ("events",) for s in venues)
-    assert all(s.extraction.feed_url for s in venues)
     assert all(s.verification.checked_at is not None for s in venues)
 
-    quarantined = {"venue_natural_history", "venue_yugoslavia"}
-    assert {s.id for s in venues if s.extraction.status != "active"} == quarantined
-    assert all(
-        s.policy.auto_publish is False for s in venues if s.id in quarantined
+    natural_history = next(s for s in venues if s.id == "venue_natural_history")
+    yugoslavia = next(s for s in venues if s.id == "venue_yugoslavia")
+
+    assert {s.id for s in venues if s.extraction.status != "active"} == {
+        "venue_natural_history"
+    }
+    assert natural_history.extraction.feed_url == "https://nhmbeo.rs/feed/"
+    assert natural_history.policy.auto_publish is False
+
+    assert yugoslavia.extraction.strategy == "yugoslavia_programs"
+    assert yugoslavia.extraction.status == "active"
+    assert yugoslavia.extraction.feed_url is None
+    assert yugoslavia.extraction.approved_hosts == (
+        "muzej-jugoslavije.org",
+        "www.muzej-jugoslavije.org",
     )
+    assert yugoslavia.policy.auto_publish is False
+    assert str(yugoslavia.url) == "https://muzej-jugoslavije.org/rs/kalendar/"
+
     assert all(
-        s.extraction.status == "active" for s in venues if s.id not in quarantined
+        s.extraction.status == "active"
+        for s in venues
+        if s.id not in {"venue_natural_history"}
     )
 
 
