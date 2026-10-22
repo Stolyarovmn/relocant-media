@@ -300,7 +300,9 @@ def finalize_media_release(
     release = MediaRelease.model_validate(
         {**draft.model_dump(mode="python"), "reviews": reviews.reviews}
     )
-    validate_media(release, assets, now=now)
+    paths = validate_media(release, assets, now=now)
+    for path in paths:
+        validate_telegram_photo(path, path.read_bytes())
 
     data = release.model_dump_json(indent=2).encode() + b"\n"
     temporary = bundle / f".release-{uuid.uuid4().hex}.tmp"
