@@ -20,7 +20,7 @@ BELGRADE_TZ = ZoneInfo("Europe/Belgrade")
 
 _PAGE_DATE = re.compile(
     r"^(?P<day>\d{1,2})\s+(?P<month>[^\s]+)\s+(?P<year>20\d{2})\s*[-–—]\s*"
-    r"Radovi na toplovodnoj mreži$",
+    r"(?:Radovi na toplovodnoj mreži)?$",
     re.IGNORECASE,
 )
 _POSTED_AT = re.compile(
@@ -79,7 +79,7 @@ _MONTHS = {
 
 
 def _notice_id(publication_date: datetime, area: str) -> str:
-    seed = f"{publication_date.date().isoformat()}\n{normalize_text(area)}".encode()
+    seed = f"{publicationation_date.date().isoformat()}\n{normalize_text(area)}".encode()
     return "beoelektrane-" + hashlib.sha256(seed).hexdigest()[:24]
 
 
