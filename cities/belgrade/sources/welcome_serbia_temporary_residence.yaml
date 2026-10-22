@@ -11,11 +11,11 @@ categories:
   - immigration
   - legal
 extraction:
-  strategy: page_change_detection
+  strategy: welcome_serbia_guidance
   status: active
 policy:
   high_risk: true
   auto_publish: false
 verification:
   checked_at: 2026-10-22
-  note: Official Government of Serbia guidance for foreigners on temporary residence and combined residence/work permits. Immigration and legal changes require human review; shadow snapshot only until structured extraction is validated.
+  note: Official Government of Serbia guidance for foreigners on temporary residence and combined residence/work permits. Structured extraction hashes only the authoritative guidance block. No publication date is inferred; immigration and legal changes remain high-risk and review-only.
