@@ -231,6 +231,11 @@ class YugoslaviaProgramsCollector:
                         detail=detail,
                     )
                     continue
+                if response.status_code == 525:
+                    raise httpx.ConnectError(
+                        "Museum of Yugoslavia upstream TLS handshake failed",
+                        request=response.request,
+                    )
                 response.raise_for_status()
                 content_length = response.headers.get("content-length")
                 if content_length is not None:
