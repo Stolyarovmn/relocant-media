@@ -65,20 +65,22 @@ def media_context_sha256(release: MediaRelease) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def validate_media(
-    release: MediaRelease,
+def validate_media_assets(
+    assets: tuple[MediaAsset, ...],
     directory: Path,
+    caption: str,
     *,
     now: datetime | None = None,
 ) -> tuple[Path, ...]:
+    """Validate explicit rights, provenance-bound files and caption attribution."""
     now = now or datetime.now(UTC)
-    if now.utcoffset() is None or len(release.caption.encode("utf-16-le")) // 2 > 1024:
+    if now.utcoffset() is None or len(caption.encode("utf-16-le")) // 2 > 1024:
         raise ValueError("aware time and caption <=1024 UTF-16 units required")
-    hashes = tuple(asset.sha256 for asset in release.assets)
+    hashes = tuple(asset.sha256 for asset in assets)
     if len(set(hashes)) != len(hashes):
         raise ValueError("duplicate images")
-    paths = []
-    for asset in release.assets:
+    paths: list[Path] = []
+    for asset in assets:
         if not asset.rights_verified:
             raise ValueError("media reuse rights not verified")
         if asset.origin == "licensed_photo" and asset.archive_year is None:
@@ -93,21 +95,31 @@ def validate_media(
         if hashlib.sha256(path.read_bytes()).hexdigest() != asset.sha256:
             raise ValueError("media changed after review")
         if asset.archive_year is not None:
-            if (
-                str(asset.archive_year) not in asset.archive_label
-                or asset.archive_label not in release.caption
-            ):
+            if str(asset.archive_year) not in asset.archive_label or asset.archive_label not in caption:
                 raise ValueError("archive year and exact label required in caption")
         if asset.origin in {"official_photo", "licensed_photo", "official_poster"} and (
-            asset.attribution not in release.caption
+            asset.attribution not in caption
         ):
             raise ValueError("photo attribution required in caption")
         paths.append(path)
+    return tuple(paths)
+
+
+def validate_media(
+    release: MediaRelease,
+    directory: Path,
+    *,
+    now: datetime | None = None,
+) -> tuple[Path, ...]:
+    now = now or datetime.now(UTC)
+    paths = validate_media_assets(release.assets, directory, release.caption, now=now)
+    hashes = tuple(asset.sha256 for asset in release.assets)
     if {r.role for r in release.reviews} != {"facts", "utility"}:
         raise ValueError("two independent media review roles required")
     if len({r.reviewer_id.strip().casefold() for r in release.reviews}) != 2:
         raise ValueError("distinct media reviewers required")
     caption_hash = hashlib.sha256(release.caption.encode()).hexdigest()
+    context_hash = media_context_sha256(release)
     for review in release.reviews:
         if (
             review.verdict != "approve"
@@ -116,8 +128,8 @@ def validate_media(
             or not review.live_source_checked
             or not timedelta(0) <= now - review.checked_at <= timedelta(hours=24)
             or review.caption_sha256 != caption_hash
-            or review.context_sha256 != media_context_sha256(release)
+            or review.context_sha256 != context_hash
             or review.reviewed_asset_sha256 != hashes
         ):
             raise ValueError("media review missing, expired, or mismatched")
-    return tuple(paths)
+    return paths
