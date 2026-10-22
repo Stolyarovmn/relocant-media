@@ -1,17 +1,15 @@
 import json
-import pathlib
-import urllib.parse
+from pathlib import Path
 
 
-REGISTRY = pathlib.Path("docs/serbian-news-discovery.json")
+REGISTRY = Path("docs/serbian-news-discovery.json")
 
 
 def _assert_https(value: str) -> None:
-    parsed = urllib.parse.urlparse(value)
-    assert parsed.scheme == "https"
-    assert parsed.netloc
-    assert parsed.username is None
-    assert parsed.password is None
+    assert value.startswith("https://")
+    authority = value.removeprefix("https://").split("/", 1)[0]
+    assert authority
+    assert "@" not in authority
 
 
 def test_serbian_news_registry_is_discovery_only_and_fail_closed() -> None:
