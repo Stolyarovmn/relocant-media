@@ -11,7 +11,7 @@ categories:
 - events
 extraction:
   strategy: venue_feed
-  status: active
+  status: planned
   feed_url: https://nhmbeo.rs/feed/
   article_selectors:
   - .entry-content
@@ -20,9 +20,8 @@ extraction:
   - nhmbeo.rs
   - www.nhmbeo.rs
 policy:
-  auto_publish: true
+  auto_publish: false
   high_risk: false
 verification:
-  checked_at: '2026-10-20'
-  note: Официальный сайт организатора подтверждён контактами; RSS и полное содержимое
-    проверены. Это не независимое подтверждение рекламных обещаний.
+  checked_at: '2026-10-22'
+  note: Официальный сайт подтверждён. 22.10.2026 live source-health отклонил RSS как unsafe venue feed; источник fail-closed выведен из active ingestion и auto-publish до повторной проверки структуры RSS. Safety guard не ослабляется.

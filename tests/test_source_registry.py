@@ -25,8 +25,17 @@ def test_venue_sources_are_explicit_first_party_events():
     venues = [s for s in sources if s.source_type == "official_venue_events"]
     assert len(venues) == 7
     assert all(s.ownership == "official" and s.categories == ("events",) for s in venues)
-    assert all(s.extraction.feed_url and s.extraction.status == "active" for s in venues)
+    assert all(s.extraction.feed_url for s in venues)
     assert all(s.verification.checked_at is not None for s in venues)
+
+    quarantined = {"venue_natural_history", "venue_yugoslavia"}
+    assert {s.id for s in venues if s.extraction.status != "active"} == quarantined
+    assert all(
+        s.policy.auto_publish is False for s in venues if s.id in quarantined
+    )
+    assert all(
+        s.extraction.status == "active" for s in venues if s.id not in quarantined
+    )
 
 
 def test_utility_sources_keep_shadow_policy_while_bvk_and_eds_are_structured() -> None:
