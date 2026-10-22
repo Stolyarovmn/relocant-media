@@ -9,12 +9,17 @@ from sqlalchemy.orm import Session
 from test_editorial_integration import prepare_service
 from test_editorial_package import bind_context, package_payload, parse
 
-from relocant_media.ai.package import EditorialPackage, draft_sha256
+from relocant_media.ai.package import EditorialPackage, canonical_json, draft_sha256
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.media import MediaRelease, media_context_sha256
 from relocant_media.domain.dedup import event_key
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
-from relocant_media.services.editorial import DeliveryBlockedError, EditorialService, _candidate, _snapshot_member
+from relocant_media.services.editorial import (
+    DeliveryBlockedError,
+    EditorialService,
+    _candidate,
+    _snapshot_member,
+)
 from relocant_media.services.package_import import import_package
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 from relocant_media.storage.sqlite_schema import initialize_sqlite
@@ -119,9 +124,7 @@ def _write_release(
             "raw_item_id": run.raw_item_id,
             "post_id": run.post_id,
             "editorial_package_sha256": hashlib.sha256(
-                __import__("relocant_media.ai.package", fromlist=["canonical_json"])
-                .canonical_json(package.model_dump(mode="json"))
-                .encode()
+                canonical_json(package.model_dump(mode="json")).encode()
             ).hexdigest(),
             "target_id": str(APPROVED_CHANNEL_ID),
             "caption": caption,
