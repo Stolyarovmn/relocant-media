@@ -25,8 +25,11 @@ _STOP = set("koncert concert koncerti koncertna concerti festival events event p
 
 
 class PublicDiscoveryLead(Protocol):
-    text: str
-    outbound_urls: tuple[str, ...]
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def outbound_urls(self) -> tuple[str, ...]: ...
 
 
 @dataclass(slots=True)
