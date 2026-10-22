@@ -13,6 +13,12 @@ from relocant_media.collectors.base import RawItem
 from relocant_media.sources.registry import SourceConfig
 
 MAX_BYTES = 2_000_000
+MAX_ITEM_ERROR_MESSAGE = 200
+
+
+def _item_error_message(error: BaseException) -> str:
+    """Return bounded single-line diagnostics without page content or response bodies."""
+    return " ".join(str(error).split())[:MAX_ITEM_ERROR_MESSAGE]
 
 
 def _date(value: str | None) -> datetime | None:
@@ -180,7 +186,13 @@ class VenueFeedCollector:
                 )
                 items.append(item)
             except (ValueError, httpx.HTTPError) as error:
-                self.item_failures.append({"url": entry.url, "error_type": type(error).__name__})
+                self.item_failures.append(
+                    {
+                        "url": entry.url,
+                        "error_type": type(error).__name__,
+                        "error_message": _item_error_message(error),
+                    }
+                )
         if self.item_failures and not items:
             raise ValueError("all fresh venue articles failed extraction")
         return items
