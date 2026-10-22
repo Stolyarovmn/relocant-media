@@ -50,17 +50,20 @@ live extraction/freshness.
 
 22.10.2026 добавлены ещё два проверенных vertical source в shadow-режиме:
 
-- `srbijavoz_news` — официальный раздел новостей пассажирского оператора Srbijavoz. Он используется
-  как первичный источник изменений железнодорожного движения и уведомлений, затрагивающих в том
-  числе станции Белграда и БГ:ВОЗ; пока только `page_change_detection`, `auto_publish: false`;
+- `srbijavoz_news` — официальный раздел новостей пассажирского оператора Srbijavoz. Живая лента
+  подтверждена как набор отдельных статей с собственными canonical URL и явными датами публикации;
+  `srbijavoz_news` теперь извлекает ссылки из news archive и затем загружает полный текст каждой
+  статьи как evidence. Redirect/canonical identity проверяются fail-closed. Источник остаётся
+  `auto_publish: false`: structured extraction не отменяет редакционные проверки;
 - `welcome_serbia_temporary_residence` — официальный портал Government of Serbia с информацией для
   иностранцев о временном проживании и единой разрешительной процедуре. Это
   `high_risk: true`, `auto_publish: false`: изменения миграционных правил никогда не превращаются
   в публикацию без отдельной редакционной проверки.
 
-Для обоих источников whole-page snapshot остаётся лишь сигналом изменения. Структурированный
-article/guidance parser можно включать только после сохранения живых fixture'ов и проверки
-семантики дат, заголовков и canonical URL.
+`welcome_serbia_temporary_residence` пока остаётся whole-page shadow snapshot. Для high-risk legal
+source структурированный guidance parser можно включать только после отдельной проверки живой
+структуры и семантики дат/версий. Для `srbijavoz_news` live `source-health` остаётся обязательной
+проверкой совместимости parser с текущим сайтом.
 
 Each source file captures:
 - stable source id;
