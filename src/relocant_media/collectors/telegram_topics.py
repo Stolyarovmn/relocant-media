@@ -19,6 +19,7 @@ from relocant_media.analytics.public_preview import (
 DEFAULT_CHANNELS = (
     "Serbia",
     "SerbiaInMyMind",
+    "serbnews",
     "novostiserbii",
     "beogradske_vesti",
     "ruserbia",
