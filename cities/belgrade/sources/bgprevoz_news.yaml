@@ -10,8 +10,13 @@ check_every: 10m
 categories:
   - transport
 extraction:
-  strategy: html_list
-  status: planned
+  strategy: bgprevoz_news
+  status: active
+  approved_hosts:
+    - www.bgprevoz.rs
+policy:
+  high_risk: false
+  auto_publish: false
 verification:
-  checked_at: 2026-10-18
-  note: Official transport-secretariat news page.
+  checked_at: 2026-10-22
+  note: Official index cards provide publication dates; full article detail pages provide publication evidence.
