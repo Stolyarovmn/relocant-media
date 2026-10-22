@@ -15,10 +15,10 @@ For `current_photo`, automatic materialization currently requires `Source.owners
 The output contains:
 
 - `assets/` — exact downloaded bytes, named by SHA-256;
-- `assets.json` — the `MediaAsset` manifest consumed by `relocant-media-release prepare`;
+- `assets.json` — the strict `MediaAsset` manifest consumed by `relocant-media-release prepare`; it intentionally contains only the `assets` field accepted by that schema;
 - `materialization.json` — audit data binding source raw item, source HTML hash, saved image-host allowlist, reviewed image URL, final downloaded URL, assessor and rights evidence.
 
-Both JSON files retain `publication_permitted=false` semantics. Independent facts/utility media reviews are still required later by `relocant-media-release finalize`.
+The command result and `materialization.json` keep `publication_permitted=false`, `rights_inferred=false` and `independent_media_reviews_completed=false`. Independent facts/utility media reviews are still required later by `relocant-media-release finalize`.
 
 ## Workflow
 
