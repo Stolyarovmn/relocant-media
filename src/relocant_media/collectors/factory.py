@@ -12,6 +12,7 @@ from relocant_media.collectors.euprava_service import EupravaServiceCollector
 from relocant_media.collectors.health_duty import HealthDutyCollector
 from relocant_media.collectors.page_snapshot import PageSnapshotCollector
 from relocant_media.collectors.srbijavoz_news import SrbijavozNewsCollector
+from relocant_media.collectors.tob_events import TobEventsCollector
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.sources.registry import SourceConfig
 
@@ -46,4 +47,6 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return HealthDutyCollector(source, client)
     if strategy == "euprava_service":
         return EupravaServiceCollector(source, client)
+    if strategy == "tob_events":
+        return TobEventsCollector(source, client)
     raise UnsupportedCollectorStrategyError(strategy)
