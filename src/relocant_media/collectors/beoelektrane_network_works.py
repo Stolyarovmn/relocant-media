@@ -79,7 +79,7 @@ _MONTHS = {
 
 
 def _notice_id(publication_date: datetime, area: str) -> str:
-    seed = f"{publicationation_date.date().isoformat()}\n{normalize_text(area)}".encode()
+    seed = f"{publication_date.date().isoformat()}\n{normalize_text(area)}".encode()
     return "beoelektrane-" + hashlib.sha256(seed).hexdigest()[:24]
 
 
