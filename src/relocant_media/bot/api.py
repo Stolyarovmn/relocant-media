@@ -155,6 +155,7 @@ class TelegramBotAPI:
         entities: Sequence[Mapping[str, object]] = (),
     ) -> int:
         visible, source_entities = compact_source_link(text)
+        link_preview_options: dict[str, object] = {"is_disabled": True}
         if visible != text:
             if entities:
                 raise ValueError(
@@ -162,10 +163,18 @@ class TelegramBotAPI:
                 )
             text = visible
             entities = source_entities
+            source_url = source_entities[0]["url"]
+            if not isinstance(source_url, str):
+                raise ValueError("source link entity requires a URL")
+            link_preview_options = {
+                "url": source_url,
+                "prefer_large_media": True,
+                "show_above_text": True,
+            }
         payload: dict[str, object] = {
             "chat_id": chat_id,
             "text": text,
-            "link_preview_options": {"is_disabled": True},
+            "link_preview_options": link_preview_options,
         }
         if entities:
             payload["entities"] = list(entities)
