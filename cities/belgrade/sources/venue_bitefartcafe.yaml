@@ -2,7 +2,7 @@ id: venue_bitefartcafe
 name: BitefArtCafe
 publisher: BitefArtCafe
 ownership: official
-url: https://bitefartcafe.rs/
+url: https://bitefartcafe.rs/program/koncerti/
 language: sr
 source_type: official_venue_events
 trust: 0.95
@@ -10,19 +10,16 @@ check_every: 3h
 categories:
 - events
 extraction:
-  strategy: venue_feed
+  strategy: bitefartcafe_events
   status: active
-  feed_url: https://bitefartcafe.rs/feed/
-  article_selectors:
-  - .entry-content
-  - .post-content
   approved_hosts:
   - bitefartcafe.rs
   - www.bitefartcafe.rs
 policy:
-  auto_publish: true
+  auto_publish: false
   high_risk: false
 verification:
-  checked_at: '2026-10-20'
-  note: Официальный сайт организатора подтверждён контактами; RSS и полное содержимое
-    проверены. Это не независимое подтверждение рекламных обещаний.
+  checked_at: '2026-10-22'
+  note: Официальная HTML-программа концертов и detail-страницы проверены. Даты и время
+    относятся к событиям, а не к публикации, поэтому источник остаётся review-only с
+    published_at=None. Это не независимое подтверждение рекламных обещаний.
