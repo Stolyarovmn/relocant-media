@@ -83,16 +83,40 @@ def test_similar_titles_cluster_only_across_sources_and_inside_window() -> None:
 
 def test_same_source_transport_reprint_requires_matching_event_anchors() -> None:
     published = datetime(2026, 10, 21, 12, tzinfo=UTC)
-    service_body = """Tokom izvođenja radova na redovnom održavanju u zoni raskrsnice ulica Gandijeve, Egipatske i Vojvođanske, 23. oktobra doći će do promena u radu linija javnog prevoza.
-Radovi podrazumevaju zatvaranje desne kolovozne trake Egipatske i Vojvođanske, gledano u smeru ka Zemunu, na delu od zone raskrsnice sa Nehruovom ulicom do skretanja ka objektu KIT komerc.
-Vozila sa linija 45, 71, 601, 601N i 603N će u oba smera saobraćati levom kolovoznom trakom, koja će biti dvosmerna za saobraćaj.
-Vozila sa linije 82 će u smeru ka Bloku 44 saobraćati preko Gandijeve, Vojvođanske i Nehruove.
-Stajalište „Crkva Svetog Georgija” (#1136) privremeno se izmešta oko 100 metara, dok se stajalište „Gandijeva” (#1194) u smeru ka Zemunu privremeno ukida."""
-    news_body = """Tokom izvođenja radova na redovnom održavanju u zoni raskrsnice ulica Gandijeve, Egipatske i Vojvođanske, 23. oktobra doći će do promena u radu javnog prevoza, najavljeno je iz Sekretarijata za javni prevoz.
-Radovi podrazumevaju zatvaranje desne kolovozne trake Egipatske i Vojvođanske, gledano u smeru ka Zemunu, na delu od zone raskrsnice sa Nehruovom ulicom do skretanja ka objektu KIT komerc.
-Vozila sa linija 45, 71, 601, 601N i 603N će u oba smera saobraćati levom kolovoznom trakom, koja će biti dvosmerna za saobraćaj.
-Vozila sa linije 82 će u smeru ka Bloku 44 saobraćati preko Gandijeve, Vojvođanske i Nehruove.
-Stajalište „Crkva Svetog Georgija” (#1136) privremeno se izmešta oko 100 metara, dok se stajalište „Gandijeva” (#1194) u smeru ka Zemunu privremeno ukida."""
+    service_body = "\n".join(
+        (
+            "Tokom izvođenja radova na redovnom održavanju u zoni raskrsnice ulica "
+            "Gandijeve, Egipatske i Vojvođanske, 23. oktobra doći će do promena u "
+            "radu linija javnog prevoza.",
+            "Radovi podrazumevaju zatvaranje desne kolovozne trake Egipatske i "
+            "Vojvođanske, gledano u smeru ka Zemunu, na delu od zone raskrsnice sa "
+            "Nehruovom ulicom do skretanja ka objektu KIT komerc.",
+            "Vozila sa linija 45, 71, 601, 601N i 603N će u oba smera saobraćati "
+            "levom kolovoznom trakom, koja će biti dvosmerna za saobraćaj.",
+            "Vozila sa linije 82 će u smeru ka Bloku 44 saobraćati preko Gandijeve, "
+            "Vojvođanske i Nehruove.",
+            "Stajalište „Crkva Svetog Georgija” (#1136) privremeno se izmešta oko "
+            "100 metara, dok se stajalište „Gandijeva” (#1194) u smeru ka Zemunu "
+            "privremeno ukida.",
+        )
+    )
+    news_body = "\n".join(
+        (
+            "Tokom izvođenja radova na redovnom održavanju u zoni raskrsnice ulica "
+            "Gandijeve, Egipatske i Vojvođanske, 23. oktobra doći će do promena u "
+            "radu javnog prevoza, najavljeno je iz Sekretarijata za javni prevoz.",
+            "Radovi podrazumevaju zatvaranje desne kolovozne trake Egipatske i "
+            "Vojvođanske, gledano u smeru ka Zemunu, na delu od zone raskrsnice sa "
+            "Nehruovom ulicom do skretanja ka objektu KIT komerc.",
+            "Vozila sa linija 45, 71, 601, 601N i 603N će u oba smera saobraćati "
+            "levom kolovoznom trakom, koja će biti dvosmerna za saobraćaj.",
+            "Vozila sa linije 82 će u smeru ka Bloku 44 saobraćati preko Gandijeve, "
+            "Vojvođanske i Nehruove.",
+            "Stajalište „Crkva Svetog Georgija” (#1136) privremeno se izmešta oko "
+            "100 metara, dok se stajalište „Gandijeva” (#1194) u smeru ka Zemunu "
+            "privremeno ukida.",
+        )
+    )
     service = candidate(
         356,
         "city_beograd_news",
