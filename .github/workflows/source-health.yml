@@ -1,3 +1,4 @@
+# Diagnostic touch only: trigger a fresh broad online source audit; do not merge.
 name: source-health
 
 on:
