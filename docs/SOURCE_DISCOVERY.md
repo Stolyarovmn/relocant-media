@@ -32,12 +32,12 @@
 
 ## Крупные публичные Telegram-каналы как discovery layer
 
-На 21.10.2026 `DEFAULT_CHANNELS` охватывает крупные русскоязычные каналы о Сербии
-и Белграде: `Serbia`, `SerbiaInMyMind`, `novostiserbii`, `beogradske_vesti`,
-`ruserbia`, `sta_imas_beograd`, `relocate_serbia`, `volna_srbjia`,
-`vstrechi_v_belgrade`, `afisha_rs`. Наблюдаемые публичные счётчики сохранены в
-`docs/public-channel-registry.json` как приблизительный снимок, а не рейтинг
-качества или доверия.
+На 22.10.2026 `DEFAULT_CHANNELS` охватывает крупные русскоязычные каналы о Сербии
+и Белграде: `Serbia`, `SerbiaInMyMind`, `serbia_news`, `serbnews`, `novostiserbii`,
+`beogradske_vesti`, `ruserbia`, `sta_imas_beograd`, `relocate_serbia`,
+`volna_srbjia`, `vstrechi_v_belgrade`, `afisha_rs`. Наблюдаемые публичные
+счётчики сохранены в `docs/public-channel-registry.json` как приблизительный
+снимок, а не рейтинг качества или доверия.
 
 Telegram-канал в этом списке является только источником темы. Его текст, фото,
 видео, число просмотров и исходящие ссылки не становятся `RawItem` или factual
@@ -49,6 +49,32 @@ source/evidence/factual guards. Пересказ другого канала н�
 быть неполным или временно недоступным. Недоступность одного канала не означает,
 что события нет. Подписчики и просмотры используются только для discovery/attention,
 но не для оценки правдивости.
+
+## Крупные сербские СМИ как discovery-only layer
+
+Проверенный на 22.10.2026 каталог хранится в `docs/serbian-news-discovery.json`.
+Он отделён от production source registry намеренно: попадание СМИ в каталог не
+делает его authoritative source и не включает автоматический ingestion в
+publication evidence. Любой обнаруженный факт по-прежнему должен быть доведён до
+первичного источника, когда такой источник существует. Несколько СМИ, повторивших
+одну новость, не считаются независимым первичным подтверждением.
+
+В каталог включены RTS, N1 Srbija, Danas, Nova.rs, Vreme, Blic и BIRN Srbija.
+Контекст выбора сверялся с Serbia chapter Digital News Report 2026 Reuters
+Institute: в нём N1 и TV Nova отмечены среди ведущих офлайн-источников новостей,
+N1, Nova, Danas и Vreme — среди более доверяемых брендов в опросе, а BIRN — как
+специализированное расследовательское издание. Эти показатели используются только
+как сигнал полезности discovery layer, а не как разрешение доверять конкретному
+сообщению без проверки.
+
+RSS не угадывается. В реестре указан только реально проверенный текущий RSS RTS
+`https://www.rts.rs/vesti/rss.html` и ссылки Blic, которые сам официальный RSS-index
+`https://www.blic.rs/rss` публикует для разделов Beograd и Srbija. Для N1, Danas,
+Nova.rs, Vreme и BIRN поле feeds остаётся пустым, пока точный endpoint не будет
+отдельно подтверждён.
+
+Исследовательская опора:
+`https://reutersinstitute.politics.ox.ac.uk/digital-news-report/2026/serbia`.
 
 ## Проверка источников
 

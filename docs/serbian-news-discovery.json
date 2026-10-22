@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-10-22",
+  "purpose": "serbian_news_discovery_only",
+  "policy": {
+    "publication_evidence": false,
+    "requires_primary_verification": true,
+    "multiple_media_reports_are_not_independent_primary_confirmation": true,
+    "follow_claim_to_primary_source_when_available": true
+  },
+  "research": {
+    "reuters_institute_2026_serbia": "https://reutersinstitute.politics.ox.ac.uk/digital-news-report/2026/serbia",
+    "note": "Selection basis is discovery value, current availability and independently documented audience/trust context. It is not an authority ranking."
+  },
+  "sources": [
+    {
+      "id": "rts_news",
+      "name": "RTS Vesti",
+      "url": "https://www.rts.rs/vesti/",
+      "scope": ["serbia", "belgrade"],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "selection_basis": ["national_public_broadcaster", "current_official_rss"],
+      "feeds": [
+        {
+          "url": "https://www.rts.rs/vesti/rss.html",
+          "status": "verified_current",
+          "verified_on": "2026-10-22"
+        }
+      ]
+    },
+    {
+      "id": "n1_serbia",
+      "name": "N1 Srbija",
+      "url": "https://n1info.rs/vesti",
+      "scope": ["serbia", "belgrade"],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "selection_basis": [
+        "reuters_institute_2026_top_offline_news_source",
+        "reuters_institute_2026_high_trust_brand"
+      ],
+      "feeds": []
+    },
+    {
+      "id": "danas_news",
+      "name": "Danas",
+      "url": "https://www.danas.rs/vesti/",
+      "local_url": "https://www.danas.rs/mesto/beograd/",
+      "scope": ["serbia", "belgrade"],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "selection_basis": ["reuters_institute_2026_high_trust_brand", "dedicated_belgrade_page"],
+      "feeds": []
+    },
+    {
+      "id": "nova_news",
+      "name": "Nova.rs",
+      "url": "https://nova.rs/vesti/",
+      "scope": ["serbia", "belgrade"],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "selection_basis": ["reuters_institute_2026_high_trust_nova_brand", "current_news_site"],
+      "feeds": []
+    },
+    {
+      "id": "vreme_news",
+      "name": "Vreme",
+      "url": "https://vreme.com/vesti/",
+      "scope": ["serbia", "belgrade"],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "selection_basis": ["reuters_institute_2026_high_trust_brand", "current_news_site"],
+      "feeds": []
+    },
+    {
+      "id": "blic_rss",
+      "name": "Blic",
+      "url": "https://www.blic.rs/rss",
+      "scope": ["serbia", "belgrade"],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "selection_basis": ["official_rss_index", "dedicated_belgrade_and_serbia_feeds"],
+      "feeds": [
+        {
+          "url": "https://www.blic.rs/rss/Vesti/Beograd",
+          "status": "advertised_by_official_rss_index",
+          "verified_on": "2026-10-22"
+        },
+        {
+          "url": "https://www.blic.rs/rss/Vesti/Srbija",
+          "status": "advertised_by_official_rss_index",
+          "verified_on": "2026-10-22"
+        }
+      ]
+    },
+    {
+      "id": "birn_serbia",
+      "name": "BIRN Srbija",
+      "url": "https://birn.rs/vrsta-clanka/vesti/",
+      "scope": ["serbia", "belgrade", "investigations"],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "selection_basis": ["reuters_institute_2026_investigative_specialist", "current_news_site"],
+      "feeds": []
+    }
+  ]
+}
