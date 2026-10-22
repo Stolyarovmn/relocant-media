@@ -97,7 +97,7 @@ def _concert_links(html: str, source: SourceConfig) -> list[str]:
     return links
 
 
-def _detail_title(soup: BeautifulSoup) -> tuple[Tag, str]:
+def _detail_headings(soup: BeautifulSoup) -> tuple[list[Tag], str]:
     if soup.title is None:
         raise ValueError("BitefArtCafe page title missing")
     page_title = soup.title.get_text(" ", strip=True)
@@ -114,7 +114,25 @@ def _detail_title(soup: BeautifulSoup) -> tuple[Tag, str]:
     ]
     if not headings:
         raise ValueError("BitefArtCafe event heading does not match page title")
-    return headings[-1], title
+    return headings, title
+
+
+def _body_after_heading(title_node: Tag, title: str) -> tuple[list[str], bool]:
+    lines: list[str] = []
+    for element in title_node.find_all_next():
+        if not isinstance(element, Tag):
+            continue
+        text = element.get_text(" ", strip=True)
+        if element.name in {"h1", "h2", "h3"} and text == _BODY_STOP:
+            return lines, True
+        if element.name in {"script", "style", "noscript", "template"}:
+            continue
+        if element.name in {"h1", "h2", "h3"} and text == title:
+            continue
+        if element.name in {"p", "li", "h2", "h3"} and text:
+            if not lines or lines[-1] != text:
+                lines.append(text)
+    return lines, False
 
 
 def _detail_body(html: str) -> tuple[str, str]:
@@ -127,27 +145,20 @@ def _detail_body(html: str) -> tuple[str, str]:
     event_date = dates[0]
 
     soup = BeautifulSoup(html, "html.parser")
-    title_node, title = _detail_title(soup)
-    lines: list[str] = []
-    stop_found = False
-    for element in title_node.find_all_next():
-        if not isinstance(element, Tag):
-            continue
-        text = element.get_text(" ", strip=True)
-        if element.name in {"h1", "h2", "h3"} and text == _BODY_STOP:
-            stop_found = True
-            break
-        if element.name in {"script", "style", "noscript", "template"}:
-            continue
-        if element.name in {"p", "li", "h2", "h3"} and text:
-            if not lines or lines[-1] != text:
-                lines.append(text)
-    if not stop_found:
+    title_nodes, title = _detail_headings(soup)
+    candidates: list[str] = []
+    boundary_found = False
+    for title_node in title_nodes:
+        lines, found = _body_after_heading(title_node, title)
+        boundary_found = boundary_found or found
+        if found and lines:
+            candidates.append("\n".join(lines))
+    if not boundary_found:
         raise ValueError("BitefArtCafe event body boundary missing")
-    if not lines:
+    if not candidates:
         raise ValueError("BitefArtCafe event body missing")
 
-    body = "\n".join(lines)
+    body = max(candidates, key=len)
     if len(body) < 120:
         raise ValueError("BitefArtCafe event body shorter than 120 characters")
     if event_date not in body:
