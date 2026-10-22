@@ -25,6 +25,25 @@ class MediaBot(Protocol):
     ) -> list[int]: ...
 
 
+async def publish_media(
+    bot: MediaBot,
+    target_id: int | str,
+    caption: str,
+    photos: Sequence[Path | PhotoUpload],
+) -> list[int]:
+    """Send already reviewed bytes while preserving compact source-link entities."""
+    if not caption.strip():
+        raise ValueError("media publication requires a caption")
+    visible, entities = compact_source_link(caption)
+    if len(visible.encode("utf-16-le")) // 2 > 1024:
+        raise ValueError("photo caption exceeds 1024 UTF-16 code units")
+    if not 1 <= len(photos) <= 10:
+        raise ValueError("media publication requires 1 to 10 photos")
+    if len(photos) == 1:
+        return [await bot.send_photo(target_id, photos[0], visible, entities)]
+    return await bot.send_media_group(target_id, photos, visible, entities)
+
+
 class StagingMediaPublisher:
     """Transport for already validated media; never selects a production target."""
 
@@ -48,25 +67,4 @@ class StagingMediaPublisher:
         return self._channel_id
 
     async def publish(self, caption: str, photos: Sequence[Path | PhotoUpload]) -> list[int]:
-        if not caption.strip():
-            raise ValueError("media publication requires a caption")
-        visible, entities = compact_source_link(caption)
-        if len(visible.encode("utf-16-le")) // 2 > 1024:
-            raise ValueError("photo caption exceeds 1024 UTF-16 code units")
-        if not 1 <= len(photos) <= 10:
-            raise ValueError("media publication requires 1 to 10 photos")
-        if len(photos) == 1:
-            return [
-                await self._bot.send_photo(
-                    self._channel_id,
-                    photos[0],
-                    visible,
-                    entities,
-                )
-            ]
-        return await self._bot.send_media_group(
-            self._channel_id,
-            photos,
-            visible,
-            entities,
-        )
+        return await publish_media(self._bot, self._channel_id, caption, photos)
