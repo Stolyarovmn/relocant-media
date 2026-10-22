@@ -103,6 +103,10 @@ _SERVER_VENUE_STRATEGIES = frozenset({
     "musicology_blog",
     "natural_history_news",
 })
+_REVIEW_ONLY_VENUE_STRATEGIES = frozenset({
+    "bitefartcafe_events",
+    "yugoslavia_programs",
+})
 
 
 class ServerAI:
@@ -180,6 +184,25 @@ def venue_sources() -> dict[str, SourceConfig]:
     }
 
 
+def review_only_venue_sources() -> dict[str, SourceConfig]:
+    """Verified undated venue sources retained only for deterministic human review."""
+    return {
+        source.id: source
+        for source in load_source_registry(SOURCES)
+        if source.extraction.strategy in _REVIEW_ONLY_VENUE_STRATEGIES
+        and source.extraction.status == "active"
+        and source.source_type == "official_venue_events"
+        and not source.policy.auto_publish
+    }
+
+
+def _is_review_only_venue_hold(item: Any, *, now: datetime) -> bool:
+    if event_content_reason(item.title, item.body, now=now) is not None:
+        return False
+    fresh = freshness_decision(item.title, item.body, item.published_at, now)
+    return fresh.action == "hold" and fresh.reason == "publication_date_unknown"
+
+
 def discovery_venue_sources() -> dict[str, SourceConfig]:
     """Legacy search-enabled venue feeds; structured list collectors are not search APIs."""
     return {
@@ -248,15 +271,19 @@ async def collect_sources(
               "discarded_before_persistence": 0, "channel_failures": 0, "channel_leads": 0,
               "news_failures": 0, "news_leads": 0}
     venues = venue_sources()
+    review_venues = review_only_venue_sources()
+    runtime_venues = {**venues, **review_venues}
     discovery_venues = discovery_venue_sources()
     news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
                for key in ("city_beograd_news", "cukarica_news")}
-    sources.update(venues)
+    sources.update(runtime_venues)
     result["sources_synced"] = len(sources)
-    result["venue_sources"] = len(venues)
+    result["venue_sources"] = len(runtime_venues)
+    result["venue_review_only_sources"] = len(review_venues)
     result["venue_items"] = 0
     result["venue_deferred"] = 0
+    result["venue_review_holds"] = 0
     result["venue_article_failures"] = 0
     result["news_feeds"] = len(news_feeds)
     result["priority_submissions"] = 0
@@ -273,7 +300,16 @@ async def collect_sources(
     news_errors: list[dict[str, str]] = []
     venue_errors: list[dict[str, str]] = []
     articles = []
+    review_holds = []
+    review_hold_urls: set[str] = set()
     fetched: dict[str, str] = {}
+
+    def register_review_hold(item: Any) -> None:
+        if item.url not in review_hold_urls:
+            review_holds.append(item)
+            review_hold_urls.add(item.url)
+            result["venue_review_holds"] += 1
+        fetched[item.url] = "primary_source_review_hold"
     submission_links: dict[int, list[str]] = {}
     attempted_tips: set[int] = set()
     watch: dict[str, Any] = {"checked": 0, "changed": [], "failures": []}
@@ -293,7 +329,7 @@ async def collect_sources(
         }
 
         collectors.update({
-            key: build_collector(source, client) for key, source in venues.items()
+            key: build_collector(source, client) for key, source in runtime_venues.items()
         })
 
         async def full_article(source_id: str, url: str) -> str:
@@ -302,7 +338,11 @@ async def collect_sources(
             item = await _collect_exact_url(collectors[source_id], url)
             fresh = freshness_decision(item.title, item.body, item.published_at, now)
             venue_reason = (event_content_reason(item.title, item.body, now=now)
-                            if source_id in venues else None)
+                            if source_id in runtime_venues else None)
+            if (source_id in review_venues and venue_reason is None
+                    and _is_review_only_venue_hold(item, now=now)):
+                register_review_hold(item)
+                return fetched[url]
             if fresh.action != "keep" or venue_reason is not None:
                 result["discarded_before_persistence"] += 1
                 fetched[url] = venue_reason or fresh.reason
@@ -358,7 +398,9 @@ async def collect_sources(
                         continue
                     result["private_link_fetches"] += 1
                 attempted_tips.add(submission_id)
-                if await resolve_link(url) == "primary_source_collected":
+                if await resolve_link(url) in {
+                    "primary_source_collected", "primary_source_review_hold"
+                }:
                     linked.append(url)
             if not tip_urls(payload):
                 attempted_tips.add(submission_id)
@@ -403,13 +445,18 @@ async def collect_sources(
                     await full_article(source_id, item.url)
             except Exception:
                 result["failures"] += 1
-        for source_id in (() if submissions_only else venues):
+        for source_id in (() if submissions_only else runtime_venues):
             collector = collectors[source_id]
             try:
                 for item in await collector.collect():
                     result["venue_items"] += 1
                     reason = event_content_reason(item.title, item.body, now=now)
                     fresh = freshness_decision(item.title, item.body, item.published_at, now)
+                    if (source_id in review_venues and reason is None
+                            and _is_review_only_venue_hold(item, now=now)):
+                        result["venue_deferred"] += 1
+                        register_review_hold(item)
+                        continue
                     if reason is not None or fresh.action != "keep":
                         result["venue_deferred"] += 1
                         continue
@@ -475,7 +522,7 @@ async def collect_sources(
                 news_errors.append({"source_id": feed.source_id,
                                     "error_type": type(error).__name__})
     with Session(engine) as session:
-        written, changes = capture_collected_batch(session, articles)
+        written, changes = capture_collected_batch(session, [*articles, *review_holds])
         for submission_id, payload in tips:
             urls = submission_links[submission_id]
             urls.extend(url for url in tip_urls(payload)
