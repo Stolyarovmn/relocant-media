@@ -420,8 +420,8 @@ async def collect_sources(
 
         for feed in news_feeds:
             try:
-                leads = await collect_news_feed(feed, client, now=now)
-                for lead in leads[:20]:
+                news_leads = await collect_news_feed(feed, client, now=now)
+                for lead in news_leads[:20]:
                     result["news_leads"] += 1
                     resolved = []
                     primary_urls = []
