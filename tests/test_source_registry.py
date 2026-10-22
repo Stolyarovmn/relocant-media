@@ -69,6 +69,20 @@ def test_parking_stays_snapshot_while_heating_is_structured_shadow() -> None:
     assert heating.verification.checked_at is not None
 
 
+def test_bgprevoz_changes_is_structured_shadow_without_publication_date_inference() -> None:
+    sources = load_source_registry(Path("cities/belgrade/sources"))
+    transport = next(source for source in sources if source.id == "bgprevoz_changes")
+
+    assert transport.ownership == "official"
+    assert transport.trust == 1.0
+    assert transport.extraction.strategy == "bgprevoz_changes"
+    assert transport.extraction.status == "active"
+    assert transport.extraction.approved_hosts == ("bgprevoz.rs",)
+    assert transport.policy.high_risk is False
+    assert transport.policy.auto_publish is False
+    assert transport.verification.checked_at is not None
+
+
 def test_new_vertical_sources_remain_shadow_only() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
     rail = next(source for source in sources if source.id == "srbijavoz_news")

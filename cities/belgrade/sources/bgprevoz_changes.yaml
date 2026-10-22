@@ -10,8 +10,13 @@ check_every: 10m
 categories:
   - transport
 extraction:
-  strategy: html_list
-  status: planned
+  strategy: bgprevoz_changes
+  status: active
+  approved_hosts:
+    - bgprevoz.rs
+policy:
+  high_risk: false
+  auto_publish: false
 verification:
-  checked_at: 2026-10-18
-  note: Official planned/current public-transport service-change feed.
+  checked_at: 2026-10-22
+  note: Official list and detail pages expose current service-change notices and effective periods; publication time is not asserted when absent.
