@@ -4,7 +4,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from test_production_media_delivery import _preview, reviewed as _reviewed
+from test_production_media_delivery import _preview
+from test_production_media_delivery import reviewed as _reviewed
 
 from relocant_media.bot.media import MediaRelease
 from relocant_media.services.media_release_finalizer import (
