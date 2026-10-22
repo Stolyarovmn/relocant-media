@@ -120,7 +120,7 @@ def _parse_period(value: str) -> tuple[datetime, datetime]:
         end = datetime.strptime(match.group("end"), "%d/%m/%Y")
     except ValueError as error:
         raise ValueError("Bgprevoz change period invalid") from error
-    if end < start or (end - start).days > 366:
+    if end < start:
         raise ValueError("Bgprevoz change period invalid")
     return start, end
 
