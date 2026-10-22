@@ -200,7 +200,10 @@ def build_category_learning_report(
                     "category": category,
                     "class": "AUTO",
                     "code": "collect_cross_category_baseline",
-                    "message": "Collect another mature category before comparing discovery attention.",
+                    "message": (
+                        "Collect another mature category before comparing "
+                        "discovery attention."
+                    ),
                 }
             )
             continue
