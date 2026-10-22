@@ -13,7 +13,8 @@ from relocant_media.collectors.base import RawItem
 from relocant_media.collectors.page_snapshot import normalize_visible_text
 from relocant_media.sources.registry import SourceConfig
 
-MAX_BYTES = 2_000_000
+MAX_LIST_BYTES = 2_000_000
+MAX_DETAIL_BYTES = 8_000_000
 MAX_NOTICES = 50
 MAX_ITEM_ERROR_MESSAGE = 200
 
@@ -84,7 +85,7 @@ def _notice_identity(value: str, source: SourceConfig) -> tuple[str, str]:
 
 def parse_bgprevoz_change_links(html: str, source: SourceConfig) -> tuple[str, ...]:
     """Extract unique official notice URLs from the current-changes list."""
-    if len(html.encode("utf-8")) > MAX_BYTES:
+    if len(html.encode("utf-8")) > MAX_LIST_BYTES:
         raise ValueError("Bgprevoz changes list response too large")
     soup = BeautifulSoup(html, "html.parser")
     result: list[str] = []
@@ -130,7 +131,7 @@ def parse_bgprevoz_change(
     page_url: str,
 ) -> RawItem:
     """Parse a detail page without treating its effective period as publication time."""
-    if len(html.encode("utf-8")) > MAX_BYTES:
+    if len(html.encode("utf-8")) > MAX_DETAIL_BYTES:
         raise ValueError("Bgprevoz change response too large")
     notice_id, canonical_url = _notice_identity(page_url, source)
     soup = BeautifulSoup(html, "html.parser")
@@ -188,7 +189,7 @@ class BgprevozChangesCollector:
         self.item_failures: list[dict[str, str]] = []
         _allowed_url(str(source.url), source)
 
-    async def _fetch(self, value: str) -> tuple[str, str]:
+    async def _fetch(self, value: str, *, max_bytes: int) -> tuple[str, str]:
         current = _allowed_url(value, self._source)
         for _ in range(6):
             async with self._client.stream(
@@ -205,22 +206,36 @@ class BgprevozChangesCollector:
                     current = _allowed_url(urljoin(current, location), self._source)
                     continue
                 response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        declared_bytes = int(content_length)
+                    except ValueError:
+                        declared_bytes = 0
+                    if declared_bytes > max_bytes:
+                        raise ValueError("Bgprevoz response too large")
                 data = bytearray()
                 async for chunk in response.aiter_bytes():
                     data.extend(chunk)
-                    if len(data) > MAX_BYTES:
+                    if len(data) > max_bytes:
                         raise ValueError("Bgprevoz response too large")
                 return data.decode(response.encoding or "utf-8"), str(response.url)
         raise ValueError("Bgprevoz redirect limit")
 
     async def collect(self) -> list[RawItem]:
         self.item_failures = []
-        list_html, _ = await self._fetch(str(self._source.url))
+        list_html, _ = await self._fetch(
+            str(self._source.url),
+            max_bytes=MAX_LIST_BYTES,
+        )
         notice_urls = parse_bgprevoz_change_links(list_html, self._source)
         items: list[RawItem] = []
         for notice_url in notice_urls:
             try:
-                html, final_url = await self._fetch(notice_url)
+                html, final_url = await self._fetch(
+                    notice_url,
+                    max_bytes=MAX_DETAIL_BYTES,
+                )
                 items.append(
                     parse_bgprevoz_change(html, self._source, page_url=final_url)
                 )
@@ -238,5 +253,8 @@ class BgprevozChangesCollector:
 
     async def collect_url(self, url: str) -> RawItem:
         _, canonical = _notice_identity(url, self._source)
-        html, final_url = await self._fetch(canonical)
+        html, final_url = await self._fetch(
+            canonical,
+            max_bytes=MAX_DETAIL_BYTES,
+        )
         return parse_bgprevoz_change(html, self._source, page_url=final_url)
