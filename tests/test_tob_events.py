@@ -17,6 +17,7 @@ def _source():
 def _list_html() -> str:
     return """
     <html><body>
+      <header><h1>Turistička organizacija Beograda</h1></header>
       <h1>Događaji</h1>
       <article><h2><a href="/sr/events/yasmin-levi">YASMIN LEVI</a></h2></article>
       <article><h2><a href="/sr/events/andre-riju">Andre Riju</a></h2></article>
@@ -39,6 +40,7 @@ def _detail_html(
     )
     return f"""
     <html><body>
+      <header><h1>Turistička organizacija Beograda</h1></header>
       <h1>{title}</h1>
       <div>{start}</div>
       <h2>{title} | Informacije</h2>
@@ -49,6 +51,7 @@ def _detail_html(
       </ul>
       <p>{body}</p>
       <h1>Ne propustite</h1>
+      <a href="/sr/events/yasmin-levi">{title}</a>
       <p>Recommendation noise that must not enter evidence.</p>
       <footer>SEO footer noise</footer>
     </body></html>
