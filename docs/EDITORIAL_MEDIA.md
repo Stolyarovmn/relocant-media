@@ -100,3 +100,30 @@ Telegram-запроса никогда не приводит к автомати
 Production media integration сама не выставляет `rights_verified`, не создаёт
 изображения и не превращает `og:image` в разрешённый asset. Поэтому отсутствие
 доказанного безопасного изображения остаётся нормальным text-only результатом.
+
+## Atomic production install
+
+Готовый `MediaRelease` не надо вручную копировать в watched production directory.
+Для установки есть отдельная команда без Telegram I/O:
+
+```sh
+APP_ENV=production relocant-media-install \
+  --release /reviewed/release.json \
+  --assets /reviewed/assets
+```
+
+Команда требует явный `DATABASE_URL`, сверяет release с текущими `EditorialRun` и
+`Post`, повторно выполняет editorial dry-run, проверяет точный package SHA, caption,
+production target, права, два media-review, имена и SHA256 всех assets. Каталог assets
+должен содержать ровно те файлы, которые перечислены в release: дополнительные или
+пропавшие файлы блокируют установку.
+
+После проверки release и bytes сначала записываются и fsync-ятся во временный каталог
+на том же filesystem. Только затем весь `<raw_item_id>` атомарно переименовывается в
+production inbox. Существующий bundle никогда не перезаписывается. Ошибка до rename
+удаляет staging-каталог и не оставляет частичный production bundle.
+
+Установка допустима только пока исходный production run находится в `pending` и
+у Post ещё нет Telegram receipt. Команда сама ничего не публикует и не меняет DB
+статус доставки; штатный `deliver_reviewed` заново проверит bundle непосредственно
+перед Telegram HTTP.
