@@ -77,6 +77,7 @@ def test_bgprevoz_changes_is_structured_shadow_without_publication_date_inferenc
     assert transport.trust == 1.0
     assert transport.extraction.strategy == "bgprevoz_changes"
     assert transport.extraction.status == "active"
+    assert transport.extraction.approved_hosts == ("bgprevoz.rs",)
     assert transport.policy.high_risk is False
     assert transport.policy.auto_publish is False
     assert transport.verification.checked_at is not None
