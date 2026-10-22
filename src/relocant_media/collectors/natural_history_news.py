@@ -22,6 +22,7 @@ _LIST_PATH = "/vesti"
 _DETAIL_PATH = re.compile(r"^/(?P<slug>[a-z0-9][a-z0-9-]*)/?$")
 _DATE = re.compile(r"^(?P<day>\d{2})\.(?P<month>\d{2})\.(?P<year>20\d{2})\.$")
 _NEWS_HEADING = "Вести"
+_READ_MORE = "прочитај више »"
 
 
 def _item_error_message(error: BaseException) -> str:
@@ -80,8 +81,13 @@ def _parse_date(value: str) -> datetime:
         raise ValueError("invalid Natural History Museum publication date") from error
 
 
-def _card_date(heading: Tag) -> datetime:
+def _card_metadata(
+    heading: Tag,
+    candidate: str,
+    source: SourceConfig,
+) -> tuple[bool, datetime | None]:
     dates: set[datetime] = set()
+    read_more_seen = False
     for node in heading.find_all_next():
         if node is not heading and isinstance(node, Tag) and node.name == "h3":
             break
@@ -90,9 +96,27 @@ def _card_date(heading: Tag) -> datetime:
         text = node.get_text(" ", strip=True)
         if _DATE.fullmatch(text):
             dates.add(_parse_date(text))
+        if node.name != "a" or text.casefold() != _READ_MORE:
+            continue
+        href = node.get("href")
+        if not isinstance(href, str) or not href.strip():
+            continue
+        try:
+            read_more_url = _allowed_url(
+                urljoin(str(source.url), href.strip()),
+                source,
+                detail=True,
+            )
+        except ValueError:
+            continue
+        if read_more_url == candidate:
+            read_more_seen = True
+
+    if not read_more_seen:
+        return False, None
     if len(dates) != 1:
         raise ValueError("Natural History Museum news card date missing or ambiguous")
-    return next(iter(dates))
+    return True, next(iter(dates))
 
 
 def _news_cards(html: str, source: SourceConfig) -> list[tuple[str, str, datetime]]:
@@ -128,10 +152,15 @@ def _news_cards(html: str, source: SourceConfig) -> list[tuple[str, str, datetim
             continue
         if candidate in seen:
             continue
+        is_card, published_at = _card_metadata(heading, candidate, source)
+        if not is_card:
+            continue
+        if published_at is None:
+            raise AssertionError("news card date invariant")
         title = " ".join(anchor.stripped_strings)
         if not title:
             raise ValueError("Natural History Museum news card title missing")
-        cards.append((candidate, title, _card_date(heading)))
+        cards.append((candidate, title, published_at))
         seen.add(candidate)
         if len(cards) >= MAX_ARTICLES:
             break
