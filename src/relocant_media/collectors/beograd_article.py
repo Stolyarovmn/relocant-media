@@ -11,7 +11,7 @@ from relocant_media.collectors.base import RawItem
 from relocant_media.sources.registry import SourceConfig
 
 ARTICLE_ID_RE = re.compile(
-    r"/lat/(?:beoinfo-vesti|servisne-informacije/saobracaj-i-prevoz)/"
+    r"/lat/(?:beoinfo-vesti|servisne-informacije/(?:saobracaj-i-prevoz|zdravstvo))/"
     r"a(?P<article_id>\d+)/[^/?#]+\.html"
 )
 DATE_RE = re.compile(r"\b(?P<day>\d{2})\.(?P<month>\d{2})\.(?P<year>\d{4})\.")
