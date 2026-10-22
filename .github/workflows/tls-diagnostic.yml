@@ -1,0 +1,85 @@
+name: tls-diagnostic
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/tls-diagnostic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install HTTPX
+        run: python -m pip install 'httpx>=0.28,<1'
+
+      - name: Compare certifi and system trust
+        shell: bash
+        run: |
+          python - <<'PY'
+          import asyncio
+          import ssl
+
+          import httpx
+
+          URLS = (
+              "https://www.parking-servis.co.rs/lat/vesti",
+              "https://srbijavoz.rs/vesti/",
+          )
+
+
+          async def probe(label: str, verify: bool | ssl.SSLContext) -> None:
+              print(f"=== {label} ===")
+              async with httpx.AsyncClient(
+                  verify=verify,
+                  trust_env=False,
+                  timeout=20,
+              ) as client:
+                  for url in URLS:
+                      try:
+                          async with client.stream(
+                              "GET",
+                              url,
+                              follow_redirects=False,
+                              headers={
+                                  "User-Agent": "RelocantMedia TLS diagnostics/1.0",
+                              },
+                          ) as response:
+                              print(
+                                  url,
+                                  "OK",
+                                  response.status_code,
+                                  "location=",
+                                  response.headers.get("location"),
+                              )
+                      except Exception as error:
+                          print(
+                              url,
+                              "ERROR",
+                              type(error).__name__,
+                              " ".join(str(error).split())[:500],
+                          )
+
+
+          async def main() -> None:
+              await probe("httpx-default-certifi", True)
+              system_context = ssl.create_default_context()
+              print(
+                  "system-context",
+                  "verify_mode=",
+                  system_context.verify_mode.name,
+                  "check_hostname=",
+                  system_context.check_hostname,
+              )
+              await probe("python-system-default-context", system_context)
+
+
+          asyncio.run(main())
+          PY
