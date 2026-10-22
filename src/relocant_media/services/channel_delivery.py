@@ -103,7 +103,11 @@ async def deliver_reviewed(
             raise DeliveryBlockedError("reviewed production media bundle is invalid") from error
         if prepared_media is not None:
             candidate_bot = getattr(publisher, "bot", None)
-            if candidate_bot is None:
+            if (
+                candidate_bot is None
+                or not callable(getattr(candidate_bot, "send_photo", None))
+                or not callable(getattr(candidate_bot, "send_media_group", None))
+            ):
                 raise DeliveryBlockedError("production publisher does not support reviewed media")
             media_bot = cast(MediaBot, candidate_bot)
             run.outcome = {
