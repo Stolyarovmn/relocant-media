@@ -97,7 +97,11 @@ async def test_db_to_structured_ai_to_fake_bot_api_is_durable_and_idempotent(
     assert json.loads(requests[0].content) == {
         "chat_id": "-100123",
         "text": visible,
-        "link_preview_options": {"is_disabled": True},
+        "link_preview_options": {
+            "url": _document().url,
+            "prefer_large_media": True,
+            "show_above_text": True,
+        },
         "entities": list(entities),
     }
     assert editorial_session.scalar(select(func.count()).select_from(EditorialRun)) == 1
