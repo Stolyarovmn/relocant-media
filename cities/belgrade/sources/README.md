@@ -50,20 +50,26 @@ live extraction/freshness.
 
 22.10.2026 добавлены ещё два проверенных vertical source в shadow-режиме:
 
-- `srbijavoz_news` — официальный раздел новостей пассажирского оператора Srbijavoz. Живая лента
-  подтверждена как набор отдельных статей с собственными canonical URL и явными датами публикации;
-  `srbijavoz_news` теперь извлекает ссылки из news archive и затем загружает полный текст каждой
-  статьи как evidence. Redirect/canonical identity проверяются fail-closed. Источник остаётся
-  `auto_publish: false`: structured extraction не отменяет редакционные проверки;
+- `srbijavoz_news` — официальный раздел новостей пассажирского оператора Srbijavoz. Он используется
+  как первичный источник изменений железнодорожного движения и уведомлений, затрагивающих в том
+  числе станции Белграда и БГ:ВОЗ; пока только `page_change_detection`, `auto_publish: false`;
 - `welcome_serbia_temporary_residence` — официальный портал Government of Serbia с информацией для
   иностранцев о временном проживании и единой разрешительной процедуре. Это
   `high_risk: true`, `auto_publish: false`: изменения миграционных правил никогда не превращаются
   в публикацию без отдельной редакционной проверки.
 
-`welcome_serbia_temporary_residence` пока остаётся whole-page shadow snapshot. Для high-risk legal
-source структурированный guidance parser можно включать только после отдельной проверки живой
-структуры и семантики дат/версий. Для `srbijavoz_news` live `source-health` остаётся обязательной
-проверкой совместимости parser с текущим сайтом.
+Для обоих источников whole-page snapshot остаётся лишь сигналом изменения. Структурированный
+article/guidance parser можно включать только после сохранения живых fixture'ов и проверки
+семантики дат, заголовков и canonical URL.
+
+Для `srbijavoz_news` подготовлен fail-closed item-level parser: archive page только обнаруживает
+article URL, а evidence строится из полного текста статьи с явной publication date и canonical
+identity. Публичный web crawl 22.10.2026 подтверждает, что официальный сайт действительно
+публикует отдельные статьи с датами. Но GitHub-hosted runners в двух Azure-регионах получили
+`ConnectError` после трёх попыток, поэтому этот parser намеренно не активирован в registry.
+Активация разрешена только после успешного source-specific online probe без transport error;
+зелёный общий `source-health`, который терпит transport errors, достаточным доказательством не
+считается.
 
 Each source file captures:
 - stable source id;
