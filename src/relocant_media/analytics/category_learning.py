@@ -86,8 +86,8 @@ def build_category_learning_report(
                 .order_by(PostSnapshot.post_id, PostSnapshot.captured_at)
             )
         )
-        for snapshot in snapshots:
-            latest_snapshot[snapshot.post_id] = snapshot
+        for stored_snapshot in snapshots:
+            latest_snapshot[stored_snapshot.post_id] = stored_snapshot
 
     category_state: dict[str, dict[str, Any]] = {}
     for post in posts:
@@ -107,31 +107,30 @@ def build_category_learning_report(
         )
         row["published_posts"] += 1
         run = run_by_post.get(post.id)
-        public_sent = (
-            run is not None
-            and run[0] == "sent"
-            and isinstance(post.telegram_message_id, int)
-            and post.telegram_message_id > 0
-        )
-        if not public_sent:
+        if (
+            run is None
+            or run[0] != "sent"
+            or not isinstance(post.telegram_message_id, int)
+            or post.telegram_message_id <= 0
+        ):
             continue
 
         row["public_sent"] += 1
         row["anchor_sources"][run[1]] += 1
-        snapshot = latest_snapshot.get(post.id)
-        if snapshot is None:
+        selected_snapshot = latest_snapshot.get(post.id)
+        if selected_snapshot is None:
             continue
         row["observed_posts"] += 1
-        row["views"] += snapshot.views
-        row["reactions"] += snapshot.reactions
-        row["comments"] += snapshot.comments
-        row["forwards"] += snapshot.forwards
+        row["views"] += selected_snapshot.views
+        row["reactions"] += selected_snapshot.reactions
+        row["comments"] += selected_snapshot.comments
+        row["forwards"] += selected_snapshot.forwards
 
     categories: list[dict[str, Any]] = []
     for category in sorted(category_state):
         state = category_state[category]
         published_posts = int(state["published_posts"])
-        public_sent = int(state["public_sent"])
+        public_sent_count = int(state["public_sent"])
         observed_posts = int(state["observed_posts"])
         views = int(state["views"])
         interactions = int(state["reactions"]) + int(state["comments"]) + int(state["forwards"])
@@ -139,10 +138,10 @@ def build_category_learning_report(
             {
                 "category": category,
                 "published_posts": published_posts,
-                "public_sent": public_sent,
+                "public_sent": public_sent_count,
                 "observed_posts": observed_posts,
-                "snapshot_coverage": _rate(observed_posts, public_sent),
-                "public_sent_from_published": _rate(public_sent, published_posts),
+                "snapshot_coverage": _rate(observed_posts, public_sent_count),
+                "public_sent_from_published": _rate(public_sent_count, published_posts),
                 "views": views,
                 "interactions": interactions,
                 "reactions": int(state["reactions"]),
