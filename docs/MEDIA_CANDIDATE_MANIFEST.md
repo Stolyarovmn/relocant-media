@@ -26,3 +26,27 @@ publication. If no candidate survives, text-only publication remains the preferr
 The HTML snapshot is capped at 5 MiB and the output directory must be new. The staging
 guard is checked before reading the snapshot. This tool is therefore safe to call after an
 existing collector/evidence step without creating a second arbitrary-URL fetch path.
+
+## Automatic ingestion sidecar
+
+Collectors that already fetched a full authoritative/source page may attach that exact HTML
+to their internal `RawItem`. Ingestion then runs the same generic candidate extraction
+locally and persists a `raw_item_media_snapshot` sidecar keyed by `raw_item_id`. No second
+HTTP request is made for media discovery.
+
+The sidecar records the source page, exact saved HTML when it is at most 5 MiB, SHA256,
+byte count, approved image hosts and the candidate manifest. Oversized snapshots are not
+stored or parsed for candidates; the manifest explicitly falls back to `mode=text`.
+Extraction failures are also fail-closed to text-only publication and do not block otherwise
+valid factual ingestion.
+
+Once any `EditorialRun` references a raw item, its media sidecar is frozen. A later fetch of
+the same factual item cannot replace the HTML or candidate list behind an already reviewed
+editorial context. Factual source changes continue through the existing source-revision and
+human-review path.
+
+The sidecar is **not** a media release. `publication_permitted` remains false,
+`event_match` remains unreviewed, no rights are inferred from source ownership or credits,
+and the existing rights verification plus two independent media reviews are still mandatory
+before local image bytes can be delivered. A missing/rejected/oversized sidecar simply means
+text-only publication.
