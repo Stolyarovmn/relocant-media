@@ -52,6 +52,7 @@ def _detail(title: str = "PSIHOMODO POP", date: str = "30.10.2026.") -> str:
         <h2>{title}</h2><h2>{title}</h2>
         <p>{body}</p>
         <p>Na koncertima postoji starosno ograničenje 18+.</p>
+        <h2>{title}</h2>
         <h2>Online Rezervacije</h2>
         <p>Ovaj tekst ne sme da uđe u telo dokaza.</p>
       </body>
@@ -78,6 +79,15 @@ def test_detail_keeps_event_date_but_does_not_invent_publication_date() -> None:
     assert "Ovaj tekst ne sme" not in item.body
     assert item.external_id == item.canonical_url == item.url == FIRST_URL
     assert item.source_html == _detail()
+
+
+def test_trailing_duplicate_heading_does_not_hide_substantive_body() -> None:
+    item = parse_bitefartcafe_event(_detail("MIŠKO PLAVI TRIO", "25.11.2026."), FIRST_URL, _source())
+
+    assert item.title == "MIŠKO PLAVI TRIO"
+    assert item.body.startswith("Datum događaja: 25.11.2026.\n")
+    assert "starosno ograničenje 18+" in item.body
+    assert len(item.body) >= 120
 
 
 @pytest.mark.asyncio
