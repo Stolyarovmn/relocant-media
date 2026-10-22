@@ -421,11 +421,11 @@ async def collect_sources(
         for feed in news_feeds:
             try:
                 news_leads = await collect_news_feed(feed, client, now=now)
-                for lead in news_leads[:20]:
+                for news_lead in news_leads[:20]:
                     result["news_leads"] += 1
                     resolved = []
                     primary_urls = []
-                    for url in lead.outbound_urls[:10]:
+                    for url in news_lead.outbound_urls[:10]:
                         # Media text and links are discovery hints only. Only an URL that
                         # independently matches the authoritative allowlist may be fetched.
                         resolution = await resolve_link(url)
@@ -433,12 +433,14 @@ async def collect_sources(
                             resolved.append(resolution)
                             primary_urls.append(url)
                     for article in articles:
-                        if (topic_matches(lead.text, article.title)
+                        if (topic_matches(news_lead.text, article.title)
                                 and article.url not in primary_urls):
                             primary_urls.append(article.url)
                             resolved.append("primary_source_collected")
                     if not any(r == "primary_source_collected" for r in resolved):
-                        for source_id, search_url in public_search_plan(lead.text, venues, aliases):
+                        for source_id, search_url in public_search_plan(
+                            news_lead.text, venues, aliases
+                        ):
                             key = (source_id, search_url)
                             if key in searches or len(searches) >= 4:
                                 continue
@@ -452,7 +454,7 @@ async def collect_sources(
                             except (httpx.HTTPError, ValueError):
                                 continue
                             for item in found:
-                                if (not topic_matches(lead.text, item.title)
+                                if (not topic_matches(news_lead.text, item.title)
                                         or freshness_decision(item.title, item.body,
                                             item.published_at, now).action != "keep"
                                         or event_content_reason(item.title, item.body, now=now)):
@@ -462,8 +464,9 @@ async def collect_sources(
                                     fetched[item.url] = "primary_source_collected"
                                 primary_urls.append(item.url)
                                 resolved.append("primary_source_collected")
-                    news_topics.append({"url": lead.url, "source_id": lead.source_id,
-                        "published_at": lead.published_at.isoformat(),
+                    news_topics.append({"url": news_lead.url,
+                        "source_id": news_lead.source_id,
+                        "published_at": news_lead.published_at.isoformat(),
                         "status": "primary_source_resolved" if any(
                             r in {"primary_source_collected", "already_collected"}
                             for r in resolved) else "deferred_missing_primary_source",
