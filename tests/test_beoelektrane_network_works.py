@@ -84,6 +84,18 @@ def test_duplicate_identical_date_and_time_metadata_is_accepted() -> None:
     assert items[0].published_at == datetime(2026, 8, 7, 8, 22, tzinfo=BELGRADE_TZ)
 
 
+def test_split_wordpress_date_and_link_title_is_accepted() -> None:
+    html = _html().replace(
+        "<h2>07 авг 2026 - Radovi na toplovodnoj mreži</h2>",
+        "<h2>07 авг 2026 - <a href='#'>Radovi na toplovodnoj mreži</a></h2>",
+        1,
+    )
+
+    items = parse_beoelektrane_network_works(html, _source())
+
+    assert items[0].published_at == datetime(2026, 8, 7, 8, 22, tzinfo=BELGRADE_TZ)
+
+
 def test_conflicting_publication_dates_fail_closed() -> None:
     html = _html().replace(
         "<div>Posted at 08:22h in Planirani radovi by Svetlana Stojakovic</div>",
