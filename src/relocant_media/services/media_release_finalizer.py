@@ -173,6 +173,7 @@ async def prepare_media_release_review_bundle(
     post = session.get(Post, run.post_id)
     if post is None or post.telegram_message_id is not None:
         raise ValueError("media review post is missing or already delivered")
+    post_id = post.id
 
     package = EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))
     if package.raw_item_id != raw_item_id:
@@ -192,7 +193,7 @@ async def prepare_media_release_review_bundle(
         version=1,
         release_id=release_id,
         raw_item_id=raw_item_id,
-        post_id=post.id,
+        post_id=post_id,
         editorial_package_sha256=package_sha256,
         target_id=str(APPROVED_CHANNEL_ID),
         caption=caption,
@@ -235,7 +236,7 @@ async def prepare_media_release_review_bundle(
     return {
         "state": "awaiting_independent_media_reviews",
         "raw_item_id": raw_item_id,
-        "post_id": post.id,
+        "post_id": post_id,
         "release_id": release_id,
         "context_sha256": context.context_sha256,
         "caption_sha256": context.caption_sha256,
@@ -288,6 +289,8 @@ def finalize_media_release(
         or context.telegram_io_performed is not False
     ):
         raise ValueError("media review context does not match frozen draft")
+    for asset in draft.assets:
+        _require_reviewable_source(asset)
 
     release = MediaRelease.model_validate(
         {**draft.model_dump(mode="python"), "reviews": reviews.reviews}
