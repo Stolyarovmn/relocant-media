@@ -16,7 +16,9 @@ from relocant_media.sources.registry import SourceConfig
 MAX_BYTES = 3_000_000
 MAX_EVENTS = 40
 MAX_ITEM_ERROR_MESSAGE = 200
-_DATE = re.compile(r"^(?P<day>\d{2})\.\s*(?P<month>\d{2})\.\s*(?P<year>20\d{2})\.$")
+_DATE = re.compile(
+    r"^(?P<day>\d{2})\.\s*(?P<month>\d{2})\.\s*(?P<year>20\d{2})\.$"
+)
 _DETAIL_PATH = re.compile(r"^/sr/events/(?P<slug>[a-z0-9][a-z0-9-]*)/?$")
 _LIST_PATH = "/sr/events"
 _REQUIRED_LABELS = ("Datum početka:", "Datum završetka:", "Mesto održavanja:")
@@ -83,7 +85,10 @@ def _event_links(html: str, source: SourceConfig) -> list[str]:
     for element in heading.find_all_next():
         if not isinstance(element, Tag):
             continue
-        if element.name in {"h1", "h2"} and element.get_text(" ", strip=True) == "Ne propustite":
+        if (
+            element.name in {"h1", "h2"}
+            and element.get_text(" ", strip=True) == "Ne propustite"
+        ):
             break
         if element.name != "a":
             continue
@@ -135,8 +140,6 @@ def _detail_body(html: str) -> tuple[str, str, date, date]:
     for element in title_node.find_all_next():
         if not isinstance(element, Tag):
             continue
-        if element is title_node:
-            continue
         text = element.get_text(" ", strip=True)
         if element.name in {"h1", "h2"} and text == "Ne propustite":
             break
@@ -163,7 +166,8 @@ def _detail_body(html: str) -> tuple[str, str, date, date]:
     if end < start:
         raise ValueError("TOB event end precedes start")
 
-    visible = [line for line in BeautifulSoup(html, "html.parser").get_text("\n").splitlines() if line.strip()]
+    visible_text = BeautifulSoup(html, "html.parser").get_text("\n")
+    visible = [line for line in visible_text.splitlines() if line.strip()]
     normalized_visible = [" ".join(line.split()) for line in visible]
     try:
         title_index = normalized_visible.index(title)
