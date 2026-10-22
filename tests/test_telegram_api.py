@@ -27,14 +27,15 @@ async def test_send_message_uses_bot_api_and_returns_message_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_message_compacts_raw_source_url_at_lowest_transport_boundary() -> None:
+async def test_send_message_compacts_source_and_requests_real_large_preview() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 8}}, request=request)
 
-    raw = "Новость\n\nТекст.\n\nИсточник: https://official.example/very/long/path?q=1"
+    source = "https://official.example/very/long/path?q=1"
+    raw = f"Новость\n\nТекст.\n\nИсточник: {source}"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         bot = TelegramBotAPI("test-token", client)
         assert await bot.send_message("-100123", raw) == 8
@@ -47,9 +48,14 @@ async def test_send_message_compacts_raw_source_url_at_lowest_transport_boundary
             "type": "text_link",
             "offset": len("Новость\n\nТекст.\n\n".encode("utf-16-le")) // 2,
             "length": len("Источник".encode("utf-16-le")) // 2,
-            "url": "https://official.example/very/long/path?q=1",
+            "url": source,
         }
     ]
+    assert payload["link_preview_options"] == {
+        "url": source,
+        "prefer_large_media": True,
+        "show_above_text": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -65,7 +71,7 @@ async def test_send_message_rejects_raw_source_url_with_precomputed_entities() -
 
 
 @pytest.mark.asyncio
-async def test_send_message_passes_explicit_text_link_entities() -> None:
+async def test_send_message_passes_explicit_text_link_entities_without_forcing_preview() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
