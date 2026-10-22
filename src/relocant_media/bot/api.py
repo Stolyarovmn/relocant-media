@@ -6,7 +6,6 @@ from typing import Protocol, cast
 
 import httpx
 
-from relocant_media.bot.formatting import compact_source_link
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
 
 
@@ -154,15 +153,13 @@ class TelegramBotAPI:
         text: str,
         entities: Sequence[Mapping[str, object]] = (),
     ) -> int:
-        visible_text, source_entities = compact_source_link(text)
         payload: dict[str, object] = {
             "chat_id": chat_id,
-            "text": visible_text,
+            "text": text,
             "link_preview_options": {"is_disabled": True},
         }
-        merged_entities = [*entities, *source_entities]
-        if merged_entities:
-            payload["entities"] = merged_entities
+        if entities:
+            payload["entities"] = list(entities)
         result = await self._call("sendMessage", payload)
         if not isinstance(result, dict):
             raise TelegramAPIError("sendMessage returned no message object")
