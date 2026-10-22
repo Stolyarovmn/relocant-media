@@ -6,6 +6,7 @@ from typing import Protocol, cast
 
 import httpx
 
+from relocant_media.bot.formatting import compact_source_link
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
 
 
@@ -153,6 +154,14 @@ class TelegramBotAPI:
         text: str,
         entities: Sequence[Mapping[str, object]] = (),
     ) -> int:
+        visible, source_entities = compact_source_link(text)
+        if visible != text:
+            if entities:
+                raise ValueError(
+                    "raw source links cannot be combined with precomputed Telegram entities"
+                )
+            text = visible
+            entities = source_entities
         payload: dict[str, object] = {
             "chat_id": chat_id,
             "text": text,
