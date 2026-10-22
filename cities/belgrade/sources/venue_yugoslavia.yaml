@@ -2,20 +2,16 @@ id: venue_yugoslavia
 name: Музей Югославии
 publisher: Музей Югославии
 ownership: official
-url: https://muzej-jugoslavije.org/
-language: sr
+url: https://muzej-jugoslavije.org/rs/kalendar/
+language: sr-Cyrl
 source_type: official_venue_events
 trust: 0.95
 check_every: 3h
 categories:
 - events
 extraction:
-  strategy: venue_feed
-  status: planned
-  feed_url: https://muzej-jugoslavije.org/feed/
-  article_selectors:
-  - .entry-content
-  - .post-content
+  strategy: yugoslavia_programs
+  status: active
   approved_hosts:
   - muzej-jugoslavije.org
   - www.muzej-jugoslavije.org
@@ -24,4 +20,4 @@ policy:
   high_risk: false
 verification:
   checked_at: '2026-10-22'
-  note: Официальный сайт подтверждён. 22.10.2026 live source-health отклонил RSS как unsafe venue feed; источник fail-closed выведен из active ingestion и auto-publish до повторной проверки структуры RSS. Safety guard не ослабляется.
+  note: Official Museum of Yugoslavia HTML calendar and program detail pages. The previously unsafe RSS feed remains unused. Event dates are validated as event metadata only; no publication date is inferred, so the source remains review-only.

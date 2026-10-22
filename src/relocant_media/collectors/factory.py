@@ -15,6 +15,7 @@ from relocant_media.collectors.srbijavoz_news import SrbijavozNewsCollector
 from relocant_media.collectors.tob_events import TobEventsCollector
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.collectors.welcome_serbia_guidance import WelcomeSerbiaGuidanceCollector
+from relocant_media.collectors.yugoslavia_programs import YugoslaviaProgramsCollector
 from relocant_media.sources.registry import SourceConfig
 
 
@@ -52,4 +53,6 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return TobEventsCollector(source, client)
     if strategy == "welcome_serbia_guidance":
         return WelcomeSerbiaGuidanceCollector(source, client)
+    if strategy == "yugoslavia_programs":
+        return YugoslaviaProgramsCollector(source, client)
     raise UnsupportedCollectorStrategyError(strategy)
