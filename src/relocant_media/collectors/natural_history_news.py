@@ -16,7 +16,7 @@ from relocant_media.collectors.page_snapshot import normalize_visible_text
 from relocant_media.sources.registry import SourceConfig
 
 MAX_BYTES = 3_000_000
-MAX_ARTICLES = 10
+MAX_ARTICLES = 5
 MAX_ITEM_ERROR_MESSAGE = 200
 BELGRADE_TZ = ZoneInfo("Europe/Belgrade")
 _LIST_PATH = "/vesti"
