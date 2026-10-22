@@ -10,8 +10,13 @@ check_every: 6h
 categories:
   - events
 extraction:
-  strategy: html_list
-  status: planned
+  strategy: tob_events
+  status: active
+  approved_hosts:
+    - tob.rs
+policy:
+  high_risk: false
+  auto_publish: false
 verification:
-  checked_at: 2026-10-18
-  note: Official Belgrade tourism event listing.
+  checked_at: 2026-10-22
+  note: Official TOB event listing and detail pages; event dates are evidence only and are never substituted for publication timestamps.
