@@ -1,13 +1,12 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy.orm import Session
 from test_production_media_delivery import (
     _preview,
     _stored_package,
     _write_release,
-    reviewed as _reviewed,
 )
+from test_production_media_delivery import reviewed as _reviewed
 
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.production_media import prepare_production_media
