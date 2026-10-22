@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.base import RawItem as CollectedItem
+from relocant_media.collectors.news_discovery import NewsDiscoveryFeed, NewsLead
 from relocant_media.collectors.telegram_topics import TopicLead
 from relocant_media.ops import server_cycle
 from relocant_media.storage.models import RawItem
@@ -33,6 +34,7 @@ def collection(tmp_path, monkeypatch):
     monkeypatch.setattr(server_cycle, "venue_sources", lambda: {})
     monkeypatch.setattr(server_cycle, "parse_beograd_news_list", lambda *_: cards)
     monkeypatch.setattr(server_cycle, "parse_cukarica_news_list", lambda *_: [])
+    monkeypatch.setattr(server_cycle, "load_verified_news_feeds", lambda _: ())
     real_client = httpx.AsyncClient
 
     def handle(request):
@@ -174,3 +176,44 @@ async def test_repeated_channel_link_to_stale_primary_is_never_reported_resolved
     audit = json.loads((tmp_path / "channel-topics.json").read_text(encoding="utf-8"))
     assert len(audit["topics"]) == 2
     assert all(t["status"] == "deferred_missing_primary_source" for t in audit["topics"])
+
+
+@pytest.mark.asyncio
+async def test_news_rss_lead_only_persists_independent_primary_source(
+    collection, tmp_path, monkeypatch,
+):
+    engine, _, articles, _, _ = collection
+    articles[BEOGRAD] = item(timedelta(hours=1))
+    feed = NewsDiscoveryFeed(
+        source_id="rts_news",
+        source_url="https://www.rts.rs/vesti/",
+        feed_url="https://www.rts.rs/vesti/rss.html",
+    )
+    monkeypatch.setattr(server_cycle, "load_verified_news_feeds", lambda _: (feed,))
+
+    async def news(*args, **kwargs):
+        return [NewsLead(
+            source_id="rts_news",
+            url="https://www.rts.rs/vesti/drustvo/6067000/izmena.html",
+            published_at=NOW,
+            observed_at=NOW,
+            text="УНИКАЛЬНЫЙ ТЕКСТ СМИ",
+            outbound_urls=(BEOGRAD, "https://evil.example/story"),
+        )]
+
+    monkeypatch.setattr(server_cycle, "collect_news_feed", news)
+
+    result = await server_cycle.collect_sources(engine, output=tmp_path)
+
+    assert result["news_leads"] == 1
+    assert result["raw_items_written"] == 1
+    assert rows(engine) == [
+        ("city_beograd_news", BEOGRAD, "Самостоятельный первоисточник")
+    ]
+    audit_text = (tmp_path / "news-topics.json").read_text(encoding="utf-8")
+    assert "УНИКАЛЬНЫЙ ТЕКСТ СМИ" not in audit_text
+    assert '"body"' not in audit_text and '"text"' not in audit_text
+    audit = json.loads(audit_text)
+    assert audit["publication_evidence"] is False
+    assert audit["topics"][0]["status"] == "primary_source_resolved"
+    assert audit["topics"][0]["source_id"] == "rts_news"
