@@ -126,8 +126,8 @@ def _parse_date(value: str, *, label: str) -> date:
         raise ValueError(f"invalid TOB {label} date") from error
 
 
-def _event_heading(soup: BeautifulSoup) -> tuple[Tag, str]:
-    matches: list[tuple[Tag, str]] = []
+def _event_heading(soup: BeautifulSoup) -> tuple[Tag, Tag, str]:
+    matches: list[tuple[Tag, Tag, str]] = []
     for info_heading in soup.find_all("h2"):
         info_text = info_heading.get_text(" ", strip=True)
         if not info_text.endswith(_INFO_SUFFIX):
@@ -139,17 +139,32 @@ def _event_heading(soup: BeautifulSoup) -> tuple[Tag, str]:
             and title
             and previous_h1.get_text(" ", strip=True) == title
         ):
-            matches.append((previous_h1, title))
+            matches.append((previous_h1, info_heading, title))
     if len(matches) != 1:
         raise ValueError("TOB event title/information heading pair missing or ambiguous")
     return matches[0]
+
+
+def _displayed_date(title_node: Tag, info_heading: Tag) -> date:
+    dates: set[date] = set()
+    for element in title_node.find_all_next():
+        if element is info_heading:
+            break
+        if not isinstance(element, Tag):
+            continue
+        text = element.get_text(" ", strip=True)
+        if _DATE.fullmatch(text):
+            dates.add(_parse_date(text, label="displayed"))
+    if len(dates) != 1:
+        raise ValueError("TOB displayed event date missing or ambiguous")
+    return next(iter(dates))
 
 
 def _detail_body(html: str) -> tuple[str, str, date, date]:
     if len(html.encode("utf-8")) > MAX_BYTES:
         raise ValueError("TOB event response too large")
     soup = BeautifulSoup(html, "html.parser")
-    title_node, title = _event_heading(soup)
+    title_node, info_heading, title = _event_heading(soup)
 
     lines: list[str] = []
     for element in title_node.find_all_next():
@@ -180,20 +195,7 @@ def _detail_body(html: str) -> tuple[str, str, date, date]:
     end = _parse_date(values["Datum završetka:"], label="end")
     if end < start:
         raise ValueError("TOB event end precedes start")
-
-    visible_text = BeautifulSoup(html, "html.parser").get_text("\n")
-    visible = [line for line in visible_text.splitlines() if line.strip()]
-    normalized_visible = [" ".join(line.split()) for line in visible]
-    title_indexes = [index for index, line in enumerate(normalized_visible) if line == title]
-    if len(title_indexes) != 1:
-        raise ValueError("TOB event title occurrence missing or ambiguous")
-    title_index = title_indexes[0]
-    leading_dates = [
-        _parse_date(line, label="displayed")
-        for line in normalized_visible[title_index + 1 : title_index + 5]
-        if _DATE.fullmatch(line)
-    ]
-    if len(leading_dates) != 1 or leading_dates[0] != start:
+    if _displayed_date(title_node, info_heading) != start:
         raise ValueError("TOB displayed event date does not match start date")
 
     if len(joined) < 120:
