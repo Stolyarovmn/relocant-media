@@ -95,7 +95,9 @@ def validate_media_assets(
         if hashlib.sha256(path.read_bytes()).hexdigest() != asset.sha256:
             raise ValueError("media changed after review")
         if asset.archive_year is not None:
-            if str(asset.archive_year) not in asset.archive_label or asset.archive_label not in caption:
+            archive_year_missing = str(asset.archive_year) not in asset.archive_label
+            archive_label_missing = asset.archive_label not in caption
+            if archive_year_missing or archive_label_missing:
                 raise ValueError("archive year and exact label required in caption")
         if asset.origin in {"official_photo", "licensed_photo", "official_poster"} and (
             asset.attribution not in caption
