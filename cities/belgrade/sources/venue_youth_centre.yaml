@@ -16,6 +16,8 @@ extraction:
   article_selectors:
   - .entry-content
   - .post-content
+  article_lead_selectors:
+  - article .entry-header .entry-excerpt
   approved_hosts:
   - domomladine.org
   - www.domomladine.org

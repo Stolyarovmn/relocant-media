@@ -185,3 +185,45 @@ async def test_jsonld_publication_date_when_entry_has_disappeared(source: Source
         item = await VenueFeedCollector(source, client).collect_url('https://museum.example/event/')
     assert item.published_at == datetime(2026, 10, 1, 8, 15, tzinfo=UTC)
     assert item.title == 'Full title'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('missing_lead', [False, True])
+async def test_configured_header_lead_requires_article_not_encoded_feed(
+    source: SourceConfig, missing_lead: bool,
+) -> None:
+    """Dom omladine puts concert time in a header omitted from content:encoded."""
+    source = source.model_copy(update={'extraction': source.extraction.model_copy(update={
+        'article_selectors': ('.entry-content',),
+        'article_lead_selectors': ('article .entry-header .entry-excerpt',),
+    })})
+    date = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
+    fixture = Path('tests/fixtures/venue_header_lead.html').read_text(encoding='utf-8')
+    if missing_lead:
+        fixture = fixture.replace('class="entry-excerpt"', 'class="changed-template"')
+    xml = feed(date.isoformat(), extra=(
+        '<content:encoded xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        '<![CDATA[<p>' + 'Interview body without the date or venue. ' * 8 +
+        '</p>]]></content:encoded>'
+    ))
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(200, text=xml if request.url.path == '/feed/' else fixture)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = VenueFeedCollector(source, client)
+        if missing_lead:
+            with pytest.raises(ValueError, match='all fresh venue articles'):
+                await collector.collect()
+            with pytest.raises(ValueError, match='configured lead'):
+                await collector.collect_url('https://museum.example/event/')
+        else:
+            item = (await collector.collect())[0]
+            assert await collector.collect_url(item.url) == item
+            assert item.body.startswith('Concert on 22 October at 19:00 in the main hall.')
+            assert 'complete interview body' in item.body
+            assert 'Unrelated concert' not in item.body
+            assert item.published_at == date
+    assert '/event/' in requests
