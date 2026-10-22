@@ -50,8 +50,8 @@ def _detail(title: str = "PSIHOMODO POP", date: str = "30.10.2026.") -> str:
       <body>
         <div>{date}</div><div>22h</div><div>BITEFARTCAFE</div>
         <h2>{title}</h2><h2>{title}</h2>
-        <p>{body}</p>
-        <p>Na koncertima postoji starosno ograničenje 18+.</p>
+        <div>{body}</div>
+        <div>Na koncertima postoji starosno ograničenje 18+.</div>
         <h2>{title}</h2>
         <h2>Online Rezervacije</h2>
         <p>Ovaj tekst ne sme da uđe u telo dokaza.</p>
