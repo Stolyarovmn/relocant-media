@@ -22,6 +22,7 @@ _DATE = re.compile(
 _DETAIL_PATH = re.compile(r"^/sr/events/(?P<slug>[a-z0-9][a-z0-9-]*)/?$")
 _LIST_PATH = "/sr/events"
 _REQUIRED_LABELS = ("Datum početka:", "Datum završetka:", "Mesto održavanja:")
+_INFO_SUFFIX = " | Informacije"
 
 
 def _item_error_message(error: BaseException) -> str:
@@ -125,16 +126,30 @@ def _parse_date(value: str, *, label: str) -> date:
         raise ValueError(f"invalid TOB {label} date") from error
 
 
+def _event_heading(soup: BeautifulSoup) -> tuple[Tag, str]:
+    matches: list[tuple[Tag, str]] = []
+    for info_heading in soup.find_all("h2"):
+        info_text = info_heading.get_text(" ", strip=True)
+        if not info_text.endswith(_INFO_SUFFIX):
+            continue
+        title = info_text[: -len(_INFO_SUFFIX)].strip()
+        previous_h1 = info_heading.find_previous("h1")
+        if (
+            isinstance(previous_h1, Tag)
+            and title
+            and previous_h1.get_text(" ", strip=True) == title
+        ):
+            matches.append((previous_h1, title))
+    if len(matches) != 1:
+        raise ValueError("TOB event title/information heading pair missing or ambiguous")
+    return matches[0]
+
+
 def _detail_body(html: str) -> tuple[str, str, date, date]:
     if len(html.encode("utf-8")) > MAX_BYTES:
         raise ValueError("TOB event response too large")
     soup = BeautifulSoup(html, "html.parser")
-    title_node = soup.find("h1")
-    if title_node is None:
-        raise ValueError("TOB event title missing")
-    title = title_node.get_text(" ", strip=True)
-    if not title:
-        raise ValueError("TOB event title missing")
+    title_node, title = _event_heading(soup)
 
     lines: list[str] = []
     for element in title_node.find_all_next():
@@ -169,10 +184,10 @@ def _detail_body(html: str) -> tuple[str, str, date, date]:
     visible_text = BeautifulSoup(html, "html.parser").get_text("\n")
     visible = [line for line in visible_text.splitlines() if line.strip()]
     normalized_visible = [" ".join(line.split()) for line in visible]
-    try:
-        title_index = normalized_visible.index(title)
-    except ValueError as error:
-        raise ValueError("TOB event title missing from visible text") from error
+    title_indexes = [index for index, line in enumerate(normalized_visible) if line == title]
+    if len(title_indexes) != 1:
+        raise ValueError("TOB event title occurrence missing or ambiguous")
+    title_index = title_indexes[0]
     leading_dates = [
         _parse_date(line, label="displayed")
         for line in normalized_visible[title_index + 1 : title_index + 5]
@@ -272,5 +287,9 @@ class TobEventsCollector:
                     }
                 )
         if self.item_failures and not items:
-            raise ValueError("all TOB event details failed extraction")
+            first = self.item_failures[0]
+            raise ValueError(
+                "all TOB event details failed extraction: "
+                f"{first['error_type']}: {first['error_message']}"
+            )
         return items
