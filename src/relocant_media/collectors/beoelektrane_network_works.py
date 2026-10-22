@@ -19,7 +19,7 @@ MAX_BYTES = 2_000_000
 BELGRADE_TZ = ZoneInfo("Europe/Belgrade")
 
 _PAGE_DATE = re.compile(
-    r"^(?P<day>\d{1,2})\s+(?P<month>[^\s]+)\s+(?P<year>20\d{2})\s*[-–]\s*"
+    r"^(?P<day>\d{1,2})\s+(?P<month>[^\s]+)\s+(?P<year>20\d{2})\s*[-–—]\s*"
     r"Radovi na toplovodnoj mreži$",
     re.IGNORECASE,
 )
@@ -92,44 +92,40 @@ def _internal_canonical_url(url: str, external_id: str) -> str:
 
 
 def _publication_time(lines: list[str], start: int) -> tuple[datetime, int]:
-    date_matches: list[tuple[int, re.Match[str]]] = []
     first_area = len(lines)
+    date_values: dict[tuple[int, int, int], int] = {}
     for index in range(start, len(lines)):
         if _AREA.match(lines[index]):
             first_area = index
             break
         match = _PAGE_DATE.match(lines[index])
-        if match is not None:
-            date_matches.append((index, match))
-    if len(date_matches) != 1:
-        raise ValueError("Beogradske elektrane publication date missing or ambiguous")
+        if match is None:
+            continue
+        month = _MONTHS.get(match.group("month").strip(".").casefold())
+        if month is None:
+            raise ValueError("unsupported Beogradske elektrane publication month")
+        try:
+            date_key = (int(match.group("year")), month, int(match.group("day")))
+            datetime(*date_key)
+        except ValueError as error:
+            raise ValueError("invalid Beogradske elektrane publication date") from error
+        date_values.setdefault(date_key, index)
 
-    date_index, match = date_matches[0]
-    month = _MONTHS.get(match.group("month").strip(".").casefold())
-    if month is None:
-        raise ValueError("unsupported Beogradske elektrane publication month")
+    if not date_values:
+        raise ValueError("Beogradske elektrane publication date missing")
+    if len(date_values) != 1:
+        raise ValueError("Beogradske elektrane publication date conflicting")
 
-    posted_matches: list[re.Match[str]] = []
+    (year, month, day), date_index = next(iter(date_values.items()))
+    posted_values: set[tuple[int, int]] = set()
     for line in lines[date_index + 1 : first_area]:
         posted = _POSTED_AT.match(line)
         if posted is not None:
-            posted_matches.append(posted)
-    if len(posted_matches) > 1:
-        raise ValueError("Beogradske elektrane publication time is ambiguous")
-    hour = int(posted_matches[0].group("hour")) if posted_matches else 0
-    minute = int(posted_matches[0].group("minute")) if posted_matches else 0
-    try:
-        published_at = datetime(
-            int(match.group("year")),
-            month,
-            int(match.group("day")),
-            hour,
-            minute,
-            tzinfo=BELGRADE_TZ,
-        )
-    except ValueError as error:
-        raise ValueError("invalid Beogradske elektrane publication date") from error
-    return published_at, first_area
+            posted_values.add((int(posted.group("hour")), int(posted.group("minute"))))
+    if len(posted_values) > 1:
+        raise ValueError("Beogradske elektrane publication time conflicting")
+    hour, minute = next(iter(posted_values), (0, 0))
+    return datetime(year, month, day, hour, minute, tzinfo=BELGRADE_TZ), first_area
 
 
 def _is_footer(line: str) -> bool:
