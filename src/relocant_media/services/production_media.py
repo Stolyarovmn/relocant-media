@@ -14,6 +14,9 @@ from relocant_media.bot.media import MediaRelease, validate_media
 
 DEFAULT_PRODUCTION_MEDIA_ROOT = Path("/var/lib/relocant-media/media-releases")
 MAX_RELEASE_BYTES = 512 * 1024
+MAX_ASSET_BYTES = 10 * 1024 * 1024
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+JPEG_SIGNATURE = b"\xff\xd8\xff"
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,19 @@ def _expected_caption(release: MediaRelease, editorial_text: str) -> str:
         )
     )
     return editorial_text + ("\n\n" + "\n".join(credits) if credits else "")
+
+
+def _validate_telegram_photo(path: Path, data: bytes) -> None:
+    if not data or len(data) > MAX_ASSET_BYTES:
+        raise ValueError("production media asset size is invalid")
+    suffix = path.suffix.lower()
+    valid = (
+        suffix == ".png" and data.startswith(PNG_SIGNATURE)
+    ) or (
+        suffix in {".jpg", ".jpeg"} and data.startswith(JPEG_SIGNATURE)
+    )
+    if not valid:
+        raise ValueError("production media asset must be matching PNG or JPEG bytes")
 
 
 def prepare_production_media(
@@ -99,6 +115,7 @@ def prepare_production_media(
         data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != asset.sha256:
             raise ValueError("media changed while preparing production upload")
+        _validate_telegram_photo(path, data)
         uploads.append(PhotoUpload(path.name, data))
 
     release_sha256 = hashlib.sha256(
