@@ -89,10 +89,11 @@ def main() -> None:
             image_hosts=tuple(args.image_host),
         )
     except Exception:
-        parser.exit(
-            1,
-            "Извлечение media candidates остановлено: проверьте snapshot, source page и новый каталог.\n",
+        message = (
+            "Извлечение media candidates остановлено: "
+            "проверьте snapshot, source page и новый каталог.\n"
         )
+        parser.exit(1, message)
     print(
         json.dumps(
             {
