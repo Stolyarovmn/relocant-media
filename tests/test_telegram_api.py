@@ -27,6 +27,44 @@ async def test_send_message_uses_bot_api_and_returns_message_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_message_compacts_raw_source_url_at_lowest_transport_boundary() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 8}}, request=request)
+
+    raw = "Новость\n\nТекст.\n\nИсточник: https://official.example/very/long/path?q=1"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot = TelegramBotAPI("test-token", client)
+        assert await bot.send_message("-100123", raw) == 8
+
+    payload = json.loads(requests[0].content)
+    assert payload["text"] == "Новость\n\nТекст.\n\nИсточник"
+    assert "https://" not in payload["text"]
+    assert payload["entities"] == [
+        {
+            "type": "text_link",
+            "offset": len("Новость\n\nТекст.\n\n".encode("utf-16-le")) // 2,
+            "length": len("Источник".encode("utf-16-le")) // 2,
+            "url": "https://official.example/very/long/path?q=1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_message_rejects_raw_source_url_with_precomputed_entities() -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: None)) as client:
+        bot = TelegramBotAPI("test-token", client)
+        with pytest.raises(ValueError, match="precomputed"):
+            await bot.send_message(
+                "-100123",
+                "Источник: https://official.example/news",
+                ({"type": "bold", "offset": 0, "length": 8},),
+            )
+
+
+@pytest.mark.asyncio
 async def test_send_message_passes_explicit_text_link_entities() -> None:
     requests: list[httpx.Request] = []
 
