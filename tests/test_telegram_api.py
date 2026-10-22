@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from relocant_media.bot.api import TelegramBotAPI
+from relocant_media.bot.formatting import compact_source_link
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
 
 
@@ -51,6 +52,30 @@ async def test_send_message_compacts_source_and_requests_real_large_preview() ->
             "url": source,
         }
     ]
+    assert payload["link_preview_options"] == {
+        "url": source,
+        "prefer_large_media": True,
+        "show_above_text": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_preformatted_canonical_source_link_gets_same_real_preview() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 9}}, request=request)
+
+    source = "https://official.example/news"
+    text, entities = compact_source_link(f"Текст\n\nИсточник: {source}")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot = TelegramBotAPI("test-token", client)
+        assert await bot.send_message("-100123", text, entities) == 9
+
+    payload = json.loads(requests[0].content)
+    assert payload["text"] == "Текст\n\nИсточник"
+    assert payload["entities"] == list(entities)
     assert payload["link_preview_options"] == {
         "url": source,
         "prefer_large_media": True,
