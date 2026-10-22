@@ -1,8 +1,8 @@
 """Deterministic URL/content/event deduplication helpers.
 
 The rules in this module are intentionally model-free. They are conservative: exact
-URL/content matches are always duplicates, while fuzzy event matching is allowed only
-across different sources and inside a bounded publication window.
+URL/content matches are always duplicates, cross-source fuzzy matching stays bounded,
+and same-source fuzzy matching is allowed only for strongly anchored transport reprints.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from difflib import SequenceMatcher
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _TRACKING_KEYS = {
@@ -24,8 +25,25 @@ _TRACKING_KEYS = {
     "ref_src",
 }
 _WORDS = re.compile(r"[^\w]+", flags=re.UNICODE)
+_EVENT_DATE_ANCHOR = re.compile(
+    r"\b\d{1,2}\.\s*(?:\d{1,2}(?:\.\s*\d{2,4})?|[^\W\d_]{3,14})",
+    flags=re.UNICODE,
+)
+_STOP_ID = re.compile(r"#\s*(\d{3,5})")
+_ROUTE_INTRO = re.compile(
+    r"\blinij\w*(?:\s+(?:broj|br))?\s+",
+    flags=re.IGNORECASE | re.UNICODE,
+)
+_ROUTE_ID = re.compile(r"^\d{1,3}[a-z]?$", flags=re.IGNORECASE)
+_TRANSPORT_ACTION = re.compile(
+    r"\b(?:ukid\w*|izmešt\w*|izmest\w*|uspostav\w*|zatvar\w*|"
+    r"dvosmer\w*|jednosmer\w*)\b",
+    flags=re.IGNORECASE | re.UNICODE,
+)
 DEFAULT_EVENT_WINDOW = timedelta(hours=48)
 DEFAULT_TITLE_SIMILARITY = 0.78
+_SAME_SOURCE_BODY_SEQUENCE_SIMILARITY = 0.85
+_SAME_SOURCE_BODY_TOKEN_SIMILARITY = 0.80
 
 
 def normalize_text(value: str) -> str:
@@ -76,6 +94,43 @@ def title_similarity(left: str, right: str) -> float:
     return len(left_tokens & right_tokens) / len(union)
 
 
+def _body_token_similarity(left: str, right: str) -> float:
+    left_tokens = set(normalize_text(left).split())
+    right_tokens = set(normalize_text(right).split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _event_date_anchors(value: str) -> frozenset[str]:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return frozenset(
+        normalize_text(match.group(0)) for match in _EVENT_DATE_ANCHOR.finditer(normalized)
+    )
+
+
+def _transport_routes(value: str) -> frozenset[str]:
+    normalized = normalize_text(value)
+    routes: set[str] = set()
+    for intro in _ROUTE_INTRO.finditer(normalized):
+        for token in normalized[intro.end() :].split():
+            if token == "i":
+                continue
+            if _ROUTE_ID.fullmatch(token) is None:
+                break
+            routes.add(token.upper())
+    return frozenset(routes)
+
+
+def _transport_stop_ids(value: str) -> frozenset[str]:
+    return frozenset(_STOP_ID.findall(value))
+
+
+def _transport_actions(value: str) -> frozenset[str]:
+    normalized = normalize_text(value)
+    return frozenset(match.group(0) for match in _TRANSPORT_ACTION.finditer(normalized))
+
+
 @dataclass(frozen=True, slots=True)
 class EventCandidate:
     raw_item_id: int
@@ -96,6 +151,54 @@ class EventCandidate:
         return self.content_sha256 or content_sha256(self.title, self.body)
 
 
+def _same_source_transport_reprint(
+    left: EventCandidate,
+    right: EventCandidate,
+    *,
+    event_window: timedelta,
+) -> bool:
+    if left.source_id != right.source_id:
+        return False
+    if left.published_at is None or right.published_at is None:
+        return False
+    if abs(left.published_at - right.published_at) > event_window:
+        return False
+
+    left_host = urlsplit(left.resolved_canonical_url).hostname
+    right_host = urlsplit(right.resolved_canonical_url).hostname
+    if left_host is None or left_host != right_host:
+        return False
+
+    left_dates = _event_date_anchors(left.body)
+    right_dates = _event_date_anchors(right.body)
+    if not left_dates or left_dates != right_dates:
+        return False
+
+    left_routes = _transport_routes(left.body)
+    right_routes = _transport_routes(right.body)
+    if len(left_routes) < 2 or left_routes != right_routes:
+        return False
+
+    left_stops = _transport_stop_ids(left.body)
+    right_stops = _transport_stop_ids(right.body)
+    if not left_stops or left_stops != right_stops:
+        return False
+
+    left_actions = _transport_actions(left.body)
+    right_actions = _transport_actions(right.body)
+    if not left_actions or left_actions != right_actions:
+        return False
+
+    left_body = normalize_text(left.body)
+    right_body = normalize_text(right.body)
+    if (
+        SequenceMatcher(None, left_body, right_body).ratio()
+        < _SAME_SOURCE_BODY_SEQUENCE_SIMILARITY
+    ):
+        return False
+    return _body_token_similarity(left.body, right.body) >= _SAME_SOURCE_BODY_TOKEN_SIMILARITY
+
+
 def same_event(
     left: EventCandidate,
     right: EventCandidate,
@@ -108,11 +211,8 @@ def same_event(
     if left.resolved_content_sha256 == right.resolved_content_sha256:
         return True
 
-    # Fuzzy matching is deliberately limited to independent sources. Within one
-    # publisher we require an exact URL/content match to avoid merging recurring
-    # columns or boilerplate headlines into a single event.
     if left.source_id == right.source_id:
-        return False
+        return _same_source_transport_reprint(left, right, event_window=event_window)
     if left.published_at is None or right.published_at is None:
         return False
     if abs(left.published_at - right.published_at) > event_window:

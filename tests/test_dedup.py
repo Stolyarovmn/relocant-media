@@ -81,6 +81,126 @@ def test_similar_titles_cluster_only_across_sources_and_inside_window() -> None:
     assert not same_event(left, late)
 
 
+def test_same_source_transport_reprint_requires_matching_event_anchors() -> None:
+    published = datetime(2026, 10, 21, 12, tzinfo=UTC)
+    service_body = "\n".join(
+        (
+            "Tokom izvođenja radova na redovnom održavanju u zoni raskrsnice ulica "
+            "Gandijeve, Egipatske i Vojvođanske, 23. oktobra doći će do promena u "
+            "radu linija javnog prevoza.",
+            "Radovi podrazumevaju zatvaranje desne kolovozne trake Egipatske i "
+            "Vojvođanske, gledano u smeru ka Zemunu, na delu od zone raskrsnice sa "
+            "Nehruovom ulicom do skretanja ka objektu KIT komerc.",
+            "Vozila sa linija 45, 71, 601, 601N i 603N će u oba smera saobraćati "
+            "levom kolovoznom trakom, koja će biti dvosmerna za saobraćaj.",
+            "Vozila sa linije 82 će u smeru ka Bloku 44 saobraćati preko Gandijeve, "
+            "Vojvođanske i Nehruove.",
+            "Stajalište „Crkva Svetog Georgija” (#1136) privremeno se izmešta oko "
+            "100 metara, dok se stajalište „Gandijeva” (#1194) u smeru ka Zemunu "
+            "privremeno ukida.",
+        )
+    )
+    news_body = "\n".join(
+        (
+            "Tokom izvođenja radova na redovnom održavanju u zoni raskrsnice ulica "
+            "Gandijeve, Egipatske i Vojvođanske, 23. oktobra doći će do promena u "
+            "radu javnog prevoza, najavljeno je iz Sekretarijata za javni prevoz.",
+            "Radovi podrazumevaju zatvaranje desne kolovozne trake Egipatske i "
+            "Vojvođanske, gledano u smeru ka Zemunu, na delu od zone raskrsnice sa "
+            "Nehruovom ulicom do skretanja ka objektu KIT komerc.",
+            "Vozila sa linija 45, 71, 601, 601N i 603N će u oba smera saobraćati "
+            "levom kolovoznom trakom, koja će biti dvosmerna za saobraćaj.",
+            "Vozila sa linije 82 će u smeru ka Bloku 44 saobraćati preko Gandijeve, "
+            "Vojvođanske i Nehruove.",
+            "Stajalište „Crkva Svetog Georgija” (#1136) privremeno se izmešta oko "
+            "100 metara, dok se stajalište „Gandijeva” (#1194) u smeru ka Zemunu "
+            "privremeno ukida.",
+        )
+    )
+    service = candidate(
+        356,
+        "city_beograd_news",
+        url=(
+            "https://www.beograd.rs/lat/servisne-informacije/saobracaj-i-prevoz/"
+            "a116344/Radovi-u-zoni-raskrsnice-ulica-Gandijeva-Egipatska-i-"
+            "Vojvodjanska.html"
+        ),
+        title=(
+            "SAOBRAĆAJ I PREVOZ: Radovi u zoni raskrsnice ulica Gandijeva, "
+            "Egipatska i Vojvođanska"
+        ),
+        body=service_body,
+        published_at=published,
+    )
+    news = candidate(
+        352,
+        "city_beograd_news",
+        url=(
+            "https://www.beograd.rs/lat/beoinfo-vesti/a116340/"
+            "Izmena-javnog-prevoza-zbog-radova-u-zoni-raskrsnice-ulica-"
+            "Gandijeve-Egipatske-i-Vojvodjanske.html"
+        ),
+        title=(
+            "Izmena javnog prevoza zbog radova u zoni raskrsnice ulica "
+            "Gandijeve, Egipatske i Vojvođanske"
+        ),
+        body=news_body,
+        published_at=published + timedelta(hours=3),
+    )
+
+    assert same_event(service, news)
+
+    changed_date = candidate(
+        400,
+        news.source_id,
+        url="https://www.beograd.rs/lat/beoinfo-vesti/a116400/changed-date.html",
+        title=news.title,
+        body=news_body.replace("23. oktobra", "24. oktobra"),
+        published_at=news.published_at,
+    )
+    changed_route = candidate(
+        401,
+        news.source_id,
+        url="https://www.beograd.rs/lat/beoinfo-vesti/a116401/changed-route.html",
+        title=news.title,
+        body=news_body.replace("603N", "604N"),
+        published_at=news.published_at,
+    )
+    changed_stop = candidate(
+        402,
+        news.source_id,
+        url="https://www.beograd.rs/lat/beoinfo-vesti/a116402/changed-stop.html",
+        title=news.title,
+        body=news_body.replace("#1194", "#1195"),
+        published_at=news.published_at,
+    )
+    corrected_condition = candidate(
+        403,
+        news.source_id,
+        url="https://www.beograd.rs/lat/beoinfo-vesti/a116403/corrected-condition.html",
+        title=news.title,
+        body=news_body.replace("privremeno ukida", "privremeno izmešta"),
+        published_at=news.published_at,
+    )
+    recurring_event = candidate(
+        404,
+        news.source_id,
+        url="https://www.beograd.rs/lat/beoinfo-vesti/a116404/recurring-event.html",
+        title=news.title,
+        body=news_body.replace("23. oktobra", "23. novembra"),
+        published_at=news.published_at,
+    )
+
+    for distinct in (
+        changed_date,
+        changed_route,
+        changed_stop,
+        corrected_condition,
+        recurring_event,
+    ):
+        assert not same_event(service, distinct)
+
+
 def test_cluster_events_handles_missing_dates_and_keeps_distinct_events() -> None:
     first = candidate(1, "a", url="https://a.test/1", title="Событие один", body="A")
     duplicate = candidate(
