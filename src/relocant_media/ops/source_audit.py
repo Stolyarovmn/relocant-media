@@ -15,6 +15,12 @@ from relocant_media.sources.registry import SourceConfig, load_source_registry
 
 _TRANSPORT_ATTEMPTS = 3
 _TRANSPORT_RETRY_DELAYS = (1.0, 3.0)
+_MAX_ERROR_MESSAGE = 240
+
+
+def _error_message(error: BaseException) -> str:
+    """Keep CI diagnostics bounded and single-line; collector messages must be static/contextual."""
+    return " ".join(str(error).split())[:_MAX_ERROR_MESSAGE]
 
 
 async def _collect_with_transport_retry(
@@ -99,10 +105,15 @@ async def audit_sources(
                     row.update(
                         status="transport_error",
                         error_type=type(error).__name__,
+                        error_message=_error_message(error),
                         attempts=_TRANSPORT_ATTEMPTS,
                     )
                 except Exception as error:
-                    row.update(status="error", error_type=type(error).__name__)
+                    row.update(
+                        status="error",
+                        error_type=type(error).__name__,
+                        error_message=_error_message(error),
+                    )
             rows.append(row)
 
     return {
@@ -166,6 +177,9 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
         details = ""
         if row.get("status") in {"error", "transport_error"}:
             details = str(row.get("error_type", "error"))
+            message = str(row.get("error_message", "")).strip()
+            if message:
+                details += f": {message}"
             if row.get("attempts", 1) > 1:
                 details += f" after {row['attempts']} attempts"
         elif row.get("status") == "partial":
