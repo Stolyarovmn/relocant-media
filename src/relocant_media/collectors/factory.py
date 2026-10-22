@@ -1,8 +1,8 @@
 import httpx
 
 from relocant_media.collectors.base import Collector
-from relocant_media.collectors.beograd_news import BelgradeNewsListCollector
 from relocant_media.collectors.beoelektrane_network_works import BeoelektraneNetworkWorksCollector
+from relocant_media.collectors.beograd_news import BelgradeNewsListCollector
 from relocant_media.collectors.bvk_planned_works import BvkPlannedWorksCollector
 from relocant_media.collectors.cukarica_news import CukaricaNewsCollector
 from relocant_media.collectors.eds_belgrade_outages import EdsBelgradeOutagesCollector
