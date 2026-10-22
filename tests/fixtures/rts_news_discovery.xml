@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>РТС :: Вести</title>
+    <link>https://www.rts.rs/vesti/</link>
+    <description>Новости Србије</description>
+    <item>
+      <title>Измена саобраћаја у Београду</title>
+      <link>https://www.rts.rs/vesti/drustvo/6067000/izmena-saobracaja.html</link>
+      <description><![CDATA[
+        Град је објавио измену режима саобраћаја.
+        <a href="https://www.beograd.rs/lat/beoinfo-vesti/a116299/radovi.html">Званично обавештење</a>
+      ]]></description>
+      <pubDate>Tue, 20 Oct 2026 17:30:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Стара вест</title>
+      <link>https://www.rts.rs/vesti/drustvo/6000000/stara.html</link>
+      <description>Не треба да уђе у свежи discovery.</description>
+      <pubDate>Sun, 18 Oct 2026 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Спољни линк није чланак РТС</title>
+      <link>https://evil.example/story</link>
+      <description>Мора бити одбачено.</description>
+      <pubDate>Tue, 20 Oct 2026 17:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>
