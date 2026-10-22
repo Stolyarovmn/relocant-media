@@ -35,7 +35,11 @@ def _source() -> SourceConfig:
 
 
 def test_list_extracts_only_linked_article_headings() -> None:
-    html = """
+    second_slug = (
+        "zatvaranje-stanice-novi-beograd-za-ulazak-i-izlazak-putnika-"
+        "od-9-septembra-2026-godine"
+    )
+    html = f"""
     <main>
       <h1>Вести</h1>
       <div class="card">
@@ -45,7 +49,7 @@ def test_list_extracts_only_linked_article_headings() -> None:
         <a href="/srbijavoz-nije-doslo-do-poskupljenja-voznih-karata/">Прочитај више</a>
       </div>
       <div class="card">
-        <a href="/zatvaranje-stanice-novi-beograd-za-ulazak-i-izlazak-putnika-od-9-septembra-2026-godine/">
+        <a href="/{second_slug}/">
           <h3>Затварање станице Нови Београд за улазак и излазак путника</h3>
         </a>
       </div>
@@ -58,21 +62,30 @@ def test_list_extracts_only_linked_article_headings() -> None:
 
     assert [item.external_id for item in items] == [
         "srbijavoz-nije-doslo-do-poskupljenja-voznih-karata",
-        "zatvaranje-stanice-novi-beograd-za-ulazak-i-izlazak-putnika-od-9-septembra-2026-godine",
+        second_slug,
     ]
     assert all(item.published_at is None and item.body == "" for item in items)
 
 
 def test_article_uses_full_body_canonical_and_published_time() -> None:
-    url = "https://srbijavoz.rs/zatvaranje-stanice-novi-beograd-za-ulazak-i-izlazak-putnika-od-9-septembra-2026-godine/"
+    url = (
+        "https://srbijavoz.rs/zatvaranje-stanice-novi-beograd-za-ulazak-i-"
+        "izlazak-putnika-od-9-septembra-2026-godine/"
+    )
     html = f"""
     <html><head>
       <link rel="canonical" href="{url}">
       <meta property="article:published_time" content="2026-09-04T08:15:00+02:00">
     </head><body>
-      <h1>Затварање станице Нови Београд за улазак и излазак путника од 9. септембра 2026. године</h1>
+      <h1>
+        Затварање станице Нови Београд за улазак и излазак путника
+        од 9. септембра 2026. године
+      </h1>
       <div class="elementor-widget-theme-post-content">
-        <p>„Србијавоз“ а.д. обавештава кориснике услуге да се станица Нови Београд затвара за улазак и излазак путника.</p>
+        <p>
+          „Србијавоз“ а.д. обавештава кориснике услуге да се станица
+          Нови Београд затвара за улазак и излазак путника.
+        </p>
         <p>Истовремено се стајалиште Тошин бунар отвара за све категорије возова.</p>
       </div>
     </body></html>
