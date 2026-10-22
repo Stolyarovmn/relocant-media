@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -87,6 +88,10 @@ async def _preview(session: Session, raw_id: int) -> str:
     return (await service.deliver(raw_id, dry_run=True)).text
 
 
+def _stored_package(run: EditorialRun) -> EditorialPackage:
+    return EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))
+
+
 def _write_release(
     root: Path,
     run: EditorialRun,
@@ -164,7 +169,7 @@ async def test_reviewed_album_uses_normal_production_receipt(
     reviewed, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session, run = reviewed
-    package = EditorialPackage.model_validate(run.outcome["_package"])
+    package = _stored_package(run)
     caption = await _preview(session, run.raw_item_id)
     media_root = tmp_path / "production-media"
     _write_release(media_root, run, package, caption)
@@ -206,7 +211,7 @@ async def test_invalid_explicit_media_bundle_blocks_before_text_fallback(
     reviewed, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session, run = reviewed
-    package = EditorialPackage.model_validate(run.outcome["_package"])
+    package = _stored_package(run)
     caption = await _preview(session, run.raw_item_id)
     media_root = tmp_path / "production-media"
     _write_release(media_root, run, package, caption, asset_count=1, rights_verified=False)
@@ -233,7 +238,7 @@ async def test_unknown_media_outcome_is_uncertain_and_never_retried(
     reviewed, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session, run = reviewed
-    package = EditorialPackage.model_validate(run.outcome["_package"])
+    package = _stored_package(run)
     caption = await _preview(session, run.raw_item_id)
     media_root = tmp_path / "production-media"
     _write_release(media_root, run, package, caption, asset_count=1)
