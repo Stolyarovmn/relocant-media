@@ -17,8 +17,8 @@ from sqlalchemy.orm import Session
 from relocant_media.bot.media import MediaAsset
 from relocant_media.collectors.article_media import (
     ArticleMediaCandidate,
-    extract_article_media_candidates,
     download_article_media,
+    extract_article_media_candidates,
 )
 from relocant_media.services.cover_selection import CoverAssessment
 from relocant_media.services.media_review_packet import (
