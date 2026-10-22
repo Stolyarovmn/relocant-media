@@ -50,3 +50,44 @@ The sidecar is **not** a media release. `publication_permitted` remains false,
 and the existing rights verification plus two independent media reviews are still mandatory
 before local image bytes can be delivered. A missing/rejected/oversized sidecar simply means
 text-only publication.
+
+## READY media review queue
+
+`relocant-media-review` materializes review input from the existing database; it does not
+perform another source request or image download. A queue item exists only when the
+`EditorialRun` is `READY`, has a persisted reviewed package hash, and at least one referenced
+raw item has an intact immutable media sidecar.
+
+```sh
+APP_ENV=staging \
+DATABASE_URL=sqlite:////srv/relocant/state/newsroom.sqlite3 \
+relocant-media-review --output /new/run/media-review
+```
+
+Without `--raw-item-id`, the command exports the newest pending review item. It writes
+`packet.json` plus `assessment-template.json`. Every template deliberately starts with
+`kind=unknown`, `event_match=false`, `visual_value=0`, `rights_method=unknown`,
+`rights_status=needs_review` and an empty `assessed_by`; it therefore cannot be accepted as a
+`CoverAssessment` until an explicit reviewer fills the missing judgement and rights evidence.
+Attribution discovered on the source page may be copied as provenance context, but it does
+not grant reuse rights.
+
+A completed assessment file can be checked against the exact ingested candidate set and the
+existing deterministic `plan_cover` policy:
+
+```sh
+APP_ENV=staging \
+DATABASE_URL=sqlite:////srv/relocant/state/newsroom.sqlite3 \
+relocant-media-review \
+  --raw-item-id 123 \
+  --assessments /review/assessments.json \
+  --event-year 2026 \
+  --output /new/run/media-review-123
+```
+
+The resulting `cover-plan.json` is still pre-download. The command always reports
+`download_permitted=false` and `publication_permitted=false`; it never creates a `MediaAsset`
+and never sets `rights_verified`. Selected local bytes must still be obtained through an
+approved downloader and then pass the existing hash-bound `MediaRelease` validation with two
+independent `facts`/`utility` reviews before staging delivery. Invalid or tampered source HTML
+fails closed to text-only mode.
