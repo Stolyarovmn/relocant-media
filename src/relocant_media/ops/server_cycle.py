@@ -279,7 +279,7 @@ async def collect_sources(
                for key in ("city_beograd_news", "cukarica_news")}
     sources.update(runtime_venues)
     result["sources_synced"] = len(sources)
-    result["venue_sources"] = len(runtime_venues)
+    result["venue_sources"] = len(venues)
     result["venue_review_only_sources"] = len(review_venues)
     result["venue_items"] = 0
     result["venue_deferred"] = 0
