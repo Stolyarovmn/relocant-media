@@ -48,6 +48,20 @@ EDS rolling day-pages (`Dan_0` ... `Dan_3`) также прошли structured s
 публикации: `published_at` остаётся пустым, `auto_publish: false` сохраняется до измерения качества
 live extraction/freshness.
 
+22.10.2026 добавлены ещё два проверенных vertical source в shadow-режиме:
+
+- `srbijavoz_news` — официальный раздел новостей пассажирского оператора Srbijavoz. Он используется
+  как первичный источник изменений железнодорожного движения и уведомлений, затрагивающих в том
+  числе станции Белграда и БГ:ВОЗ; пока только `page_change_detection`, `auto_publish: false`;
+- `welcome_serbia_temporary_residence` — официальный портал Government of Serbia с информацией для
+  иностранцев о временном проживании и единой разрешительной процедуре. Это
+  `high_risk: true`, `auto_publish: false`: изменения миграционных правил никогда не превращаются
+  в публикацию без отдельной редакционной проверки.
+
+Для обоих источников whole-page snapshot остаётся лишь сигналом изменения. Структурированный
+article/guidance parser можно включать только после сохранения живых fixture'ов и проверки
+семантики дат, заголовков и canonical URL.
+
 Each source file captures:
 - stable source id;
 - publisher and ownership/type;

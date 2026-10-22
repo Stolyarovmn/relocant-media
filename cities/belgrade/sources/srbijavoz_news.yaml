@@ -1,0 +1,22 @@
+id: srbijavoz_news
+name: Srbijavoz — Vesti
+publisher: Srbijavoz a.d.
+ownership: official
+url: https://srbijavoz.rs/vesti/
+language: sr-Cyrl
+source_type: official_rail_operator_news
+trust: 1.0
+check_every: 1h
+categories:
+  - transport
+  - rail
+  - city
+extraction:
+  strategy: page_change_detection
+  status: active
+policy:
+  high_risk: false
+  auto_publish: false
+verification:
+  checked_at: 2026-10-22
+  note: Official Srbijavoz news page publishes passenger-service and traffic-organization changes, including changes affecting BG:VOZ and Belgrade stations. Shadow snapshot only until dated article extraction is validated.
