@@ -34,6 +34,10 @@ from relocant_media.collectors.cukarica_news import (
     parse_cukarica_article,
     parse_cukarica_news_list,
 )
+from relocant_media.collectors.news_discovery import (
+    collect_news_feed,
+    load_verified_news_feeds,
+)
 from relocant_media.collectors.telegram_topics import DEFAULT_CHANNELS, collect_topics
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.attention import source_priorities, venue_attention
@@ -90,6 +94,7 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 SOURCES = Path("cities/belgrade/sources")
+NEWS_DISCOVERY = Path("docs/serbian-news-discovery.json")
 
 
 class ServerAI:
@@ -202,8 +207,10 @@ async def collect_sources(
     now = datetime.now(UTC)
     result: dict[str, Any] = {"sources_synced": 2, "sources_skipped": 0, "raw_items_written": 0,
               "failures": 0, "review_required": 0, "discarded_before_article_fetch": 0,
-              "discarded_before_persistence": 0, "channel_failures": 0, "channel_leads": 0}
+              "discarded_before_persistence": 0, "channel_failures": 0, "channel_leads": 0,
+              "news_failures": 0, "news_leads": 0}
     venues = venue_sources()
+    news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
                for key in ("city_beograd_news", "cukarica_news")}
     sources.update(venues)
@@ -212,6 +219,7 @@ async def collect_sources(
     result["venue_items"] = 0
     result["venue_deferred"] = 0
     result["venue_article_failures"] = 0
+    result["news_feeds"] = len(news_feeds)
     result["priority_submissions"] = 0
     result["primary_searches"] = 0
     result["private_link_fetches"] = 0
@@ -221,7 +229,9 @@ async def collect_sources(
         session.commit()
     attention_leads = []
     topics: list[dict[str, Any]] = []
+    news_topics: list[dict[str, Any]] = []
     channel_errors: list[dict[str, str]] = []
+    news_errors: list[dict[str, str]] = []
     venue_errors: list[dict[str, str]] = []
     articles = []
     fetched: dict[str, str] = {}
@@ -407,6 +417,61 @@ async def collect_sources(
             except Exception as error:
                 result["channel_failures"] += 1
                 channel_errors.append({"channel": channel, "error_type": type(error).__name__})
+
+        for feed in news_feeds:
+            try:
+                leads = await collect_news_feed(feed, client, now=now)
+                for lead in leads[:20]:
+                    result["news_leads"] += 1
+                    resolved = []
+                    primary_urls = []
+                    for url in lead.outbound_urls[:10]:
+                        # Media text and links are discovery hints only. Only an URL that
+                        # independently matches the authoritative allowlist may be fetched.
+                        resolution = await resolve_link(url)
+                        if resolution is not None:
+                            resolved.append(resolution)
+                            primary_urls.append(url)
+                    for article in articles:
+                        if (topic_matches(lead.text, article.title)
+                                and article.url not in primary_urls):
+                            primary_urls.append(article.url)
+                            resolved.append("primary_source_collected")
+                    if not any(r == "primary_source_collected" for r in resolved):
+                        for source_id, search_url in public_search_plan(lead.text, venues, aliases):
+                            key = (source_id, search_url)
+                            if key in searches or len(searches) >= 4:
+                                continue
+                            searches.add(key)
+                            result["primary_searches"] += 1
+                            search_source = venues[source_id].model_copy(update={"extraction":
+                                venues[source_id].extraction.model_copy(
+                                    update={"feed_url": search_url})})
+                            try:
+                                found = await VenueFeedCollector(search_source, client).collect()
+                            except (httpx.HTTPError, ValueError):
+                                continue
+                            for item in found:
+                                if (not topic_matches(lead.text, item.title)
+                                        or freshness_decision(item.title, item.body,
+                                            item.published_at, now).action != "keep"
+                                        or event_content_reason(item.title, item.body, now=now)):
+                                    continue
+                                if item.url not in fetched:
+                                    articles.append(item)
+                                    fetched[item.url] = "primary_source_collected"
+                                primary_urls.append(item.url)
+                                resolved.append("primary_source_collected")
+                    news_topics.append({"url": lead.url, "source_id": lead.source_id,
+                        "published_at": lead.published_at.isoformat(),
+                        "status": "primary_source_resolved" if any(
+                            r in {"primary_source_collected", "already_collected"}
+                            for r in resolved) else "deferred_missing_primary_source",
+                        "primary_results": resolved, "primary_urls": primary_urls, "ai_calls": 0})
+            except Exception as error:
+                result["news_failures"] += 1
+                news_errors.append({"source_id": feed.source_id,
+                                    "error_type": type(error).__name__})
     with Session(engine) as session:
         written, changes = capture_collected_batch(session, articles)
         for submission_id, payload in tips:
@@ -452,6 +517,10 @@ async def collect_sources(
         (output / "channel-topics.json").write_text(json.dumps({"topics": topics,
             "failures": channel_errors, "publication_evidence": False},
             ensure_ascii=False, indent=2), encoding="utf-8")
+        (output / "news-topics.json").write_text(json.dumps({"topics": news_topics,
+            "failures": news_errors, "publication_evidence": False,
+            "requires_primary_verification": True}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
     return result
 
 
