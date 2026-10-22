@@ -41,9 +41,7 @@ def _allowed_hostnames(source: SourceConfig) -> set[str]:
     hostname = urlsplit(str(source.url)).hostname
     if not hostname:
         raise ValueError("Bgprevoz source hostname missing")
-    if hostname.startswith("www."):
-        return {hostname, hostname.removeprefix("www.")}
-    return {hostname, f"www.{hostname}"}
+    return {hostname, *source.extraction.approved_hosts}
 
 
 def _allowed_url(value: str, source: SourceConfig) -> str:
