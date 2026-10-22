@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from sqlalchemy import create_engine
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from relocant_media.services.cover_selection import CoverAssessment
@@ -25,7 +25,7 @@ def _require_staging() -> None:
         raise ValueError("APP_ENV=staging required")
 
 
-def _sqlite_url():
+def _sqlite_url() -> URL:
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
         raise ValueError("explicit DATABASE_URL required")
