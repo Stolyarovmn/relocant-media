@@ -49,21 +49,24 @@ def test_utility_sources_keep_shadow_policy_while_bvk_and_eds_are_structured() -
     assert all(source.verification.checked_at is not None for source in utility_sources)
 
 
-def test_parking_and_heating_sources_are_verified_shadow_snapshots() -> None:
+def test_parking_stays_snapshot_while_heating_is_structured_shadow() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    selected = [
-        source
-        for source in sources
-        if source.id in {"parking_servis_news", "beoelektrane_network_works"}
-    ]
+    parking = next(source for source in sources if source.id == "parking_servis_news")
+    heating = next(source for source in sources if source.id == "beoelektrane_network_works")
 
-    assert len(selected) == 2
-    assert all(source.ownership == "official" for source in selected)
-    assert all(source.trust == 1.0 for source in selected)
-    assert all(source.extraction.strategy == "page_change_detection" for source in selected)
-    assert all(source.extraction.status == "active" for source in selected)
-    assert all(source.policy.auto_publish is False for source in selected)
-    assert all(source.verification.checked_at is not None for source in selected)
+    assert parking.ownership == "official"
+    assert parking.trust == 1.0
+    assert parking.extraction.strategy == "page_change_detection"
+    assert parking.extraction.status == "active"
+    assert parking.policy.auto_publish is False
+
+    assert heating.ownership == "official"
+    assert heating.trust == 1.0
+    assert heating.extraction.strategy == "beoelektrane_network_works"
+    assert heating.extraction.status == "active"
+    assert heating.policy.high_risk is False
+    assert heating.policy.auto_publish is False
+    assert heating.verification.checked_at is not None
 
 
 def test_new_vertical_sources_remain_shadow_only() -> None:
