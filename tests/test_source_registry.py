@@ -5,7 +5,7 @@ from relocant_media.sources.registry import load_source_registry
 
 def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    assert len(sources) == 22
+    assert len(sources) == 24
     assert len({source.id for source in sources}) == len(sources)
 
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")
@@ -64,3 +64,26 @@ def test_parking_and_heating_sources_are_verified_shadow_snapshots() -> None:
     assert all(source.extraction.status == "active" for source in selected)
     assert all(source.policy.auto_publish is False for source in selected)
     assert all(source.verification.checked_at is not None for source in selected)
+
+
+def test_new_vertical_sources_are_verified_shadow_only() -> None:
+    sources = load_source_registry(Path("cities/belgrade/sources"))
+    rail = next(source for source in sources if source.id == "srbijavoz_news")
+    residence = next(
+        source for source in sources if source.id == "welcome_serbia_temporary_residence"
+    )
+
+    assert rail.ownership == "official"
+    assert rail.trust == 1.0
+    assert rail.extraction.strategy == "page_change_detection"
+    assert rail.extraction.status == "active"
+    assert rail.policy.auto_publish is False
+    assert str(rail.url) == "https://srbijavoz.rs/vesti/"
+
+    assert residence.ownership == "official"
+    assert residence.trust == 1.0
+    assert residence.extraction.strategy == "page_change_detection"
+    assert residence.extraction.status == "active"
+    assert residence.policy.high_risk is True
+    assert residence.policy.auto_publish is False
+    assert str(residence.url) == "https://welcometoserbia.gov.rs/privremeni-boravak"
