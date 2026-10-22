@@ -23,6 +23,7 @@ def test_default_channels_are_popular_discovery_sources_only() -> None:
     assert DEFAULT_CHANNELS == (
         "Serbia",
         "SerbiaInMyMind",
+        "serbnews",
         "novostiserbii",
         "beogradske_vesti",
         "ruserbia",
