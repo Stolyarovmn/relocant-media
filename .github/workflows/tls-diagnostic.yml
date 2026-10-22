@@ -83,3 +83,32 @@ jobs:
 
           asyncio.run(main())
           PY
+
+      - name: Inspect presented certificate chains
+        shell: bash
+        run: |
+          set -u
+          for host in www.parking-servis.co.rs srbijavoz.rs; do
+            echo "=== ${host} presented chain ==="
+            output="$(mktemp)"
+            errors="$(mktemp)"
+            openssl s_client \
+              -connect "${host}:443" \
+              -servername "${host}" \
+              -showcerts \
+              </dev/null >"${output}" 2>"${errors}" || true
+
+            echo "presented_certificates=$(grep -c 'BEGIN CERTIFICATE' "${output}" || true)"
+            grep -E 'depth=|verify error|Verify return code' "${errors}" || true
+            openssl x509 \
+              -in "${output}" \
+              -noout \
+              -subject \
+              -issuer \
+              -serial \
+              -dates \
+              -fingerprint \
+              -sha256 \
+              -ext authorityInfoAccess || true
+            rm -f "${output}" "${errors}"
+          done
