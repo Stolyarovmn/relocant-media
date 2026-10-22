@@ -10,11 +10,13 @@ check_every: 6h
 categories:
   - medicine
 extraction:
-  strategy: html_list
-  status: planned
+  strategy: health_duty
+  status: active
+  approved_hosts:
+    - beograd.rs
 policy:
   high_risk: true
   auto_publish: false
 verification:
-  checked_at: 2026-10-18
-  note: City service-information listing for duty health institutions; medical information remains human-review-only in v1.
+  checked_at: 2026-10-22
+  note: Official dated listing and detail pages for duty health institutions; medical information remains human-review-only.
