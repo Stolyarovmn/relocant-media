@@ -94,18 +94,17 @@ def test_end_before_start_fails_closed() -> None:
         )
 
 
-def test_review_only_policy_cannot_be_relaxed() -> None:
+@pytest.mark.asyncio
+async def test_review_only_policy_cannot_be_relaxed() -> None:
     source = _source()
     unsafe = source.model_copy(
         update={"policy": source.policy.model_copy(update={"auto_publish": True})}
     )
-    with httpx.Client() as sync_client:
-        async_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
-        try:
-            with pytest.raises(ValueError, match="review-only"):
-                TobEventsCollector(unsafe, async_client)
-        finally:
-            sync_client.close()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(500))
+    ) as client:
+        with pytest.raises(ValueError, match="review-only"):
+            TobEventsCollector(unsafe, client)
 
 
 @pytest.mark.asyncio
