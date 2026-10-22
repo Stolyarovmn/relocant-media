@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import cast
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.package import EditorialPackage, canonical_json
@@ -22,7 +23,8 @@ from relocant_media.services.production_media import (
     prepare_production_media,
     production_media_root,
 )
-from relocant_media.storage.models import EditorialRun, Post
+from relocant_media.storage.locks import lock_editorial_city
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 
 def _read_release(path: Path) -> tuple[bytes, MediaRelease]:
@@ -71,36 +73,48 @@ async def install_production_media(
     if release.target_id != str(APPROVED_CHANNEL_ID):
         raise ValueError("reviewed media release target is not the approved production channel")
 
-    run = session.get(EditorialRun, release.raw_item_id)
-    if run is None or run.post_id != release.post_id or "_package" not in run.outcome:
-        raise ValueError("current reviewed editorial package is required")
-    if run.delivery_status != "pending":
-        raise ValueError("production media can only be installed before delivery")
-    post = session.get(Post, release.post_id)
-    if post is None or post.telegram_message_id is not None:
-        raise ValueError("production media post is missing or already delivered")
+    city = session.scalar(
+        select(Source.city)
+        .join(RawItem, RawItem.source_id == Source.id)
+        .where(RawItem.id == release.raw_item_id)
+    )
+    if city is None:
+        raise ValueError("production media raw item/source does not exist")
+    lock_editorial_city(session, city)
 
-    package = EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))
-    package_sha256 = hashlib.sha256(
-        canonical_json(package.model_dump(mode="json")).encode()
-    ).hexdigest()
-    if run.outcome.get("_package_sha256") != package_sha256:
-        raise ValueError("current editorial package fingerprint does not match")
-
-    service = EditorialService(session, cast(EditorialPipeline, None))
-    preview = await service.deliver(release.raw_item_id, dry_run=True)
-
-    destination_root = production_media_root(root)
-    if destination_root.exists() and destination_root.is_symlink():
-        raise ValueError("production media root must not be a symlink")
-    destination_root.mkdir(parents=True, exist_ok=True)
-    final = destination_root / str(release.raw_item_id)
-    if final.exists():
-        raise ValueError("production media bundle already exists")
-
-    staging_root = destination_root / f".install-{release.raw_item_id}-{uuid.uuid4().hex}"
-    staged_bundle = staging_root / str(release.raw_item_id)
+    staging_root: Path | None = None
     try:
+        run = session.get(EditorialRun, release.raw_item_id, populate_existing=True)
+        if run is None or run.post_id != release.post_id or "_package" not in run.outcome:
+            raise ValueError("current reviewed editorial package is required")
+        if run.delivery_status != "pending":
+            raise ValueError("production media can only be installed before delivery")
+        post = session.get(Post, release.post_id, populate_existing=True)
+        if post is None or post.telegram_message_id is not None:
+            raise ValueError("production media post is missing or already delivered")
+
+        package = EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))
+        if package.raw_item_id != release.raw_item_id or package.city != city:
+            raise ValueError("current editorial package identity does not match")
+        package_sha256 = hashlib.sha256(
+            canonical_json(package.model_dump(mode="json")).encode()
+        ).hexdigest()
+        if run.outcome.get("_package_sha256") != package_sha256:
+            raise ValueError("current editorial package fingerprint does not match")
+
+        service = EditorialService(session, cast(EditorialPipeline, None))
+        preview = await service.deliver(release.raw_item_id, dry_run=True)
+
+        destination_root = production_media_root(root)
+        if destination_root.exists() and destination_root.is_symlink():
+            raise ValueError("production media root must not be a symlink")
+        destination_root.mkdir(parents=True, exist_ok=True)
+        final = destination_root / str(release.raw_item_id)
+        if final.exists():
+            raise ValueError("production media bundle already exists")
+
+        staging_root = destination_root / f".install-{release.raw_item_id}-{uuid.uuid4().hex}"
+        staged_bundle = staging_root / str(release.raw_item_id)
         staged_bundle.mkdir(parents=True, exist_ok=False)
         staged_release = staged_bundle / "release.json"
         with staged_release.open("xb") as handle:
@@ -126,7 +140,8 @@ async def install_production_media(
         finally:
             os.close(directory_fd)
         staging_root.rmdir()
-        return {
+        staging_root = None
+        result = {
             "state": "installed",
             "raw_item_id": release.raw_item_id,
             "post_id": release.post_id,
@@ -136,6 +151,10 @@ async def install_production_media(
             "target_id": release.target_id,
             "telegram_io_performed": False,
         }
+        session.rollback()
+        return result
     except BaseException:
-        shutil.rmtree(staging_root, ignore_errors=True)
+        if staging_root is not None:
+            shutil.rmtree(staging_root, ignore_errors=True)
+        session.rollback()
         raise
