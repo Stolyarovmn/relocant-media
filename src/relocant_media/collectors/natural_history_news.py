@@ -12,6 +12,7 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.page_snapshot import normalize_visible_text
 from relocant_media.sources.registry import SourceConfig
 
 MAX_BYTES = 3_000_000
@@ -122,21 +123,14 @@ def _card_metadata(
 def _news_cards(html: str, source: SourceConfig) -> list[tuple[str, str, datetime]]:
     if len(html.encode("utf-8")) > MAX_BYTES:
         raise ValueError("Natural History Museum news response too large")
-    soup = BeautifulSoup(html, "html.parser")
-    news_heading = next(
-        (
-            node
-            for node in soup.find_all(["h1", "h2"])
-            if node.get_text(" ", strip=True) == _NEWS_HEADING
-        ),
-        None,
-    )
-    if not isinstance(news_heading, Tag):
+    visible_lines = normalize_visible_text(html).splitlines()
+    if _NEWS_HEADING not in visible_lines:
         raise ValueError("Natural History Museum news heading missing")
+    soup = BeautifulSoup(html, "html.parser")
 
     cards: list[tuple[str, str, datetime]] = []
     seen: set[str] = set()
-    for heading in news_heading.find_all_next("h3"):
+    for heading in soup.find_all("h3"):
         if not isinstance(heading, Tag):
             continue
         anchor = heading.find("a", href=True)
