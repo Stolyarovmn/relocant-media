@@ -11,7 +11,9 @@ def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")
     assert euprava.policy.high_risk is True
     assert euprava.policy.auto_publish is False
-    assert euprava.extraction.strategy == "page_change_detection"
+    assert euprava.extraction.strategy == "euprava_service"
+    assert euprava.extraction.status == "active"
+    assert euprava.verification.checked_at is not None
 
     news = next(source for source in sources if source.id == "city_beograd_news")
     assert news.extraction.strategy == "beograd_news_list"

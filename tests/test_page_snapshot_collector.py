@@ -21,7 +21,14 @@ def test_normalize_visible_text_ignores_script_and_style() -> None:
 @pytest.mark.asyncio
 async def test_page_snapshot_collector_is_deterministic() -> None:
     html = (FIXTURES / "euprava_foreigner_registration.html").read_text(encoding="utf-8")
-    source = load_source_file(SOURCE_PATH)
+    configured = load_source_file(SOURCE_PATH)
+    source = configured.model_copy(
+        update={
+            "extraction": configured.extraction.model_copy(
+                update={"strategy": "page_change_detection"}
+            )
+        }
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == str(source.url)
