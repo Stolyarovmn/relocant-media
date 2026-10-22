@@ -105,15 +105,19 @@ def _require_reviewable_source(asset: MediaAsset) -> None:
         raise ValueError("media source URL must be credential-free HTTPS")
 
 
+def _require_exact_asset_set(assets: tuple[MediaAsset, ...], directory: Path) -> None:
+    expected = {asset.file_name for asset in assets}
+    observed = {entry.name for entry in directory.iterdir()}
+    if observed != expected:
+        raise ValueError("media review assets must exactly match the manifest")
+
+
 def _copy_review_assets(
     assets: tuple[MediaAsset, ...],
     source: Path,
     destination: Path,
 ) -> None:
-    expected = {asset.file_name for asset in assets}
-    observed = {entry.name for entry in source.iterdir()}
-    if observed != expected:
-        raise ValueError("media review assets must exactly match the manifest")
+    _require_exact_asset_set(assets, source)
     destination.mkdir(parents=False, exist_ok=False)
     for asset in assets:
         origin = source / asset.file_name
@@ -291,6 +295,7 @@ def finalize_media_release(
         raise ValueError("media review context does not match frozen draft")
     for asset in draft.assets:
         _require_reviewable_source(asset)
+    _require_exact_asset_set(draft.assets, assets)
 
     release = MediaRelease.model_validate(
         {**draft.model_dump(mode="python"), "reviews": reviews.reviews}
