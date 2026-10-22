@@ -39,6 +39,7 @@ def _ready_record(
         enabled=True,
     )
     session.add(source)
+    session.flush()
     raw = RawItem(
         source_id=source.id,
         external_id="42",
