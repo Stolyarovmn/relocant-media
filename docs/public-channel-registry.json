@@ -1,5 +1,5 @@
 {
-  "observed_on": "2026-10-21",
+  "observed_on": "2026-10-22",
   "purpose": "topic_discovery_only",
   "publication_evidence": false,
   "requires_independent_primary_verification": true,
@@ -10,12 +10,13 @@
   "channels": [
     {"username": "Serbia", "url": "https://t.me/s/Serbia", "language": "ru", "visible_subscribers": "44.4K", "role": "broad_serbia_news"},
     {"username": "SerbiaInMyMind", "url": "https://t.me/s/SerbiaInMyMind", "language": "ru", "visible_subscribers": "31.1K", "role": "relocation_and_local_topics"},
+    {"username": "serbnews", "url": "https://t.me/s/serbnews", "language": "ru", "visible_subscribers": "21.4K", "role": "serbia_news"},
     {"username": "novostiserbii", "url": "https://t.me/s/novostiserbii", "language": "ru", "visible_subscribers": "17.2K", "role": "serbia_news"},
     {"username": "beogradske_vesti", "url": "https://t.me/s/beogradske_vesti", "language": "ru", "visible_subscribers": "15K", "role": "belgrade_news"},
     {"username": "ruserbia", "url": "https://t.me/s/ruserbia", "language": "ru", "visible_subscribers": "13K", "role": "serbia_news"},
     {"username": "sta_imas_beograd", "url": "https://t.me/s/sta_imas_beograd", "language": "ru", "visible_subscribers": "12.5K", "role": "belgrade_events"},
     {"username": "relocate_serbia", "url": "https://t.me/s/relocate_serbia", "language": "ru", "visible_subscribers": "11.7K", "role": "relocation_and_local_topics"},
-    {"username": "volna_srbjia", "url": "https://t.me/s/volna_srbjia", "language": "ru", "visible_subscribers": "10K", "role": "relocation_and_local_news"},
+    {"username": "volna_srbjia", "url": "https://t.me/s/volna_srbjia", "language": "ru", "visible_subscribers": "10.1K", "role": "relocation_and_local_news"},
     {"username": "vstrechi_v_belgrade", "url": "https://t.me/s/vstrechi_v_belgrade", "language": "ru", "visible_subscribers": "9.62K", "role": "belgrade_events"},
     {"username": "afisha_rs", "url": "https://t.me/s/afisha_rs", "language": "ru", "visible_subscribers": "4.09K", "role": "belgrade_events"}
   ]
