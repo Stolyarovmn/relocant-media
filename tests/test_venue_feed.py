@@ -153,7 +153,7 @@ async def test_bad_article_does_not_hide_other_fresh_announcements(source: Sourc
         assert collector.item_failures == [dict(
             url='https://museum.example/event/',
             error_type='ValueError',
-            error_message='venue article lacks full body/title/publication date',
+            error_message='venue article body shorter than 120 characters',
         )]
         # Discovery skips an unusable page; a live evidence check still fails closed.
         with pytest.raises(ValueError):
@@ -172,7 +172,7 @@ async def test_all_bad_fresh_articles_are_a_failure_not_empty_success(source: So
             await collector.collect()
         assert len(collector.item_failures) == 1
         assert collector.item_failures[0]['error_message'] == (
-            'venue article lacks full body/title/publication date'
+            'venue article body shorter than 120 characters'
         )
 
 
@@ -236,3 +236,63 @@ async def test_configured_header_lead_requires_article_not_encoded_feed(
             assert 'Unrelated concert' not in item.body
             assert item.published_at == date
     assert '/event/' in requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("article", "expected"),
+    [
+        (
+            "<article>" + "Complete verified announcement. " * 10 + "</article>",
+            "venue article title missing",
+        ),
+        (
+            "<h1>Full title</h1><article>Short</article>",
+            "venue article body shorter than 120 characters",
+        ),
+    ],
+)
+async def test_article_validation_reasons_are_specific_with_feed_fallback(
+    source: SourceConfig, article: str, expected: str,
+) -> None:
+    date = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=feed(date) if request.url.path == '/feed/' else article)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match=expected):
+            await VenueFeedCollector(source, client).collect_url('https://museum.example/event/')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("date_published", "expected"),
+    [
+        (None, "venue article publication date missing"),
+        (
+            (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            "venue article publication date is in the future",
+        ),
+    ],
+)
+async def test_article_publication_date_reasons_are_specific_without_feed_fallback(
+    source: SourceConfig, date_published: str | None, expected: str,
+) -> None:
+    date_field = f',"datePublished":"{date_published}"' if date_published else ""
+    article = (
+        '<script type="application/ld+json">'
+        '{"@type":"Article","headline":"Full title","articleBody":"'
+        + 'Complete verified announcement. ' * 10
+        + '"'
+        + date_field
+        + '}</script>'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text='<rss><channel/></rss>'
+                              if request.url.path == '/feed/' else article)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match=expected):
+            await VenueFeedCollector(source, client).collect_url('https://museum.example/event/')

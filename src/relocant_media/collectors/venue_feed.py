@@ -134,9 +134,14 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
     if lead_text and lead_text not in body:
         body = lead_text + " " + body
     published = published or fallback
-    if (not title or len(body) < 120 or published is None
-            or published > datetime.now(UTC)):
-        raise ValueError("venue article lacks full body/title/publication date")
+    if not title:
+        raise ValueError("venue article title missing")
+    if len(body) < 120:
+        raise ValueError("venue article body shorter than 120 characters")
+    if published is None:
+        raise ValueError("venue article publication date missing")
+    if published > datetime.now(UTC):
+        raise ValueError("venue article publication date is in the future")
     return RawItem(source.id, url, url, title, body, published)
 
 
