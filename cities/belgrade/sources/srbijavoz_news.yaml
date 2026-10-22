@@ -12,11 +12,11 @@ categories:
   - rail
   - city
 extraction:
-  strategy: srbijavoz_news
+  strategy: page_change_detection
   status: active
 policy:
   high_risk: false
   auto_publish: false
 verification:
   checked_at: 2026-10-22
-  note: Official Srbijavoz news archive has independent article URLs and visible publication dates. Structured extraction fetches each full article as evidence; source remains shadow-only with auto_publish disabled.
+  note: Official Srbijavoz news page publishes passenger-service and traffic-organization changes, including changes affecting BG:VOZ and Belgrade stations. Shadow snapshot only until dated article extraction is validated.
