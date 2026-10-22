@@ -13,7 +13,6 @@ from bs4 import BeautifulSoup, Tag
 
 from relocant_media.collectors.base import RawItem
 from relocant_media.collectors.beograd_article import (
-    ArticleExtractionError,
     match_beograd_article_url,
     parse_beograd_article,
 )
@@ -229,7 +228,7 @@ class HealthDutyCollector:
         for candidate in candidates:
             try:
                 items.append(await self._collect_candidate(candidate))
-            except (ValueError, ArticleExtractionError, httpx.HTTPError) as error:
+            except (ValueError, httpx.HTTPError) as error:
                 self.item_failures.append(
                     {
                         "url": candidate.url,
