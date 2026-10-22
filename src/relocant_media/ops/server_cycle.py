@@ -34,6 +34,7 @@ from relocant_media.collectors.cukarica_news import (
     parse_cukarica_article,
     parse_cukarica_news_list,
 )
+from relocant_media.collectors.factory import build_collector
 from relocant_media.collectors.news_discovery import (
     collect_news_feed,
     load_verified_news_feeds,
@@ -97,6 +98,11 @@ from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 SOURCES = Path("cities/belgrade/sources")
 NEWS_DISCOVERY = Path("docs/serbian-news-discovery.json")
+_SERVER_VENUE_STRATEGIES = frozenset({
+    "venue_feed",
+    "musicology_blog",
+    "natural_history_news",
+})
 
 
 class ServerAI:
@@ -164,10 +170,39 @@ class _CachedOutcome(EditorialPipeline):
 
 
 def venue_sources() -> dict[str, SourceConfig]:
-    return {source.id: source for source in load_source_registry(SOURCES)
-            if source.extraction.strategy == "venue_feed"
-            and source.extraction.status == "active"
-            and source.source_type == "official_venue_events"}
+    """Active venue sources safe for the dated autonomous editorial queue."""
+    return {
+        source.id: source
+        for source in load_source_registry(SOURCES)
+        if source.extraction.strategy in _SERVER_VENUE_STRATEGIES
+        and source.extraction.status == "active"
+        and source.source_type == "official_venue_events"
+    }
+
+
+def discovery_venue_sources() -> dict[str, SourceConfig]:
+    """Legacy search-enabled venue feeds; structured list collectors are not search APIs."""
+    return {
+        source.id: source
+        for source in load_source_registry(SOURCES)
+        if source.extraction.strategy == "venue_feed"
+        and source.extraction.status == "active"
+        and source.source_type == "official_venue_events"
+    }
+
+
+async def _collect_exact_url(collector: Any, url: str) -> Any:
+    collect_url = getattr(collector, "collect_url", None)
+    if callable(collect_url):
+        return await collect_url(url)
+    matches = [
+        item
+        for item in await collector.collect()
+        if item.url == url or item.canonical_url == url
+    ]
+    if len(matches) != 1:
+        raise ValueError("official source item unavailable or ambiguous")
+    return matches[0]
 
 
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
@@ -176,7 +211,8 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     venues = venue_sources()
     async def fetch_venue(source: SourceConfig, url: str) -> Any:
         async with httpx.AsyncClient(timeout=25, trust_env=False) as venue_client:
-            return await VenueFeedCollector(source, venue_client).collect_url(url)
+            collector = build_collector(source, venue_client)
+            return await _collect_exact_url(collector, url)
     with httpx.Client(timeout=25, trust_env=False) as client:
         for document in package.event.documents:
             if document.source_id in venues:
@@ -212,6 +248,7 @@ async def collect_sources(
               "discarded_before_persistence": 0, "channel_failures": 0, "channel_leads": 0,
               "news_failures": 0, "news_leads": 0}
     venues = venue_sources()
+    discovery_venues = discovery_venue_sources()
     news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
                for key in ("city_beograd_news", "cukarica_news")}
@@ -250,20 +287,19 @@ async def collect_sources(
     aliases = json.loads(aliases_path.read_text(encoding="utf-8")) if aliases_path.is_file() else {}
     search_budget = PublicSearchBudget()
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
-        collectors: dict[
-            str, BelgradeArticleCollector | CukaricaNewsCollector | VenueFeedCollector
-        ] = {
+        collectors: dict[str, Any] = {
             "city_beograd_news": BelgradeArticleCollector(sources["city_beograd_news"], client),
             "cukarica_news": CukaricaNewsCollector(sources["cukarica_news"], client),
         }
 
-        collectors.update({key: VenueFeedCollector(source, client)
-                           for key, source in venues.items()})
+        collectors.update({
+            key: build_collector(source, client) for key, source in venues.items()
+        })
 
         async def full_article(source_id: str, url: str) -> str:
             if url in fetched:
                 return fetched[url]
-            item = await collectors[source_id].collect_url(url)
+            item = await _collect_exact_url(collectors[source_id], url)
             fresh = freshness_decision(item.title, item.body, item.published_at, now)
             venue_reason = (event_content_reason(item.title, item.body, now=now)
                             if source_id in venues else None)
@@ -286,11 +322,11 @@ async def collect_sources(
                 return fetched[url]
 
         def plan_public_searches(text: str) -> list[tuple[str, str]]:
-            return public_search_plan(text, venues, aliases)
+            return public_search_plan(text, discovery_venues, aliases)
 
         async def search_official(source_id: str, search_url: str) -> list[Any]:
-            search_source = venues[source_id].model_copy(update={"extraction":
-                venues[source_id].extraction.model_copy(update={"feed_url": search_url})})
+            search_source = discovery_venues[source_id].model_copy(update={"extraction":
+                discovery_venues[source_id].extraction.model_copy(update={"feed_url": search_url})})
             try:
                 return await VenueFeedCollector(search_source, client).collect()
             except (httpx.HTTPError, ValueError):
@@ -332,7 +368,7 @@ async def collect_sources(
             if original.source_id not in collectors:
                 continue
             try:
-                current = await collectors[original.source_id].collect_url(original.url)
+                current = await _collect_exact_url(collectors[original.source_id], original.url)
                 watch["checked"] += 1
                 if evidence_changed(original, current):
                     articles.append(current)
@@ -368,7 +404,7 @@ async def collect_sources(
             except Exception:
                 result["failures"] += 1
         for source_id in (() if submissions_only else venues):
-            collector = VenueFeedCollector(venues[source_id], client)
+            collector = collectors[source_id]
             try:
                 for item in await collector.collect():
                     result["venue_items"] += 1
@@ -382,9 +418,10 @@ async def collect_sources(
             except Exception:
                 result["failures"] += 1
             finally:
-                result["venue_article_failures"] += len(collector.item_failures)
+                item_failures = getattr(collector, "item_failures", [])
+                result["venue_article_failures"] += len(item_failures)
                 venue_errors.extend({"source_id": source_id, **error}
-                                    for error in collector.item_failures)
+                                    for error in item_failures)
         for channel in (() if submissions_only else DEFAULT_CHANNELS):
             try:
                 leads = await collect_topics(channel, client, now=now)

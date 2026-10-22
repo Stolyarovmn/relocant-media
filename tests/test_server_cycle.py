@@ -292,3 +292,47 @@ def test_rank_uses_machine_categories_while_reasons_stay_russian():
     assert "events" in calls[0]["response_schema"]["properties"]["category"]["enum"]
     assert "medicine" in calls[0]["response_schema"]["properties"]["category"]["enum"]
     assert "enum" not in original["properties"]["category"]
+
+
+
+def test_runtime_venue_sources_include_dated_structured_collectors():
+    venues = server_cycle.venue_sources()
+    assert "venue_musicology" in venues
+    assert venues["venue_musicology"].extraction.strategy == "musicology_blog"
+    assert "venue_natural_history" in venues
+    assert venues["venue_natural_history"].extraction.strategy == "natural_history_news"
+    assert "venue_bitefartcafe" not in venues
+    assert "venue_yugoslavia" not in venues
+
+    discovery = server_cycle.discovery_venue_sources()
+    assert discovery
+    assert all(source.extraction.strategy == "venue_feed" for source in discovery.values())
+    assert set(discovery) < set(venues)
+
+
+@pytest.mark.asyncio
+async def test_structured_venue_exact_refresh_requires_one_matching_official_url():
+    target = CollectedItem(
+        source_id="venue_musicology",
+        external_id="https://musicology.rs/2026/10/14/example/",
+        url="https://musicology.rs/2026/10/14/example/",
+        title="Example",
+        body="Verified official body",
+        published_at=datetime(2026, 10, 14, 12, tzinfo=UTC),
+        canonical_url="https://musicology.rs/2026/10/14/example/",
+    )
+
+    class StructuredCollector:
+        async def collect(self):
+            return [target]
+
+    assert await server_cycle._collect_exact_url(
+        StructuredCollector(), target.url
+    ) is target
+
+    class AmbiguousCollector:
+        async def collect(self):
+            return [target, target]
+
+    with pytest.raises(ValueError, match="unavailable or ambiguous"):
+        await server_cycle._collect_exact_url(AmbiguousCollector(), target.url)
