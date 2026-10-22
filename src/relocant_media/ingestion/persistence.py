@@ -10,8 +10,10 @@ from sqlalchemy.orm import Session
 
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.domain.dedup import canonicalize_url, content_sha256
+from relocant_media.ingestion.media_provenance import build_media_provenance
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.locks import lock_editorial_city
+from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import (
     CollectorFailure,
     EditorialRun,
@@ -92,6 +94,38 @@ def _block_changed_evidence(session: Session, raw_item_id: int) -> None:
             post.status = "human_review"
 
 
+def _upsert_media_snapshot(
+    session: Session,
+    raw_item_id: int,
+    item: CollectedRawItem,
+) -> None:
+    source_html, manifest = build_media_provenance(item)
+    existing = session.get(RawItemMediaSnapshot, raw_item_id)
+    if manifest is None:
+        if existing is not None:
+            session.delete(existing)
+        return
+
+    values = {
+        "raw_item_id": raw_item_id,
+        "source_page": item.url,
+        "source_html": source_html,
+        "source_html_sha256": manifest["source_html_sha256"],
+        "source_html_bytes": manifest["source_html_bytes"],
+        "manifest": manifest,
+    }
+    statement = (
+        sqlite_insert(RawItemMediaSnapshot)
+        if session.get_bind().dialect.name == "sqlite"
+        else insert(RawItemMediaSnapshot)
+    ).values(**values)
+    statement = statement.on_conflict_do_update(
+        index_elements=["raw_item_id"],
+        set_={key: value for key, value in values.items() if key != "raw_item_id"},
+    )
+    session.execute(statement)
+
+
 def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
     cities = session.scalars(select(Source.city).where(
         Source.id.in_({item.source_id for item in items}),
@@ -109,6 +143,8 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
                 raise ReviewedEvidenceChangedError(existing.id)
             # Derived metadata is safe to backfill: it is deterministic from the exact
             # evidence already reviewed and does not change the evidence snapshot itself.
+            # Media provenance is intentionally frozen once any editorial run references
+            # the raw item, so a later page fetch cannot rewrite reviewed visual context.
             existing.canonical_url = canonical_url
             existing.content_sha256 = fingerprint
             continue
@@ -136,6 +172,13 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
             },
         )
         session.execute(statement)
+        persisted = session.scalar(select(RawItem).where(
+            RawItem.source_id == item.source_id,
+            RawItem.external_id == item.external_id,
+        ))
+        if persisted is None:
+            raise RuntimeError("raw item upsert did not materialize a row")
+        _upsert_media_snapshot(session, persisted.id, item)
     return len(items)
 
 
