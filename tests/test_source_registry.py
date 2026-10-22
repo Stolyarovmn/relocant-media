@@ -66,7 +66,7 @@ def test_parking_and_heating_sources_are_verified_shadow_snapshots() -> None:
     assert all(source.verification.checked_at is not None for source in selected)
 
 
-def test_new_vertical_sources_are_verified_shadow_only() -> None:
+def test_new_vertical_sources_remain_shadow_only() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
     rail = next(source for source in sources if source.id == "srbijavoz_news")
     residence = next(
@@ -75,8 +75,9 @@ def test_new_vertical_sources_are_verified_shadow_only() -> None:
 
     assert rail.ownership == "official"
     assert rail.trust == 1.0
-    assert rail.extraction.strategy == "page_change_detection"
+    assert rail.extraction.strategy == "srbijavoz_news"
     assert rail.extraction.status == "active"
+    assert rail.policy.high_risk is False
     assert rail.policy.auto_publish is False
     assert str(rail.url) == "https://srbijavoz.rs/vesti/"
 
