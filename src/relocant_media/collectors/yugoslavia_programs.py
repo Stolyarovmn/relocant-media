@@ -209,7 +209,9 @@ class YugoslaviaProgramsCollector:
         if source.extraction.strategy != "yugoslavia_programs":
             raise ValueError(source.extraction.strategy)
         if source.policy.auto_publish:
-            raise ValueError("Museum of Yugoslavia programs must stay review-only without publication dates")
+            raise ValueError(
+                "Museum of Yugoslavia programs must stay review-only without publication dates"
+            )
         self._source = source
         self._client = client
         self.item_failures: list[dict[str, str]] = []
