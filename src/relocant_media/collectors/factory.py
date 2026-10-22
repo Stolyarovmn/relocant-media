@@ -4,6 +4,7 @@ from relocant_media.collectors.base import Collector
 from relocant_media.collectors.beoelektrane_network_works import BeoelektraneNetworkWorksCollector
 from relocant_media.collectors.beograd_news import BelgradeNewsListCollector
 from relocant_media.collectors.bgprevoz_changes import BgprevozChangesCollector
+from relocant_media.collectors.bgprevoz_news import BgprevozNewsCollector
 from relocant_media.collectors.bvk_planned_works import BvkPlannedWorksCollector
 from relocant_media.collectors.cukarica_news import CukaricaNewsCollector
 from relocant_media.collectors.eds_belgrade_outages import EdsBelgradeOutagesCollector
@@ -37,4 +38,6 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return BeoelektraneNetworkWorksCollector(source, client)
     if strategy == "bgprevoz_changes":
         return BgprevozChangesCollector(source, client)
+    if strategy == "bgprevoz_news":
+        return BgprevozNewsCollector(source, client)
     raise UnsupportedCollectorStrategyError(strategy)
