@@ -12,6 +12,7 @@ from test_editorial_package import bind_context, package_payload, parse
 
 from relocant_media.ai.package import EditorialPackage, canonical_json, draft_sha256
 from relocant_media.ai.pipeline import EditorialPipeline
+from relocant_media.bot.formatting import compact_source_link
 from relocant_media.bot.media import MediaRelease, media_context_sha256
 from relocant_media.domain.dedup import event_key
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
@@ -171,6 +172,7 @@ async def test_reviewed_album_uses_normal_production_receipt(
     session, run = reviewed
     package = _stored_package(run)
     caption = await _preview(session, run.raw_item_id)
+    visible_caption, _ = compact_source_link(caption)
     media_root = tmp_path / "production-media"
     _write_release(media_root, run, package, caption)
     monkeypatch.setenv("EDITORIAL_MEDIA_RELEASE_DIR", str(media_root))
@@ -188,7 +190,7 @@ async def test_reviewed_album_uses_normal_production_receipt(
     assert result.message_id == 701
     assert post is not None and post.telegram_message_id == 701
     assert publisher.text_calls == []
-    assert publisher.bot.calls == [("album", APPROVED_CHANNEL_ID, caption)]
+    assert publisher.bot.calls == [("album", APPROVED_CHANNEL_ID, visible_caption)]
     session.refresh(run)
     receipt = run.outcome["_media_delivery"]
     assert receipt["state"] == "sent"
