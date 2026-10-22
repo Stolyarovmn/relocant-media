@@ -3,6 +3,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import relocant_media.collectors.bgprevoz_changes as bgprevoz_changes
 from relocant_media.collectors.bgprevoz_changes import (
     BgprevozChangesCollector,
     parse_bgprevoz_change,
@@ -128,6 +129,51 @@ async def test_collect_fetches_list_and_exact_detail_without_publication_time() 
     assert [item.external_id for item in items] == ["bgprevoz-1141"]
     assert items[0].published_at is None
     assert len(requested) == 2
+
+
+@pytest.mark.asyncio
+async def test_detail_can_be_larger_than_list_but_remains_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bgprevoz_changes, "MAX_LIST_BYTES", 256)
+    monkeypatch.setattr(bgprevoz_changes, "MAX_DETAIL_BYTES", 2_000)
+    source = _source()
+    detail = _detail(body="Потврђени детаљи измене. " * 30)
+    assert 256 < len(detail.encode()) < 2_000
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/linije/aktuelne-izmene":
+            return httpx.Response(
+                200,
+                text='<a href="/linije/aktuelne-izmene/1141">one</a>',
+            )
+        return httpx.Response(200, text=detail)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        items = await BgprevozChangesCollector(source, client).collect()
+    assert [item.external_id for item in items] == ["bgprevoz-1141"]
+
+
+@pytest.mark.asyncio
+async def test_detail_still_fails_closed_above_separate_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bgprevoz_changes, "MAX_DETAIL_BYTES", 512)
+    source = _source()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/linije/aktuelne-izmene":
+            return httpx.Response(
+                200,
+                text='<a href="/linije/aktuelne-izmene/1141">one</a>',
+            )
+        return httpx.Response(200, text=_detail(body="x" * 900))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = BgprevozChangesCollector(source, client)
+        with pytest.raises(ValueError, match="all Bgprevoz"):
+            await collector.collect()
+    assert collector.item_failures[0]["error_message"] == "Bgprevoz response too large"
 
 
 @pytest.mark.asyncio
