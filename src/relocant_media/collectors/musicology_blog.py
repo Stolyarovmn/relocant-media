@@ -5,8 +5,9 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+from collections.abc import Iterator
 from datetime import date, datetime
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
