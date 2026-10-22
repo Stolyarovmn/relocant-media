@@ -84,6 +84,13 @@ def parse_venue_feed(html_xml: str, source: SourceConfig) -> list[RawItem]:
 
 def _article(html: str, url: str, source: SourceConfig, fallback: datetime | None) -> RawItem:
     soup = BeautifulSoup(html, "html.parser")
+    lead_text = ""
+    if source.extraction.article_lead_selectors:
+        lead = next((element for selector in source.extraction.article_lead_selectors
+                     if (element := soup.select_one(selector)) is not None), None)
+        if lead is None or not lead.get_text(" ", strip=True):
+            raise ValueError("venue article lacks configured lead")
+        lead_text = lead.get_text(" ", strip=True)
     title = ""
     body = ""
     published = None
@@ -118,6 +125,8 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
                 body = article.get_text(" ", strip=True)
                 break
     body = BeautifulSoup(body, "html.parser").get_text(" ", strip=True)
+    if lead_text and lead_text not in body:
+        body = lead_text + " " + body
     published = published or fallback
     if (not title or len(body) < 120 or published is None
             or published > datetime.now(UTC)):
@@ -165,7 +174,8 @@ class VenueFeedCollector:
         items = []
         for entry in entries[:20]:
             try:
-                item = entry if entry.body else _article(
+                use_feed = bool(entry.body and not self._source.extraction.article_lead_selectors)
+                item = entry if use_feed else _article(
                     await self._fetch(entry.url), entry.url, self._source, entry.published_at
                 )
                 items.append(item)
@@ -178,7 +188,8 @@ class VenueFeedCollector:
     async def collect_url(self, url: str) -> RawItem:
         _allowed(url, self._source)
         entry = next((item for item in await self._entries() if item.url == url), None)
-        if entry is not None and entry.body:
+        if (entry is not None and entry.body
+                and not self._source.extraction.article_lead_selectors):
             return entry
         html = await self._fetch(url)
         return _article(html, url, self._source, entry.published_at if entry else None)

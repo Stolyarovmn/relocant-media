@@ -11,6 +11,7 @@ class ExtractionConfig(BaseModel):
     status: str | None = None
     feed_url: str | None = None
     article_selectors: tuple[str, ...] = (".entry-content", "article .content", "article")
+    article_lead_selectors: tuple[str, ...] = ()
     approved_hosts: tuple[str, ...] = ()
 
 
