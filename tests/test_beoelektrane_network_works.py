@@ -72,6 +72,32 @@ def test_parser_splits_explicit_districts_and_publication_time() -> None:
     assert "Dobračinoj" in items[1].body
 
 
+def test_duplicate_identical_date_and_time_metadata_is_accepted() -> None:
+    metadata = """
+        <h2>07 авг 2026 - Radovi na toplovodnoj mreži</h2>
+        <div>Posted at 08:22h in Planirani radovi by Svetlana Stojakovic</div>
+    """
+    html = _html().replace(metadata, metadata + metadata, 1)
+
+    items = parse_beoelektrane_network_works(html, _source())
+
+    assert items[0].published_at == datetime(2026, 8, 7, 8, 22, tzinfo=BELGRADE_TZ)
+
+
+def test_conflicting_publication_dates_fail_closed() -> None:
+    html = _html().replace(
+        "<div>Posted at 08:22h in Planirani radovi by Svetlana Stojakovic</div>",
+        """
+        <h2>08 авг 2026 - Radovi na toplovodnoj mreži</h2>
+        <div>Posted at 08:22h in Planirani radovi by Svetlana Stojakovic</div>
+        """,
+        1,
+    )
+
+    with pytest.raises(ValueError, match="publication date conflicting"):
+        parse_beoelektrane_network_works(html, _source())
+
+
 def test_same_date_and_district_keep_identity_across_street_revision() -> None:
     before = parse_beoelektrane_network_works(_html(), _source())[0]
     after = parse_beoelektrane_network_works(
