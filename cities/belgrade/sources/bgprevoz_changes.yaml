@@ -12,6 +12,8 @@ categories:
 extraction:
   strategy: bgprevoz_changes
   status: active
+  approved_hosts:
+    - bgprevoz.rs
 policy:
   high_risk: false
   auto_publish: false
