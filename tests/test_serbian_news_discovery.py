@@ -1,13 +1,13 @@
 import json
-from pathlib import Path
-from urllib.parse import urlparse
+import pathlib
+import urllib.parse
 
 
-REGISTRY = Path("docs/serbian-news-discovery.json")
+REGISTRY = pathlib.Path("docs/serbian-news-discovery.json")
 
 
 def _assert_https(value: str) -> None:
-    parsed = urlparse(value)
+    parsed = urllib.parse.urlparse(value)
     assert parsed.scheme == "https"
     assert parsed.netloc
     assert parsed.username is None
