@@ -66,7 +66,7 @@ async def test_send_message_never_exposes_delivery_appended_raw_source_url() -> 
     assert source_url not in payload["text"]
     assert payload["entities"] == [{
         "type": "text_link",
-        "offset": 52,
+        "offset": 48,
         "length": 8,
         "url": source_url,
     }]
