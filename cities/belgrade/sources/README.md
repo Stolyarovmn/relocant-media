@@ -48,6 +48,17 @@ EDS rolling day-pages (`Dan_0` ... `Dan_3`) также прошли structured s
 публикации: `published_at` остаётся пустым, `auto_publish: false` сохраняется до измерения качества
 live extraction/freshness.
 
+`beoelektrane_network_works` прошёл structured shadow-этап 22.10.2026. Официальная страница
+содержит одну явную дату публикации `Radovi na toplovodnoj mreži` и отдельные районные блоки
+`Radovi na toplovodnoj mreži – <район>` с конкретными улицами. Parser создаёт один RawItem на
+район: точный официальный URL остаётся evidence URL, а внутренняя canonical identity разделяет
+районы. External ID зависит от явной даты страницы и района, поэтому изменение списка улиц в тот
+же день становится source revision, а новая датированная публикация — новым item. Если `Posted at
+HH:MMh` присутствует, используется это явное время; иначе сохраняется только явная дата,
+нормализованная к началу дня Europe/Belgrade. Исчезновение даты, районов, body или footer sentinel
+считается extraction error. Источник остаётся `auto_publish: false` и обязан пройти strict online
+probe changed-source gate перед merge.
+
 22.10.2026 добавлены ещё два проверенных vertical source в shadow-режиме:
 
 - `srbijavoz_news` — официальный раздел новостей пассажирского оператора Srbijavoz. Он используется
