@@ -2,7 +2,7 @@ id: venue_musicology
 name: Musicology Barcaffè Sessions
 publisher: Musicology Barcaffè Sessions
 ownership: official
-url: https://musicology.rs/
+url: https://musicology.rs/blog/
 language: sr
 source_type: official_venue_events
 trust: 0.95
@@ -10,19 +10,16 @@ check_every: 3h
 categories:
 - events
 extraction:
-  strategy: venue_feed
+  strategy: musicology_blog
   status: active
-  feed_url: https://musicology.rs/feed/
-  article_selectors:
-  - .entry-content
-  - .post-content
   approved_hosts:
   - musicology.rs
   - www.musicology.rs
 policy:
-  auto_publish: true
+  auto_publish: false
   high_risk: false
 verification:
-  checked_at: '2026-10-20'
-  note: Официальный сайт организатора подтверждён контактами; RSS и полное содержимое
-    проверены. Это не независимое подтверждение рекламных обещаний.
+  checked_at: '2026-10-22'
+  note: Официальный HTML-блог и canonical detail-страницы проверены. Publication date
+    принимается только из явного article metadata и сверяется с dated permalink;
+    event date из текста не подменяет publication date. Источник остаётся review-only.
