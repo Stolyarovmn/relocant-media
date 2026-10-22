@@ -139,17 +139,14 @@ def parse_srbijavoz_news_list(html: str, source: SourceConfig) -> list[RawItem]:
 
 
 def _canonical_from_document(soup: BeautifulSoup, response_url: str) -> tuple[str, str]:
-    links = [
-        link
-        for link in soup.find_all("link", href=True)
-        if isinstance(link, Tag)
-        and "canonical" in {
-            str(value).casefold()
-            for value in (
-                link.get("rel") if isinstance(link.get("rel"), list) else [link.get("rel")]
-            )
-        }
-    ]
+    links: list[Tag] = []
+    for link in soup.find_all("link", href=True):
+        if not isinstance(link, Tag):
+            continue
+        rel = link.get("rel")
+        rel_values = rel if isinstance(rel, list) else [rel]
+        if any(str(value).casefold() == "canonical" for value in rel_values):
+            links.append(link)
     if len(links) > 1:
         raise SrbijavozExtractionError("ambiguous Srbijavoz canonical URL")
     value = links[0].get("href") if links else response_url
@@ -159,7 +156,10 @@ def _canonical_from_document(soup: BeautifulSoup, response_url: str) -> tuple[st
 
 
 def _title(soup: BeautifulSoup) -> str:
-    values = {text for node in soup.find_all("h1") if isinstance(node, Tag) if (text := _text(node))}
+    values: set[str] = set()
+    for node in soup.find_all("h1"):
+        if isinstance(node, Tag) and (value := _text(node)):
+            values.add(value)
     if len(values) != 1:
         raise SrbijavozExtractionError("article heading missing or ambiguous")
     return values.pop()
@@ -177,11 +177,13 @@ def _parse_iso_datetime(value: str) -> datetime:
 
 
 def _published_at(soup: BeautifulSoup) -> datetime:
-    meta_values = {
-        str(meta.get("content")).strip()
-        for meta in soup.find_all("meta", attrs={"property": "article:published_time"})
-        if isinstance(meta, Tag) and isinstance(meta.get("content"), str) and str(meta.get("content")).strip()
-    }
+    meta_values: set[str] = set()
+    for meta in soup.find_all("meta", attrs={"property": "article:published_time"}):
+        if not isinstance(meta, Tag):
+            continue
+        content = meta.get("content")
+        if isinstance(content, str) and content.strip():
+            meta_values.add(content.strip())
     if len(meta_values) > 1:
         raise SrbijavozExtractionError("ambiguous article publication timestamp")
     if meta_values:
@@ -215,10 +217,13 @@ def _body(soup: BeautifulSoup, title: str) -> str:
             if len(_text(node)) >= 40:
                 candidates.append(node)
     if candidates:
+        candidate_ids = {id(node) for node in candidates}
         non_nested = [
             node
             for node in candidates
-            if not any(parent in candidates for parent in node.parents if isinstance(parent, Tag))
+            if not any(
+                id(parent) in candidate_ids for parent in node.parents if isinstance(parent, Tag)
+            )
         ]
         candidates = non_nested or candidates
         if len(candidates) != 1:
