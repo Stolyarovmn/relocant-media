@@ -58,6 +58,7 @@ def _html(*, first_street: str = "Crnotravskoj ulici") -> str:
 
 def test_parser_splits_explicit_districts_and_publication_time() -> None:
     items = parse_beoelektrane_network_works(_html(), _source(), page_url=PAGE_URL)
+    expected_published_at = datetime(2026, 8, 7, 8, 22, tzinfo=BELGRADE_TZ)
 
     assert [item.title for item in items] == [
         "Radovi na toplovodnoj mreži – Voždovac",
@@ -65,7 +66,7 @@ def test_parser_splits_explicit_districts_and_publication_time() -> None:
         "Radovi na toplovodnoj mreži – Savski venac",
     ]
     assert all(item.url == PAGE_URL for item in items)
-    assert all(item.published_at == datetime(2026, 8, 7, 8, 22, tzinfo=BELGRADE_TZ) for item in items)
+    assert all(item.published_at == expected_published_at for item in items)
     assert all("__beoelektrane_notice=" in str(item.canonical_url) for item in items)
     assert "Mitrovdanskoj" in items[0].body
     assert "Dobračinoj" in items[1].body
