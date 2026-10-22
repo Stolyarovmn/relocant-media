@@ -6,7 +6,7 @@ from typing import Protocol, cast
 
 import httpx
 
-from relocant_media.bot.formatting import compact_source_link
+from relocant_media.bot.formatting import compact_source_link, source_link_entities
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
 
 
@@ -95,6 +95,25 @@ class TelegramBotAPI:
             raise TelegramAPIError("media response has an invalid message_id")
         return message_id
 
+    @staticmethod
+    def _source_preview_url(
+        text: str,
+        entities: Sequence[Mapping[str, object]],
+    ) -> str | None:
+        if len(entities) != 1:
+            return None
+        candidate = entities[0]
+        url = candidate.get("url")
+        if not isinstance(url, str):
+            return None
+        try:
+            expected = source_link_entities(text, url)
+        except ValueError:
+            return None
+        if len(expected) == 1 and dict(candidate) == expected[0]:
+            return url
+        return None
+
     async def send_photo(
         self,
         chat_id: int | str,
@@ -155,7 +174,6 @@ class TelegramBotAPI:
         entities: Sequence[Mapping[str, object]] = (),
     ) -> int:
         visible, source_entities = compact_source_link(text)
-        link_preview_options: dict[str, object] = {"is_disabled": True}
         if visible != text:
             if entities:
                 raise ValueError(
@@ -163,9 +181,11 @@ class TelegramBotAPI:
                 )
             text = visible
             entities = source_entities
-            source_url = source_entities[0]["url"]
-            if not isinstance(source_url, str):
-                raise ValueError("source link entity requires a URL")
+        source_url = self._source_preview_url(text, entities)
+        link_preview_options: dict[str, object]
+        if source_url is None:
+            link_preview_options = {"is_disabled": True}
+        else:
             link_preview_options = {
                 "url": source_url,
                 "prefer_large_media": True,
