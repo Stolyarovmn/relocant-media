@@ -10,7 +10,7 @@ from pathlib import Path
 
 from relocant_media.ai.package import canonical_json
 from relocant_media.bot.api import PhotoUpload
-from relocant_media.bot.media import MediaRelease, validate_media
+from relocant_media.bot.media import MediaAsset, MediaRelease, validate_media
 
 DEFAULT_PRODUCTION_MEDIA_ROOT = Path("/var/lib/relocant-media/media-releases")
 MAX_RELEASE_BYTES = 512 * 1024
@@ -34,12 +34,13 @@ def production_media_root(root: Path | None = None) -> Path:
     return Path(configured) if configured else DEFAULT_PRODUCTION_MEDIA_ROOT
 
 
-def _expected_caption(release: MediaRelease, editorial_text: str) -> str:
+def expected_media_caption(assets: tuple[MediaAsset, ...], editorial_text: str) -> str:
+    """Append only credits required by the explicitly classified reviewed assets."""
     credits = list(
         dict.fromkeys(
             value
-            for asset in release.assets
-            if asset.origin in {"licensed_photo", "official_poster"}
+            for asset in assets
+            if asset.origin in {"official_photo", "licensed_photo", "official_poster"}
             for value in (asset.archive_label, asset.attribution)
             if value
         )
@@ -47,7 +48,8 @@ def _expected_caption(release: MediaRelease, editorial_text: str) -> str:
     return editorial_text + ("\n\n" + "\n".join(credits) if credits else "")
 
 
-def _validate_telegram_photo(path: Path, data: bytes) -> None:
+def validate_telegram_photo(path: Path, data: bytes) -> None:
+    """Reject unsupported or oversized photo bytes before any durable send claim."""
     if not data or len(data) > MAX_ASSET_BYTES:
         raise ValueError("production media asset size is invalid")
     suffix = path.suffix.lower()
@@ -105,7 +107,7 @@ def prepare_production_media(
     ):
         raise ValueError("production media release identity does not match delivery")
 
-    expected_caption = _expected_caption(release, editorial_text)
+    expected_caption = expected_media_caption(release.assets, editorial_text)
     if release.caption != expected_caption:
         raise ValueError("production media caption does not match reviewed editorial text")
 
@@ -115,7 +117,7 @@ def prepare_production_media(
         data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != asset.sha256:
             raise ValueError("media changed while preparing production upload")
-        _validate_telegram_photo(path, data)
+        validate_telegram_photo(path, data)
         uploads.append(PhotoUpload(path.name, data))
 
     release_sha256 = hashlib.sha256(

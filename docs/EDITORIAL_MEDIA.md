@@ -11,8 +11,11 @@
 
 `MediaRelease` связывает исходный raw item/post, канонический SHA256 редакционного
 пакета, точную подпись, получателя и 1–10 локальных PNG/JPEG. Каждое изображение
-имеет SHA256, происхождение, основание прав, подтверждение и атрибуцию. Для фото
-нужен подтверждённый год и явная подпись с годом; атрибуция включается в caption.
+имеет SHA256, происхождение, основание прав, подтверждение и атрибуцию.
+`official_photo` используется для текущей фотографии официального источника и не
+маскируется под архив. `licensed_photo` остаётся исторической/лицензионной
+фотографией с подтверждённым годом и явной подписью с годом. Для `official_photo`,
+`licensed_photo` и `official_poster` атрибуция обязательно включается в caption.
 Булево подтверждение прав — свидетельство редакционной проверки, а не автоматический
 юридический вывод из наличия URL. Не выставляйте его без основания.
 
@@ -101,6 +104,43 @@ Production media integration сама не выставляет `rights_verified
 изображения и не превращает `og:image` в разрешённый asset. Поэтому отсутствие
 доказанного безопасного изображения остаётся нормальным text-only результатом.
 
+## Finalize reviewed media
+
+`MediaRelease` формируется в два отдельных этапа. Сначала явный assets manifest
+уже содержит происхождение, `source_url`, `rights_basis`, `rights_verified`,
+атрибуцию и SHA256. Prepare ничего из этого не выводит из домена, `og:image` или
+наличия подписи автора:
+
+```sh
+APP_ENV=production relocant-media-release prepare \
+  --raw-item-id 123 \
+  --release-id media-123 \
+  --assets-manifest /review/assets.json \
+  --assets /review/assets \
+  --output /review/bundles/123
+```
+
+Prepare заново сверяет текущий editorial package и dry-run, строит точный caption,
+проверяет explicit rights, HTTPS provenance, SHA256 и PNG/JPEG bytes, после чего
+замораживает `release-draft.json`, `review-context.json` и копию точных assets.
+На этом этапе `publication_permitted=false`, `rights_inferred=false`, Telegram I/O нет.
+
+Два независимых рецензента должны проверить именно этот frozen context и вернуть
+готовые `MediaReview` для ролей `facts` и `utility`: разные reviewer_id, approve,
+score не ниже 75, пустые blocking flags, live source checked, точные context/caption/
+asset hashes. Финализатор не создаёт и не исправляет эти approvals:
+
+```sh
+APP_ENV=production relocant-media-release finalize \
+  --bundle /review/bundles/123 \
+  --reviews /review/reviews-123.json
+```
+
+Только полное совпадение двух review создаёт `release.json`. Финализация повторно
+проверяет frozen bytes, права, attribution/archive labels и provenance. Изменение
+asset после prepare или несовпадающий review блокируют выпуск без `release.json`.
+Финализатор сам не устанавливает bundle в production inbox и не обращается к Telegram.
+
 ## Atomic production install
 
 Готовый `MediaRelease` не надо вручную копировать в watched production directory.
@@ -108,8 +148,8 @@ Production media integration сама не выставляет `rights_verified
 
 ```sh
 APP_ENV=production relocant-media-install \
-  --release /reviewed/release.json \
-  --assets /reviewed/assets
+  --release /review/bundles/123/release.json \
+  --assets /review/bundles/123/assets
 ```
 
 Команда требует явный `DATABASE_URL`, сверяет release с текущими `EditorialRun` и
