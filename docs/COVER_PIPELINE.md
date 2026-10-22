@@ -26,6 +26,33 @@ Preview не выставляет `rights_verified`, не превращает �
 медиа-ревью → MediaRelease с атрибуцией → fake-проверка. Обнаружение картинки само по
 себе никогда не выставляет `rights_verified=true` и не разрешает публикацию файла.
 
+## Generic source-page candidate extraction
+
+`collectors/article_media.py` разбирает **уже загруженную** HTML-страницу проверенного
+первоисточника. Этот слой сам не открывает произвольные URL, не использует web search и
+не скачивает найденные в поиске изображения. Он предназначен для automatic candidate
+extraction перед существующими cover selection и media review.
+
+Из `<article>` (или `<main>`, если article отсутствует) извлекаются обычные и lazy-loaded
+`img`, а из metadata — `og:image`, `og:image:url`, `twitter:image` и
+`twitter:image:src`. Relative URL нормализуются относительно source page. Допускается
+только HTTPS и только тот же image-host либо CDN, явно переданный вызывающим кодом в
+allowlist. Credentials, нестандартные порты, HTTP/data/blob URL и изображения с
+посторонних хостов отбрасываются. Очевидные logo/icon/avatar/sprite/tracker/pixel и
+объявленные tiny images также не становятся кандидатами.
+
+Для каждого кандидата сохраняются source page URL, direct image URL, способ обнаружения
+(`origin`), alt, явная атрибуция из `figcaption`, `provenance_basis`, объявленные размеры,
+`rights_hint` и `event_match=unreviewed`. Наличие `og:image`, подписи автора или размещение
+на официальном домене **не** означает пригодность к публикации и никогда автоматически
+не подтверждает права или совпадение с событием.
+
+После редакционного выбора helper скачивания повторно проверяет каждый redirect и
+allowlist, ограничивает ответ 10 МБ, принимает только JPEG/PNG по сигнатуре и сохраняет
+SHA256 фактически полученных байтов. Хэш фиксирует конкретный asset, но не является
+основанием использования. Source-specific adapters ниже остаются предпочтительнее там,
+где структура официального сайта уже известна: их ограничения точнее generic parser.
+
 ## Реализованные адаптеры
 
 ### Чукарица
