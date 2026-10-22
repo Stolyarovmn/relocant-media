@@ -102,7 +102,7 @@ def test_short_detail_is_not_accepted_as_full_evidence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_collector_fetches_list_then_exact_detail_and_keeps_unknown_publication_time() -> None:
+async def test_collect_fetches_list_and_exact_detail_without_publication_time() -> None:
     source = _source()
     requested: list[str] = []
 
