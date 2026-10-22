@@ -27,6 +27,7 @@ _NEWS_PATH = re.compile(
 )
 _DATE = re.compile(r"\b(?P<day>\d{2})-(?P<month>\d{2})-(?P<year>20\d{2})\b")
 _READ_MORE = {"опширније", "opsirnije", "read more"}
+_CARD_BOUNDARIES = {"body", "html", "main"}
 _STOP_LINES = {
     "Секретаријат за јавни превоз",
     "Sekretarijat za javni prevoz",
@@ -108,9 +109,10 @@ def _parse_card_date(value: str) -> datetime | None:
 
 
 def _ancestor_text_with_date(anchor: Tag) -> str:
-    current: Tag | None = anchor
-    for _ in range(7):
-        if current is None:
+    parent = anchor.parent
+    current = parent if isinstance(parent, Tag) else None
+    for _ in range(6):
+        if current is None or current.name in _CARD_BOUNDARIES:
             break
         text = " ".join(current.stripped_strings)
         if _DATE.search(text):
@@ -124,12 +126,13 @@ def parse_bgprevoz_news_list(
     html: str,
     source: SourceConfig,
 ) -> tuple[BgprevozNewsCandidate, ...]:
-    """Bind each official detail URL to the date shown on its index card."""
+    """Bind each official detail URL to the date shown on its local index card."""
     if len(html.encode("utf-8")) > MAX_LIST_BYTES:
         raise ValueError("Bgprevoz news list response too large")
     soup = BeautifulSoup(html, "html.parser")
     candidates: list[BgprevozNewsCandidate] = []
     seen: set[str] = set()
+    now = datetime.now(BELGRADE_TZ)
     for anchor in soup.find_all("a", href=True):
         if not isinstance(anchor, Tag):
             continue
@@ -150,7 +153,7 @@ def parse_bgprevoz_news_list(
             continue
         card_text = _ancestor_text_with_date(anchor)
         published_at = _parse_card_date(card_text)
-        if published_at is None:
+        if published_at is None or published_at > now:
             continue
         candidates.append(
             BgprevozNewsCandidate(
