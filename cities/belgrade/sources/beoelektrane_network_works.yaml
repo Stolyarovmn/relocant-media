@@ -11,11 +11,11 @@ categories:
   - utilities
   - heating
 extraction:
-  strategy: page_change_detection
+  strategy: beoelektrane_network_works
   status: active
 policy:
   high_risk: false
   auto_publish: false
 verification:
-  checked_at: 2026-10-21
-  note: Official Beogradske elektrane page lists current heating-network works by municipality and street. Shadow snapshot only until structured extraction is validated on real page revisions.
+  checked_at: 2026-10-22
+  note: Official page exposes one dated works publication split into municipality/district headings and street-level details. Structured extraction is enabled in shadow mode; auto_publish remains disabled.
