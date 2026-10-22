@@ -97,7 +97,7 @@ def _concert_links(html: str, source: SourceConfig) -> list[str]:
     return links
 
 
-def _detail_headings(soup: BeautifulSoup) -> tuple[list[Tag], str]:
+def _detail_title(soup: BeautifulSoup) -> str:
     if soup.title is None:
         raise ValueError("BitefArtCafe page title missing")
     page_title = soup.title.get_text(" ", strip=True)
@@ -106,59 +106,52 @@ def _detail_headings(soup: BeautifulSoup) -> tuple[list[Tag], str]:
     title = page_title[: -len(_TITLE_SUFFIX)].strip()
     if not title:
         raise ValueError("BitefArtCafe event title missing")
+    return title
 
-    headings = [
-        node
-        for node in soup.find_all(["h1", "h2"])
-        if isinstance(node, Tag) and node.get_text(" ", strip=True) == title
-    ]
-    if not headings:
+
+def _bounded_visible_body(lines: list[str], title: str) -> str:
+    heading_indexes = [index for index, line in enumerate(lines) if line == title]
+    if not heading_indexes:
         raise ValueError("BitefArtCafe event heading does not match page title")
-    return headings, title
 
+    stop_indexes = [index for index, line in enumerate(lines) if line == _BODY_STOP]
+    if not stop_indexes:
+        raise ValueError("BitefArtCafe event body boundary missing")
 
-def _body_after_heading(title_node: Tag, title: str) -> tuple[list[str], bool]:
-    lines: list[str] = []
-    for element in title_node.find_all_next():
-        if not isinstance(element, Tag):
+    candidates: list[str] = []
+    for heading_index in heading_indexes:
+        stop_index = next(
+            (index for index in stop_indexes if index > heading_index),
+            None,
+        )
+        if stop_index is None:
             continue
-        text = element.get_text(" ", strip=True)
-        if element.name in {"h1", "h2", "h3"} and text == _BODY_STOP:
-            return lines, True
-        if element.name in {"script", "style", "noscript", "template"}:
-            continue
-        if element.name in {"h1", "h2", "h3"} and text == title:
-            continue
-        if element.name in {"p", "li", "h2", "h3"} and text:
-            if not lines or lines[-1] != text:
-                lines.append(text)
-    return lines, False
+        body_lines = [
+            line
+            for line in lines[heading_index + 1 : stop_index]
+            if line != title
+        ]
+        if body_lines:
+            candidates.append("\n".join(body_lines))
+
+    if not candidates:
+        raise ValueError("BitefArtCafe event body missing")
+    return max(candidates, key=len)
 
 
 def _detail_body(html: str) -> tuple[str, str]:
     if len(html.encode("utf-8")) > MAX_BYTES:
         raise ValueError("BitefArtCafe event response too large")
+
     visible = normalize_visible_text(html)
+    lines = [line.strip() for line in visible.splitlines() if line.strip()]
     dates = _DATE_SEARCH.findall(visible)
     if not dates:
         raise ValueError("BitefArtCafe event date missing")
     event_date = dates[0]
 
-    soup = BeautifulSoup(html, "html.parser")
-    title_nodes, title = _detail_headings(soup)
-    candidates: list[str] = []
-    boundary_found = False
-    for title_node in title_nodes:
-        lines, found = _body_after_heading(title_node, title)
-        boundary_found = boundary_found or found
-        if found and lines:
-            candidates.append("\n".join(lines))
-    if not boundary_found:
-        raise ValueError("BitefArtCafe event body boundary missing")
-    if not candidates:
-        raise ValueError("BitefArtCafe event body missing")
-
-    body = max(candidates, key=len)
+    title = _detail_title(BeautifulSoup(html, "html.parser"))
+    body = _bounded_visible_body(lines, title)
     if len(body) < 120:
         raise ValueError("BitefArtCafe event body shorter than 120 characters")
     if event_date not in body:
