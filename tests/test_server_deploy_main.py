@@ -41,7 +41,10 @@ def _repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str
         "relocant-deploy.timer",
     ):
         (deploy / unit).write_text(f"# {unit}\n", encoding="utf-8")
-    (deploy / "deploy-green-main.sh").write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+    (deploy / "deploy-green-main.sh").write_text(
+        SCRIPT.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     (deploy / "check-main-sync.sh").write_text(
         "#!/bin/sh\n"
         "set -eu\n"
@@ -240,7 +243,10 @@ def test_deploy_refuses_dirty_checkout_before_timer_changes(tmp_path: pathlib.Pa
 
 def test_root_deploy_service_executes_only_installed_root_owned_script() -> None:
     service = DEPLOY_SERVICE.read_text(encoding="utf-8")
+    checkout_exec = (
+        "ExecStart=/bin/sh /opt/relocant-media/app/deploy/server/deploy-green-main.sh"
+    )
 
     assert "ExecStart=/usr/local/libexec/relocant-media/deploy-green-main.sh" in service
-    assert "ExecStart=/bin/sh /opt/relocant-media/app/deploy/server/deploy-green-main.sh" not in service
+    assert checkout_exec not in service
     assert "NoNewPrivileges=true" in service
