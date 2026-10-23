@@ -288,6 +288,37 @@
       }
     },
     {
+      "id": "viber_n1_srbija",
+      "platform": "viber",
+      "name": "N1 Srbija",
+      "url": "https://invite.viber.com/?g2=AQBu2xsPIrvg1lb%2BqrecLE105zQ4T%2BxmAlGBO0khhkbbevr0vkugiUXofCe480r9&lang=en",
+      "scope": [
+        "serbia",
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_channel",
+      "selection_basis": [
+        "official_n1_launch_announcement",
+        "current_viber_invite"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "private_channel_without_safe_read_only_public_adapter"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://n1info.rs/vesti/n1-sada-dostupan-na-threads-u-i-viberu-pratite-nas/komentari/",
+          "https://invite.viber.com/?g2=AQBu2xsPIrvg1lb%2BqrecLE105zQ4T%2BxmAlGBO0khhkbbevr0vkugiUXofCe480r9&lang=en"
+        ]
+      }
+    },
+    {
       "id": "viber_beograd_uzivo",
       "platform": "viber",
       "name": "Beograd uživo",
