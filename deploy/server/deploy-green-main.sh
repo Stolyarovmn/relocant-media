@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+
 APP_DIR="${RELOCANT_APP_DIR:-/opt/relocant-media/app}"
 REMOTE_URL="${RELOCANT_GIT_REMOTE_URL:-https://github.com/Stolyarovmn/relocant-media.git}"
 BRANCH="${RELOCANT_GIT_BRANCH:-main}"
@@ -34,11 +37,16 @@ if [ ! -x "$SYSTEMCTL_BIN" ] || [ ! -x "$CURL_BIN" ] || [ ! -x "$PYTHON_BIN" ] |
 fi
 
 cd "$APP_DIR"
-if [ "$(git symbolic-ref --short -q HEAD || true)" != "$BRANCH" ]; then
+
+git_safe() {
+  git -c "safe.directory=$APP_DIR" "$@"
+}
+
+if [ "$(git_safe symbolic-ref --short -q HEAD || true)" != "$BRANCH" ]; then
   echo "production checkout must be on $BRANCH" >&2
   exit 78
 fi
-if [ -n "$(git status --porcelain)" ]; then
+if [ -n "$(git_safe status --porcelain)" ]; then
   echo "production checkout is not clean" >&2
   exit 78
 fi
@@ -75,11 +83,11 @@ install_control_plane() {
 # Fetch and validate the exact target before touching editorial timers. This makes
 # frequent unattended checks cheap and non-disruptive when main has not changed or
 # when the newest commit is not yet backed by successful CI.
-current="$(git rev-parse --verify HEAD)"
-git fetch --no-tags "$REMOTE_URL" "refs/heads/$BRANCH"
-target="$(git rev-parse --verify FETCH_HEAD)"
+current="$(git_safe rev-parse --verify HEAD)"
+git_safe fetch --no-tags "$REMOTE_URL" "refs/heads/$BRANCH"
+target="$(git_safe rev-parse --verify FETCH_HEAD)"
 
-if [ "$current" != "$target" ] && ! git merge-base --is-ancestor "$current" "$target"; then
+if [ "$current" != "$target" ] && ! git_safe merge-base --is-ancestor "$current" "$target"; then
   echo "refusing non-fast-forward production deployment: current=$current target=$target" >&2
   exit 78
 fi
@@ -142,7 +150,7 @@ fi
 
 # Main may advance while we wait for the worker lock. Never deploy an intermediate
 # commit and call it current production; defer and let the next watcher pass retry.
-latest_line="$(git ls-remote --exit-code "$REMOTE_URL" "refs/heads/$BRANCH")"
+latest_line="$(git_safe ls-remote --exit-code "$REMOTE_URL" "refs/heads/$BRANCH")"
 latest="$(printf '%s\n' "$latest_line" | awk 'NR == 1 {print $1}')"
 if [ -z "$latest" ] || [ "$latest" != "$target" ]; then
   echo "public $BRANCH advanced while deployment was waiting; retry later" >&2
@@ -151,11 +159,11 @@ fi
 
 rollback() {
   echo "deployment failed; restoring checkout $current" >&2
-  git reset --hard "$current" >/dev/null 2>&1 || true
+  git_safe reset --hard "$current" >/dev/null 2>&1 || true
   "$VENV_PYTHON" -m pip install -e "$APP_DIR" >/dev/null 2>&1 || true
 }
 
-git merge --ff-only "$target"
+git_safe merge --ff-only "$target"
 if ! "$VENV_PYTHON" -m pip install -e "$APP_DIR"; then
   rollback
   exit 1
