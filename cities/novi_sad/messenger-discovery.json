@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "city": "novi_sad",
+  "observed_on": "2026-10-23",
+  "purpose": "city_messenger_discovery_catalog_only",
+  "policy": {
+    "runtime_collection": false,
+    "publication_evidence": false,
+    "requires_primary_verification": true,
+    "dedicated_channel_required_before_runtime": true
+  },
+  "sources": [
+    {
+      "id": "viber_visit_novi_sad",
+      "platform": "viber",
+      "name": "Visit Novi Sad",
+      "url": "https://invite.viber.com/?g2=AQAijTcfD%2FxyMEwC72beAyq4%2BSu7WXS1%2FqGesFltku2GMR1sKG5BHgQdq2WpVQ5h&lang=en",
+      "scope": [
+        "novi_sad"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "official_city_culture_channel",
+      "selection_basis": [
+        "official_novi_sad_report_lists_viber_visit_novi_sad",
+        "current_viber_verified_channel"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "novi_sad_runtime_and_destination_channel_not_configured"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://skupstina.novisad.rs/wp-content/uploads/2025/06/44-izvestaj-o-radu-fondacije-novi-sad-evropska-prestonica-kulture-za-2024.pdf",
+          "https://invite.viber.com/?g2=AQAijTcfD%2FxyMEwC72beAyq4%2BSu7WXS1%2FqGesFltku2GMR1sKG5BHgQdq2WpVQ5h&lang=en"
+        ]
+      }
+    }
+  ]
+}
