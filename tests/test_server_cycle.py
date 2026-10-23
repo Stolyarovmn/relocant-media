@@ -304,6 +304,10 @@ def test_runtime_venue_sources_include_dated_structured_collectors():
     assert "venue_bitefartcafe" not in venues
     assert "venue_yugoslavia" not in venues
 
+    review_only = server_cycle.review_only_venue_sources()
+    assert set(review_only) == {"venue_bitefartcafe", "venue_yugoslavia"}
+    assert all(not source.policy.auto_publish for source in review_only.values())
+
     discovery = server_cycle.discovery_venue_sources()
     assert discovery
     assert all(source.extraction.strategy == "venue_feed" for source in discovery.values())
@@ -336,3 +340,58 @@ async def test_structured_venue_exact_refresh_requires_one_matching_official_url
 
     with pytest.raises(ValueError, match="unavailable or ambiguous"):
         await server_cycle._collect_exact_url(AmbiguousCollector(), target.url)
+
+
+
+def test_review_only_venue_hold_requires_future_event_and_unknown_publication():
+    now = datetime(2026, 10, 22, 12, tzinfo=UTC)
+    future = CollectedItem(
+        source_id="venue_bitefartcafe",
+        external_id="https://bitefartcafe.rs/dogadjaji/example/",
+        url="https://bitefartcafe.rs/dogadjaji/example/",
+        title="Koncert 30.10.2026.",
+        body="Koncert će se održati 30.10.2026. u Beogradu. Ulaznice su dostupne.",
+        published_at=None,
+    )
+    assert server_cycle._is_review_only_venue_hold(future, now=now)
+
+    expired = future.__class__(
+        source_id=future.source_id,
+        external_id=future.external_id + "expired",
+        url=future.url + "expired",
+        title="Koncert 20.10.2026.",
+        body="Koncert je održan 20.10.2026. u Beogradu. Ulaznice su bile dostupne.",
+        published_at=None,
+    )
+    assert not server_cycle._is_review_only_venue_hold(expired, now=now)
+
+    dated = future.__class__(
+        source_id=future.source_id,
+        external_id=future.external_id + "dated",
+        url=future.url + "dated",
+        title=future.title,
+        body=future.body,
+        published_at=now - timedelta(hours=1),
+    )
+    assert not server_cycle._is_review_only_venue_hold(dated, now=now)
+
+
+def test_unknown_publication_date_triages_to_human_review_without_ai(seeded):
+    from relocant_media.ops.newsroom_triage import triage_queue
+
+    engine, raw_id, _ = seeded
+    with Session(engine) as session:
+        item = session.get(RawItem, raw_id)
+        item.published_at = None
+        session.commit()
+
+    report = triage_queue(engine, now=datetime.now(UTC))
+    assert report["metadata_deferred"] == 1
+    assert report["ai_calls"] == 0
+    with Session(engine) as session:
+        run = session.get(EditorialRun, raw_id)
+        assert run is not None
+        assert run.outcome["status"] == "human_review"
+        assert run.outcome["reason"] == "publication_date_unknown"
+        assert run.outcome["ai_calls"] == 0
+        assert run.post_id is None
