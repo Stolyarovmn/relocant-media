@@ -15,18 +15,13 @@
       "platform": "telegram",
       "name": "SERBIA LIVE - BEOGRAD",
       "url": "https://t.me/s/serbialive_beograd",
-      "scope": [
-        "belgrade"
-      ],
+      "scope": ["belgrade"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "mixed_ugc_and_publisher_posts",
-      "selection_basis": [
-        "current_public_preview",
-        "belgrade_local_incident_and_city_signals"
-      ],
+      "selection_basis": ["current_public_preview", "belgrade_local_incident_and_city_signals"],
       "collection": {
         "status": "runtime_public_preview",
         "adapter": "telegram_public_preview",
@@ -35,9 +30,7 @@
       "verification": {
         "status": "verified_current",
         "verified_on": "2026-10-23",
-        "verification_urls": [
-          "https://t.me/s/serbialive_beograd"
-        ]
+        "verification_urls": ["https://t.me/s/serbialive_beograd"]
       }
     },
     {
@@ -45,18 +38,13 @@
       "platform": "telegram",
       "name": "MOJ - BEOGRAD",
       "url": "https://t.me/s/ylcutcTMU01kNWVk",
-      "scope": [
-        "belgrade"
-      ],
+      "scope": ["belgrade"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "mixed_ugc_and_publisher_posts",
-      "selection_basis": [
-        "current_public_preview",
-        "belgrade_local_incident_traffic_and_city_signals"
-      ],
+      "selection_basis": ["current_public_preview", "belgrade_local_incident_traffic_and_city_signals"],
       "collection": {
         "status": "runtime_public_preview",
         "adapter": "telegram_public_preview",
@@ -65,9 +53,7 @@
       "verification": {
         "status": "verified_current",
         "verified_on": "2026-10-23",
-        "verification_urls": [
-          "https://t.me/s/ylcutcTMU01kNWVk"
-        ]
+        "verification_urls": ["https://t.me/s/ylcutcTMU01kNWVk"]
       }
     },
     {
@@ -75,20 +61,13 @@
       "platform": "telegram",
       "name": "Работа в Сербии | Rabota v Serbii",
       "url": "https://t.me/s/rabotavserbii",
-      "scope": [
-        "serbia",
-        "belgrade",
-        "jobs"
-      ],
+      "scope": ["serbia", "belgrade", "jobs"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "commercial_job_board_and_ads",
-      "selection_basis": [
-        "current_public_preview",
-        "high_volume_russian_language_jobs"
-      ],
+      "selection_basis": ["current_public_preview", "high_volume_russian_language_jobs"],
       "collection": {
         "status": "catalog_only",
         "reason": "high_volume_job_ads_without_approved_primary_resolution_path"
@@ -96,9 +75,7 @@
       "verification": {
         "status": "verified_current",
         "verified_on": "2026-10-23",
-        "verification_urls": [
-          "https://t.me/s/rabotavserbii"
-        ]
+        "verification_urls": ["https://t.me/s/rabotavserbii"]
       }
     },
     {
@@ -106,20 +83,13 @@
       "platform": "telegram",
       "name": "Вакансии в Сербии",
       "url": "https://t.me/s/serbiawork",
-      "scope": [
-        "serbia",
-        "belgrade",
-        "jobs"
-      ],
+      "scope": ["serbia", "belgrade", "jobs"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "community_job_ads",
-      "selection_basis": [
-        "current_public_preview",
-        "russian_language_jobs"
-      ],
+      "selection_basis": ["current_public_preview", "russian_language_jobs"],
       "collection": {
         "status": "catalog_only",
         "reason": "high_volume_job_ads_without_approved_primary_resolution_path"
@@ -127,9 +97,7 @@
       "verification": {
         "status": "verified_current",
         "verified_on": "2026-10-23",
-        "verification_urls": [
-          "https://t.me/s/serbiawork"
-        ]
+        "verification_urls": ["https://t.me/s/serbiawork"]
       }
     },
     {
@@ -137,20 +105,13 @@
       "platform": "viber",
       "name": "AIR SERBIA",
       "url": "https://invite.viber.com/?g2=AQBNVfpliTxfMlZQ6prYFwV5EuDddOe3ilGIuIoejPXQLXncLZzxuDp2%2BasGq66F",
-      "scope": [
-        "serbia",
-        "belgrade",
-        "transport"
-      ],
+      "scope": ["serbia", "belgrade", "transport"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "official_publisher_channel",
-      "selection_basis": [
-        "official_air_serbia_launch_announcement",
-        "current_viber_invite"
-      ],
+      "selection_basis": ["official_air_serbia_launch_announcement", "current_viber_invite"],
       "collection": {
         "status": "catalog_only",
         "reason": "no_safe_read_only_public_adapter"
@@ -169,19 +130,13 @@
       "platform": "viber",
       "name": "Blic",
       "url": "https://invite.viber.com/?g2=AQBI0Sbh%2FqkqL0xslYqfxIfVNI824DTNNKhlGsV00aLd58O6E4klv96aRe8SmMSE",
-      "scope": [
-        "serbia",
-        "belgrade"
-      ],
+      "scope": ["serbia", "belgrade"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "publisher_channel",
-      "selection_basis": [
-        "linked_from_blic_official_site",
-        "current_viber_invite"
-      ],
+      "selection_basis": ["linked_from_blic_official_site", "current_viber_invite"],
       "collection": {
         "status": "catalog_only",
         "reason": "no_safe_read_only_public_adapter"
@@ -200,19 +155,13 @@
       "platform": "whatsapp",
       "name": "Blic",
       "url": "https://www.whatsapp.com/channel/0029Va9AnaGJUM2hafZrhJ2f",
-      "scope": [
-        "serbia",
-        "belgrade"
-      ],
+      "scope": ["serbia", "belgrade"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "publisher_channel",
-      "selection_basis": [
-        "linked_from_blic_official_site",
-        "current_whatsapp_channel_page"
-      ],
+      "selection_basis": ["linked_from_blic_official_site", "current_whatsapp_channel_page"],
       "collection": {
         "status": "catalog_only",
         "reason": "no_safe_read_only_public_adapter"
@@ -231,18 +180,13 @@
       "platform": "whatsapp",
       "name": "N1 Srbija",
       "url": "https://www.whatsapp.com/channel/0029VajYmom8V0tp1wlTwp0V",
-      "scope": [
-        "serbia",
-        "belgrade"
-      ],
+      "scope": ["serbia", "belgrade"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "publisher_channel",
-      "selection_basis": [
-        "linked_from_n1_official_site"
-      ],
+      "selection_basis": ["linked_from_n1_official_site"],
       "collection": {
         "status": "catalog_only",
         "reason": "no_safe_read_only_public_adapter"
@@ -261,19 +205,13 @@
       "platform": "whatsapp",
       "name": "Nova S",
       "url": "https://www.whatsapp.com/channel/0029Vb5s0jMDJ6GsQ9ab4z0y",
-      "scope": [
-        "serbia",
-        "belgrade"
-      ],
+      "scope": ["serbia", "belgrade"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "publisher_channel",
-      "selection_basis": [
-        "linked_from_nova_official_site",
-        "current_whatsapp_channel_page"
-      ],
+      "selection_basis": ["linked_from_nova_official_site", "current_whatsapp_channel_page"],
       "collection": {
         "status": "catalog_only",
         "reason": "no_safe_read_only_public_adapter"
@@ -292,19 +230,13 @@
       "platform": "viber",
       "name": "N1 Srbija",
       "url": "https://invite.viber.com/?g2=AQBu2xsPIrvg1lb%2BqrecLE105zQ4T%2BxmAlGBO0khhkbbevr0vkugiUXofCe480r9&lang=en",
-      "scope": [
-        "serbia",
-        "belgrade"
-      ],
+      "scope": ["serbia", "belgrade"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "publisher_channel",
-      "selection_basis": [
-        "official_n1_launch_announcement",
-        "current_viber_invite"
-      ],
+      "selection_basis": ["official_n1_launch_announcement", "current_viber_invite"],
       "collection": {
         "status": "catalog_only",
         "reason": "private_channel_without_safe_read_only_public_adapter"
@@ -319,22 +251,45 @@
       }
     },
     {
+      "id": "viber_visit_novi_sad",
+      "platform": "viber",
+      "name": "Visit Novi Sad",
+      "url": "https://invite.viber.com/?g2=AQAijTcfD%2FxyMEwC72beAyq4%2BSu7WXS1%2FqGesFltku2GMR1sKG5BHgQdq2WpVQ5h&lang=en",
+      "scope": ["novi_sad"],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "official_city_culture_channel",
+      "selection_basis": [
+        "official_novi_sad_report_lists_viber_visit_novi_sad",
+        "current_viber_verified_channel"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "novi_sad_runtime_not_enabled_and_no_safe_read_only_public_adapter"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://skupstina.novisad.rs/wp-content/uploads/2025/06/44-izvestaj-o-radu-fondacije-novi-sad-evropska-prestonica-kulture-za-2024.pdf",
+          "https://invite.viber.com/?g2=AQAijTcfD%2FxyMEwC72beAyq4%2BSu7WXS1%2FqGesFltku2GMR1sKG5BHgQdq2WpVQ5h&lang=en"
+        ]
+      }
+    },
+    {
       "id": "viber_beograd_uzivo",
       "platform": "viber",
       "name": "Beograd uživo",
       "url": "https://invite.viber.com/?g2=AQBMMeg%2BOeZlQEssOvMj0FQt45PBeuhq2s1VmggSNHEj3opF7AlgTSlgj%2BBiqitf",
-      "scope": [
-        "belgrade"
-      ],
+      "scope": ["belgrade"],
       "role": "discovery_only",
       "publication_evidence": false,
       "requires_primary_verification": true,
       "authoritative_for": [],
       "content_origin": "community_ugc",
-      "selection_basis": [
-        "linked_from_beograd_uzivo_site",
-        "local_traffic_and_city_problem_signals"
-      ],
+      "selection_basis": ["linked_from_beograd_uzivo_site", "local_traffic_and_city_problem_signals"],
       "collection": {
         "status": "catalog_only",
         "reason": "no_safe_read_only_public_adapter"
