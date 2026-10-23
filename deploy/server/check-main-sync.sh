@@ -8,7 +8,7 @@ BRANCH="${RELOCANT_GIT_BRANCH:-main}"
 cd "$APP_DIR"
 
 actual="$(git rev-parse --verify HEAD)"
-if [ "$(git status --porcelain --untracked-files=no)" ]; then
+if ! git diff-index --quiet HEAD --; then
   echo "production runtime checkout has tracked modifications; refusing editorial cycle" >&2
   exit 78
 fi
