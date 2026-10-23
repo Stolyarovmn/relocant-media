@@ -7,7 +7,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import httpx
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 from relocant_media.collectors.base import RawItem
 from relocant_media.sources.registry import SourceConfig
@@ -71,14 +71,69 @@ def _text(node: Tag) -> str:
     return " ".join(node.stripped_strings)
 
 
-def _nearby_publication_date(h1: Tag) -> datetime:
-    # The official page renders the location/publication date adjacent to the story heading.
-    # Requiring the location comma prevents an event/effective date in body prose from being
-    # mistaken for the publication date.
-    strings = [
-        *h1.find_all_previous(string=True, limit=30),
-        *h1.find_all_next(string=True, limit=30),
+def _meta_content(soup: BeautifulSoup, property_name: str) -> str | None:
+    node = soup.find("meta", attrs={"property": property_name})
+    if not isinstance(node, Tag):
+        return None
+    value = node.get("content")
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split())
+    return normalized or None
+
+
+def _declared_title(soup: BeautifulSoup) -> str | None:
+    og_title = _meta_content(soup, "og:title")
+    if og_title:
+        return og_title
+    title = soup.find("title")
+    if isinstance(title, Tag):
+        value = _text(title)
+        return value or None
+    return None
+
+
+def _matches_declared_title(candidate: str, declared: str) -> bool:
+    if candidate == declared:
+        return True
+    for separator in (" | ", " - ", " — "):
+        if declared.startswith(candidate + separator):
+            return True
+    return False
+
+
+def _article_heading(soup: BeautifulSoup) -> Tag:
+    headings = [
+        node
+        for node in soup.find_all(["h1", "h2", "h3"])
+        if isinstance(node, Tag) and _text(node)
     ]
+    declared = _declared_title(soup)
+    if declared:
+        matches = [node for node in headings if _matches_declared_title(_text(node), declared)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise SrbijaGovExtractionError("declared article heading is ambiguous")
+    if len(headings) == 1:
+        return headings[0]
+    raise SrbijaGovExtractionError("article heading missing or ambiguous")
+
+
+def _outside_paragraph(value: NavigableString) -> bool:
+    parent = value.parent
+    return not isinstance(parent, Tag) or (parent.name != "p" and parent.find_parent("p") is None)
+
+
+def _nearby_publication_date(heading: Tag) -> datetime:
+    # The official page renders the location/publication date adjacent to the story heading.
+    # Only text before the article body is eligible: a later event/effective date in prose must
+    # never be substituted for a missing publication date.
+    strings = list(heading.find_all_previous(string=True, limit=30))
+    for value in heading.find_all_next(string=True, limit=30):
+        if not isinstance(value, NavigableString) or not _outside_paragraph(value):
+            break
+        strings.append(value)
     for value in strings:
         match = DATE_RE.search(" ".join(str(value).split()))
         if match is None:
@@ -98,11 +153,11 @@ def _nearby_publication_date(h1: Tag) -> datetime:
     raise SrbijaGovExtractionError("explicit publication date not found near article heading")
 
 
-def _article_root(h1: Tag, soup: BeautifulSoup) -> Tag | BeautifulSoup:
-    article = h1.find_parent("article")
+def _article_root(heading: Tag, soup: BeautifulSoup) -> Tag | BeautifulSoup:
+    article = heading.find_parent("article")
     if isinstance(article, Tag):
         return article
-    main = h1.find_parent("main")
+    main = heading.find_parent("main")
     if isinstance(main, Tag):
         return main
     return soup
@@ -111,16 +166,9 @@ def _article_root(h1: Tag, soup: BeautifulSoup) -> Tag | BeautifulSoup:
 def parse_srbija_gov_article(html: str, source: SourceConfig, url: str) -> RawItem:
     canonical, article_id = canonical_srbija_gov_article_url(url)
     soup = BeautifulSoup(html, "html.parser")
-    headings = [
-        node
-        for node in soup.find_all("h1")
-        if isinstance(node, Tag) and _text(node)
-    ]
-    if len(headings) != 1:
-        raise SrbijaGovExtractionError("article heading missing or ambiguous")
-    h1 = headings[0]
-    root = _article_root(h1, soup)
-    following = {id(node) for node in h1.find_all_next("p")}
+    heading = _article_heading(soup)
+    root = _article_root(heading, soup)
+    following = {id(node) for node in heading.find_all_next("p")}
     paragraphs: list[str] = []
     for paragraph in root.find_all("p"):
         if not isinstance(paragraph, Tag) or id(paragraph) not in following:
@@ -137,9 +185,9 @@ def parse_srbija_gov_article(html: str, source: SourceConfig, url: str) -> RawIt
         source_id=source.id,
         external_id=article_id,
         url=canonical,
-        title=_text(h1),
+        title=_text(heading),
         body=body,
-        published_at=_nearby_publication_date(h1),
+        published_at=_nearby_publication_date(heading),
     )
 
 
