@@ -28,6 +28,7 @@ from relocant_media.collectors.srbija_gov_article import (
 from relocant_media.domain.freshness import freshness_decision
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops import server_cycle as base
+from relocant_media.services.primary_discovery import source_for_url
 from relocant_media.services.published_watch import evidence_changed, published_sources
 from relocant_media.services.submission_feedback import resolve_submission
 from relocant_media.services.submission_queue import (
@@ -35,7 +36,7 @@ from relocant_media.services.submission_queue import (
     pending_submissions,
     tip_urls,
 )
-from relocant_media.sources.registry import SourceConfig
+from relocant_media.sources.registry import SourceConfig, load_source_file
 from relocant_media.storage.models import EditorialRun, RawItem, Submission
 
 SOURCES = Path("cities/belgrade/sources")
@@ -45,12 +46,12 @@ _BASE_FETCH_DOCUMENTS = base.fetch_documents
 
 
 def _source() -> SourceConfig:
-    return base.load_source_file(SOURCES / f"{SOURCE_ID}.yaml")
+    return load_source_file(SOURCES / f"{SOURCE_ID}.yaml")
 
 
 def _base_direct_sources() -> dict[str, SourceConfig]:
     sources = {
-        key: base.load_source_file(SOURCES / f"{key}.yaml")
+        key: load_source_file(SOURCES / f"{key}.yaml")
         for key in ("city_beograd_news", "cukarica_news")
     }
     sources.update(base.venue_sources())
@@ -64,7 +65,7 @@ def _direct_budget(rows: list[Submission]) -> int:
     already_allowed: set[str] = set()
     for row in rows:
         for url in tip_urls(row.payload):
-            if base.source_for_url(url, known) is not None:
+            if source_for_url(url, known) is not None:
                 already_allowed.add(url)
     return max(0, 10 - len(already_allowed))
 
