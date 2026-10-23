@@ -35,11 +35,11 @@ def _repository(tmp_path: Path) -> tuple[Path, Path, str]:
     return work, remote, initial
 
 
-def _check(work: Path) -> subprocess.CompletedProcess[str]:
+def _check(work: Path, remote: Path) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
         "RELOCANT_APP_DIR": str(work),
-        "RELOCANT_GIT_REMOTE": "origin",
+        "RELOCANT_GIT_REMOTE_URL": str(remote),
         "RELOCANT_GIT_BRANCH": "main",
     }
     return subprocess.run(
@@ -52,9 +52,9 @@ def _check(work: Path) -> subprocess.CompletedProcess[str]:
 
 
 def test_runtime_freshness_accepts_exact_remote_main(tmp_path: Path) -> None:
-    work, _, initial = _repository(tmp_path)
+    work, remote, initial = _repository(tmp_path)
 
-    result = _check(work)
+    result = _check(work, remote)
 
     assert result.returncode == 0
     assert initial in result.stdout
@@ -62,7 +62,7 @@ def test_runtime_freshness_accepts_exact_remote_main(tmp_path: Path) -> None:
 
 
 def test_runtime_freshness_rejects_stale_checkout(tmp_path: Path) -> None:
-    work, _, initial = _repository(tmp_path)
+    work, remote, initial = _repository(tmp_path)
     (work / "tracked.txt").write_text("two\n", encoding="utf-8")
     _git(work, "add", "tracked.txt")
     _git(work, "commit", "-m", "new main")
@@ -70,7 +70,7 @@ def test_runtime_freshness_rejects_stale_checkout(tmp_path: Path) -> None:
     _git(work, "push", "origin", "main")
     _git(work, "reset", "--hard", initial)
 
-    result = _check(work)
+    result = _check(work, remote)
 
     assert result.returncode == 78
     assert "runtime is stale" in result.stderr
@@ -79,10 +79,10 @@ def test_runtime_freshness_rejects_stale_checkout(tmp_path: Path) -> None:
 
 
 def test_runtime_freshness_rejects_tracked_modifications(tmp_path: Path) -> None:
-    work, _, _ = _repository(tmp_path)
+    work, remote, _ = _repository(tmp_path)
     (work / "tracked.txt").write_text("locally changed\n", encoding="utf-8")
 
-    result = _check(work)
+    result = _check(work, remote)
 
     assert result.returncode == 78
     assert "tracked modifications" in result.stderr
