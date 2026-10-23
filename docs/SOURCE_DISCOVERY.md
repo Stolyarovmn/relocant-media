@@ -64,13 +64,14 @@ source/evidence/factual guards. Пересказ другого канала н�
 
 В каталоге зафиксированы `SERBIA LIVE - BEOGRAD`, `MOJ - BEOGRAD`, два
 русскоязычных канала вакансий, официальный Viber AIR SERBIA, Viber и WhatsApp
-Blic и Viber-сообщество Beograd uživo. `SERBIA LIVE - BEOGRAD` и
-`MOJ - BEOGRAD` имеют статус `runtime_public_preview`, потому что их публичный
-Telegram preview читается существующим адаптером без аккаунта. Каналы вакансий
-остаются `catalog_only`, чтобы поток объявлений не занимал discovery budget без
-разрешённого пути к первичному подтверждению. Viber/WhatsApp также
-`catalog_only`, пока нет безопасного read-only публичного адаптера; наличие
-invite/channel URL не имитируется как автоматический ingestion.
+Blic, WhatsApp N1 Srbija и Nova S, а также Viber-сообщество Beograd uživo.
+`SERBIA LIVE - BEOGRAD` и `MOJ - BEOGRAD` имеют статус
+`runtime_public_preview`, потому что их публичный Telegram preview читается
+существующим адаптером без аккаунта. Каналы вакансий остаются `catalog_only`,
+чтобы поток объявлений не занимал discovery budget без разрешённого пути к
+первичному подтверждению. Viber/WhatsApp также `catalog_only`, пока нет
+безопасного read-only публичного адаптера; наличие invite/channel URL не
+имитируется как автоматический ingestion.
 
 ## Крупные сербские СМИ как discovery-only layer
 
