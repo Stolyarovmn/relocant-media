@@ -1,4 +1,4 @@
-"""Receive private tips without replies, forwarding or publication capabilities."""
+"""Receive private tips and exact owner-review actions without publication side effects."""
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.bot.intake import handle_private_message
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
+from relocant_media.services.owner_review import record_owner_callback, record_owner_reply
 from relocant_media.services.submission_feedback import save_requested_followup
 from relocant_media.storage.models import Submission, TelegramUpdateReceipt
 
@@ -53,21 +54,48 @@ def _mapping(value: object) -> dict[str, Any]:
     return value
 
 
+async def _ack_owner_action(bot: TelegramBotAPI, callback: object, result: Any) -> None:
+    """Best-effort UI acknowledgement after the durable decision has committed."""
+    if isinstance(callback, dict):
+        callback_id = callback.get("id")
+        if isinstance(callback_id, str) and callback_id:
+            try:
+                await bot._call("answerCallbackQuery", {
+                    "callback_query_id": callback_id,
+                    "text": result.answer_text or "Принято.",
+                })
+            except Exception:
+                pass
+    if result.clear_chat_id is not None and result.clear_message_id is not None:
+        try:
+            await bot._call("editMessageReplyMarkup", {
+                "chat_id": result.clear_chat_id,
+                "message_id": result.clear_message_id,
+                "reply_markup": {"inline_keyboard": []},
+            })
+        except Exception:
+            pass
+
+
 async def receive_private_tips(
     engine: Engine, bot: TelegramBotAPI, *, enabled: bool,
     poll_timeout: int = 0,
     store_guard: Callable[[], AbstractContextManager[bool]] | None = None,
+    accept_private_tips: bool = True,
+    owner_user_id: int | None = None,
+    owner_chat_id: int | None = None,
 ) -> dict[str, Any]:
     if not enabled:
         return dict(status="disabled", received=0, owner_action_required=False)
     webhook = _mapping(await bot._call("getWebhookInfo", {}))
     if webhook.get("url"):
         return dict(status="blocked_existing_webhook", received=0, owner_action_required=True)
-    me = _mapping(await bot._call("getMe", {}))
-    member = _mapping(await bot._call(
-        "getChatMember", dict(chat_id=APPROVED_CHANNEL_ID, user_id=me["id"])))
-    if member.get("can_manage_direct_messages") is not True:
-        return dict(status="blocked_direct_message_access", received=0, owner_action_required=True)
+    if accept_private_tips:
+        me = _mapping(await bot._call("getMe", {}))
+        member = _mapping(await bot._call(
+            "getChatMember", dict(chat_id=APPROVED_CHANNEL_ID, user_id=me["id"])))
+        if member.get("can_manage_direct_messages") is not True:
+            return dict(status="blocked_direct_message_access", received=0, owner_action_required=True)
     with Session(engine) as session:
         unresolved = session.scalar(select(TelegramUpdateReceipt.update_id).where(
             TelegramUpdateReceipt.status.in_(("processing", "failed"))).limit(1))
@@ -92,38 +120,97 @@ async def receive_private_tips(
         if not acquired:
             return dict(status="busy", received=0, inspected=0,
                         owner_action_required=False, telegram_sends=0)
-        return await _store_updates(engine, bot, updates)
+        return await _store_updates(
+            engine,
+            bot,
+            updates,
+            accept_private_tips=accept_private_tips,
+            owner_user_id=owner_user_id,
+            owner_chat_id=owner_chat_id,
+        )
 
 
 async def _store_updates(
-    engine: Engine, bot: TelegramBotAPI, updates: list[dict[str, Any]],
+    engine: Engine, bot: TelegramBotAPI, updates: list[dict[str, Any]], *,
+    accept_private_tips: bool = True,
+    owner_user_id: int | None = None,
+    owner_chat_id: int | None = None,
 ) -> dict[str, Any]:
     received = 0
+    owner_actions = 0
     parents: dict[int, bool] = {}
     for update in sorted(updates, key=lambda value: value["update_id"]):
         uid = update.get("update_id")
         if type(uid) is not int:
             raise ValueError("invalid Telegram update id")
+        owner_result = None
+        callback = update.get("callback_query")
         with Session(engine) as session:
             if session.get(TelegramUpdateReceipt, uid) is not None:
                 continue
-            message = update.get("message", update.get("edited_message", {}))
-            chat = message.get("chat", {})
-            accepted = False
-            if chat.get("is_direct_messages") is True and type(chat.get("id")) is int:
-                cid = chat["id"]
-                if cid not in parents:
-                    info = _mapping(await bot._call("getChat", dict(chat_id=cid)))
-                    parents[cid] = info.get("parent_chat", {}).get("id") == APPROVED_CHANNEL_ID
-                if parents[cid]:
-                    accepted = save_channel_tip(session, message, edited="edited_message" in update)
-            elif chat.get("type") == "private" and "message" in update:
-                accepted = save_requested_followup(session, message) or handle_private_message(
-                    session, message, city="belgrade").outcome == "submitted"
-            session.add(TelegramUpdateReceipt(update_id=uid, kind="private_intake",
-                status="processed" if accepted else "ignored", processed_at=datetime.now(UTC)))
-            # Receipt and submission commit together, before the next offset can acknowledge them.
-            session.commit()
-            received += int(accepted)
+            if callback is not None:
+                owner_result = record_owner_callback(
+                    session,
+                    callback,
+                    owner_user_id=owner_user_id,
+                    owner_chat_id=owner_chat_id,
+                )
+                if owner_result is not None and owner_result.handled:
+                    session.add(TelegramUpdateReceipt(
+                        update_id=uid,
+                        kind="owner_review",
+                        status="processed" if owner_result.accepted else "ignored",
+                        processed_at=datetime.now(UTC),
+                    ))
+                    session.commit()
+                    received += int(owner_result.accepted)
+                    owner_actions += int(owner_result.accepted)
+            if owner_result is None:
+                message = update.get("message", update.get("edited_message", {}))
+                chat = message.get("chat", {}) if isinstance(message, dict) else {}
+                accepted = False
+                receipt_kind = "private_intake"
+                if isinstance(message, dict) and "message" in update:
+                    owner_result = record_owner_reply(
+                        session,
+                        message,
+                        owner_user_id=owner_user_id,
+                        owner_chat_id=owner_chat_id,
+                    )
+                    if owner_result is not None and owner_result.handled:
+                        accepted = owner_result.accepted
+                        receipt_kind = "owner_review"
+                if owner_result is None:
+                    if (
+                        accept_private_tips
+                        and chat.get("is_direct_messages") is True
+                        and type(chat.get("id")) is int
+                    ):
+                        cid = chat["id"]
+                        if cid not in parents:
+                            info = _mapping(await bot._call("getChat", dict(chat_id=cid)))
+                            parents[cid] = info.get("parent_chat", {}).get("id") == APPROVED_CHANNEL_ID
+                        if parents[cid]:
+                            accepted = save_channel_tip(
+                                session,
+                                message,
+                                edited="edited_message" in update,
+                            )
+                    elif accept_private_tips and chat.get("type") == "private" and "message" in update:
+                        accepted = save_requested_followup(session, message) or handle_private_message(
+                            session, message, city="belgrade").outcome == "submitted"
+                session.add(TelegramUpdateReceipt(
+                    update_id=uid,
+                    kind=receipt_kind,
+                    status="processed" if accepted else "ignored",
+                    processed_at=datetime.now(UTC),
+                ))
+                # Receipt and owner decision/submission commit together, before the next offset.
+                session.commit()
+                received += int(accepted)
+                if receipt_kind == "owner_review":
+                    owner_actions += int(accepted)
+        if owner_result is not None and owner_result.handled:
+            await _ack_owner_action(bot, callback, owner_result)
     return dict(status="ready", received=received, inspected=len(updates),
-                owner_action_required=False, telegram_sends=0)
+                owner_actions=owner_actions, owner_action_required=False, telegram_sends=0)
