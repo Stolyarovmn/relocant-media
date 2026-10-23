@@ -109,6 +109,7 @@ def test_catalog_only_sources_are_not_silently_enabled() -> None:
         "viber_air_serbia",
         "viber_blic",
         "viber_n1_srbija",
+        "viber_visit_novi_sad",
         "whatsapp_blic",
         "whatsapp_n1_srbija",
         "whatsapp_nova_s",
@@ -116,3 +117,16 @@ def test_catalog_only_sources_are_not_silently_enabled() -> None:
     } <= catalog_only
     assert "rabotavserbii" not in DEFAULT_CHANNELS
     assert "serbiawork" not in DEFAULT_CHANNELS
+
+
+def test_novi_sad_source_is_preserved_but_never_enabled_for_belgrade() -> None:
+    payload = _load_registry()
+    sources = payload["sources"]
+    assert isinstance(sources, list)
+    source = next(source for source in sources if source["id"] == "viber_visit_novi_sad")
+
+    assert source["scope"] == ["novi_sad"]
+    assert source["collection"]["status"] == "catalog_only"
+    assert source["publication_evidence"] is False
+    assert default_channels_for_city("novi_sad") == ()
+    assert source["url"] not in DEFAULT_CHANNELS
