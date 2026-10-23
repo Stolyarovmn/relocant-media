@@ -108,6 +108,7 @@ def test_catalog_only_sources_are_not_silently_enabled() -> None:
         "telegram_serbiawork",
         "viber_air_serbia",
         "viber_blic",
+        "viber_n1_srbija",
         "whatsapp_blic",
         "whatsapp_n1_srbija",
         "whatsapp_nova_s",
