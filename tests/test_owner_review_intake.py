@@ -21,6 +21,10 @@ class OwnerBot:
         self.calls.append((method, params))
         if method == "getWebhookInfo":
             return {"url": ""}
+        if method == "getMe":
+            return {"id": 42}
+        if method == "getChatMember":
+            return {"can_manage_direct_messages": True}
         if method == "getUpdates":
             return self.updates
         if method == "answerCallbackQuery":
@@ -111,6 +115,9 @@ async def test_owner_reply_becomes_revision_not_news_tip(engine):
         owner_chat_id=OWNER_CHAT,
     )
     assert result["received"] == 1 and result["owner_actions"] == 1
+    assert [name for name, _ in bot.calls[:4]] == [
+        "getWebhookInfo", "getMe", "getChatMember", "getUpdates"
+    ]
     with Session(engine) as session:
         stored = session.get(Submission, review_id)
         assert stored.status == "revision_requested"
