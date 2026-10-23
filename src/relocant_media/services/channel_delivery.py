@@ -23,6 +23,11 @@ from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 APPROVED_CHANNEL_ID = -1003967014133
+# Production routing is fail-closed per city. Future city channels (for example
+# Novi Sad) must receive their own explicit mapping before delivery can be enabled.
+APPROVED_CHANNELS_BY_CITY = {
+    "belgrade": APPROVED_CHANNEL_ID,
+}
 
 
 def _media_receipt(
@@ -48,7 +53,7 @@ async def deliver_reviewed(
     """Dedicated session and caller-injected target adapter; no staging bypass."""
     if enabled is not True:
         raise DeliveryBlockedError("channel delivery is disabled")
-    if type(target_channel_id) is not int or target_channel_id != APPROVED_CHANNEL_ID:
+    if type(target_channel_id) is not int:
         raise DeliveryBlockedError("channel target is not approved")
     prepared_media: PreparedProductionMedia | None = None
     media_bot: MediaBot | None = None
@@ -58,6 +63,8 @@ async def deliver_reviewed(
         ).where(RawItem.id == raw_item_id))
         if city is None:
             raise DeliveryBlockedError("raw item/source does not exist")
+        if APPROVED_CHANNELS_BY_CITY.get(city) != target_channel_id:
+            raise DeliveryBlockedError("channel target is not approved for source city")
         lock_editorial_city(session, city)
         run = session.get(EditorialRun, raw_item_id, populate_existing=True)
         post = (session.get(Post, run.post_id, populate_existing=True)

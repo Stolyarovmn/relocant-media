@@ -8,7 +8,11 @@ from test_editorial_package import bind_context, package_payload, parse
 
 from relocant_media.ai.package import draft_sha256
 from relocant_media.domain.dedup import event_key
-from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
+from relocant_media.services.channel_delivery import (
+    APPROVED_CHANNEL_ID,
+    APPROVED_CHANNELS_BY_CITY,
+    deliver_reviewed,
+)
 from relocant_media.services.editorial import DeliveryBlockedError, _candidate, _snapshot_member
 from relocant_media.services.package_import import import_package
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
@@ -158,6 +162,23 @@ async def test_channel_guards_before_network(reviewed, mutation):
     with pytest.raises(DeliveryBlockedError):
         await send(session, run, publisher)
     assert publisher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_belgrade_channel_rejects_novi_sad_source(reviewed):
+    session, run = reviewed
+    item = session.get(RawItem, run.raw_item_id)
+    source = session.get(Source, item.source_id)
+    source.city = "novi_sad"
+    session.commit()
+
+    publisher = FakePublisher()
+    with pytest.raises(DeliveryBlockedError, match="source city"):
+        await send(session, run, publisher)
+
+    assert APPROVED_CHANNELS_BY_CITY == {"belgrade": APPROVED_CHANNEL_ID}
+    assert publisher.calls == []
+    assert run.delivery_status == "pending"
 
 
 @pytest.mark.asyncio
