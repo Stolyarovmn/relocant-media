@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import traceback
 from pathlib import Path
 
 import httpx
@@ -140,5 +141,24 @@ def main() -> None:
     print(json.dumps(result, ensure_ascii=False))
 
 
+def run_cli() -> None:
+    """Expose a safe failure category to intake without logging exception values."""
+    try:
+        main()
+    except Exception as error:
+        frames = traceback.extract_tb(error.__traceback__)
+        last = frames[-1]
+        print(json.dumps({
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "failure_location": {
+                "module": Path(last.filename).name,
+                "function": last.name,
+                "line": last.lineno,
+            },
+        }, ensure_ascii=False))
+        raise SystemExit(1) from None
+
+
 if __name__ == "__main__":
-    main()
+    run_cli()
