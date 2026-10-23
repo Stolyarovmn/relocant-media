@@ -186,6 +186,16 @@ def _persist_reviewed_package(
     session.commit()
 
 
+def _live_fetcher(
+    package: EditorialPackage,
+    fetcher: Callable[[EditorialPackage], tuple[EvidenceDocument, ...]],
+) -> Callable[[], tuple[EvidenceDocument, ...]]:
+    def live() -> tuple[EvidenceDocument, ...]:
+        return fetcher(package)
+
+    return live
+
+
 def prepare_high_risk_holds(
     engine: Engine,
     provider: StructuredAIProvider,
@@ -201,14 +211,10 @@ def prepare_high_risk_holds(
         try:
             with Session(engine) as session:
                 package = _build_package(session, raw_item_id)
-
-            def current_live_documents() -> tuple[EvidenceDocument, ...]:
-                return live_documents(package)
-
             package = review_with_repairs(
                 package,
                 provider,
-                current_live_documents,
+                _live_fetcher(package, live_documents),
                 audit=audit,
             )
             evaluated = evaluate_package(package)
