@@ -1,6 +1,9 @@
 import json
 
-from relocant_media.collectors.telegram_topics import DEFAULT_CHANNELS
+from relocant_media.collectors.telegram_topics import (
+    DEFAULT_CHANNELS,
+    default_channels_for_city,
+)
 
 REGISTRY = "docs/messenger-discovery.json"
 
@@ -43,6 +46,7 @@ def test_messenger_registry_is_discovery_only_and_fail_closed() -> None:
         assert source["requires_primary_verification"] is True
         assert source["authoritative_for"] == []
         assert source["platform"] in {"telegram", "viber", "whatsapp"}
+        assert source["scope"]
         _assert_https(source["url"])
 
         collection = source["collection"]
@@ -83,8 +87,10 @@ def test_only_explicitly_supported_messenger_sources_are_runtime_collected() -> 
     assert runtime["telegram_moj_beograd"]["url"] == (
         "https://t.me/s/ylcutcTMU01kNWVk"
     )
-    assert "serbialive_beograd" in DEFAULT_CHANNELS
-    assert "ylcutcTMU01kNWVk" in DEFAULT_CHANNELS
+    assert all(source["scope"] == ["belgrade"] for source in runtime.values())
+    assert "serbialive_beograd" in default_channels_for_city("belgrade")
+    assert "ylcutcTMU01kNWVk" in default_channels_for_city("belgrade")
+    assert default_channels_for_city("novi_sad") == ()
 
 
 def test_catalog_only_sources_are_not_silently_enabled() -> None:
