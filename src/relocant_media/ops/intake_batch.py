@@ -1,4 +1,4 @@
-"""Five-minute private intake batches; one serialized production pass, never per message."""
+"""Five-minute private intake and owner-review batches; never one process per message."""
 import asyncio
 import json
 import os
@@ -27,9 +27,20 @@ async def collect_batch(
     store_guard: Callable[[], AbstractContextManager[bool]],
     run_pipeline: Callable[[], int], state: dict[str, Any],
     checkpoint: Callable[[], None] | None = None,
+    accept_private_tips: bool = True,
+    owner_user_id: int | None = None,
+    owner_chat_id: int | None = None,
 ) -> dict[str, Any]:
-    intake = await receive_private_tips(engine,bot,enabled=enabled,
-                                       poll_timeout=1,store_guard=store_guard)
+    intake = await receive_private_tips(
+        engine,
+        bot,
+        enabled=enabled,
+        poll_timeout=1,
+        store_guard=store_guard,
+        accept_private_tips=accept_private_tips,
+        owner_user_id=owner_user_id,
+        owner_chat_id=owner_chat_id,
+    )
     result: dict[str, Any] = dict(status=intake["status"],intake=intake,pipeline_started=False)
     if intake["status"] not in {"ready", "busy"}:
         return result
@@ -52,6 +63,32 @@ async def collect_batch(
     return result
 
 
+def _optional_positive_int(name: str, *, required: bool) -> int | None:
+    value = os.environ.get(name, "")
+    if not value and not required:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+def _owner_review_changed(result: dict[str, Any]) -> bool:
+    actions = result.get("actions")
+    queue = result.get("queue")
+    if isinstance(actions, dict) and any(
+        type(value) is int and value > 0 for value in actions.values()
+    ):
+        return True
+    return isinstance(queue, dict) and any(
+        type(queue.get(key)) is int and queue.get(key, 0) > 0
+        for key in ("queued", "uncertain")
+    )
+
+
 def main() -> None:
     if os.environ.get("EDITORIAL_INTAKE_MODE") != "batch":
         raise SystemExit("Требуется EDITORIAL_INTAKE_MODE=batch")
@@ -61,6 +98,10 @@ def main() -> None:
         raise ValueError("existing persistent SQLite required")
     directory = Path(url.database).parent
     state_path = directory / "intake-batch-state.json"
+    owner_enabled = os.environ.get("EDITORIAL_OWNER_REVIEW_ENABLED") == "true"
+    private_enabled = os.environ.get("EDITORIAL_PRIVATE_INTAKE_ENABLED") == "true"
+    owner_user_id = _optional_positive_int("EDITORIAL_OWNER_USER_ID", required=owner_enabled)
+    owner_chat_id = _optional_positive_int("EDITORIAL_OWNER_CHAT_ID", required=owner_enabled)
     with file_lock(directory/"intake-consumer.lock") as acquired:
         if not acquired:
             raise SystemExit("Другой приёмник уже работает")
@@ -81,15 +122,43 @@ def main() -> None:
             async with httpx.AsyncClient(timeout=25,trust_env=False) as client:
                 return await collect_batch(engine,
                     TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"],client),
-                    enabled=os.environ.get("EDITORIAL_PRIVATE_INTAKE_ENABLED") == "true",
+                    enabled=private_enabled or owner_enabled,
+                    accept_private_tips=private_enabled,
+                    owner_user_id=owner_user_id,
+                    owner_chat_id=owner_chat_id,
                     store_guard=lambda: file_lock(directory/"worker.lock"),
                     run_pipeline=pipeline,state=state,checkpoint=checkpoint)
         try:
             result = asyncio.run(run())
         except Exception as error:
             result = dict(status="failed",error_type=type(error).__name__)
-        finally:
-            engine.dispose()
+        if owner_enabled and result.get("status") in {
+            "ready", "busy", "disabled", "blocked_retry_budget", "pipeline_failed"
+        }:
+            completed = subprocess.run(
+                [
+                    "/opt/relocant-media/venv/bin/python",
+                    "-m",
+                    "relocant_media.ops.owner_review_cycle",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+            try:
+                owner_result = json.loads(completed.stdout) if completed.stdout else {
+                    "status": "failed",
+                }
+            except json.JSONDecodeError:
+                owner_result = {"status": "failed", "error_type": "invalid_owner_review_output"}
+            result["owner_review"] = owner_result
+            result["owner_review_exit_code"] = completed.returncode
+            if completed.returncode != 0:
+                result["status"] = "owner_review_failed"
+            if _owner_review_changed(owner_result):
+                state["backup_pending"] = True
+        engine.dispose()
         state.update(last_result=result,checked_at=datetime.now(UTC).isoformat())
         if result.get("intake", {}).get("inspected", 0) or result.get("pipeline_started"):
             state["backup_pending"] = True
