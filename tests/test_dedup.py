@@ -1,4 +1,9 @@
+import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
 
 from relocant_media.domain.dedup import (
     EventCandidate,
@@ -9,6 +14,46 @@ from relocant_media.domain.dedup import (
 )
 
 NOW = datetime(2026, 10, 19, 12, tzinfo=UTC)
+
+
+def real_transport_reprint() -> tuple[EventCandidate, EventCandidate]:
+    rows = json.loads(Path('tests/fixtures/beograd_transport_reprint_20261023.json').read_text(
+        encoding='utf-8'))
+    items = [EventCandidate(**{**row, 'published_at': datetime.fromisoformat(
+        row['published_at']).replace(tzinfo=UTC)}) for row in rows]
+    return items[0], items[1]
+
+
+def test_real_published_reprint_is_one_event_in_both_directions() -> None:
+    left, right = real_transport_reprint()
+    assert same_event(left, right)
+    assert same_event(right, left)
+
+
+@pytest.mark.parametrize(('before', 'after'), [
+    ('23. oktobra', '24. oktobra'),
+    ('23. oktobra', '23. oktobra 2027.'),
+    ('23. oktobra', '23. novembra'),
+    ('603N', '604N'),
+    ('#1194', '#1195'),
+    ('privremeno ukida', 'privremeno izmešta'),
+    ('privremeno ukida', 'privremeno ne ukida'),
+    ('dvosmerna', 'jednosmerna'),
+])
+def test_real_reprint_keeps_changed_event_facts(before: str, after: str) -> None:
+    left, right = real_transport_reprint()
+    assert before in right.body
+    assert not same_event(left, replace(right, body=right.body.replace(before, after)))
+
+
+def test_long_reprint_skips_expensive_character_matching(monkeypatch: pytest.MonkeyPatch) -> None:
+    left, right = real_transport_reprint()
+    long_text = ' dodatna objava' * 1000
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError('oversized body must be rejected before sequence comparison')
+    monkeypatch.setattr('relocant_media.domain.dedup.SequenceMatcher', forbidden)
+    assert not same_event(replace(left, body=left.body+long_text),
+                          replace(right, body=right.body+long_text))
 
 
 def candidate(
