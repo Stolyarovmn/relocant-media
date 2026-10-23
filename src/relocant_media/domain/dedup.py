@@ -37,13 +37,15 @@ _ROUTE_INTRO = re.compile(
 _ROUTE_ID = re.compile(r"^\d{1,3}[a-z]?$", flags=re.IGNORECASE)
 _TRANSPORT_ACTION = re.compile(
     r"\b(?:ukid\w*|izmešt\w*|izmest\w*|uspostav\w*|zatvar\w*|"
-    r"dvosmer\w*|jednosmer\w*)\b",
+    r"u?dvosmer\w*|jednosmer\w*)\b",
     flags=re.IGNORECASE | re.UNICODE,
 )
 DEFAULT_EVENT_WINDOW = timedelta(hours=48)
 DEFAULT_TITLE_SIMILARITY = 0.78
 _SAME_SOURCE_BODY_SEQUENCE_SIMILARITY = 0.85
 _SAME_SOURCE_BODY_TOKEN_SIMILARITY = 0.80
+_SAME_SOURCE_MAX_BODY_CHARS = 8_000
+_TRANSPORT_NEGATION = re.compile(r"\b(?:ne|neće|nece|nije|nisu|nema|bez)\b")
 
 
 def normalize_text(value: str) -> str:
@@ -102,11 +104,20 @@ def _body_token_similarity(left: str, right: str) -> float:
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
-def _event_date_anchors(value: str) -> frozenset[str]:
+def _event_date_anchors(value: str, *, publication_year: int | None = None) -> frozenset[str]:
     normalized = unicodedata.normalize("NFKC", value).casefold()
-    return frozenset(
-        normalize_text(match.group(0)) for match in _EVENT_DATE_ANCHOR.finditer(normalized)
-    )
+    dates = set()
+    for match in _EVENT_DATE_ANCHOR.finditer(normalized):
+        anchor = normalize_text(match.group(0))
+        # The month-name branch ends before the optional year. Never erase an
+        # explicitly different event year when comparing annual announcements.
+        following_year = re.match(r"\s+(\d{4})\b", normalized[match.end():])
+        if following_year:
+            anchor += " " + following_year.group(1)
+        elif publication_year is not None and not re.search(r"\b\d{4}\b", anchor):
+            anchor += " " + str(publication_year)
+        dates.add(anchor)
+    return frozenset(dates)
 
 
 def _transport_routes(value: str) -> frozenset[str]:
@@ -128,7 +139,10 @@ def _transport_stop_ids(value: str) -> frozenset[str]:
 
 def _transport_actions(value: str) -> frozenset[str]:
     normalized = normalize_text(value)
-    return frozenset(match.group(0) for match in _TRANSPORT_ACTION.finditer(normalized))
+    return frozenset(
+        "dvosmer" if match.group(0).startswith(("dvosmer", "udvosmer")) else match.group(0)
+        for match in _TRANSPORT_ACTION.finditer(normalized)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,8 +183,8 @@ def _same_source_transport_reprint(
     if left_host is None or left_host != right_host:
         return False
 
-    left_dates = _event_date_anchors(left.body)
-    right_dates = _event_date_anchors(right.body)
+    left_dates = _event_date_anchors(left.body, publication_year=left.published_at.year)
+    right_dates = _event_date_anchors(right.body, publication_year=right.published_at.year)
     if not left_dates or left_dates != right_dates:
         return False
 
@@ -191,8 +205,16 @@ def _same_source_transport_reprint(
 
     left_body = normalize_text(left.body)
     right_body = normalize_text(right.body)
+    if sorted(_TRANSPORT_NEGATION.findall(left_body)) != sorted(
+        _TRANSPORT_NEGATION.findall(right_body)
+    ):
+        return False
+    # Disabling character-popularity suppression keeps ordinary Serbian letters
+    # usable as evidence. Bound this potentially quadratic comparison first.
+    if max(len(left_body), len(right_body)) > _SAME_SOURCE_MAX_BODY_CHARS:
+        return False
     if (
-        SequenceMatcher(None, left_body, right_body).ratio()
+        SequenceMatcher(None, left_body, right_body, autojunk=False).ratio()
         < _SAME_SOURCE_BODY_SEQUENCE_SIMILARITY
     ):
         return False
