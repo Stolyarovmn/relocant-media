@@ -14,6 +14,7 @@ from relocant_media.collectors.health_duty import HealthDutyCollector
 from relocant_media.collectors.musicology_blog import MusicologyBlogCollector
 from relocant_media.collectors.natural_history_news import NaturalHistoryNewsCollector
 from relocant_media.collectors.page_snapshot import PageSnapshotCollector
+from relocant_media.collectors.srbija_gov_article import SrbijaGovArticleCollector
 from relocant_media.collectors.srbijavoz_news import SrbijavozNewsCollector
 from relocant_media.collectors.tob_events import TobEventsCollector
 from relocant_media.collectors.venue_feed import VenueFeedCollector
@@ -64,4 +65,6 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return BitefArtCafeEventsCollector(source, client)
     if strategy == "musicology_blog":
         return MusicologyBlogCollector(source, client)
+    if strategy == "srbija_gov_article":
+        return SrbijaGovArticleCollector(source, client)
     raise UnsupportedCollectorStrategyError(strategy)

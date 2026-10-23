@@ -1,0 +1,30 @@
+id: srbija_gov_news
+name: Vlada Republike Srbije — Vesti
+publisher: Government of Serbia
+ownership: official
+url: https://www.srbija.gov.rs/vesti/239/
+language: sr-Cyrl
+source_type: official_government_news
+trust: 1.0
+check_every: 1h
+categories:
+  - politics
+extraction:
+  strategy: srbija_gov_article
+  status: active
+  feed_url: https://www.srbija.gov.rs/vest/1009119/bezbednost-izbornog-procesa-apsolutni-prioritet-mup-a.php
+  approved_hosts:
+    - srbija.gov.rs
+    - www.srbija.gov.rs
+policy:
+  high_risk: true
+  auto_publish: true
+verification:
+  checked_at: 2026-10-23
+  note: >-
+    Official Government of Serbia news pages. Production integration is intentionally
+    direct-link only: a private tip must contain an exact HTTPS /vest/<id> article URL,
+    the full article is fetched independently, and an explicit publication date is required.
+    feed_url is a fixed official verification article used only by source-health; it is not
+    crawled as a discovery feed. The source is high-risk, so political material remains
+    owner-review gated even though the source itself is eligible for editorial processing.

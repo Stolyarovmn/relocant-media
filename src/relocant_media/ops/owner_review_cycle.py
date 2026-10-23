@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.gemini import GeminiStructuredProvider
 from relocant_media.bot.api import TelegramBotAPI
-from relocant_media.ops.server_cycle import ChannelPublisher, ServerAI, fetch_documents
+from relocant_media.ops.server_cycle import ChannelPublisher, ServerAI
+from relocant_media.ops.server_runtime import fetch_documents
 from relocant_media.services.owner_review import (
     OWNER_REVIEW_KIND,
     process_owner_actions,

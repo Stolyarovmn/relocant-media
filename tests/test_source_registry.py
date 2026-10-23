@@ -5,7 +5,7 @@ from relocant_media.sources.registry import load_source_registry
 
 def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    assert len(sources) == 24
+    assert len(sources) == 25
     assert len({source.id for source in sources}) == len(sources)
 
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")
@@ -18,6 +18,18 @@ def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     news = next(source for source in sources if source.id == "city_beograd_news")
     assert news.extraction.strategy == "beograd_news_list"
     assert str(news.url) == "https://www.beograd.rs/lat/vesti"
+
+    government = next(source for source in sources if source.id == "srbija_gov_news")
+    assert government.ownership == "official"
+    assert government.trust == 1.0
+    assert government.extraction.strategy == "srbija_gov_article"
+    assert government.extraction.status == "active"
+    assert government.policy.high_risk is True
+    # Category/source risk is the publication gate. Setting this false would stop the item
+    # before the owner-review path with source_auto_publish_disabled.
+    assert government.policy.auto_publish is True
+    assert government.verification.checked_at is not None
+    assert str(government.url) == "https://www.srbija.gov.rs/vesti/239/"
 
 
 def test_venue_sources_are_explicit_first_party_events():
