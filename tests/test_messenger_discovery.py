@@ -103,6 +103,7 @@ def test_catalog_only_sources_are_not_silently_enabled() -> None:
         "viber_air_serbia",
         "viber_blic",
         "whatsapp_blic",
+        "whatsapp_n1_srbija",
         "viber_beograd_uzivo",
     } <= catalog_only
     assert "rabotavserbii" not in DEFAULT_CHANNELS
