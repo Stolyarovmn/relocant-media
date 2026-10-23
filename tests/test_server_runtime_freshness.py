@@ -2,7 +2,6 @@ import os
 import pathlib
 import subprocess
 
-
 SCRIPT = pathlib.Path(__file__).parents[1] / "deploy/server/check-main-sync.sh"
 
 
