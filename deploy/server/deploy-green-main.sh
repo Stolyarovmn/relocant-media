@@ -79,7 +79,7 @@ payload = json.load(sys.stdin)
 target = sys.argv[1]
 for run in payload.get("workflow_runs", []):
     if run.get("name") == "ci" and run.get("head_sha") == target and run.get("event") == "push":
-        print(f"{run.get(\"status\")}:{run.get(\"conclusion\")}")
+        print("{}:{}".format(run.get("status"), run.get("conclusion")))
         break
 else:
     print("missing:missing")
@@ -130,6 +130,14 @@ finally:
   fi
 fi
 
+# Re-check public main before changing installed units. If main advanced during the
+# deployment window, return to the previous checkout and let a later deploy take it.
+if ! /bin/sh "$APP_DIR/deploy/server/check-main-sync.sh"; then
+  rollback
+  echo "deployed checkout failed final main-sync verification" >&2
+  exit 78
+fi
+
 for unit in \
   relocant-editorial.service relocant-editorial.timer \
   relocant-intake.service relocant-intake.timer
@@ -137,11 +145,5 @@ do
   /usr/bin/install -m 0644 "$APP_DIR/deploy/server/$unit" "$SYSTEMD_DIR/$unit"
 done
 "$SYSTEMCTL_BIN" daemon-reload
-
-if ! /bin/sh "$APP_DIR/deploy/server/check-main-sync.sh"; then
-  rollback
-  echo "deployed checkout failed final main-sync verification" >&2
-  exit 78
-fi
 
 printf 'deployed green main: %s -> %s\n' "$current" "$target"
