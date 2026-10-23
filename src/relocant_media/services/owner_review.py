@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -244,7 +245,7 @@ def _validated_pending_package(
         raise DeliveryBlockedError("reviewed source/post is missing")
     if post.telegram_message_id is not None or post.published_at is not None:
         raise DeliveryBlockedError("reviewed post already has a publication receipt")
-    package = EditorialPackage.model_validate(run.outcome["_package"])
+    package = EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))
     if (
         package.version != 2
         or package.event is None
