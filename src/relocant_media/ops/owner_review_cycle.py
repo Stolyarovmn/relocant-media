@@ -6,12 +6,11 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any
 
 import httpx
 from google import genai
 from sqlalchemy import create_engine, func, select
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.gemini import GeminiStructuredProvider
@@ -21,6 +20,10 @@ from relocant_media.services.owner_review import (
     OWNER_REVIEW_KIND,
     process_owner_actions,
     queue_owner_reviews,
+)
+from relocant_media.services.owner_review_prepare import (
+    pending_high_risk_holds,
+    prepare_high_risk_holds,
 )
 from relocant_media.storage.file_lock import file_lock
 from relocant_media.storage.models import Submission
@@ -38,7 +41,7 @@ def _positive_int(name: str) -> int:
     return parsed
 
 
-def _revision_count(engine: Any) -> int:
+def _revision_count(engine: Engine) -> int:
     with Session(engine) as session:
         return int(session.scalar(
             select(func.count())
@@ -50,18 +53,31 @@ def _revision_count(engine: Any) -> int:
         ) or 0)
 
 
-async def run_cycle(engine: Any, *, owner_user_id: int, owner_chat_id: int) -> dict[str, Any]:
+def _provider(engine: Engine) -> ServerAI | None:
+    if not _revision_count(engine) and not pending_high_risk_holds(engine):
+        return None
+    api_key = os.environ["GEMINI_API_KEY"]
+    model = os.environ["GEMINI_MODEL"]
+    client = genai.Client(
+        api_key=api_key,
+        http_options={"timeout": 45000, "retry_options": {"attempts": 0}},
+    )
+    return ServerAI(GeminiStructuredProvider(api_key, model=model, client=client))
+
+
+async def run_cycle(
+    engine: Engine,
+    *,
+    owner_user_id: int,
+    owner_chat_id: int,
+) -> dict[str, object]:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
-    revision_count = _revision_count(engine)
-    provider = None
-    if revision_count:
-        api_key = os.environ["GEMINI_API_KEY"]
-        model = os.environ["GEMINI_MODEL"]
-        client = genai.Client(
-            api_key=api_key,
-            http_options={"timeout": 45000, "retry_options": {"attempts": 0}},
-        )
-        provider = ServerAI(GeminiStructuredProvider(api_key, model=model, client=client))
+    provider = _provider(engine)
+    preparation = (
+        prepare_high_risk_holds(engine, provider, fetch_documents)
+        if provider is not None and pending_high_risk_holds(engine)
+        else {"prepared": 0, "blocked": 0}
+    )
     async with httpx.AsyncClient(
         timeout=30,
         trust_env=False,
@@ -86,7 +102,12 @@ async def run_cycle(engine: Any, *, owner_user_id: int, owner_chat_id: int) -> d
             owner_chat_id=owner_chat_id,
             enabled=True,
         )
-    return {"status": "ready", "actions": actions, "queue": queued}
+    return {
+        "status": "ready",
+        "preparation": preparation,
+        "actions": actions,
+        "queue": queued,
+    }
 
 
 def main() -> None:
