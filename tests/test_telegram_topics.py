@@ -6,7 +6,9 @@ import pytest
 from relocant_media.analytics.public_preview import PreviewError
 from relocant_media.collectors.telegram_topics import (
     DEFAULT_CHANNELS,
+    DEFAULT_CHANNELS_BY_CITY,
     collect_topics,
+    default_channels_for_city,
     parse_topics,
 )
 
@@ -37,6 +39,13 @@ def test_default_channels_are_popular_discovery_sources_only() -> None:
         "ylcutcTMU01kNWVk",
     )
     assert len(DEFAULT_CHANNELS) == len(set(DEFAULT_CHANNELS))
+
+
+def test_runtime_channels_are_explicitly_scoped_by_city() -> None:
+    assert DEFAULT_CHANNELS_BY_CITY == {"belgrade": DEFAULT_CHANNELS}
+    assert default_channels_for_city("belgrade") == DEFAULT_CHANNELS
+    assert default_channels_for_city("novi_sad") == ()
+    assert default_channels_for_city("unknown") == ()
 
 
 def test_only_recent_posts_extract_text_and_public_links() -> None:

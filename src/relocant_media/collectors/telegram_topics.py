@@ -14,24 +14,36 @@ from relocant_media.analytics.public_preview import (
     validate_username,
 )
 
-# Public Serbia/Belgrade channels are useful as a discovery surface only.
-# Inclusion here does not make a channel trusted evidence and does not change publication policy.
-DEFAULT_CHANNELS = (
-    "Serbia",
-    "SerbiaInMyMind",
-    "serbia_news",
-    "serbnews",
-    "novostiserbii",
-    "beogradske_vesti",
-    "ruserbia",
-    "sta_imas_beograd",
-    "relocate_serbia",
-    "volna_srbjia",
-    "vstrechi_v_belgrade",
-    "afisha_rs",
-    "serbialive_beograd",
-    "ylcutcTMU01kNWVk",
-)
+# Runtime messenger discovery is explicitly scoped by city. Serbia-wide channels may still
+# be useful to Belgrade, but a source dedicated to another city must never be added to this
+# tuple. Future cities receive their own tuple before runtime collection is enabled.
+DEFAULT_CHANNELS_BY_CITY: dict[str, tuple[str, ...]] = {
+    "belgrade": (
+        "Serbia",
+        "SerbiaInMyMind",
+        "serbia_news",
+        "serbnews",
+        "novostiserbii",
+        "beogradske_vesti",
+        "ruserbia",
+        "sta_imas_beograd",
+        "relocate_serbia",
+        "volna_srbjia",
+        "vstrechi_v_belgrade",
+        "afisha_rs",
+        "serbialive_beograd",
+        "ylcutcTMU01kNWVk",
+    ),
+}
+
+
+def default_channels_for_city(city: str) -> tuple[str, ...]:
+    """Return only explicitly enabled runtime channels; unknown cities fail closed."""
+    return DEFAULT_CHANNELS_BY_CITY.get(city, ())
+
+
+# Backward-compatible Belgrade alias for the existing Belgrade-only server cycle.
+DEFAULT_CHANNELS = default_channels_for_city("belgrade")
 
 
 @dataclass(frozen=True, slots=True)
