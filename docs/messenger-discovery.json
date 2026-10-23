@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-10-23",
+  "purpose": "messenger_discovery_only",
+  "policy": {
+    "publication_evidence": false,
+    "requires_primary_verification": true,
+    "messenger_messages_are_not_independent_primary_confirmation": true,
+    "ugc_requires_independent_primary_confirmation": true,
+    "runtime_collection_requires_read_only_public_adapter": true
+  },
+  "sources": [
+    {
+      "id": "telegram_serbialive_beograd",
+      "platform": "telegram",
+      "name": "SERBIA LIVE - BEOGRAD",
+      "url": "https://t.me/s/serbialive_beograd",
+      "scope": [
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "mixed_ugc_and_publisher_posts",
+      "selection_basis": [
+        "current_public_preview",
+        "belgrade_local_incident_and_city_signals"
+      ],
+      "collection": {
+        "status": "runtime_public_preview",
+        "adapter": "telegram_public_preview",
+        "account_required": false
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://t.me/s/serbialive_beograd"
+        ]
+      }
+    },
+    {
+      "id": "telegram_rabotavserbii",
+      "platform": "telegram",
+      "name": "Работа в Сербии | Rabota v Serbii",
+      "url": "https://t.me/s/rabotavserbii",
+      "scope": [
+        "serbia",
+        "belgrade",
+        "jobs"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "commercial_job_board_and_ads",
+      "selection_basis": [
+        "current_public_preview",
+        "high_volume_russian_language_jobs"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "high_volume_job_ads_without_approved_primary_resolution_path"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://t.me/s/rabotavserbii"
+        ]
+      }
+    },
+    {
+      "id": "telegram_serbiawork",
+      "platform": "telegram",
+      "name": "Вакансии в Сербии",
+      "url": "https://t.me/s/serbiawork",
+      "scope": [
+        "serbia",
+        "belgrade",
+        "jobs"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "community_job_ads",
+      "selection_basis": [
+        "current_public_preview",
+        "russian_language_jobs"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "high_volume_job_ads_without_approved_primary_resolution_path"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://t.me/s/serbiawork"
+        ]
+      }
+    },
+    {
+      "id": "viber_air_serbia",
+      "platform": "viber",
+      "name": "AIR SERBIA",
+      "url": "https://invite.viber.com/?g2=AQBNVfpliTxfMlZQ6prYFwV5EuDddOe3ilGIuIoejPXQLXncLZzxuDp2%2BasGq66F",
+      "scope": [
+        "serbia",
+        "belgrade",
+        "transport"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "official_publisher_channel",
+      "selection_basis": [
+        "official_air_serbia_launch_announcement",
+        "current_viber_invite"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "no_safe_read_only_public_adapter"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://www.airserbia.com/en/media-news/Every-journey-begins-with-a-message-Air-Serbia-introduces-Viber-stickers-and-launches-official-Viber-channel~1951635",
+          "https://invite.viber.com/?g2=AQBNVfpliTxfMlZQ6prYFwV5EuDddOe3ilGIuIoejPXQLXncLZzxuDp2%2BasGq66F"
+        ]
+      }
+    },
+    {
+      "id": "viber_blic",
+      "platform": "viber",
+      "name": "Blic",
+      "url": "https://invite.viber.com/?g2=AQBI0Sbh%2FqkqL0xslYqfxIfVNI824DTNNKhlGsV00aLd58O6E4klv96aRe8SmMSE",
+      "scope": [
+        "serbia",
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_channel",
+      "selection_basis": [
+        "linked_from_blic_official_site",
+        "current_viber_invite"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "no_safe_read_only_public_adapter"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://www.blic.rs/slobodno-vreme/blic-i-na-whatsapp-u-najvaznije-vesti-na-najcitanijem-portalu-u-srbiji/gewq3q6",
+          "https://invite.viber.com/?g2=AQBI0Sbh%2FqkqL0xslYqfxIfVNI824DTNNKhlGsV00aLd58O6E4klv96aRe8SmMSE"
+        ]
+      }
+    },
+    {
+      "id": "whatsapp_blic",
+      "platform": "whatsapp",
+      "name": "Blic",
+      "url": "https://www.whatsapp.com/channel/0029Va9AnaGJUM2hafZrhJ2f",
+      "scope": [
+        "serbia",
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_channel",
+      "selection_basis": [
+        "linked_from_blic_official_site",
+        "current_whatsapp_channel_page"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "no_safe_read_only_public_adapter"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://www.blic.rs/slobodno-vreme/blic-i-na-whatsapp-u-najvaznije-vesti-na-najcitanijem-portalu-u-srbiji/gewq3q6",
+          "https://www.whatsapp.com/channel/0029Va9AnaGJUM2hafZrhJ2f"
+        ]
+      }
+    },
+    {
+      "id": "viber_beograd_uzivo",
+      "platform": "viber",
+      "name": "Beograd uživo",
+      "url": "https://invite.viber.com/?g2=AQBMMeg%2BOeZlQEssOvMj0FQt45PBeuhq2s1VmggSNHEj3opF7AlgTSlgj%2BBiqitf",
+      "scope": [
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "community_ugc",
+      "selection_basis": [
+        "linked_from_beograd_uzivo_site",
+        "local_traffic_and_city_problem_signals"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "no_safe_read_only_public_adapter"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://www.beograduzivo.rs/info/gradske-vesti/pridruzite-se-beograd-uzivo-viber-zajednici/",
+          "https://invite.viber.com/?g2=AQBMMeg%2BOeZlQEssOvMj0FQt45PBeuhq2s1VmggSNHEj3opF7AlgTSlgj%2BBiqitf"
+        ]
+      }
+    }
+  ]
+}
