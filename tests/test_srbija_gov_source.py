@@ -48,7 +48,10 @@ def test_exact_government_article_url_is_fail_closed() -> None:
     assert match_srbija_gov_article_url(ARTICLE + "?utm_source=x") is None
     assert match_srbija_gov_article_url(ARTICLE + "#fragment") is None
     assert match_srbija_gov_article_url(ARTICLE.replace("https://", "http://")) is None
-    assert match_srbija_gov_article_url(ARTICLE.replace("www.srbija.gov.rs", "evil.example")) is None
+    assert (
+        match_srbija_gov_article_url(ARTICLE.replace("www.srbija.gov.rs", "evil.example"))
+        is None
+    )
     assert match_srbija_gov_article_url(
         ARTICLE.replace("www.srbija.gov.rs", "www.srbija.gov.rs:444")
     ) is None
