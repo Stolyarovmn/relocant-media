@@ -22,6 +22,7 @@ ARTICLE = (
     "https://www.srbija.gov.rs/vest/1009119/"
     "bezbednost-izbornog-procesa-apsolutni-prioritet-mup-a.php"
 )
+TITLE = "Безбедност изборног процеса апсолутни приоритет МУП-а"
 NOW = datetime(2026, 10, 23, 10, tzinfo=UTC)
 BODY = (
     "Дирекција полиције активно спроводи мере из своје надлежности како би цео "
@@ -29,12 +30,20 @@ BODY = (
     "наложено је доследно поштовање закона и професионално поступање."
 )
 HTML = f"""
-<html><body><main><article>
-  <div class="date">Београд, 22. октобар 2026.</div>
-  <h1>Безбедност изборног процеса апсолутни приоритет МУП-а</h1>
-  <p>{BODY}</p>
-  <p>Изборни процес заказан је за 25. октобар, што није датум публикације.</p>
-</article></main></body></html>
+<html>
+<head>
+  <meta property="og:title" content="{TITLE}" />
+  <title>{TITLE} | Влада Републике Србије</title>
+</head>
+<body><main>
+  <h1>Влада Републике Србије</h1>
+  <article>
+    <div class="date">Београд, 22. октобар 2026.</div>
+    <h2>{TITLE}</h2>
+    <p>{BODY}</p>
+    <p>Изборни процес заказан је за недељу, 25. октобар 2026. године.</p>
+  </article>
+</main></body></html>
 """
 
 
@@ -57,17 +66,17 @@ def test_exact_government_article_url_is_fail_closed() -> None:
     ) is None
 
 
-def test_parser_uses_explicit_publication_date_not_event_date() -> None:
+def test_parser_uses_declared_article_title_and_explicit_publication_date() -> None:
     item = parse_srbija_gov_article(HTML, source(), ARTICLE)
     assert item.source_id == "srbija_gov_news"
     assert item.external_id == "1009119"
-    assert item.title == "Безбедност изборног процеса апсолутни приоритет МУП-а"
+    assert item.title == TITLE
     assert item.published_at is not None
     assert item.published_at.isoformat() == "2026-10-22T00:00:00+02:00"
     assert "25. октобар" in item.body
 
 
-def test_parser_refuses_missing_explicit_publication_date() -> None:
+def test_parser_refuses_event_date_when_publication_date_is_missing() -> None:
     html = HTML.replace("Београд, 22. октобар 2026.", "")
     with pytest.raises(SrbijaGovExtractionError, match="publication date"):
         parse_srbija_gov_article(html, source(), ARTICLE)
@@ -183,6 +192,6 @@ def test_owner_review_live_fetch_uses_same_strict_extractor(monkeypatch) -> None
         published_at=NOW,
     ))
     assert live.source_id == "srbija_gov_news"
-    assert live.title == "Безбедност изборног процеса апсолутни приоритет МУП-а"
+    assert live.title == TITLE
     assert live.published_at is not None
     assert live.published_at.isoformat() == "2026-10-22T00:00:00+02:00"
