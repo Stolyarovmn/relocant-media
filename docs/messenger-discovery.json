@@ -227,6 +227,36 @@
       }
     },
     {
+      "id": "whatsapp_n1_srbija",
+      "platform": "whatsapp",
+      "name": "N1 Srbija",
+      "url": "https://www.whatsapp.com/channel/0029VajYmom8V0tp1wlTwp0V",
+      "scope": [
+        "serbia",
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_channel",
+      "selection_basis": [
+        "linked_from_n1_official_site"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "no_safe_read_only_public_adapter"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://n1info.rs/vesti/pratite-n1-i-na-whatsapp-u/",
+          "https://www.whatsapp.com/channel/0029VajYmom8V0tp1wlTwp0V"
+        ]
+      }
+    },
+    {
       "id": "viber_beograd_uzivo",
       "platform": "viber",
       "name": "Beograd uživo",
