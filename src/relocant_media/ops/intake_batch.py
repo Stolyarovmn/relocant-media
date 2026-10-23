@@ -77,16 +77,41 @@ def _optional_positive_int(name: str, *, required: bool) -> int | None:
 
 
 def _owner_review_changed(result: dict[str, Any]) -> bool:
-    actions = result.get("actions")
-    queue = result.get("queue")
-    if isinstance(actions, dict) and any(
-        type(value) is int and value > 0 for value in actions.values()
+    for section, keys in (
+        ("preparation", ("prepared", "blocked")),
+        ("actions", ("revised", "rejected", "published", "blocked")),
+        ("queue", ("queued", "uncertain")),
     ):
-        return True
-    return isinstance(queue, dict) and any(
-        type(queue.get(key)) is int and queue.get(key, 0) > 0
-        for key in ("queued", "uncertain")
-    )
+        values = result.get(section)
+        if isinstance(values, dict) and any(
+            type(values.get(key)) is int and values.get(key, 0) > 0 for key in keys
+        ):
+            return True
+    return False
+
+
+def _run_owner_review() -> tuple[int, dict[str, Any]]:
+    try:
+        completed = subprocess.run(
+            [
+                "/opt/relocant-media/venv/bin/python",
+                "-m",
+                "relocant_media.ops.owner_review_cycle",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return 1, {"status": "failed", "error_type": "owner_review_timeout"}
+    try:
+        result = json.loads(completed.stdout) if completed.stdout else {"status": "failed"}
+    except json.JSONDecodeError:
+        result = {"status": "failed", "error_type": "invalid_owner_review_output"}
+    if not isinstance(result, dict):
+        result = {"status": "failed", "error_type": "invalid_owner_review_output"}
+    return completed.returncode, result
 
 
 def main() -> None:
@@ -130,35 +155,20 @@ def main() -> None:
                     run_pipeline=pipeline,state=state,checkpoint=checkpoint)
         try:
             result = asyncio.run(run())
+            if owner_enabled and result.get("status") in {
+                "ready", "busy", "disabled", "blocked_retry_budget", "pipeline_failed"
+            }:
+                owner_exit_code, owner_result = _run_owner_review()
+                result["owner_review"] = owner_result
+                result["owner_review_exit_code"] = owner_exit_code
+                if owner_exit_code != 0:
+                    result["status"] = "owner_review_failed"
+                if _owner_review_changed(owner_result):
+                    state["backup_pending"] = True
         except Exception as error:
             result = dict(status="failed",error_type=type(error).__name__)
-        if owner_enabled and result.get("status") in {
-            "ready", "busy", "disabled", "blocked_retry_budget", "pipeline_failed"
-        }:
-            completed = subprocess.run(
-                [
-                    "/opt/relocant-media/venv/bin/python",
-                    "-m",
-                    "relocant_media.ops.owner_review_cycle",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=900,
-                check=False,
-            )
-            try:
-                owner_result = json.loads(completed.stdout) if completed.stdout else {
-                    "status": "failed",
-                }
-            except json.JSONDecodeError:
-                owner_result = {"status": "failed", "error_type": "invalid_owner_review_output"}
-            result["owner_review"] = owner_result
-            result["owner_review_exit_code"] = completed.returncode
-            if completed.returncode != 0:
-                result["status"] = "owner_review_failed"
-            if _owner_review_changed(owner_result):
-                state["backup_pending"] = True
-        engine.dispose()
+        finally:
+            engine.dispose()
         state.update(last_result=result,checked_at=datetime.now(UTC).isoformat())
         if result.get("intake", {}).get("inspected", 0) or result.get("pipeline_started"):
             state["backup_pending"] = True
