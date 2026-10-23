@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import httpx
 from pydantic import ValidationError
@@ -43,9 +43,11 @@ from relocant_media.services.editorial import (
     _candidate,
     _event_items,
     _snapshot_member,
-    _timestamp,
 )
-from relocant_media.services.production_media import PreparedProductionMedia, prepare_production_media
+from relocant_media.services.production_media import (
+    PreparedProductionMedia,
+    prepare_production_media,
+)
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 
@@ -53,6 +55,10 @@ OWNER_REVIEW_KIND = "owner_editorial_review"
 _CALLBACK_RE = re.compile(r"^or:(publish|reject):(\d+)$")
 _ACTIVE_REVIEW_STATUSES = frozenset({"sending", "pending", "approved", "revision_requested"})
 _FINAL_REVIEW_STATUSES = frozenset({"published", "rejected", "cancelled", "publish_blocked"})
+
+
+class TelegramCaller(Protocol):
+    async def _call(self, method: str, payload: Mapping[str, object]) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +75,8 @@ def _now_iso() -> str:
 
 
 def _package_sha256(package: EditorialPackage) -> str:
-    return hashlib.sha256(canonical_json(package.model_dump(mode="json")).encode()).hexdigest()
+    payload = canonical_json(package.model_dump(mode="json")).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _review_rows(session: Session, raw_item_id: int) -> list[Submission]:
@@ -108,13 +115,17 @@ def record_owner_callback(
     owner_user_id: int | None,
     owner_chat_id: int | None,
 ) -> OwnerUpdateResult | None:
-    """Persist an exact-version owner decision; stale buttons never change current state."""
+    """Persist an exact-version owner decision; stale buttons cannot change current state."""
     if not owner_user_id or not owner_chat_id or not isinstance(callback, dict):
         return None
     sender = callback.get("from")
     data = callback.get("data")
     message = callback.get("message")
-    if not isinstance(sender, dict) or sender.get("id") != owner_user_id or sender.get("is_bot"):
+    if (
+        not isinstance(sender, dict)
+        or sender.get("id") != owner_user_id
+        or sender.get("is_bot")
+    ):
         return None
     if not isinstance(data, str) or not isinstance(message, dict):
         return None
@@ -154,15 +165,12 @@ def record_owner_callback(
         "owner_decision": action,
         "decided_at": _now_iso(),
     }
-    return OwnerUpdateResult(
-        True,
-        True,
+    answer = (
         "Согласовано. Проверяю источник перед публикацией."
         if action == "publish"
-        else "Отклонено.",
-        owner_chat_id,
-        message_id,
+        else "Отклонено."
     )
+    return OwnerUpdateResult(True, True, answer, owner_chat_id, message_id)
 
 
 def record_owner_reply(
@@ -172,7 +180,7 @@ def record_owner_reply(
     owner_user_id: int | None,
     owner_chat_id: int | None,
 ) -> OwnerUpdateResult | None:
-    """Turn a reply to an exact review message into a bounded revision request."""
+    """Turn a reply to an exact pending review into a bounded revision request."""
     if not owner_user_id or not owner_chat_id or not isinstance(message, dict):
         return None
     sender = message.get("from")
@@ -235,7 +243,7 @@ def _validated_pending_package(
         raise DeliveryBlockedError("reviewed source/post is missing")
     if post.telegram_message_id is not None or post.published_at is not None:
         raise DeliveryBlockedError("reviewed post already has a publication receipt")
-    package = EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))
+    package = EditorialPackage.model_validate(run.outcome["_package"])
     if (
         package.version != 2
         or package.event is None
@@ -254,8 +262,7 @@ def _validated_pending_package(
         raise DeliveryBlockedError("owner-review draft changed after review")
     if not valid_title_presentation(post.title):
         raise DeliveryBlockedError("title presentation does not match channel mode")
-    fingerprint = _package_sha256(package)
-    if run.outcome.get("_package_sha256") != fingerprint:
+    if run.outcome.get("_package_sha256") != _package_sha256(package):
         raise DeliveryBlockedError("owner-review package fingerprint mismatch")
     outcome = evaluate_package(package, now=now)
     if (
@@ -280,7 +287,10 @@ def _validated_pending_package(
             or age > max_age
         ):
             raise DeliveryBlockedError("two fresh independent approvals are required")
-    if not any(document.ownership.strip().casefold() == "official" for document in package.event.documents):
+    if not any(
+        document.ownership.strip().casefold() == "official"
+        for document in package.event.documents
+    ):
         raise DeliveryBlockedError("official primary evidence is required")
     return run, post, item, source, package
 
@@ -292,7 +302,10 @@ def _publication_text(package: EditorialPackage) -> str:
         for document in package.event.documents
         if document.ownership.strip().casefold() == "official"
     )
-    text = f"{package.outcome.draft.title}\n\n{package.outcome.draft.body}\n\nИсточник: {primary.url}"
+    text = (
+        f"{package.outcome.draft.title}\n\n{package.outcome.draft.body}"
+        f"\n\nИсточник: {primary.url}"
+    )
     if len(text.encode("utf-16-le")) // 2 > 4096:
         raise DeliveryBlockedError("draft exceeds Telegram message length")
     return text
@@ -303,48 +316,64 @@ def _review_message(package: EditorialPackage) -> tuple[str, list[dict[str, obje
     return text, list(entities)
 
 
+def _official_url(package: EditorialPackage) -> str:
+    assert package.event is not None
+    return next(
+        document.url
+        for document in package.event.documents
+        if document.ownership.strip().casefold() == "official"
+    )
+
+
 async def queue_owner_reviews(
     engine: Engine,
-    bot: Any,
+    bot: TelegramCaller,
     *,
     owner_user_id: int,
     owner_chat_id: int,
     enabled: bool,
     limit: int = 5,
 ) -> dict[str, Any]:
-    """Send each eligible exact draft once; ambiguous sends become manual-reconciliation holds."""
+    """Send each eligible exact draft once; ambiguous sends are never retried."""
     if not enabled:
         return {"status": "disabled", "queued": 0, "uncertain": 0}
     queued = 0
     uncertain = 0
     with Session(engine) as session:
-        ids = list(session.scalars(
-            select(EditorialRun.raw_item_id)
-            .join(Post, EditorialRun.post_id == Post.id)
-            .where(
-                EditorialRun.delivery_status == "pending",
-                Post.status == PublicationStatus.HUMAN_REVIEW.value,
-                Post.category.in_(tuple(HIGH_RISK_CATEGORIES)),
+        ids = list(
+            session.scalars(
+                select(EditorialRun.raw_item_id)
+                .join(Post, EditorialRun.post_id == Post.id)
+                .where(
+                    EditorialRun.delivery_status == "pending",
+                    Post.status == PublicationStatus.HUMAN_REVIEW.value,
+                    Post.category.in_(tuple(HIGH_RISK_CATEGORIES)),
+                )
+                .order_by(EditorialRun.raw_item_id)
             )
-            .order_by(EditorialRun.raw_item_id)
-        ))
+        )
     for raw_item_id in ids:
         if queued >= limit:
             break
         with Session(engine) as session:
             try:
-                _, _, _, _, package = _validated_pending_package(session, raw_item_id)
+                run, _, _, _, package = _validated_pending_package(session, raw_item_id)
             except (DeliveryBlockedError, ValueError):
                 continue
             package_sha = _package_sha256(package)
             rows = _review_rows(session, raw_item_id)
             same = [row for row in rows if row.payload.get("package_sha256") == package_sha]
-            if any(row.status in _ACTIVE_REVIEW_STATUSES | _FINAL_REVIEW_STATUSES
-                   for row in same):
+            if any(
+                row.status in _ACTIVE_REVIEW_STATUSES | _FINAL_REVIEW_STATUSES
+                for row in same
+            ):
                 continue
             version = 1 + max(
-                (int(row.payload.get("version", 0)) for row in rows
-                 if type(row.payload.get("version")) is int),
+                (
+                    int(row.payload["version"])
+                    for row in rows
+                    if type(row.payload.get("version")) is int
+                ),
                 default=0,
             )
             review = Submission(
@@ -355,7 +384,7 @@ async def queue_owner_reviews(
                 payload={
                     "city": package.city,
                     "raw_item_id": raw_item_id,
-                    "post_id": session.get(EditorialRun, raw_item_id).post_id,
+                    "post_id": run.post_id,
                     "owner_chat_id": owner_chat_id,
                     "package_sha256": package_sha,
                     "draft_sha256": draft_sha256(package.outcome.draft),
@@ -374,19 +403,21 @@ async def queue_owner_reviews(
             "entities": entities,
             "reply_markup": {
                 "inline_keyboard": [[
-                    {"text": "✅ Опубликовать", "callback_data": f"or:publish:{review_id}"},
-                    {"text": "❌ Отклонить", "callback_data": f"or:reject:{review_id}"},
+                    {
+                        "text": "✅ Опубликовать",
+                        "callback_data": f"or:publish:{review_id}",
+                    },
+                    {
+                        "text": "❌ Отклонить",
+                        "callback_data": f"or:reject:{review_id}",
+                    },
                 ]]
             },
-        }
-        source_url = next(
-            document.url for document in package.event.documents
-            if document.ownership.strip().casefold() == "official"
-        )
-        payload["link_preview_options"] = {
-            "url": source_url,
-            "prefer_large_media": True,
-            "show_above_text": True,
+            "link_preview_options": {
+                "url": _official_url(package),
+                "prefer_large_media": True,
+                "show_above_text": True,
+            },
         }
         try:
             result = await bot._call("sendMessage", payload)
@@ -474,7 +505,7 @@ def revise_package(
     *,
     audit: Callable[[dict[str, Any]], None] | None = None,
 ) -> EditorialPackage:
-    """Apply owner wording feedback only, then discard stale reviews and review again."""
+    """Apply wording feedback only, discard stale approvals and run both reviews again."""
     draft = _owner_revision_draft(package, provider, comment)
     outcome = package.outcome.model_copy(update={"draft": draft})
     placeholders = tuple(
@@ -495,7 +526,9 @@ def revise_package(
         audit=audit,
     )
     if any(
-        review.verdict != "approve" or review.score < 75 or review.flags
+        review.verdict != "approve"
+        or review.score < 75
+        or review.flags
         or not review.live_source_checked
         for review in reviewed.reviews
     ):
@@ -519,6 +552,8 @@ def replace_pending_package(
     if type(raw_item_id) is not int:
         raise DeliveryBlockedError("owner review raw item is invalid")
     run, post, item, source, current = _validated_pending_package(session, raw_item_id)
+    if review.kind != OWNER_REVIEW_KIND or review.status != "revision_requested":
+        raise DeliveryBlockedError("exact revision request is required")
     if review.payload.get("package_sha256") != _package_sha256(current):
         raise DeliveryBlockedError("owner revision targets a stale package")
     if (
@@ -535,9 +570,15 @@ def replace_pending_package(
         raise DeliveryBlockedError("owner revision changed evidence or verified claims")
     lock_editorial_city(session, source.city)
     members = _event_items(session, anchor=item, anchor_source=source)
-    expected = {document.raw_item_id: document.model_dump(mode="json")
-                for document in revised.event.documents}
-    actual = {member.id: _snapshot_member(member, policy) for member, policy in members}
+    assert revised.event is not None
+    expected = {
+        document.raw_item_id: document.model_dump(mode="json")
+        for document in revised.event.documents
+    }
+    actual = {
+        member.id: _snapshot_member(member, policy)
+        for member, policy in members
+    }
     if revised.event.event_key != event_key(_candidate(item)) or expected != actual:
         raise DeliveryBlockedError("event evidence changed before owner revision persistence")
     evaluated = evaluate_package(revised)
@@ -551,7 +592,8 @@ def replace_pending_package(
     metadata = {
         key: value
         for key, value in run.outcome.items()
-        if key.startswith("_") and key not in {"_package", "_package_sha256", "_media_delivery"}
+        if key.startswith("_")
+        and key not in {"_package", "_package_sha256", "_media_delivery"}
     }
     run.outcome = {
         **evaluated.model_dump(mode="json"),
@@ -589,6 +631,59 @@ def _media_receipt(
     }
 
 
+def _expected_live_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
+    assert package.event is not None
+    return tuple(
+        EvidenceDocument(
+            source_id=document.source_id,
+            url=document.url,
+            title=document.title,
+            body=document.body,
+            published_at=document.published_at,
+        )
+        for document in package.event.documents
+    )
+
+
+def _assert_live_documents(
+    package: EditorialPackage,
+    live_documents: tuple[EvidenceDocument, ...],
+) -> None:
+    if live_documents != _expected_live_documents(package):
+        raise DeliveryBlockedError("live source changed before owner-approved delivery")
+
+
+def _prepared_media(
+    package: EditorialPackage,
+    post: Post,
+    text: str,
+    *,
+    target_channel_id: int,
+) -> PreparedProductionMedia | None:
+    try:
+        return prepare_production_media(
+            raw_item_id=package.raw_item_id,
+            post_id=post.id,
+            editorial_package_sha256=_package_sha256(package),
+            target_channel_id=target_channel_id,
+            editorial_text=text,
+            now=datetime.now(UTC),
+        )
+    except ValueError as error:
+        raise DeliveryBlockedError("reviewed production media bundle is invalid") from error
+
+
+def _media_bot(publisher: Publisher) -> MediaBot:
+    candidate = getattr(publisher, "bot", None)
+    if (
+        candidate is None
+        or not callable(getattr(candidate, "send_photo", None))
+        or not callable(getattr(candidate, "send_media_group", None))
+    ):
+        raise DeliveryBlockedError("production publisher does not support reviewed media")
+    return cast(MediaBot, candidate)
+
+
 async def deliver_owner_approved(
     session: Session,
     review: Submission,
@@ -604,7 +699,11 @@ async def deliver_owner_approved(
     if type(target_channel_id) is not int or target_channel_id != APPROVED_CHANNEL_ID:
         raise DeliveryBlockedError("channel target is not approved")
     raw_item_id = review.payload.get("raw_item_id")
-    if type(raw_item_id) is not int or review.status != "approved":
+    if (
+        review.kind != OWNER_REVIEW_KIND
+        or review.status != "approved"
+        or type(raw_item_id) is not int
+    ):
         raise DeliveryBlockedError("exact owner approval is required")
     prepared_media: PreparedProductionMedia | None = None
     media_bot: MediaBot | None = None
@@ -614,11 +713,7 @@ async def deliver_owner_approved(
             raise DeliveryBlockedError("owner approval targets a stale package")
         if review.payload.get("draft_sha256") != draft_sha256(package.outcome.draft):
             raise DeliveryBlockedError("owner approval targets a stale draft")
-        if len(live_documents) != len(package.event.documents):
-            raise DeliveryBlockedError("live source set changed before owner-approved delivery")
-        for live, frozen in zip(live_documents, package.event.documents, strict=True):
-            if live.model_dump() != frozen.model_dump(include=set(EvidenceDocument.model_fields)):
-                raise DeliveryBlockedError("live source changed before owner-approved delivery")
+        _assert_live_documents(package, live_documents)
         fresh = freshness_decision(
             title=item.title,
             body=item.body,
@@ -626,55 +721,61 @@ async def deliver_owner_approved(
             now=datetime.now(UTC),
         )
         if fresh.action != "keep":
-            raise DeliveryBlockedError(f"freshness blocks owner-approved delivery: {fresh.reason}")
+            raise DeliveryBlockedError(
+                f"freshness blocks owner-approved delivery: {fresh.reason}"
+            )
         members = _event_items(session, anchor=item, anchor_source=source)
-        expected = {document.raw_item_id: document.model_dump(mode="json")
-                    for document in package.event.documents}
-        actual = {member.id: _snapshot_member(member, policy) for member, policy in members}
+        assert package.event is not None
+        expected = {
+            document.raw_item_id: document.model_dump(mode="json")
+            for document in package.event.documents
+        }
+        actual = {
+            member.id: _snapshot_member(member, policy)
+            for member, policy in members
+        }
         if package.event.event_key != event_key(_candidate(item)) or expected != actual:
             raise DeliveryBlockedError("event evidence or source policy changed")
-        if source.source_type == "official_venue_events" and package.outcome.ranking.category != "events":
+        if (
+            source.source_type == "official_venue_events"
+            and package.outcome.ranking.category != "events"
+        ):
             raise DeliveryBlockedError("venue source cannot authorize a high-risk topic")
-        if not any(policy.ownership.strip().casefold() == "official" for _, policy in members):
+        if not any(
+            policy.ownership.strip().casefold() == "official"
+            for _, policy in members
+        ):
             raise DeliveryBlockedError("official source is required")
         for member, _ in members:
             audience_reason = audience_relevance_reason(member.title, member.body)
             if audience_reason:
-                raise DeliveryBlockedError(f"audience policy blocks delivery: {audience_reason}")
+                raise DeliveryBlockedError(
+                    f"audience policy blocks delivery: {audience_reason}"
+                )
         text = _publication_text(package)
-        package_sha = _package_sha256(package)
-        try:
-            prepared_media = prepare_production_media(
-                raw_item_id=raw_item_id,
-                post_id=post.id,
-                editorial_package_sha256=package_sha,
-                target_channel_id=target_channel_id,
-                editorial_text=text,
-                now=datetime.now(UTC),
-            )
-        except ValueError as error:
-            raise DeliveryBlockedError("reviewed production media bundle is invalid") from error
+        prepared_media = _prepared_media(
+            package,
+            post,
+            text,
+            target_channel_id=target_channel_id,
+        )
         if prepared_media is not None:
-            candidate_bot = getattr(publisher, "bot", None)
-            if (
-                candidate_bot is None
-                or not callable(getattr(candidate_bot, "send_photo", None))
-                or not callable(getattr(candidate_bot, "send_media_group", None))
-            ):
-                raise DeliveryBlockedError("production publisher does not support reviewed media")
-            media_bot = cast(MediaBot, candidate_bot)
+            media_bot = _media_bot(publisher)
             run.outcome = {
                 **run.outcome,
                 "_media_delivery": _media_receipt(prepared_media, state="sending"),
             }
-        claimed = cast(CursorResult[object], session.execute(
-            update(EditorialRun)
-            .where(
-                EditorialRun.raw_item_id == raw_item_id,
-                EditorialRun.delivery_status == "pending",
-            )
-            .values(delivery_status="sending")
-        ))
+        claimed = cast(
+            CursorResult[Any],
+            session.execute(
+                update(EditorialRun)
+                .where(
+                    EditorialRun.raw_item_id == raw_item_id,
+                    EditorialRun.delivery_status == "pending",
+                )
+                .values(delivery_status="sending")
+            ),
+        )
         if claimed.rowcount != 1:
             raise DeliveryBlockedError("owner-approved delivery claim failed")
         review.payload = {**review.payload, "publish_claimed_at": _now_iso()}
@@ -715,9 +816,12 @@ async def deliver_owner_approved(
         session.commit()
         raise
     current_run = session.get(EditorialRun, raw_item_id, populate_existing=True)
+    if current_run is None or current_run.post_id is None:
+        raise DeliveryBlockedError("delivery state disappeared after Telegram send")
     current_post = session.get(Post, current_run.post_id, populate_existing=True)
     stored_review = session.get(Submission, review.id, populate_existing=True)
-    assert current_run is not None and current_post is not None and stored_review is not None
+    if current_post is None or stored_review is None:
+        raise DeliveryBlockedError("delivery receipt target disappeared after Telegram send")
     current_post.telegram_message_id = message_id
     current_post.published_at = datetime.now(UTC)
     current_run.delivery_status = "sent"
@@ -726,7 +830,11 @@ async def deliver_owner_approved(
         assert message_ids is not None
         current_run.outcome = {
             **current_run.outcome,
-            "_media_delivery": _media_receipt(prepared_media, state="sent", message_ids=message_ids),
+            "_media_delivery": _media_receipt(
+                prepared_media,
+                state="sent",
+                message_ids=message_ids,
+            ),
         }
     stored_review.status = "published"
     stored_review.payload = {
@@ -739,20 +847,51 @@ async def deliver_owner_approved(
     return DeliveryResult("sent", delivered_text, message_id)
 
 
-async def _send_notice(bot: Any, chat_id: int, text: str) -> None:
+async def _send_notice(bot: TelegramCaller, chat_id: int, text: str) -> None:
     try:
-        await bot._call("sendMessage", {
-            "chat_id": chat_id,
-            "text": text,
-            "link_preview_options": {"is_disabled": True},
-        })
-    except (httpx.HTTPError, ValueError):
+        await bot._call(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "link_preview_options": {"is_disabled": True},
+            },
+        )
+    except Exception:
         return
+
+
+def _mark_stale(session: Session, review: Submission) -> None:
+    review.status = "stale"
+    review.payload = {**review.payload, "stale_at": _now_iso()}
+    session.commit()
+
+
+def _reject_owner_review(
+    session: Session,
+    review: Submission,
+    run: EditorialRun,
+    post: Post,
+    package: EditorialPackage,
+) -> None:
+    lock_editorial_city(session, package.city)
+    run.delivery_status = "cancelled"
+    run.outcome = {
+        **run.outcome,
+        "_owner_review": {
+            "review_id": review.id,
+            "decision": "reject",
+            "decided_at": review.payload.get("decided_at", _now_iso()),
+        },
+    }
+    post.status = "rejected"
+    review.payload = {**review.payload, "processed_at": _now_iso()}
+    session.commit()
 
 
 async def process_owner_actions(
     engine: Engine,
-    bot: Any,
+    bot: TelegramCaller,
     *,
     owner_user_id: int,
     owner_chat_id: int,
@@ -760,19 +899,21 @@ async def process_owner_actions(
     live_document_fetcher: Callable[[EditorialPackage], tuple[EvidenceDocument, ...]],
     publisher: Publisher,
     publish_enabled: bool,
-) -> dict[str, Any]:
-    """Apply persisted owner decisions. Revisions always receive fresh independent reviews."""
+) -> dict[str, int]:
+    """Apply durable owner decisions; revisions always receive fresh independent reviews."""
     stats = {"revised": 0, "rejected": 0, "published": 0, "blocked": 0, "deferred": 0}
     with Session(engine) as session:
-        ids = list(session.scalars(
-            select(Submission.id)
-            .where(
-                Submission.kind == OWNER_REVIEW_KIND,
-                Submission.telegram_user_id == owner_user_id,
-                Submission.status.in_(("revision_requested", "rejected", "approved")),
+        ids = list(
+            session.scalars(
+                select(Submission.id)
+                .where(
+                    Submission.kind == OWNER_REVIEW_KIND,
+                    Submission.telegram_user_id == owner_user_id,
+                    Submission.status.in_(("revision_requested", "rejected", "approved")),
+                )
+                .order_by(Submission.id)
             )
-            .order_by(Submission.id)
-        ))
+        )
     for review_id in ids:
         with Session(engine) as session:
             review = session.get(Submission, review_id)
@@ -780,35 +921,18 @@ async def process_owner_actions(
                 continue
             raw_item_id = review.payload.get("raw_item_id")
             if type(raw_item_id) is not int:
-                review.status = "stale"
-                session.commit()
+                _mark_stale(session, review)
                 continue
             try:
-                _, post, _, _, package = _validated_pending_package(session, raw_item_id)
+                run, post, _, _, package = _validated_pending_package(session, raw_item_id)
             except (DeliveryBlockedError, ValueError):
-                review.status = "stale"
-                session.commit()
+                _mark_stale(session, review)
                 continue
             if review.payload.get("package_sha256") != _package_sha256(package):
-                review.status = "stale"
-                session.commit()
+                _mark_stale(session, review)
                 continue
             if review.status == "rejected":
-                run = session.get(EditorialRun, raw_item_id)
-                assert run is not None
-                lock_editorial_city(session, package.city)
-                run.delivery_status = "cancelled"
-                run.outcome = {
-                    **run.outcome,
-                    "_owner_review": {
-                        "review_id": review.id,
-                        "decision": "reject",
-                        "decided_at": review.payload.get("decided_at", _now_iso()),
-                    },
-                }
-                post.status = "rejected"
-                review.payload = {**review.payload, "processed_at": _now_iso()}
-                session.commit()
+                _reject_owner_review(session, review, run, post, package)
                 stats["rejected"] += 1
                 continue
             if review.status == "revision_requested":
@@ -853,41 +977,42 @@ async def process_owner_actions(
                 else:
                     stats["revised"] += 1
                 continue
-            if review.status == "approved":
-                if not publish_enabled:
-                    stats["deferred"] += 1
-                    continue
-                try:
-                    live = live_document_fetcher(package)
-                except (ValueError, httpx.HTTPError):
-                    stats["deferred"] += 1
-                    continue
-                try:
-                    await deliver_owner_approved(
-                        session,
-                        review,
-                        publisher,
-                        live_documents=live,
-                        target_channel_id=APPROVED_CHANNEL_ID,
-                        enabled=True,
-                    )
-                except DeliveryBlockedError as error:
-                    session.rollback()
-                    current = session.get(Submission, review_id)
-                    if current is not None:
-                        current.status = "publish_blocked"
-                        current.payload = {
-                            **current.payload,
-                            "publish_error_type": type(error).__name__,
-                            "blocked_at": _now_iso(),
-                        }
-                        session.commit()
-                    await _send_notice(
-                        bot,
-                        owner_chat_id,
-                        "Публикация заблокирована защитной проверкой. Автоматического обхода нет.",
-                    )
-                    stats["blocked"] += 1
-                else:
-                    stats["published"] += 1
+            if review.status != "approved":
+                continue
+            if not publish_enabled:
+                stats["deferred"] += 1
+                continue
+            try:
+                live = live_document_fetcher(package)
+            except (ValueError, httpx.HTTPError):
+                stats["deferred"] += 1
+                continue
+            try:
+                await deliver_owner_approved(
+                    session,
+                    review,
+                    publisher,
+                    live_documents=live,
+                    target_channel_id=APPROVED_CHANNEL_ID,
+                    enabled=True,
+                )
+            except DeliveryBlockedError as error:
+                session.rollback()
+                current = session.get(Submission, review_id)
+                if current is not None:
+                    current.status = "publish_blocked"
+                    current.payload = {
+                        **current.payload,
+                        "publish_error_type": type(error).__name__,
+                        "blocked_at": _now_iso(),
+                    }
+                    session.commit()
+                await _send_notice(
+                    bot,
+                    owner_chat_id,
+                    "Публикация заблокирована защитной проверкой. Автоматического обхода нет.",
+                )
+                stats["blocked"] += 1
+            else:
+                stats["published"] += 1
     return stats
