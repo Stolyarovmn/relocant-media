@@ -257,6 +257,37 @@
       }
     },
     {
+      "id": "whatsapp_nova_s",
+      "platform": "whatsapp",
+      "name": "Nova S",
+      "url": "https://www.whatsapp.com/channel/0029Vb5s0jMDJ6GsQ9ab4z0y",
+      "scope": [
+        "serbia",
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_channel",
+      "selection_basis": [
+        "linked_from_nova_official_site",
+        "current_whatsapp_channel_page"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "reason": "no_safe_read_only_public_adapter"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://nova.rs/vesti/drustvo/pratite-tv-nova-i-na-whatsapp-u-ekskluzivni-sadrzaj-i-vesti-dana-stizu-direktno-na-vas-telefon/",
+          "https://www.whatsapp.com/channel/0029Vb5s0jMDJ6GsQ9ab4z0y"
+        ]
+      }
+    },
+    {
       "id": "viber_beograd_uzivo",
       "platform": "viber",
       "name": "Beograd uživo",
