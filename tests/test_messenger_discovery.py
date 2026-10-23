@@ -62,7 +62,7 @@ def test_messenger_registry_is_discovery_only_and_fail_closed() -> None:
             _assert_https(url)
 
 
-def test_only_explicitly_supported_messenger_source_is_runtime_collected() -> None:
+def test_only_explicitly_supported_messenger_sources_are_runtime_collected() -> None:
     payload = _load_registry()
     sources = payload["sources"]
     assert isinstance(sources, list)
@@ -73,11 +73,18 @@ def test_only_explicitly_supported_messenger_source_is_runtime_collected() -> No
         and source["collection"]["status"] == "runtime_public_preview"
     }
 
-    assert set(runtime) == {"telegram_serbialive_beograd"}
+    assert set(runtime) == {
+        "telegram_serbialive_beograd",
+        "telegram_moj_beograd",
+    }
     assert runtime["telegram_serbialive_beograd"]["url"] == (
         "https://t.me/s/serbialive_beograd"
     )
+    assert runtime["telegram_moj_beograd"]["url"] == (
+        "https://t.me/s/ylcutcTMU01kNWVk"
+    )
     assert "serbialive_beograd" in DEFAULT_CHANNELS
+    assert "ylcutcTMU01kNWVk" in DEFAULT_CHANNELS
 
 
 def test_catalog_only_sources_are_not_silently_enabled() -> None:

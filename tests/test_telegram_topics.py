@@ -34,6 +34,7 @@ def test_default_channels_are_popular_discovery_sources_only() -> None:
         "vstrechi_v_belgrade",
         "afisha_rs",
         "serbialive_beograd",
+        "ylcutcTMU01kNWVk",
     )
     assert len(DEFAULT_CHANNELS) == len(set(DEFAULT_CHANNELS))
 

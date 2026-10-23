@@ -35,11 +35,11 @@
 На 23.10.2026 `DEFAULT_CHANNELS` охватывает крупные публичные каналы о Сербии
 и Белграде: `Serbia`, `SerbiaInMyMind`, `serbia_news`, `serbnews`, `novostiserbii`,
 `beogradske_vesti`, `ruserbia`, `sta_imas_beograd`, `relocate_serbia`,
-`volna_srbjia`, `vstrechi_v_belgrade`, `afisha_rs`, `serbialive_beograd`.
-Последний добавлен как сербоязычный источник ранних локальных сигналов и UGC,
-а не как источник подтверждённых фактов. Наблюдаемые публичные счётчики сохранены
-в `docs/public-channel-registry.json` как приблизительный снимок, а не рейтинг
-качества или доверия.
+`volna_srbjia`, `vstrechi_v_belgrade`, `afisha_rs`, `serbialive_beograd`,
+`ylcutcTMU01kNWVk` (`MOJ - BEOGRAD`). Два последних — сербоязычные источники
+ранних локальных сигналов и UGC, а не источники подтверждённых фактов.
+Наблюдаемые публичные счётчики сохранены в `docs/public-channel-registry.json`
+как приблизительный снимок, а не рейтинг качества или доверия.
 
 Telegram-канал в этом списке является только источником темы. Его текст, фото,
 видео, число просмотров и исходящие ссылки не становятся `RawItem` или factual
@@ -62,15 +62,15 @@ source/evidence/factual guards. Пересказ другого канала н�
 перевозчика, пока сообщение не получено поддерживаемым read-only адаптером с
 проверяемой датой и provenance.
 
-В каталоге зафиксированы `SERBIA LIVE - BEOGRAD`, два русскоязычных канала
-вакансий, официальный Viber AIR SERBIA, Viber и WhatsApp Blic и Viber-сообщество
-Beograd uživo. Только `SERBIA LIVE - BEOGRAD` имеет статус
-`runtime_public_preview`, потому что его публичный Telegram preview читается
-существующим адаптером без аккаунта. Каналы вакансий остаются `catalog_only`,
-чтобы поток объявлений не занимал discovery budget без разрешённого пути к
-первичному подтверждению. Viber/WhatsApp также `catalog_only`, пока нет
-безопасного read-only публичного адаптера; наличие invite/channel URL не
-имитируется как автоматический ingestion.
+В каталоге зафиксированы `SERBIA LIVE - BEOGRAD`, `MOJ - BEOGRAD`, два
+русскоязычных канала вакансий, официальный Viber AIR SERBIA, Viber и WhatsApp
+Blic и Viber-сообщество Beograd uživo. `SERBIA LIVE - BEOGRAD` и
+`MOJ - BEOGRAD` имеют статус `runtime_public_preview`, потому что их публичный
+Telegram preview читается существующим адаптером без аккаунта. Каналы вакансий
+остаются `catalog_only`, чтобы поток объявлений не занимал discovery budget без
+разрешённого пути к первичному подтверждению. Viber/WhatsApp также
+`catalog_only`, пока нет безопасного read-only публичного адаптера; наличие
+invite/channel URL не имитируется как автоматический ingestion.
 
 ## Крупные сербские СМИ как discovery-only layer
 

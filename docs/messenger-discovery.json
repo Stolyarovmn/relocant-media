@@ -41,6 +41,36 @@
       }
     },
     {
+      "id": "telegram_moj_beograd",
+      "platform": "telegram",
+      "name": "MOJ - BEOGRAD",
+      "url": "https://t.me/s/ylcutcTMU01kNWVk",
+      "scope": [
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "mixed_ugc_and_publisher_posts",
+      "selection_basis": [
+        "current_public_preview",
+        "belgrade_local_incident_traffic_and_city_signals"
+      ],
+      "collection": {
+        "status": "runtime_public_preview",
+        "adapter": "telegram_public_preview",
+        "account_required": false
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-10-23",
+        "verification_urls": [
+          "https://t.me/s/ylcutcTMU01kNWVk"
+        ]
+      }
+    },
+    {
       "id": "telegram_rabotavserbii",
       "platform": "telegram",
       "name": "Работа в Сербии | Rabota v Serbii",
