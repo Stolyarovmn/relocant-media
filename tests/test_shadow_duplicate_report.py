@@ -4,11 +4,12 @@ from decimal import Decimal
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
+from relocant_media.services import shadow_duplicates
 from relocant_media.services.shadow_duplicates import build_shadow_duplicate_report
 from relocant_media.storage.models import Base, RawItem, Source
 
 
-def test_shadow_duplicate_report_is_read_only_and_non_authoritative() -> None:
+def test_shadow_duplicate_report_is_read_only_and_non_authoritative(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     now = datetime(2026, 10, 21, 10, tzinfo=UTC)
@@ -66,6 +67,15 @@ def test_shadow_duplicate_report_is_read_only_and_non_authoritative() -> None:
         before = session.scalar(select(func.count()).select_from(RawItem))
 
         report = build_shadow_duplicate_report(session, city="belgrade")
+        observed = []
+
+        def fake_jev(pairs, *, city):
+            observed.append((pairs, city))
+            return {"status": "ok", "decision_effect": "none", "signals": []}
+
+        monkeypatch.setattr(shadow_duplicates, "jev_enabled", lambda: True)
+        monkeypatch.setattr(shadow_duplicates, "duplicate_shadow", fake_jev)
+        enhanced = build_shadow_duplicate_report(session, city="belgrade")
         after = session.scalar(select(func.count()).select_from(RawItem))
 
     assert before == after == 2
@@ -82,3 +92,9 @@ def test_shadow_duplicate_report_is_read_only_and_non_authoritative() -> None:
     assert report["signals"][0]["left_raw_item_id"] == 1
     assert report["signals"][0]["right_raw_item_id"] == 2
     assert report["signals"][0]["scorer"] == report["scorer"]
+
+    assert enhanced["signals"] == report["signals"]
+    assert enhanced["jev_shadow"]["decision_effect"] == "none"
+    assert observed[0][1] == "belgrade"
+    assert len(observed[0][0]) == 1
+    assert observed[0][0][0]["left_title"] == "Затварање улице Кнеза Милоша у суботу"

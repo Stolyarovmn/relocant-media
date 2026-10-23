@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.jev import MAX_DUPLICATE_PAIRS, duplicate_shadow, jev_enabled
 from relocant_media.domain.dedup import EventCandidate
-from relocant_media.domain.shadow_dedup import LexicalSemanticScorer, find_shadow_duplicates
+from relocant_media.domain.shadow_dedup import (
+    DEFAULT_SHADOW_THRESHOLD,
+    LexicalSemanticScorer,
+    find_shadow_duplicates,
+)
 from relocant_media.storage.models import RawItem, Source
 
 
@@ -39,13 +45,23 @@ def build_shadow_duplicate_report(
         .order_by(RawItem.published_at, RawItem.id)
     ).all()
     scorer = LexicalSemanticScorer()
-    signals = find_shadow_duplicates(
-        [_candidate(item) for item, _source in rows],
-        scorer=scorer,
-        limit=limit,
-    )
+    candidates = [_candidate(item) for item, _source in rows]
+    use_jev = jev_enabled()
+    if use_jev:
+        # One lexical pass also provides a wider, bounded Jev shortlist.
+        shortlist = find_shadow_duplicates(
+            candidates, scorer=scorer, threshold=0.40, limit=max(limit, 64),
+        )
+        signals = [
+            replace(signal, threshold=DEFAULT_SHADOW_THRESHOLD)
+            for signal in shortlist
+            if signal.score.score >= DEFAULT_SHADOW_THRESHOLD
+        ][:limit]
+    else:
+        shortlist = []
+        signals = find_shadow_duplicates(candidates, scorer=scorer, limit=limit)
     metadata = scorer.metadata
-    return {
+    report: dict[str, Any] = {
         "mode": "shadow_only",
         "authoritative": False,
         "decision_effect": "none",
@@ -79,3 +95,37 @@ def build_shadow_duplicate_report(
             for signal in signals
         ],
     }
+    if use_jev:
+        # No private submissions, community tips, or unapproved sources leave the DB.
+        official = {
+            item.id: (item, source)
+            for item, source in rows
+            if source.ownership == "official"
+        }
+        pairs: list[dict[str, Any]] = []
+        for signal in shortlist:
+            left = official.get(signal.left_raw_item_id)
+            right = official.get(signal.right_raw_item_id)
+            if left is None or right is None:
+                continue
+            pairs.append({
+                "left_raw_item_id": signal.left_raw_item_id,
+                "right_raw_item_id": signal.right_raw_item_id,
+                "left_title": left[0].title,
+                "left_body": left[0].body,
+                "right_title": right[0].title,
+                "right_body": right[0].body,
+            })
+            if len(pairs) >= MAX_DUPLICATE_PAIRS:
+                break
+        try:
+            report["jev_shadow"] = duplicate_shadow(pairs, city=city)
+        except Exception as error:
+            report["jev_shadow"] = {
+                "mode": "shadow_only",
+                "decision_effect": "none",
+                "status": "unavailable",
+                "error_type": type(error).__name__,
+            }
+    return report
+

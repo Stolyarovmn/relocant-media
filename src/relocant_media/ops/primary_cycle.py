@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.jev import jev_enabled, rank_shadow
 from relocant_media.ops.candidates_cli import aware_datetime, select_candidates
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.storage.models import EditorialRun, RawItem, Source, SourceRevision
@@ -123,6 +124,18 @@ def run_cycle(
                     for i in extra[:max(0, limit - len(selected))])
                 manifest["candidate_count"] = len(manifest["candidates"])
                 manifest["reassessment_count"] = len(extra)
+            # Jev is a non-authoritative, optional observer; it never edits the queue.
+            if jev_enabled():
+                try:
+                    manifest["jev_shadow"] = rank_shadow(manifest["candidates"], city=city)
+                except Exception as error:
+                    # No model errors or secrets may block the editorial checkpoint.
+                    manifest["jev_shadow"] = {
+                        "mode": "shadow_only",
+                        "decision_effect": "none",
+                        "status": "unavailable",
+                        "error_type": type(error).__name__,
+                    }
             (output / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             processed = []

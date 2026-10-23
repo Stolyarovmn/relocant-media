@@ -23,6 +23,8 @@ Automation platform for a Russian-language local Telegram media network for relo
 - **FastAPI runtime**: Telegram webhooks and realtime workflows.
 
 See [`docs/architecture.md`](docs/architecture.md).
+Optional TypeSafe Jev shadow scoring is controlled entirely by `JEV_ENABLED`:
+see [`docs/JEV_INTEGRATION.md`](docs/JEV_INTEGRATION.md).
 
 ## Local start
 
