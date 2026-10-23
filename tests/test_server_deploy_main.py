@@ -96,9 +96,11 @@ def _mocks(
         "for arg in \"$@\"; do case \"$arg\" in https://*) url=\"$arg\";; esac; done\n"
         "sha=$(printf '%s' \"$url\" | sed -n 's/.*head_sha=\\([^&]*\\).*/\\1/p')\n"
         "conclusion=${MOCK_CI_CONCLUSION:-success}\n"
-        "printf '{\"workflow_runs\":[{\"name\":\"ci\",\"head_sha\":\"%s\","
-        "\"event\":\"push\",\"status\":\"completed\",\"conclusion\":\"%s\"}]}' "
-        "\"$sha\" \"$conclusion\"\n",
+        "path=${MOCK_CI_PATH:-.github/workflows/ci.yml}\n"
+        "printf '{\"workflow_runs\":[{\"name\":\"ci\",\"path\":\"%s\","
+        "\"head_sha\":\"%s\",\"head_branch\":\"main\",\"event\":\"push\","
+        "\"status\":\"completed\",\"conclusion\":\"%s\"}]}' "
+        "\"$path\" \"$sha\" \"$conclusion\"\n",
     )
     venv_python = bin_dir / "venv-python"
     _write_executable(venv_python, "#!/bin/sh\nexit 0\n")
@@ -111,6 +113,7 @@ def _run(
     tmp_path: pathlib.Path,
     *,
     ci_conclusion: str = "success",
+    ci_path: str = ".github/workflows/ci.yml",
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     systemd_dir = tmp_path / "systemd"
     systemd_dir.mkdir(exist_ok=True)
@@ -130,6 +133,7 @@ def _run(
         "RELOCANT_PYTHON_BIN": sys.executable,
         "RELOCANT_VENV_PYTHON": str(venv_python),
         "MOCK_CI_CONCLUSION": ci_conclusion,
+        "MOCK_CI_PATH": ci_path,
         "MOCK_SYSTEMCTL_LOG": str(systemctl_log),
     }
     result = subprocess.run(
@@ -204,6 +208,23 @@ def test_deploy_refuses_target_without_successful_exact_ci(tmp_path: pathlib.Pat
     assert _git(work, "rev-parse", "HEAD") == initial
     assert target in result.stderr
     assert "completed:failure" in result.stderr
+    assert _systemctl_calls(systemctl_log) == ""
+
+
+def test_deploy_refuses_named_ci_from_noncanonical_workflow(tmp_path: pathlib.Path) -> None:
+    work, remote, initial, target = _repository(tmp_path)
+
+    result, systemctl_log = _run(
+        work,
+        remote,
+        tmp_path,
+        ci_path=".github/workflows/not-production-ci.yml",
+    )
+
+    assert result.returncode == 78
+    assert _git(work, "rev-parse", "HEAD") == initial
+    assert target in result.stderr
+    assert "missing:missing" in result.stderr
     assert _systemctl_calls(systemctl_log) == ""
 
 
