@@ -1,0 +1,16 @@
+[Unit]
+Description=Relocant guarded exact-green main deployment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/relocant-media/app
+ExecStart=/usr/local/libexec/relocant-media/deploy-green-main.sh
+TimeoutStartSec=45min
+Nice=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true

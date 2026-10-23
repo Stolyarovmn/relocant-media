@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a new exact-green relocant-media main
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
+Unit=relocant-deploy.service
+
+[Install]
+WantedBy=timers.target
