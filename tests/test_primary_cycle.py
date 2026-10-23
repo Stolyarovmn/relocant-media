@@ -1,3 +1,4 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -243,3 +244,48 @@ def test_server_isolates_failed_item_and_keeps_checkpoint_open(queue, tmp_path):
                                              "error_type": "TimeoutError"}]
     assert report["processed_raw_item_ids"] == attempted[1:]
     assert report["remaining_count"] == 11
+
+
+def test_jev_shadow_annotates_manifest_without_changing_selection(
+    queue, tmp_path, monkeypatch,
+):
+    from relocant_media.ops import primary_cycle
+
+    engine, process = queue
+    observed = []
+
+    def fake_rank(candidates, *, city):
+        observed.append((len(candidates), city))
+        return {"status": "ok", "decision_effect": "none", "signals": []}
+
+    monkeypatch.setattr(primary_cycle, "jev_enabled", lambda: True)
+    monkeypatch.setattr(primary_cycle, "rank_shadow", fake_rank)
+    result = run_cycle(engine, city="belgrade", output=tmp_path / "jev", now=NOW,
+                       ingest=ingest_ok, process=process, limit=2)
+    manifest = json.loads((tmp_path / "jev" / "manifest.json").read_text(encoding="utf-8"))
+
+    assert result["processed_raw_item_ids"] == [
+        row["raw_item_id"] for row in manifest["candidates"]
+    ]
+    assert observed == [(2, "belgrade")]
+    assert manifest["jev_shadow"]["decision_effect"] == "none"
+
+
+def test_jev_failure_cannot_block_primary_cycle_or_leak_error(
+    queue, tmp_path, monkeypatch,
+):
+    from relocant_media.ops import primary_cycle
+
+    engine, process = queue
+
+    def failed_rank(candidates, *, city):
+        raise RuntimeError("SECRET-UPSTREAM-ERROR")
+
+    monkeypatch.setattr(primary_cycle, "jev_enabled", lambda: True)
+    monkeypatch.setattr(primary_cycle, "rank_shadow", failed_rank)
+    result = run_cycle(engine, city="belgrade", output=tmp_path / "jev-failed", now=NOW,
+                       ingest=ingest_ok, process=process, limit=1)
+    manifest_text = (tmp_path / "jev-failed" / "manifest.json").read_text(encoding="utf-8")
+    assert result["processed_raw_item_ids"]
+    assert json.loads(manifest_text)["jev_shadow"]["status"] == "unavailable"
+    assert "SECRET-UPSTREAM-ERROR" not in manifest_text
