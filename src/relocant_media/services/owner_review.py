@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -54,7 +53,9 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, S
 OWNER_REVIEW_KIND = "owner_editorial_review"
 _CALLBACK_RE = re.compile(r"^or:(publish|reject):(\d+)$")
 _ACTIVE_REVIEW_STATUSES = frozenset({"sending", "pending", "approved", "revision_requested"})
-_FINAL_REVIEW_STATUSES = frozenset({"published", "rejected", "cancelled", "publish_blocked"})
+_FINAL_REVIEW_STATUSES = frozenset(
+    {"published", "rejected", "cancelled", "publish_blocked", "send_uncertain"}
+)
 
 
 class TelegramCaller(Protocol):
