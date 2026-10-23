@@ -5,6 +5,7 @@ APP_DIR="${RELOCANT_APP_DIR:-/opt/relocant-media/app}"
 REMOTE_URL="${RELOCANT_GIT_REMOTE_URL:-https://github.com/Stolyarovmn/relocant-media.git}"
 BRANCH="${RELOCANT_GIT_BRANCH:-main}"
 GITHUB_REPO="${RELOCANT_GITHUB_REPO:-Stolyarovmn/relocant-media}"
+CI_WORKFLOW_PATH="${RELOCANT_CI_WORKFLOW_PATH:-.github/workflows/ci.yml}"
 WORKER_LOCK="${RELOCANT_WORKER_LOCK:-/var/lib/relocant-media/worker.lock}"
 SYSTEMD_DIR="${RELOCANT_SYSTEMD_DIR:-/etc/systemd/system}"
 DEPLOY_LIBEXEC_DIR="${RELOCANT_DEPLOY_LIBEXEC_DIR:-/usr/local/libexec/relocant-media}"
@@ -92,14 +93,20 @@ ci_json="$("$CURL_BIN" -fsSL -H 'Accept: application/vnd.github+json' "$ci_url")
 ci_state="$(printf '%s' "$ci_json" | "$PYTHON_BIN" -c '
 import json, sys
 payload = json.load(sys.stdin)
-target = sys.argv[1]
+target, branch, workflow_path = sys.argv[1:4]
 for run in payload.get("workflow_runs", []):
-    if run.get("name") == "ci" and run.get("head_sha") == target and run.get("event") == "push":
+    if (
+        run.get("name") == "ci"
+        and run.get("path") == workflow_path
+        and run.get("head_sha") == target
+        and run.get("head_branch") == branch
+        and run.get("event") == "push"
+    ):
         print("{}:{}".format(run.get("status"), run.get("conclusion")))
         break
 else:
     print("missing:missing")
-' "$target")"
+' "$target" "$BRANCH" "$CI_WORKFLOW_PATH")"
 if [ "$ci_state" != "completed:success" ]; then
   echo "target main is not backed by successful exact-sha CI: $target ($ci_state)" >&2
   exit 78
