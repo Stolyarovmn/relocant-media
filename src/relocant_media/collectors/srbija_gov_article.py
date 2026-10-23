@@ -12,9 +12,7 @@ from bs4 import BeautifulSoup, Tag
 from relocant_media.collectors.base import RawItem
 from relocant_media.sources.registry import SourceConfig
 
-ARTICLE_PATH = re.compile(
-    r"/vest/(?P<id>[1-9]\d*)(?:/(?P<slug>[a-z0-9-]+)\.php)?"
-)
+ARTICLE_PATH = re.compile(r"/vest/(?P<id>[1-9]\d*)(?:/(?P<slug>[a-z0-9-]+)\.php)?")
 DATE_RE = re.compile(
     r"[^,\n]{1,80},\s*(?P<day>[1-9]|[12]\d|3[01])\.\s*"
     r"(?P<month>јануар|фебруар|март|април|мај|јун|јул|август|септембар|октобар|новембар|децембар)\s+"
@@ -77,7 +75,10 @@ def _nearby_publication_date(h1: Tag) -> datetime:
     # The official page renders the location/publication date adjacent to the story heading.
     # Requiring the location comma prevents an event/effective date in body prose from being
     # mistaken for the publication date.
-    strings = [*h1.find_all_previous(string=True, limit=30), *h1.find_all_next(string=True, limit=30)]
+    strings = [
+        *h1.find_all_previous(string=True, limit=30),
+        *h1.find_all_next(string=True, limit=30),
+    ]
     for value in strings:
         match = DATE_RE.search(" ".join(str(value).split()))
         if match is None:
@@ -110,7 +111,11 @@ def _article_root(h1: Tag, soup: BeautifulSoup) -> Tag | BeautifulSoup:
 def parse_srbija_gov_article(html: str, source: SourceConfig, url: str) -> RawItem:
     canonical, article_id = canonical_srbija_gov_article_url(url)
     soup = BeautifulSoup(html, "html.parser")
-    headings = [node for node in soup.find_all("h1") if isinstance(node, Tag) and _text(node)]
+    headings = [
+        node
+        for node in soup.find_all("h1")
+        if isinstance(node, Tag) and _text(node)
+    ]
     if len(headings) != 1:
         raise SrbijaGovExtractionError("article heading missing or ambiguous")
     h1 = headings[0]
@@ -139,13 +144,20 @@ def parse_srbija_gov_article(html: str, source: SourceConfig, url: str) -> RawIt
 
 
 class SrbijaGovArticleCollector:
-    """Fetch only explicitly supplied official article URLs; never crawl the government feed."""
+    """Fetch exact official article URLs without crawling the government news archive."""
 
     def __init__(self, source: SourceConfig, client: httpx.AsyncClient) -> None:
         if source.extraction.strategy != "srbija_gov_article":
             raise SrbijaGovExtractionError("unsupported extraction strategy")
         self._source = source
         self._client = client
+
+    async def collect(self) -> list[RawItem]:
+        """Probe the one fixed verification article configured for source-health."""
+        verification_url = self._source.extraction.feed_url
+        if not verification_url:
+            raise SrbijaGovExtractionError("verification article URL is missing")
+        return [await self.collect_url(verification_url)]
 
     async def collect_url(self, url: str) -> RawItem:
         current, article_id = canonical_srbija_gov_article_url(url)
@@ -155,7 +167,9 @@ class SrbijaGovArticleCollector:
                 location = response.headers.get("location")
                 if not location:
                     raise SrbijaGovExtractionError("redirect without location")
-                current, redirected_id = canonical_srbija_gov_article_url(urljoin(current, location))
+                current, redirected_id = canonical_srbija_gov_article_url(
+                    urljoin(current, location)
+                )
                 if redirected_id != article_id:
                     raise SrbijaGovExtractionError("redirect changed article ID")
                 continue
