@@ -40,24 +40,9 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 78
 fi
 
-# Stop only timers. Never kill a running editorial/intake service: the worker lock
-# below waits for a current editorial pass, and active intake makes deployment defer.
-"$SYSTEMCTL_BIN" stop relocant-editorial.timer relocant-intake.timer
-restart_timers() {
-  "$SYSTEMCTL_BIN" start relocant-editorial.timer relocant-intake.timer >/dev/null 2>&1 || true
-}
-trap restart_timers EXIT INT TERM
-
-exec 9>"$WORKER_LOCK"
-if ! /usr/bin/flock -w 2100 9; then
-  echo "could not acquire editorial worker lock" >&2
-  exit 75
-fi
-if "$SYSTEMCTL_BIN" is-active --quiet relocant-intake.service; then
-  echo "private intake is active; deployment deferred without stopping it" >&2
-  exit 75
-fi
-
+# Fetch and validate the exact target before touching editorial timers. This makes
+# frequent unattended checks cheap and non-disruptive when main has not changed or
+# when the newest commit is not yet backed by successful CI.
 current="$(git rev-parse --verify HEAD)"
 git fetch --no-tags "$REMOTE_URL" "refs/heads/$BRANCH"
 target="$(git rev-parse --verify FETCH_HEAD)"
@@ -87,6 +72,34 @@ else:
 if [ "$ci_state" != "completed:success" ]; then
   echo "target main is not backed by successful exact-sha CI: $target ($ci_state)" >&2
   exit 78
+fi
+
+# Stop only timers after a green update is known to exist. Never kill a running
+# editorial/intake service: the worker lock below waits for a current editorial pass,
+# and active intake makes deployment defer.
+"$SYSTEMCTL_BIN" stop relocant-editorial.timer relocant-intake.timer
+restart_timers() {
+  "$SYSTEMCTL_BIN" start relocant-editorial.timer relocant-intake.timer >/dev/null 2>&1 || true
+}
+trap restart_timers EXIT INT TERM
+
+exec 9>"$WORKER_LOCK"
+if ! /usr/bin/flock -w 2100 9; then
+  echo "could not acquire editorial worker lock" >&2
+  exit 75
+fi
+if "$SYSTEMCTL_BIN" is-active --quiet relocant-intake.service; then
+  echo "private intake is active; deployment deferred without stopping it" >&2
+  exit 75
+fi
+
+# Main may advance while we wait for the worker lock. Never deploy an intermediate
+# commit and call it current production; defer and let the next watcher pass retry.
+latest_line="$(git ls-remote --exit-code "$REMOTE_URL" "refs/heads/$BRANCH")"
+latest="$(printf '%s\n' "$latest_line" | awk 'NR == 1 {print $1}')"
+if [ -z "$latest" ] || [ "$latest" != "$target" ]; then
+  echo "public $BRANCH advanced while deployment was waiting; retry later" >&2
+  exit 75
 fi
 
 rollback() {
@@ -140,10 +153,14 @@ fi
 
 for unit in \
   relocant-editorial.service relocant-editorial.timer \
-  relocant-intake.service relocant-intake.timer
+  relocant-intake.service relocant-intake.timer \
+  relocant-deploy.service relocant-deploy.timer
 do
   /usr/bin/install -m 0644 "$APP_DIR/deploy/server/$unit" "$SYSTEMD_DIR/$unit"
 done
 "$SYSTEMCTL_BIN" daemon-reload
+if ! "$SYSTEMCTL_BIN" enable --now relocant-deploy.timer; then
+  echo "warning: green-main deploy timer was installed but could not be enabled" >&2
+fi
 
 printf 'deployed green main: %s -> %s\n' "$current" "$target"
