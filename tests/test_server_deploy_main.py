@@ -35,6 +35,8 @@ def _repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str
         "relocant-editorial.timer",
         "relocant-intake.service",
         "relocant-intake.timer",
+        "relocant-deploy.service",
+        "relocant-deploy.timer",
     ):
         (deploy / unit).write_text(f"# {unit}\n", encoding="utf-8")
     (deploy / "check-main-sync.sh").write_text(
@@ -64,13 +66,18 @@ def _repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str
     return work, remote, initial, target
 
 
-def _mocks(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+def _mocks(
+    tmp_path: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, pathlib.Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    systemctl_log = tmp_path / "systemctl.log"
     systemctl = bin_dir / "systemctl"
     _write_executable(
         systemctl,
         "#!/bin/sh\n"
+        "if [ -n \"${MOCK_SYSTEMCTL_LOG:-}\" ]; then "
+        "printf '%s\\n' \"$*\" >> \"$MOCK_SYSTEMCTL_LOG\"; fi\n"
         "if [ \"${1:-}\" = is-active ]; then exit 1; fi\n"
         "exit 0\n",
     )
@@ -88,7 +95,7 @@ def _mocks(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.
     )
     venv_python = bin_dir / "venv-python"
     _write_executable(venv_python, "#!/bin/sh\nexit 0\n")
-    return systemctl, curl, venv_python
+    return systemctl, curl, venv_python, systemctl_log
 
 
 def _run(
@@ -97,10 +104,10 @@ def _run(
     tmp_path: pathlib.Path,
     *,
     ci_conclusion: str = "success",
-) -> subprocess.CompletedProcess[str]:
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     systemd_dir = tmp_path / "systemd"
     systemd_dir.mkdir(exist_ok=True)
-    systemctl, curl, venv_python = _mocks(tmp_path)
+    systemctl, curl, venv_python, systemctl_log = _mocks(tmp_path)
     env = {
         **os.environ,
         "RELOCANT_DEPLOY_TEST_MODE": "true",
@@ -114,16 +121,22 @@ def _run(
         "RELOCANT_PYTHON_BIN": sys.executable,
         "RELOCANT_VENV_PYTHON": str(venv_python),
         "MOCK_CI_CONCLUSION": ci_conclusion,
+        "MOCK_SYSTEMCTL_LOG": str(systemctl_log),
     }
-    return subprocess.run(
+    result = subprocess.run(
         ["/bin/sh", str(SCRIPT)], env=env, capture_output=True, text=True, check=False
     )
+    return result, systemctl_log
+
+
+def _systemctl_calls(path: pathlib.Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
 def test_deploy_fast_forwards_only_green_exact_main(tmp_path: pathlib.Path) -> None:
     work, remote, _, target = _repository(tmp_path)
 
-    result = _run(work, remote, tmp_path)
+    result, systemctl_log = _run(work, remote, tmp_path)
 
     assert result.returncode == 0, result.stderr
     assert _git(work, "rev-parse", "HEAD") == target
@@ -131,17 +144,34 @@ def test_deploy_fast_forwards_only_green_exact_main(tmp_path: pathlib.Path) -> N
     systemd_dir = tmp_path / "systemd"
     assert (systemd_dir / "relocant-editorial.service").is_file()
     assert (systemd_dir / "relocant-intake.timer").is_file()
+    assert (systemd_dir / "relocant-deploy.service").is_file()
+    assert (systemd_dir / "relocant-deploy.timer").is_file()
+    calls = _systemctl_calls(systemctl_log)
+    assert "stop relocant-editorial.timer relocant-intake.timer" in calls
+    assert "enable --now relocant-deploy.timer" in calls
+
+
+def test_deploy_noop_does_not_touch_editorial_timers(tmp_path: pathlib.Path) -> None:
+    work, remote, _, target = _repository(tmp_path)
+    _git(work, "reset", "--hard", target)
+
+    result, systemctl_log = _run(work, remote, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "already matches main" in result.stdout
+    assert _systemctl_calls(systemctl_log) == ""
 
 
 def test_deploy_refuses_target_without_successful_exact_ci(tmp_path: pathlib.Path) -> None:
     work, remote, initial, target = _repository(tmp_path)
 
-    result = _run(work, remote, tmp_path, ci_conclusion="failure")
+    result, systemctl_log = _run(work, remote, tmp_path, ci_conclusion="failure")
 
     assert result.returncode == 78
     assert _git(work, "rev-parse", "HEAD") == initial
     assert target in result.stderr
     assert "completed:failure" in result.stderr
+    assert _systemctl_calls(systemctl_log) == ""
 
 
 def test_deploy_refuses_non_fast_forward_remote_main(tmp_path: pathlib.Path) -> None:
@@ -157,20 +187,22 @@ def test_deploy_refuses_non_fast_forward_remote_main(tmp_path: pathlib.Path) -> 
     replacement = _git(other, "rev-parse", "HEAD")
     _git(other, "push", "--force", "origin", "HEAD:main")
 
-    result = _run(work, remote, tmp_path)
+    result, systemctl_log = _run(work, remote, tmp_path)
 
     assert result.returncode == 78
     assert _git(work, "rev-parse", "HEAD") == initial
     assert replacement in result.stderr
     assert "non-fast-forward" in result.stderr
+    assert _systemctl_calls(systemctl_log) == ""
 
 
 def test_deploy_refuses_dirty_checkout_before_timer_changes(tmp_path: pathlib.Path) -> None:
     work, remote, initial, _ = _repository(tmp_path)
     (work / "tracked.txt").write_text("dirty\n", encoding="utf-8")
 
-    result = _run(work, remote, tmp_path)
+    result, systemctl_log = _run(work, remote, tmp_path)
 
     assert result.returncode == 78
     assert _git(work, "rev-parse", "HEAD") == initial
     assert "not clean" in result.stderr
+    assert _systemctl_calls(systemctl_log) == ""
