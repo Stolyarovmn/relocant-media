@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-10-23",
+  "purpose": "messenger_discovery_candidates_only",
+  "policy": {
+    "runtime_collection": false,
+    "publication_evidence": false,
+    "requires_current_endpoint_verification_before_promotion": true,
+    "requires_primary_verification": true
+  },
+  "sources": [
+    {
+      "id": "viber_visit_novi_sad",
+      "platform": "viber",
+      "name": "Visit Novi Sad",
+      "scope": [
+        "novi_sad"
+      ],
+      "role": "candidate_only",
+      "runtime_collection": false,
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "endpoint_status": "unconfirmed_current",
+      "selection_basis": [
+        "official_novi_sad_report_lists_viber_visit_novi_sad",
+        "current_direct_invite_not_independently_verified"
+      ],
+      "verification": {
+        "status": "historically_official_current_endpoint_unverified",
+        "checked_on": "2026-10-23",
+        "official_evidence_urls": [
+          "https://skupstina.novisad.rs/wp-content/uploads/2025/06/44-izvestaj-o-radu-fondacije-novi-sad-evropska-prestonica-kulture-za-2024.pdf"
+        ],
+        "note": "The official Novi Sad 2024 report lists Viber — Visit Novi Sad. The invite URL printed in the PDF is not stored because the extracted token is ambiguous and a current direct invite could not be independently verified."
+      }
+    }
+  ]
+}
