@@ -1,12 +1,12 @@
 import os
+import pathlib
 import subprocess
-from pathlib import Path
 
 
-SCRIPT = Path(__file__).parents[1] / "deploy/server/check-main-sync.sh"
+SCRIPT = pathlib.Path(__file__).parents[1] / "deploy/server/check-main-sync.sh"
 
 
-def _git(cwd: Path, *args: str) -> str:
+def _git(cwd: pathlib.Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -17,7 +17,7 @@ def _git(cwd: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _repository(tmp_path: Path) -> tuple[Path, Path, str]:
+def _repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str]:
     work = tmp_path / "work"
     remote = tmp_path / "remote.git"
     work.mkdir()
@@ -35,7 +35,7 @@ def _repository(tmp_path: Path) -> tuple[Path, Path, str]:
     return work, remote, initial
 
 
-def _check(work: Path, remote: Path) -> subprocess.CompletedProcess[str]:
+def _check(work: pathlib.Path, remote: pathlib.Path) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
         "RELOCANT_APP_DIR": str(work),
@@ -51,7 +51,7 @@ def _check(work: Path, remote: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_runtime_freshness_accepts_exact_remote_main(tmp_path: Path) -> None:
+def test_runtime_freshness_accepts_exact_remote_main(tmp_path: pathlib.Path) -> None:
     work, remote, initial = _repository(tmp_path)
 
     result = _check(work, remote)
@@ -61,7 +61,7 @@ def test_runtime_freshness_accepts_exact_remote_main(tmp_path: Path) -> None:
     assert "verified" in result.stdout
 
 
-def test_runtime_freshness_rejects_stale_checkout(tmp_path: Path) -> None:
+def test_runtime_freshness_rejects_stale_checkout(tmp_path: pathlib.Path) -> None:
     work, remote, initial = _repository(tmp_path)
     (work / "tracked.txt").write_text("two\n", encoding="utf-8")
     _git(work, "add", "tracked.txt")
@@ -78,7 +78,7 @@ def test_runtime_freshness_rejects_stale_checkout(tmp_path: Path) -> None:
     assert f"expected={newest}" in result.stderr
 
 
-def test_runtime_freshness_rejects_tracked_modifications(tmp_path: Path) -> None:
+def test_runtime_freshness_rejects_tracked_modifications(tmp_path: pathlib.Path) -> None:
     work, remote, _ = _repository(tmp_path)
     (work / "tracked.txt").write_text("locally changed\n", encoding="utf-8")
 
