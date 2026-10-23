@@ -30,6 +30,7 @@ DEFAULT_CHANNELS = (
     "vstrechi_v_belgrade",
     "afisha_rs",
     "serbialive_beograd",
+    "ylcutcTMU01kNWVk",
 )
 
 
