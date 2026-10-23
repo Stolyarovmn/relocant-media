@@ -36,6 +36,10 @@ def _package_hash(package: EditorialPackage) -> str:
     return hashlib.sha256(canonical_json(package.model_dump(mode="json")).encode()).hexdigest()
 
 
+def _stored_package(run: EditorialRun) -> EditorialPackage:
+    return EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))
+
+
 def _live(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     return tuple(
@@ -146,7 +150,7 @@ def _store_reviewed_politics(engine) -> int:
 def _owner_review_row(session: Session, raw_id: int, *, message_id: int = 501) -> Submission:
     run = session.get(EditorialRun, raw_id)
     assert run is not None
-    package = EditorialPackage.model_validate(run.outcome["_package"])
+    package = _stored_package(run)
     row = Submission(
         kind=OWNER_REVIEW_KIND,
         telegram_user_id=OWNER,
@@ -184,7 +188,7 @@ def test_high_risk_policy_hold_gets_two_reviews_but_stays_human_review(engine):
     with Session(engine) as session:
         run = session.get(EditorialRun, raw_id)
         post = session.get(Post, run.post_id)
-        package = EditorialPackage.model_validate(run.outcome["_package"])
+        package = _stored_package(run)
         assert run.outcome["status"] == "human_review"
         assert run.outcome["reason"] == "package_requires_review"
         assert post.status == "human_review"
@@ -292,7 +296,7 @@ def test_owner_revision_discards_old_reviews_and_creates_new_exact_version(engin
         review.status = "revision_requested"
         review.payload = {**review.payload, "owner_comment": "Сократи заголовок."}
         run = session.get(EditorialRun, raw_id)
-        package = EditorialPackage.model_validate(run.outcome["_package"])
+        package = _stored_package(run)
         session.commit()
 
     revised = revise_package(
@@ -324,7 +328,7 @@ async def test_owner_publish_is_separate_at_most_once_path(engine):
         review = _owner_review_row(session, raw_id)
         review.status = "approved"
         run = session.get(EditorialRun, raw_id)
-        package = EditorialPackage.model_validate(run.outcome["_package"])
+        package = _stored_package(run)
         session.commit()
 
         with pytest.raises(DeliveryBlockedError):
