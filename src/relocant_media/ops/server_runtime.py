@@ -30,7 +30,11 @@ from relocant_media.ingestion.persistence import capture_collected_batch, sync_s
 from relocant_media.ops import server_cycle as base
 from relocant_media.services.published_watch import evidence_changed, published_sources
 from relocant_media.services.submission_feedback import resolve_submission
-from relocant_media.services.submission_queue import batch_submissions, pending_submissions, tip_urls
+from relocant_media.services.submission_queue import (
+    batch_submissions,
+    pending_submissions,
+    tip_urls,
+)
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.models import EditorialRun, RawItem, Submission
 
