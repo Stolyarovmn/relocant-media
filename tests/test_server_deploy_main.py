@@ -151,7 +151,6 @@ def test_deploy_refuses_non_fast_forward_remote_main(tmp_path: pathlib.Path) -> 
     _git(other, "config", "user.email", "test@example.invalid")
     _git(other, "config", "user.name", "Deploy Test")
     _git(other, "checkout", "--orphan", "replacement")
-    _git(other, "rm", "-rf", ".")
     (other / "replacement.txt").write_text("replacement\n", encoding="utf-8")
     _git(other, "add", ".")
     _git(other, "commit", "-m", "replacement main")
