@@ -45,7 +45,9 @@ sudo env \
 
 The bootstrap never starts an editorial cycle and never calls Telegram. A dirty checkout,
 non-fast-forward history, missing/failed CI, incompatible database, active private intake or
-other failed guard stops the deployment.
+other failed guard stops the deployment. If the checkout already equals the exact green
+`main`, the bootstrap only installs the deployment control plane; it does not stop the
+editorial/intake timers or reinstall the application package.
 
 ## Normal deployment contract
 
@@ -74,9 +76,15 @@ existing explicit maintenance/backup path.
 
 After a successful rollout the script installs the editorial/intake units plus
 `relocant-deploy.service` and `relocant-deploy.timer`, reloads systemd, and enables the deploy
-timer. The watcher checks roughly every ten minutes. It uses the same fast-forward, exact-SHA
-CI, worker-lock, database and final-main guards; it does not run an editorial cycle and it does
-not call Telegram.
+timer. The recurring root service does **not** execute code directly from the application
+checkout: the verified deploy script is installed root-owned at
+`/usr/local/libexec/relocant-media/deploy-green-main.sh`, and systemd executes that copy. This
+prevents the unprivileged application checkout from becoming a root command surface.
+
+The watcher checks roughly every ten minutes. It uses the same fast-forward, exact-SHA CI,
+worker-lock, database and final-main guards; it does not run an editorial cycle and it does not
+call Telegram. When production already matches `main` and the installed control plane matches
+the checked-in files, the watcher exits without touching systemd.
 
 For the current production channel this deployment is also the boundary that makes Telegram
 presentation changes real. Current `main` hides the raw final source URL behind the clickable
