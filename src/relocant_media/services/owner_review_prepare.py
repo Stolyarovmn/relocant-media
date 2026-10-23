@@ -30,11 +30,12 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 
 def _package_sha256(package: EditorialPackage) -> str:
-    return hashlib.sha256(canonical_json(package.model_dump(mode="json")).encode()).hexdigest()
+    payload = canonical_json(package.model_dump(mode="json")).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def pending_high_risk_holds(engine: Engine) -> list[int]:
-    """Return only full AI outcomes held solely by the high-risk human-review policy."""
+    """Return full AI outcomes held solely by the high-risk human-review policy."""
     with Session(engine) as session:
         rows = session.execute(
             select(EditorialRun, Post)
@@ -57,13 +58,21 @@ def pending_high_risk_holds(engine: Engine) -> list[int]:
         ]
 
 
-def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
+def _candidate_rows(
+    session: Session,
+    raw_item_id: int,
+) -> tuple[EditorialRun, Post, RawItem, Source]:
     run = session.get(EditorialRun, raw_item_id, populate_existing=True)
     item = session.get(RawItem, raw_item_id, populate_existing=True)
     source = session.get(Source, item.source_id, populate_existing=True) if item else None
     post = session.get(Post, run.post_id, populate_existing=True) if run and run.post_id else None
     if run is None or item is None or source is None or post is None or not source.enabled:
         raise DeliveryBlockedError("high-risk owner-review candidate is incomplete")
+    return run, post, item, source
+
+
+def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
+    run, post, item, source = _candidate_rows(session, raw_item_id)
     if (
         run.delivery_status != "pending"
         or run.staging_message_id is not None
@@ -94,13 +103,15 @@ def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
     ):
         raise DeliveryBlockedError("official primary evidence is required")
     primary = EvidenceDocument.model_validate(run.evidence)
-    normalized = outcome.model_copy(update={
-        # Package evaluation immediately converts this asserted READY state back to
-        # HUMAN_REVIEW for high-risk categories. This normalization exists only so the
-        # package contract can run the same two-review machinery used by auto-safe news.
-        "status": PublicationStatus.READY,
-        "reason": "owner_review_candidate",
-    })
+    normalized = outcome.model_copy(
+        update={
+            # Package evaluation immediately converts this asserted READY state back to
+            # HUMAN_REVIEW because the category remains high-risk. The normalization is
+            # only an input to the same two-review package contract used by safe news.
+            "status": PublicationStatus.READY,
+            "reason": "owner_review_candidate",
+        }
+    )
     placeholders = [
         {
             "reviewer_id": f"pending-{role}",
@@ -117,7 +128,7 @@ def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
         }
         for role in ("facts", "utility")
     ]
-    return EditorialPackage.model_validate_json(json.dumps({
+    payload = {
         "version": 2,
         "policy_version": "subscription-editorial-v2",
         "city": source.city,
@@ -133,7 +144,46 @@ def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
         },
         "outcome": normalized.model_dump(mode="json"),
         "reviews": placeholders,
-    }))
+    }
+    return EditorialPackage.model_validate_json(json.dumps(payload))
+
+
+def _persist_reviewed_package(
+    session: Session,
+    raw_item_id: int,
+    package: EditorialPackage,
+    outcome: EditorialOutcome,
+) -> None:
+    run, post, item, source = _candidate_rows(session, raw_item_id)
+    if "_package" in run.outcome or run.delivery_status != "pending":
+        raise DeliveryBlockedError("high-risk candidate changed during review")
+    lock_editorial_city(session, source.city)
+    members = _event_items(session, anchor=item, anchor_source=source)
+    current_snapshots = [_snapshot_member(member, policy) for member, policy in members]
+    assert package.event is not None
+    package_snapshots = [
+        document.model_dump(mode="json") for document in package.event.documents
+    ]
+    if (
+        package.event.event_key != event_key(_candidate(item))
+        or package_snapshots != current_snapshots
+    ):
+        raise DeliveryBlockedError("evidence changed during independent review")
+    metadata = {
+        key: value for key, value in run.outcome.items() if key.startswith("_")
+    }
+    run.outcome = {
+        **outcome.model_dump(mode="json"),
+        **metadata,
+        "_package": package.model_dump(mode="json"),
+        "_package_sha256": _package_sha256(package),
+    }
+    post.category = package.outcome.ranking.category
+    post.status = PublicationStatus.HUMAN_REVIEW.value
+    post.title = package.outcome.draft.title
+    post.body = package.outcome.draft.body
+    post.confidence = Decimal(str(outcome.confidence))
+    session.commit()
 
 
 def prepare_high_risk_holds(
@@ -144,17 +194,21 @@ def prepare_high_risk_holds(
     limit: int = 5,
     audit: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, int]:
-    """Attach two fresh independent reviews, while leaving final status HUMAN_REVIEW."""
+    """Attach two fresh independent reviews while preserving final HUMAN_REVIEW status."""
     prepared = 0
     blocked = 0
     for raw_item_id in pending_high_risk_holds(engine)[:limit]:
         try:
             with Session(engine) as session:
                 package = _build_package(session, raw_item_id)
+
+            def current_live_documents() -> tuple[EvidenceDocument, ...]:
+                return live_documents(package)
+
             package = review_with_repairs(
                 package,
                 provider,
-                lambda current=package: live_documents(current),
+                current_live_documents,
                 audit=audit,
             )
             evaluated = evaluate_package(package)
@@ -171,47 +225,18 @@ def prepare_high_risk_holds(
                 )
             ):
                 raise DeliveryBlockedError("high-risk package failed independent review")
-            fingerprint = _package_sha256(package)
             with Session(engine) as session:
-                run = session.get(EditorialRun, raw_item_id, populate_existing=True)
-                item = session.get(RawItem, raw_item_id, populate_existing=True)
-                source = session.get(Source, item.source_id, populate_existing=True) if item else None
-                post = session.get(Post, run.post_id, populate_existing=True) if run and run.post_id else None
-                if run is None or item is None or source is None or post is None:
-                    raise DeliveryBlockedError("high-risk candidate disappeared")
-                if "_package" in run.outcome or run.delivery_status != "pending":
-                    raise DeliveryBlockedError("high-risk candidate changed during review")
-                lock_editorial_city(session, source.city)
-                members = _event_items(session, anchor=item, anchor_source=source)
-                current_snapshots = [_snapshot_member(member, policy) for member, policy in members]
-                assert package.event is not None
-                if (
-                    package.event.event_key != event_key(_candidate(item))
-                    or [document.model_dump(mode="json") for document in package.event.documents]
-                    != current_snapshots
-                ):
-                    raise DeliveryBlockedError("evidence changed during independent review")
-                metadata = {key: value for key, value in run.outcome.items() if key.startswith("_")}
-                run.outcome = {
-                    **evaluated.model_dump(mode="json"),
-                    **metadata,
-                    "_package": package.model_dump(mode="json"),
-                    "_package_sha256": fingerprint,
-                }
-                post.category = package.outcome.ranking.category
-                post.status = PublicationStatus.HUMAN_REVIEW.value
-                post.title = package.outcome.draft.title
-                post.body = package.outcome.draft.body
-                post.confidence = Decimal(str(evaluated.confidence))
-                session.commit()
+                _persist_reviewed_package(session, raw_item_id, package, evaluated)
             prepared += 1
         except Exception as error:
             blocked += 1
             if audit is not None:
-                audit({
-                    "role": "owner_review_prepare",
-                    "raw_item_id": raw_item_id,
-                    "status": "blocked",
-                    "error_type": type(error).__name__,
-                })
+                audit(
+                    {
+                        "role": "owner_review_prepare",
+                        "raw_item_id": raw_item_id,
+                        "status": "blocked",
+                        "error_type": type(error).__name__,
+                    }
+                )
     return {"prepared": prepared, "blocked": blocked}
