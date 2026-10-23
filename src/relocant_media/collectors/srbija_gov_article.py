@@ -7,7 +7,8 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import httpx
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup
+from bs4.element import NavigableString, Tag
 
 from relocant_media.collectors.base import RawItem
 from relocant_media.sources.registry import SourceConfig
