@@ -1,17 +1,18 @@
 from pathlib import Path
 
-WORKFLOW = Path(".github/workflows/editorial-primary.yml")
+import yaml
+
+WORKFLOW = Path(".github/workflows/jev-smoke.yml")
 RUN_CYCLE = Path("deploy/server/run-cycle.sh")
 SERVICE = Path("deploy/server/relocant-editorial.service")
 COMPOSE = Path("docker-compose.yml")
 ENV_EXAMPLE = Path(".env.example")
 
 
-def test_jev_is_wired_to_canonical_server_runtime() -> None:
+def test_existing_server_observer_remains_optional_and_fail_open() -> None:
     script = RUN_CYCLE.read_text(encoding="utf-8")
     service = SERVICE.read_text(encoding="utf-8")
 
-    assert not WORKFLOW.exists()
     assert "EnvironmentFile=/etc/relocant-media.env" in service
     assert '${JEV_ENABLED:-false}' in script
     assert "relocant_media.ops.server_runtime" in script
@@ -21,6 +22,28 @@ def test_jev_is_wired_to_canonical_server_runtime() -> None:
     assert "jev-shadow-duplicates.json" in script
     assert '"$status" -eq 0' in script
     assert '"status":"unavailable"' in script
+
+
+def test_actions_smoke_has_no_newsroom_or_publication_credentials() -> None:
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert workflow["permissions"] == {"contents": "read"}
+    assert "pull_request" not in workflow["on"]
+    assert "schedule" not in workflow["on"]
+    assert workflow["on"]["push"]["branches"] == ["main"]
+    steps = workflow["jobs"]["smoke"]["steps"]
+    step = next(step for step in steps if "env" in step)
+    assert "relocant_media.ops.jev_smoke" in step["run"]
+    assert step["env"]["JEV_ENABLED"] == "${{ vars.JEV_ENABLED || 'false' }}"
+    assert step["env"]["TYPESAFE_API_KEY"] == (
+        "${{ vars.JEV_ENABLED == 'true' && secrets.TYPESAFE_API_KEY || '' }}"
+    )
+    for name in ("TELEGRAM_RUNTIME_ENABLED", "TELEGRAM_MTPROTO_ENABLED",
+                 "EDITORIAL_SEND_ENABLED"):
+        assert step["env"][name] == "false"
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "secrets.DATABASE_URL" not in text
+    assert "secrets.GEMINI_API_KEY" not in text
+    assert "secrets.TELEGRAM" not in text
 
 
 def test_staging_compose_does_not_own_production_jev_credentials() -> None:
