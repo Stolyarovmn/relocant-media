@@ -11,12 +11,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from google import genai
 from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
-from relocant_media.ai.gemini import GeminiStructuredProvider
+from relocant_media.ai.gemini_process import IsolatedGeminiProvider
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
 from relocant_media.ai.package import EditorialPackage
 from relocant_media.ai.pipeline import EditorialPipeline
@@ -770,11 +769,9 @@ def main() -> None:
             raise ValueError("existing local SQLite required")
         engine = create_engine(url)
         verify_sqlite_schema(engine)
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"],
-                              http_options={"timeout": 45000, "retry_options": {"attempts": 0}})
         provider = PublicPreparationCache(
-            ServerAI(GeminiStructuredProvider(os.environ["GEMINI_API_KEY"],
-                model=os.environ["GEMINI_MODEL"], client=client),
+            ServerAI(IsolatedGeminiProvider(os.environ["GEMINI_API_KEY"],
+                model=os.environ["GEMINI_MODEL"]),
                 audit_path=args.output / "ai-calls.jsonl"),
             Path(url.database).parent / "ai-cache",
             model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v7-local-venue-style",

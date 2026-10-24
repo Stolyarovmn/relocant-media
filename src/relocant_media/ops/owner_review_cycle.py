@@ -9,12 +9,11 @@ import traceback
 from pathlib import Path
 
 import httpx
-from google import genai
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
-from relocant_media.ai.gemini import GeminiStructuredProvider
+from relocant_media.ai.gemini_process import IsolatedGeminiProvider
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.ops.server_cycle import ChannelPublisher, ServerAI
 from relocant_media.ops.server_runtime import fetch_documents
@@ -60,11 +59,7 @@ def _provider(engine: Engine) -> ServerAI | None:
         return None
     api_key = os.environ["GEMINI_API_KEY"]
     model = os.environ["GEMINI_MODEL"]
-    client = genai.Client(
-        api_key=api_key,
-        http_options={"timeout": 45000, "retry_options": {"attempts": 0}},
-    )
-    return ServerAI(GeminiStructuredProvider(api_key, model=model, client=client))
+    return ServerAI(IsolatedGeminiProvider(api_key, model=model))
 
 
 async def run_cycle(
