@@ -19,7 +19,7 @@ def test_jev_is_wired_to_canonical_server_runtime() -> None:
     assert "--database" in script
     assert "--shadow-duplicates" in script
     assert "jev-shadow-duplicates.json" in script
-    assert '"status" -eq 0' in script
+    assert '"$status" -eq 0' in script
     assert '"status":"unavailable"' in script
 
 
