@@ -1,59 +1,83 @@
-# Проверка runtime перед подключением Jev
+# Проверка фактического редакционного runtime
 
-Проверено 24 октября 2026 года на `main` `7e2afd4ef6bc2958ad95cc67ccb07d0974a9c19b`.
-Это наблюдения о доступном коде и GitHub, а не утверждение о состоянии удалённого сервера.
+## Подтверждённый запуск на сервере
 
-## GitHub Actions
+24 октября 2026 года владелец предоставил вывод `systemctl` с рабочего сервера:
 
-Проверены все 1476 доступных workflow runs через
-[Actions API](https://api.github.com/repos/Stolyarovmn/relocant-media/actions/runs?per_page=100)
-(15 страниц). В них `editorial-primary` имеет 17 запусков: 16 `skipped`, 1 `failure`,
-0 `success`. Это не исключает удалённые runs или запуск из другого repository/сервиса.
+- установлен `/etc/systemd/system/relocant-editorial.service`;
+- `WorkingDirectory=/opt/relocant-media/app`;
+- `ExecStart=/opt/relocant-media/app/deploy/server/run-cycle.sh`;
+- последний запуск: 09:00:38–09:02:32 UTC, `Result=success`;
+- активны `relocant-editorial.timer` и отдельный пятиминутный
+  `relocant-intake.timer`.
 
-- [Scheduled run 39988874983](https://github.com/Stolyarovmn/relocant-media/actions/runs/39988874983)
-  завершился `skipped`.
-- [Manual run 40064385537](https://github.com/Stolyarovmn/relocant-media/actions/runs/40064385537)
-  также `skipped`.
-- [Manual run 40064995861](https://github.com/Stolyarovmn/relocant-media/actions/runs/40064995861),
-  job `120786251253`: Jev configuration validation успешна, но `DATABASE_URL` пустой,
-  CLI останавливается до обработки. Это подтверждает только передачу непустого ключа,
-  а не успешный TypeSafe API call.
+Это подтверждение установленного server runtime, а не вывод по наличию unit-файлов
+в Git. `Result=success` означает успешное завершение сервиса, но само по себе не
+доказывает публикацию или качество материала.
 
-[Workflow до удаления](https://github.com/Stolyarovmn/relocant-media/blob/e9204e8455b78ad35bc55a1f64b070b9a5cefb96/.github/workflows/editorial-primary.yml)
-использовал `ubuntu-latest`, `APP_ENV=staging` и `primary_cycle` CLI. Он не получал
-Telegram token, выключал Telegram runtime и не содержал SSH/SFTP/download/upload
-канонической SQLite. CLI вызывает `_run(..., "fake")` и собирает только два базовых
-источника. Поэтому этот workflow не объясняет реальные публикации канала.
+Код проверен на `main` `4f77222af46fc3606ca921ca2773fd0dcf742156`.
+Точный SHA установленного серверного checkout указанным выводом не подтверждён.
 
-[PR #143](https://github.com/Stolyarovmn/relocant-media/pull/143) удалил workflow и
-добавил shadow dedup в серверный wrapper. Его
-[post-merge CI 40066097133](https://github.com/Stolyarovmn/relocant-media/actions/runs/40066097133)
-успешен, но CI не проверяет установленный publisher/runtime.
+## Подготовка и настоящая доставка — разные этапы
 
-## Код альтернативного entrypoint
+Штатный wrapper вызывает
+`server_runtime -> server_cycle.main -> primary_cycle.run_cycle`.
+Общий цикл выбирает кандидатов, вызывает optional Jev shadow и подготавливает
+проверенные пакеты. Его `telegram_transport="fake"` описывает только этот этап.
 
-`server_runtime -> server_cycle.main -> primary_cycle.run_cycle` реализует расширенный
-сбор, Gemini, независимые facts/utility reviews, live recheck и guarded delivery.
-`server_cycle.main` требует существующий **локальный SQLite**. Доставка включается через
-`EDITORIAL_SEND_ENABLED`; одного `TELEGRAM_RUNTIME_ENABLED=false` для этого entrypoint
-недостаточно. Указанный путь можно проверить в
-[server_cycle.py](../src/relocant_media/ops/server_cycle.py).
+Затем `server_cycle.main` отдельно вызывает `publish_pending()`, используя
+`ChannelPublisher` и настоящий Bot API при `EDITORIAL_SEND_ENABLED=true`.
+Успешная доставка сохраняет `Post.telegram_message_id`, `published_at` и
+`EditorialRun.delivery_status="sent"`; внешний отчёт содержит
+`channel_transport` и `sent_message_ids`.
 
-В Git есть systemd units и пути `/opt/relocant-media/app`, `/etc/relocant-media.env`,
-`/var/lib/relocant-media/runs`. Их наличие не доказывает установку, активность или
-последнюю успешную отправку. Доступ к серверу из текущей инженерной среды недоступен;
-реальные units/processes/receipt rows этой проверкой не подтверждены.
+Поэтому внутреннее поле `fake` не доказывает отсутствие production delivery.
+Свежий согласованный снимок рабочей SQLite от 07:41:36 UTC содержит квитанции:
+message 27 в 07:15:53 UTC и message 28 в 07:35:55 UTC. Для message 28 материал
+`raw_item_id=398` связан с подготовительным scheduler run 30, который завершился
+в 07:35:54 UTC, и facts/utility reviews `server-facts`/`server-utility`.
+Снимок проверен в read-only режиме: quick_check=ok и SHA256 совпал с manifest.
+Эти данные подтверждают сохранённый результат доставки, но не являются live-чтением
+Telegram или отдельным подтверждением активной настройки Jev.
 
-## Что требуется установить до runtime migration
+Проверяемые точки:
+[wrapper](../deploy/server/run-cycle.sh),
+[server runtime](../src/relocant_media/ops/server_runtime.py),
+[подготовка и доставка](../src/relocant_media/ops/server_cycle.py),
+[фиксация квитанций](../src/relocant_media/services/channel_delivery.py).
 
-Нужно связать конкретную недавнюю Telegram-квитанцию с `post`/`editorial_run`, run report,
-точным кодовым SHA и фактическим процессом/runner. Затем установить путь доступа к
-канонической SQLite, общий writer lock и сохранение состояния между запусками.
+## Что выполнял GitHub Actions
 
-Нельзя считать зелёный CI доказательством публикации; создавать пустую DB вместо
-действующей; переносить production execution между Actions/systemd по названиям файлов;
-одновременно включать два писателя; копировать live SQLite без корректного snapshot и
-проверки отсутствия конкурирующих writers.
+В предыдущей проверке истории Actions (1476 доступных runs, 15 страниц) у
+`editorial-primary` было 17 запусков: 16 `skipped`, 1 `failure`, 0 `success`.
+Это исторический срез, не постоянно обновляемый счётчик.
 
-Отдельный `jev-smoke` безопасно проверяет уже сохранённый Actions Secret без решения
-этих вопросов. Он не объявляется подключением к действующему production newsroom.
+[Manual run 40064995861](https://github.com/Stolyarovmn/relocant-media/actions/runs/40064995861)
+остановился на пустом `DATABASE_URL` до обработки. Удалённый в
+[PR #143](https://github.com/Stolyarovmn/relocant-media/pull/143)
+workflow использовал staging CLI, не получал Telegram token и не запускал
+полный `server_runtime`. Он не объясняет действующую публикацию.
+
+Текущие workflows — CI, source-health, daily-analysis placeholder и
+[jev-smoke](../.github/workflows/jev-smoke.yml). Отдельный Jev smoke проверяет
+Actions Secret на фиксированном публичном примере; он не подключает этот secret
+к окружению systemd и не является benchmark редакции.
+
+## Jev и оставшиеся эксплуатационные проверки
+
+Jev уже вызывается в общем `run_cycle()` после детерминированного отбора, а
+wrapper содержит optional duplicate-shadow после успешного server cycle.
+Для реальных сигналов настройки должны быть доступны процессу редакции на сервере:
+см. [JEV_INTEGRATION.md](JEV_INTEGRATION.md).
+
+До утверждения, что Jev включён в production, проверить:
+
+1. точный установленный SHA: `git -C /opt/relocant-media/app rev-parse HEAD`;
+2. фактический путь EnvironmentFile:
+   `systemctl show relocant-editorial.service -p EnvironmentFiles`;
+3. `manifest.json -> jev_shadow` и `jev-shadow-duplicates.json` штатного прохода.
+
+Не читать/публиковать содержимое env-файла или ключей в диагностике.
+Не создавать вторую БД, не заменять SQLite PostgreSQL и не включать второго писателя.
+Наличие hooks, зелёный CI и успешный сервис не доказывают HTTP-вызов TypeSafe:
+его подтверждает только telemetry конкретного shadow-вызова.
