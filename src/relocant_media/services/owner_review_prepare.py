@@ -18,6 +18,7 @@ from relocant_media.ai.package import EditorialPackage, canonical_json, evaluate
 from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.domain.dedup import event_key
+from relocant_media.domain.freshness import freshness_decision
 from relocant_media.domain.policy import HIGH_RISK_CATEGORIES
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
@@ -34,12 +35,14 @@ def _package_sha256(package: EditorialPackage) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def pending_high_risk_holds(engine: Engine) -> list[int]:
+def pending_high_risk_holds(engine: Engine, *, now: datetime | None = None) -> list[int]:
     """Return full AI outcomes held solely by the high-risk human-review policy."""
+    checked_at = now if now is not None else datetime.now(UTC)
     with Session(engine) as session:
         rows = session.execute(
-            select(EditorialRun, Post)
+            select(EditorialRun, Post, RawItem)
             .join(Post, EditorialRun.post_id == Post.id)
+            .join(RawItem, EditorialRun.raw_item_id == RawItem.id)
             .where(
                 EditorialRun.delivery_status == "pending",
                 Post.status == PublicationStatus.HUMAN_REVIEW.value,
@@ -49,12 +52,15 @@ def pending_high_risk_holds(engine: Engine) -> list[int]:
         ).all()
         return [
             run.raw_item_id
-            for run, post in rows
+            for run, post, item in rows
             if "_package" not in run.outcome
             and run.outcome.get("reason") == "policy_requires_human_review"
             and isinstance(run.outcome.get("draft"), dict)
             and post.telegram_message_id is None
             and post.published_at is None
+            and freshness_decision(
+                item.title, item.body, item.published_at, checked_at
+            ).action == "keep"
         ]
 
 
@@ -202,12 +208,13 @@ def prepare_high_risk_holds(
     live_documents: Callable[[EditorialPackage], tuple[EvidenceDocument, ...]],
     *,
     limit: int = 5,
+    now: datetime | None = None,
     audit: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, int]:
     """Attach two fresh independent reviews while preserving final HUMAN_REVIEW status."""
     prepared = 0
     blocked = 0
-    for raw_item_id in pending_high_risk_holds(engine)[:limit]:
+    for raw_item_id in pending_high_risk_holds(engine, now=now)[:limit]:
         try:
             with Session(engine) as session:
                 package = _build_package(session, raw_item_id)
