@@ -1,0 +1,40 @@
+name: campaign-brief
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - prompts/belgrade-acquisition-brief.md
+      - src/relocant_media/ops/campaign_brief.py
+      - .github/workflows/campaign-brief.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: campaign-brief
+  cancel-in-progress: false
+
+jobs:
+  proposal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # Same default as .env.example; override with the repository variable if needed.
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e .
+      - name: Request one Gemini proposal without publication or ad spend
+        run: python -m relocant_media.ops.campaign_brief
+      - uses: actions/upload-artifact@v4
+        with:
+          name: belgrade-campaign-proposal
+          path: campaign-output/
+          if-no-files-found: error
+          retention-days: 30
