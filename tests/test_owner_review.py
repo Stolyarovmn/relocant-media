@@ -110,6 +110,19 @@ class Publisher:
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.replace(tzinfo=None) if tz is None else NOW.astimezone(tz)
+
+    # Keep review creation and validation on the same clock as the fixed source dates.
+    for module in (
+        "relocant_media.ai.package",
+        "relocant_media.ai.independent_reviews",
+        "relocant_media.services.owner_review",
+        "relocant_media.services.owner_review_prepare",
+    ):
+        monkeypatch.setattr(f"{module}.datetime", FixedDateTime)
     monkeypatch.setenv("EDITORIAL_CHANNEL_MODE", "public")
     path = tmp_path / "owner-review.sqlite3"
     initialize_sqlite(path)
@@ -431,3 +444,41 @@ def test_owner_selection_keeps_older_explicit_upcoming_event(engine):
         item.body = "Koncert se održava 27. oktobra 2026."
         session.commit()
     assert pending_high_risk_holds(engine, now=NOW) == [raw_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age", [timedelta(hours=25), -timedelta(minutes=1)])
+async def test_owner_publish_rejects_expired_or_future_reviews(engine, age):
+    raw_id = _store_reviewed_politics(engine)
+    publisher = Publisher()
+    with Session(engine) as session:
+        run = session.get(EditorialRun, raw_id)
+        package = _stored_package(run)
+        package = package.model_copy(update={
+            "reviews": tuple(
+                review.model_copy(update={"reviewed_at": NOW - age})
+                for review in package.reviews
+            ),
+        })
+        run.outcome = {
+            **run.outcome,
+            "_package": package.model_dump(mode="json"),
+            "_package_sha256": _package_hash(package),
+        }
+        review = _owner_review_row(session, raw_id)
+        review.status = "approved"
+        session.commit()
+
+        with pytest.raises(DeliveryBlockedError, match="fresh independent approvals"):
+            await deliver_owner_approved(
+                session,
+                review,
+                publisher,
+                live_documents=_live(package),
+                target_channel_id=APPROVED_CHANNEL_ID,
+                enabled=True,
+            )
+        assert publisher.calls == []
+        session.refresh(run)
+        assert run.delivery_status == "pending"
+        assert session.get(Post, run.post_id).telegram_message_id is None
