@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -22,7 +22,10 @@ from relocant_media.services.owner_review import (
     replace_pending_package,
     revise_package,
 )
-from relocant_media.services.owner_review_prepare import prepare_high_risk_holds
+from relocant_media.services.owner_review_prepare import (
+    pending_high_risk_holds,
+    prepare_high_risk_holds,
+)
 from relocant_media.services.package_import import import_package
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 from relocant_media.storage.sqlite_schema import initialize_sqlite
@@ -175,13 +178,16 @@ def _owner_review_row(session: Session, raw_id: int, *, message_id: int = 501) -
 def test_high_risk_policy_hold_gets_two_reviews_but_stays_human_review(engine):
     with Session(engine) as session:
         service, _, raw_id = prepare_service(session, category="politics")
+        item = session.get(RawItem, raw_id)
+        item.published_at = NOW
+        session.commit()
         run = service.prepare(raw_id)
         assert run.outcome["status"] == "human_review"
         assert run.outcome["reason"] == "policy_requires_human_review"
         assert "_package" not in run.outcome
 
     provider = ReviewProvider()
-    result = prepare_high_risk_holds(engine, provider, _live)
+    result = prepare_high_risk_holds(engine, provider, _live, now=NOW)
 
     assert result == {"prepared": 1, "blocked": 0}
     assert provider.calls == ["independent_facts", "independent_utility"]
@@ -379,3 +385,49 @@ def test_owner_review_rows_never_enter_normal_submission_queue(engine):
                 Submission.kind == OWNER_REVIEW_KIND
             )
         ) == 1
+
+
+@pytest.mark.parametrize(
+    ("published", "body"),
+    [
+        (NOW - timedelta(days=4), "Koncert se održava 20. oktobra 2026."),
+        (NOW - timedelta(days=4), "Poziv dobrovoljnim davaocima krvi."),
+        (NOW - timedelta(hours=1), "Koncert se održava 20. oktobra 2026."),
+        (None, "Poziv dobrovoljnim davaocima krvi."),
+        (NOW + timedelta(hours=1), "Poziv dobrovoljnim davaocima krvi."),
+    ],
+)
+def test_owner_preparation_skips_unfresh_before_network_or_ai(engine, published, body):
+    with Session(engine) as session:
+        service, _, raw_id = prepare_service(session, category="politics")
+        run = service.prepare(raw_id)
+        original_outcome = json.loads(json.dumps(run.outcome))
+        item = session.get(RawItem, raw_id)
+        item.published_at = published
+        item.body = body
+        session.commit()
+    provider = ReviewProvider()
+
+    def forbidden_fetch(package):
+        raise AssertionError("stale evidence must not reach the network")
+
+    assert pending_high_risk_holds(engine, now=NOW) == []
+    assert prepare_high_risk_holds(
+        engine, provider, forbidden_fetch, now=NOW
+    ) == {"prepared": 0, "blocked": 0}
+    assert provider.calls == []
+    with Session(engine) as session:
+        run = session.get(EditorialRun, raw_id)
+        assert run.outcome == original_outcome
+        assert run.delivery_status == "pending"
+
+
+def test_owner_selection_keeps_older_explicit_upcoming_event(engine):
+    with Session(engine) as session:
+        service, _, raw_id = prepare_service(session, category="politics")
+        service.prepare(raw_id)
+        item = session.get(RawItem, raw_id)
+        item.published_at = NOW - timedelta(days=4)
+        item.body = "Koncert se održava 27. oktobra 2026."
+        session.commit()
+    assert pending_high_risk_holds(engine, now=NOW) == [raw_id]
