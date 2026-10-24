@@ -36,8 +36,6 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      JEV_ENABLED: ${JEV_ENABLED:-false}
-      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
     ports:
       - "8080:8080"
     depends_on:
