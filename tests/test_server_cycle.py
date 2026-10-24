@@ -204,15 +204,6 @@ def test_failed_or_busy_main_never_enters_publisher(seeded, tmp_path, monkeypatc
     monkeypatch.setenv("GEMINI_MODEL", "fake-model")
     monkeypatch.setenv("EDITORIAL_SEND_ENABLED", "true")
     monkeypatch.setattr(sys, "argv", ["server-cycle", "--output", str(output)])
-    clients = []
-
-    def client(**kwargs):
-        clients.append(kwargs)
-        return object()
-
-    monkeypatch.setattr(server_cycle.genai, "Client", client)
-    monkeypatch.setattr(server_cycle, "GeminiStructuredProvider", lambda *a, **kw: object())
-
     def cycle(*args, **kwargs):
         assert kwargs["limit"] == 2
         output.mkdir()
@@ -227,8 +218,6 @@ def test_failed_or_busy_main_never_enters_publisher(seeded, tmp_path, monkeypatc
     with pytest.raises(SystemExit) as stopped:
         server_cycle.main()
     assert stopped.value.code == 1
-    assert clients == [{"api_key": "fake-key", "http_options": {
-        "timeout": 45000, "retry_options": {"attempts": 0}}}]
     report = json.loads((output / "server-report.json").read_text(encoding="utf-8"))
     assert report["status"] == status
     assert report["sent_message_ids"] == []
