@@ -105,6 +105,21 @@ def _public_excerpt(title: str, body: str) -> dict[str, str]:
     }
 
 
+def smoke_shadow() -> dict[str, Any]:
+    """Check the real adapter with the public TypeSafe API example, without newsroom data."""
+    result = _request(
+        {"message": "I was charged twice for my subscription this month. "
+                    "Please refund the extra charge."},
+        {"billing": _noul("Is this message about billing?")},
+    )
+    return {
+        "mode": "shadow_only",
+        "decision_effect": "none",
+        "fixture": "typesafe-system-one-billing-example-v1",
+        **result,
+    }
+
+
 def rank_shadow(candidates: list[dict[str, Any]], *, city: str) -> dict[str, Any]:
     """Observe local relevance and practical value; never reorder or drop candidates."""
     if not jev_enabled():

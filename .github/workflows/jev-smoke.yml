@@ -1,0 +1,47 @@
+name: jev-smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/jev-smoke.yml"
+      - "src/relocant_media/ops/jev_smoke.py"
+      - "src/relocant_media/ai/jev.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Check TypeSafe using fixed public fixture
+        env:
+          JEV_ENABLED: ${{ vars.JEV_ENABLED || 'false' }}
+          TYPESAFE_API_KEY: ${{ vars.JEV_ENABLED == 'true' && secrets.TYPESAFE_API_KEY || '' }}
+          TELEGRAM_RUNTIME_ENABLED: "false"
+          TELEGRAM_MTPROTO_ENABLED: "false"
+          EDITORIAL_SEND_ENABLED: "false"
+        run: python -m relocant_media.ops.jev_smoke --output "outputs/jev-smoke/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Upload safe API telemetry
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jev-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: outputs/jev-smoke/${{ github.run_id }}-${{ github.run_attempt }}/manifest.json
+          if-no-files-found: warn
+          retention-days: 14

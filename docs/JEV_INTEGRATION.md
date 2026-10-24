@@ -1,141 +1,93 @@
-# TypeSafe Jev — отключаемый shadow-наблюдатель серверной редакции
+# TypeSafe Jev — отключаемый shadow-наблюдатель
 
-Jev работает только как **неавторитетный semantic observer** реального серверного
-редакционного контура. Канонические данные находятся в существующей локальной SQLite,
-которую использует `relocant_media.ops.server_runtime`; отдельная PostgreSQL или копия БД
-в GitHub Actions для Jev не создаётся.
+Jev — неавторитетный semantic observer. Он не меняет очередь, candidate selection,
+Gemini rank/claims/verify/draft, deterministic dedup или publication policy.
 
-**Единственный runtime-выключатель — `JEV_ENABLED`.** При значении, отличном от `true`,
-код Jev не создаёт HTTP-клиент, не читает `TYPESAFE_API_KEY` и не обращается к TypeSafe.
+**Единственный выключатель — `JEV_ENABLED`.** При выключенном Jev адаптер не читает
+`TYPESAFE_API_KEY`, не создаёт HTTP-клиент и не обращается к TypeSafe.
 
-## Production configuration
+## GitHub Actions configuration
 
-Systemd unit `deploy/server/relocant-editorial.service` загружает root-owned файл:
+Настройки, запрошенные владельцем:
 
-```text
-/etc/relocant-media.env
-```
+- Repository variable `JEV_ENABLED=true` (или `false` для полного выключения).
+- Repository secret `TYPESAFE_API_KEY`.
 
-Именно там, вне Git и GitHub Actions, должны находиться production-настройки Jev:
+Не переносите ключ на DB-сервер, в Git, PR, Compose, логи или артефакты.
 
-```dotenv
-JEV_ENABLED=false
-TYPESAFE_API_KEY=
-```
+Workflow [jev-smoke.yml](../.github/workflows/jev-smoke.yml) запускается вручную или при
+изменении своего workflow/адаптера на `main`. Он использует тот же HTTP-адаптер, что и
+rank/dedup, но только фиксированный публичный пример из
+[официальной документации](https://docs.typesafe.ai/api/system-one). Один включённый запуск
+делает не более одного запроса, без retry. При `JEV_ENABLED=false` secret не передаётся
+шагу, запрос не выполняется. При отсутствии variable используется `false`.
 
-Для controlled shadow benchmark владелец может изменить только:
+Проверка не требует `DATABASE_URL`, Gemini или Telegram credentials. Она не читает БД,
+не собирает новости, не импортирует публикационные модули и не отправляет сообщения.
+`TELEGRAM_RUNTIME_ENABLED`, `TELEGRAM_MTPROTO_ENABLED` и `EDITORIAL_SEND_ENABLED`
+принудительно выключены. Ошибка API даёт failed smoke; нормальный редакционный
+shadow-слой при этом по-прежнему fail-open.
 
-```dotenv
-JEV_ENABLED=true
-TYPESAFE_API_KEY=<server secret>
-```
-
-Ключ нельзя помещать в Git, PR, `.env.example`, Docker Compose, логи или run artifacts.
-GitHub Actions secret `TYPESAFE_API_KEY` серверной редакцией не используется и для этого
-контура не требуется.
-
-Официальный API-контракт интеграции: `POST https://api.typesafe.ai/v1/systemone`, Bearer
-auth, модель `jev-latest`, типизированные `noul`-вопросы с вероятностями от 0 до 1.
-Интеграция использует уже установленный `httpx`; отдельный SDK не требуется.
-
-## Где Jev работает
-
-### 1. Shadow ranking реальных кандидатов
-
-Production timer запускает:
+Artifact `jev-smoke-<run_id>-<attempt>/manifest.json` содержит:
 
 ```text
-relocant-editorial.service
-  -> deploy/server/run-cycle.sh
-  -> relocant_media.ops.server_runtime
-  -> relocant_media.ops.server_cycle
-  -> primary_cycle.run_cycle(...)
+kind = jev_api_smoke
+production_benchmark = false
+newsroom_state_accessed = false
+telegram_transport = none
+jev_shadow.status/model/duration_ms/input_tokens/output_tokens/probabilities
 ```
 
-`run_cycle()` работает с той же существующей SQLite, из которой редакция выбирает реальные
-кандидаты. После обычного SQL/детерминированного выбора он вызывает Jev только при
-`JEV_ENABLED=true` и записывает результат в:
+`ok` подтверждает успешный HTTP-вызов и разбор ответа; `disabled` — отсутствие вызова;
+`missing_api_key` — отсутствие доступного ключа; `unavailable` — сетевую/API/контрактную
+ошибку. Exception text, credentials и полный request/response body не сохраняются.
+Это проверка подключения, **не benchmark редакционного качества**.
 
-```text
-manifest.json -> jev_shadow
-```
+## Что подтверждено о редакционном runtime
 
-Jev оценивает до пяти публичных материалов официальных источников по локальной
-релевантности и практической пользе. Он не меняет `candidate_count`, порядок кандидатов,
-очередь, Gemini rank/claims/verify/draft или publication policy.
+См. [проверку фактического пути](RUNTIME_VERIFICATION.md). Не следует выдавать наличие
+systemd units в Git за доказательство их установки, а наличие Actions workflow — за
+доказательство успешного запуска или публикации.
 
-### 2. Shadow semantic dedup той же SQLite
+Владелец указал целевую схему: выполнение в GitHub Actions, сервер хранит БД.
+Доступ GitHub-hosted runner к существующему каноническому SQLite в текущем коде не найден.
+Без подтверждения этого пути нельзя создавать вторую пустую БД, объявлять её production
+или подменять SQLite PostgreSQL. Добавление PostgreSQL secret проблему не решает.
 
-После успешного `server_runtime` и всё ещё под общим editorial worker lock wrapper запускает:
+Удалённый в #143 `editorial-primary` вызывал staging/fake preparation, а не полноценный
+публикующий `server_runtime`. Его слепое восстановление не восстанавливает рабочую
+редакцию. Изменение существующего publisher/timer и перенос канонического состояния не
+входят в smoke-проверку.
 
-```text
-python -m relocant_media.ops.newsroom_status \
-  --database \
-  --city belgrade \
-  --limit 100 \
-  --shadow-duplicates
-```
+## Существующие точки Jev в коде
 
-Результат сохраняется рядом с артефактами реального цикла:
+`primary_cycle.run_cycle()` после детерминированного выбора вызывает `rank_shadow()`
+при включённом Jev и пишет `manifest.json -> jev_shadow`. Общий код поддерживает
+PostgreSQL и SQLite; это не утверждение о фактически используемом backend/хосте.
 
-```text
-jev-shadow-duplicates.json
-```
+`newsroom_status --database --city belgrade --limit 100 --shadow-duplicates` использует
+существующий lexical shortlist и добавляет bounded Jev duplicate signals. В
+`deploy/server/run-cycle.sh` есть opt-in вызов после успешного цикла, под тем же lock.
+Наличие этого wrapper не подтверждает его исполнение и не требует переноса ключа туда.
 
-Сначала применяется существующий lexical shortlist. Jev получает только ограниченное
-число пар официальных публичных материалов и возвращает дополнительный shadow signal.
-`mode=shadow_only`, `authoritative=false`, `decision_effect=none`: автоматического merge,
-удаления, блокировки или изменения события нет.
+## API и передаваемые данные
 
-Если diagnostic shadow dedup завершится ошибкой, wrapper записывает `status=unavailable`
-и сохраняет исходный exit status серверной редакции. То есть отказ TypeSafe не превращает
-успешный editorial cycle в failed cycle.
+Официальный контракт: `POST https://api.typesafe.ai/v1/systemone`, Bearer auth,
+`jev-latest`, `noul`-вопросы, вероятности 0..1 и `usage.input_tokens/output_tokens`.
 
-## Что отправляется в TypeSafe
+Rank-shadow передаёт до пяти title/body excerpts материалов с official ownership;
+duplicate-shadow — до восьми пар официальных материалов, отобранных сервисом.
+URL и private/discovery-only материалы не должны передаваться. Публичные excerpts
+ограничены 600 символами на поле; timeout — 3 секунды, без retry. Smoke использует
+только публичный billing example TypeSafe, без данных редакции.
 
-Rank-shadow и duplicate-shadow передают только ограниченные title/body excerpts публичных
-материалов официальных источников. URL, приватные submissions, контакты, Telegram tips,
-Viber/WhatsApp catalog entries и другие private/discovery-only данные в Jev не передаются.
+## Границы и будущий benchmark
 
-Текст ограничивается в интеграции, запросы имеют короткий timeout и не retry'ятся. В
-результатах сохраняются только безопасные telemetry-поля, включая статус, модель,
-`duration_ms`, token usage и semantic signals; ключ и request body не логируются.
+`mode=shadow_only`, `decision_effect=none`: автоматического удаления, merge событий или
+блокировки кандидатов нет. Jev не является evidence и не заменяет official-source,
+freshness, moderation, high-risk review, recheck, городскую маршрутизацию или Gemini.
 
-## Границы безопасности
-
-- Jev не является источником фактов и не заменяет official evidence.
-- Deterministic dedup остаётся authoritative.
-- Evidence recheck, freshness, moderation, human-review и high-risk guards не меняются.
-- Belgrade/Novi Sad routing остаётся детерминированным; Jev не выбирает город.
-- Telegram publication не включается и не выключается через Jev.
-- При ошибке TypeSafe Jev fail-open только для самого shadow-слоя.
-- До размеченного benchmark никакие Jev thresholds не могут блокировать или удалять новости.
-
-## Benchmark
-
-Сравнивать нужно данные **реальных server runs**, а не отдельную пустую БД в CI:
-
-```text
-candidate_count
-порядок raw_item_id
-jev_shadow.status
-model
-duration_ms
-input_tokens
-output_tokens
-signals
-jev-shadow-duplicates.json
-```
-
-Shadow-включение не должно менять candidate selection или публикационные решения. Для
-semantic dedup нужен отдельно размеченный набор `SAME / RELATED_BUT_DISTINCT / DIFFERENT`
-и измерения precision/recall, false-SAME и material-update false merges. До таких данных
-нельзя утверждать, что Jev улучшил качество или сократил стоимость редакции.
-
-## GitHub Actions
-
-GitHub Actions остаётся инженерным CI/CD-контуром и не запускает production newsroom.
-Workflow `.github/workflows/editorial-primary.yml`, который пытался поднять отдельный
-редакционный цикл без канонической SQLite, удалён. CI по-прежнему проверяет код на PR и на
-точном SHA `main`; production deployment допускает только green `main` и затем использует
-серверную SQLite через `/etc/relocant-media.env`.
+После подтверждения доступа к каноническому состоянию нужно измерить реальные rank и
+dedup signals, latency, usage, selection agreement и ошибки на размеченных русских и
+сербских материалах. Сохранение выбора уже покрыто regression-тестами общего цикла,
+но качество и экономию нельзя объявлять доказанными без production measurements.
