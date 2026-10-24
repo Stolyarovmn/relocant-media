@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 WORKFLOW = Path(".github/workflows/editorial-primary.yml")
 COMPOSE = Path("docker-compose.yml")
 ENV_EXAMPLE = Path(".env.example")
