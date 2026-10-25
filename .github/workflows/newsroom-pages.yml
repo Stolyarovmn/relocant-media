@@ -1,0 +1,57 @@
+name: Newsroom Pages
+on:
+  push:
+    branches: [main, newsroom-data]
+    paths:
+      - 'web/newsroom/**'
+      - 'dashboard-data/latest.json'
+      - 'cities/**'
+      - 'docs/messenger-discovery.json'
+      - 'src/relocant_media/ops/newsroom_export.py'
+      - '.github/workflows/newsroom-pages.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: newsroom-pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e .
+      - name: Build catalog and attach latest runtime snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          cp web/newsroom/* _site/
+          python -m relocant_media.ops.newsroom_export --output _site/data.json
+          if git fetch origin newsroom-data; then
+            if git show FETCH_HEAD:dashboard-data/latest.json > /tmp/newsroom-runtime.json; then
+              python -m relocant_media.ops.newsroom_merge --catalog _site/data.json --runtime /tmp/newsroom-runtime.json
+            fi
+          fi
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
