@@ -36,10 +36,11 @@ Workflow использует код/реестр из main и только сн
 из main; её код не исполняется workflow. Конкурентные записи защищены contents SHA:
 конфликт считается ошибкой, снимок не перезаписывается force-push.
 
-Для первоначального включения Pages workflow пробует `actions/configure-pages` с
-`enablement: true`. Если GitHub не разрешает включить Pages с данным токеном,
-нужна однократная настройка Settings → Pages → Source: GitHub Actions. Не выдавать
-зелёный CI за успешный Pages deployment.
+Для первоначального включения Pages нужна однократная настройка
+Settings → Pages → Source: GitHub Actions. Workflow не пытается менять настройки
+репозитория с недостаточными правами. До шага Pages сохраняется артефакт
+`newsroom-preview`, доступный для проверки даже при ошибке развёртывания.
+Не выдавать зелёный CI за успешный Pages deployment.
 
 ## Экспорт и приватность
 
