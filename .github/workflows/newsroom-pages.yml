@@ -42,11 +42,12 @@ jobs:
           fi
       - uses: actions/upload-artifact@v4
         with:
-          name: newsroom-preview
+          name: newsroom-preview-${{ github.run_id }}-${{ github.run_attempt }}
           path: _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
           path: _site
   deploy:
     needs: build
@@ -57,3 +58,5 @@ jobs:
     steps:
       - uses: actions/deploy-pages@v4
         id: deployment
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
