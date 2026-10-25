@@ -16,6 +16,7 @@ dependencies = [
   "feedparser>=6.0.11,<7",
   "PyYAML>=6.0,<7",
   "google-genai>=2.31,<3",
+  "google-auth[requests]>=2.38,<3",
   "Telethon>=1.45,<2",
 ]
 

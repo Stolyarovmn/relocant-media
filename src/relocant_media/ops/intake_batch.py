@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
@@ -94,7 +95,7 @@ def _run_owner_review() -> tuple[int, dict[str, Any]]:
     try:
         completed = subprocess.run(
             [
-                "/opt/relocant-media/venv/bin/python",
+                sys.executable,
                 "-m",
                 "relocant_media.ops.owner_review_cycle",
             ],
@@ -139,6 +140,16 @@ def main() -> None:
         verify_sqlite_schema(engine)
         def pipeline() -> int:
             # No shell interpolation, no secret output. The child uses the same worker.lock.
+            if os.environ.get("RELOCANT_RUNTIME_PLATFORM") == "github-actions":
+                output = directory / "runs" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+                output.mkdir(parents=True, exist_ok=False)
+                with file_lock(directory / "worker.lock") as locked:
+                    if not locked:
+                        return 75
+                    return subprocess.run(
+                        [sys.executable, "-m", "relocant_media.ops.server_runtime",
+                         "--output", str(output), "--submissions-only"],
+                        capture_output=True, timeout=4100, check=False).returncode
             completed = subprocess.run(
                 ["/opt/relocant-media/app/deploy/server/run-cycle.sh", "--submissions-only"],
                 capture_output=True, timeout=4100, check=False)
