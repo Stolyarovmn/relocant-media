@@ -151,3 +151,7 @@ def test_upload_uses_sha_and_allowlist_without_transmitting_private_fields(
     import base64
     assert sent["sha"] == "old-sha" and sent["branch"] == "newsroom-data"
     assert b"PRIVATE_SECRET" not in base64.b64decode(sent["content"])
+
+
+def test_server_cycle_hook_remains_executable() -> None:
+    assert (ROOT / "deploy/server/run-cycle.sh").stat().st_mode & 0o111

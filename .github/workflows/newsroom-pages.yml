@@ -40,9 +40,11 @@ jobs:
               python -m relocant_media.ops.newsroom_merge --catalog _site/data.json --runtime /tmp/newsroom-runtime.json
             fi
           fi
-      - uses: actions/configure-pages@v5
+      - uses: actions/upload-artifact@v4
         with:
-          enablement: true
+          name: newsroom-preview
+          path: _site
+      - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
