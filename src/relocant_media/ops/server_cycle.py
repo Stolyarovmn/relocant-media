@@ -110,9 +110,12 @@ _REVIEW_ONLY_VENUE_STRATEGIES = frozenset({
 
 class ServerAI:
     """Keep server roles Russian and bind relevance decisions to the actual date."""
-    def __init__(self, provider: StructuredAIProvider, *, audit_path: Path | None = None):
+    def __init__(self, provider: StructuredAIProvider, *, audit_path: Path | None = None,
+                 provider_name: str = "unknown", model_id: str | None = None):
         self.provider = provider
         self.audit_path = audit_path
+        self.provider_name = provider_name
+        self.model_id = model_id
 
     def generate_json(self, *, task: str, system_instruction: str, prompt: str,
                       response_schema: dict[str, Any]) -> str:
@@ -144,7 +147,8 @@ class ServerAI:
             if "category" in response_schema.get("properties", {}):
                 response_schema["properties"]["category"]["enum"] = categories
         started = time.monotonic()
-        record: dict[str, Any] = {"task": task}
+        record: dict[str, Any] = {"task": task, "provider": self.provider_name,
+            "model": self.model_id, "occurred_at": datetime.now(UTC).isoformat()}
         try:
             response = self.provider.generate_json(
                 task=task, system_instruction=policy + system_instruction,
@@ -772,7 +776,8 @@ def main() -> None:
         provider = PublicPreparationCache(
             ServerAI(IsolatedGeminiProvider(os.environ["GEMINI_API_KEY"],
                 model=os.environ["GEMINI_MODEL"]),
-                audit_path=args.output / "ai-calls.jsonl"),
+                audit_path=args.output / "ai-calls.jsonl", provider_name="gemini",
+                model_id=os.environ["GEMINI_MODEL"]),
             Path(url.database).parent / "ai-cache",
             model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v7-local-venue-style",
             public_news_only=True,

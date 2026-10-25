@@ -28,4 +28,12 @@ if [ "$status" -eq 0 ] && [ "${JEV_ENABLED:-false}" = "true" ]; then
   fi
 fi
 
+# Export after both successful and failed cycles. This reads the same canonical DB;
+# it never creates a second queue and never changes delivery receipts.
+if "$python" -m relocant_media.ops.newsroom_after_cycle --output "$output"; then
+  :
+else
+  echo "newsroom dashboard refresh failed; editorial exit status preserved" >&2
+fi
+
 exit "$status"
