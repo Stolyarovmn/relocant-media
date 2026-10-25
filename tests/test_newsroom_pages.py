@@ -157,6 +157,22 @@ def test_server_cycle_hook_remains_executable() -> None:
     assert (ROOT / "deploy/server/run-cycle.sh").stat().st_mode & 0o111
 
 
+def test_pages_workflows_use_matching_artifacts_unique_per_run_and_attempt() -> None:
+    import yaml
+
+    for filename in ("newsroom-pages.yml", "editorial-actions.yml"):
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+        steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
+        upload = next(step for step in steps
+                      if step.get("uses", "").startswith("actions/upload-pages-artifact@"))
+        deploy = next(step for step in steps
+                      if step.get("uses", "").startswith("actions/deploy-pages@"))
+        name = upload["with"]["name"]
+        assert "${{ github.run_id }}" in name
+        assert "${{ github.run_attempt }}" in name
+        assert deploy["with"]["artifact_name"] == name
+
+
 def test_archive_export_does_not_refresh_observation_time(tmp_path: Path) -> None:
     from relocant_media.storage.sqlite_schema import initialize_sqlite
     database = tmp_path / 'archive.sqlite3'
