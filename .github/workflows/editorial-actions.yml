@@ -1,0 +1,130 @@
+name: Editorial Actions
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Read-only preview or canonical worker (requires completed cutover)
+        type: choice
+        options: [preview, editorial, intake]
+        default: preview
+  schedule:
+    - cron: '17 0,3,6,9,12,15,18,21 * * *'
+    - cron: '2,7,12,22,27,32,37,42,47,52,57 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: canonical-editorial-writer
+  cancel-in-progress: false
+jobs:
+  cycle:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' || vars.ACTIONS_EDITORIAL_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    permissions:
+      contents: write
+    outputs:
+      projection: ${{ steps.projection.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e .
+      - name: Select bounded worker mode
+        id: mode
+        env:
+          REQUESTED_MODE: ${{ inputs.mode }}
+          EVENT_NAME: ${{ github.event_name }}
+          CRON: ${{ github.event.schedule }}
+        run: |
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            echo "value=$REQUESTED_MODE" >> "$GITHUB_OUTPUT"
+          elif [ "$CRON" = '17 0,3,6,9,12,15,18,21 * * *' ]; then
+            echo 'value=editorial' >> "$GITHUB_OUTPUT"
+          else
+            echo 'value=intake' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify exact main CI before any runtime side effect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo = 'Stolyarovmn/relocant-media'
+          sha = os.environ['EXPECTED_SHA']
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/{path}']))
+          assert api('git/ref/heads/main')['object']['sha'] == sha, 'main advanced; retry current main'
+          runs = api(f'actions/runs?head_sha={sha}&event=push&per_page=100')['workflow_runs']
+          ci = [r for r in runs if r['path'] == '.github/workflows/ci.yml'
+                and r['head_branch'] == 'main' and r['event'] == 'push']
+          assert ci and ci[0]['status'] == 'completed' and ci[0]['conclusion'] == 'success'
+          PY
+      - name: Restore, claim, process, save and export
+        env:
+          GH_STATE_TOKEN: ${{ github.token }}
+          DRIVE_CREDENTIALS_JSON: ${{ secrets.DRIVE_CREDENTIALS_JSON }}
+          DRIVE_STATE_FOLDER_ID: ${{ vars.DRIVE_STATE_FOLDER_ID }}
+          DRIVE_PREVIEW_MANIFEST_ID: ${{ vars.DRIVE_PREVIEW_MANIFEST_ID }}
+          ACTIONS_CUTOVER_CONFIRMED: ${{ vars.ACTIONS_CUTOVER_CONFIRMED }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          EDITORIAL_SEND_ENABLED: ${{ vars.ACTIONS_SEND_ENABLED || 'false' }}
+          EDITORIAL_CHANNEL_MODE: public
+          EDITORIAL_PRIVATE_INTAKE_ENABLED: ${{ vars.ACTIONS_PRIVATE_INTAKE_ENABLED || 'false' }}
+          EDITORIAL_PRIVATE_FEEDBACK_ENABLED: ${{ vars.ACTIONS_PRIVATE_FEEDBACK_ENABLED || 'false' }}
+          EDITORIAL_OWNER_REVIEW_ENABLED: ${{ vars.ACTIONS_OWNER_REVIEW_ENABLED || 'false' }}
+          EDITORIAL_OWNER_USER_ID: ${{ vars.EDITORIAL_OWNER_USER_ID }}
+          EDITORIAL_OWNER_CHAT_ID: ${{ vars.EDITORIAL_OWNER_CHAT_ID }}
+          JEV_ENABLED: ${{ vars.JEV_ENABLED || 'false' }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          WORKER_MODE: ${{ steps.mode.outputs.value }}
+        run: |
+          mkdir -p _site
+          cp web/newsroom/* _site/
+          rm -f _site/data.json
+          python -m relocant_media.ops.actions_runtime --mode "$WORKER_MODE" \
+            --work "$RUNNER_TEMP/editorial-work" --output _site/data.json
+      - name: Publish only sanitized projection
+        if: always()
+        id: projection
+        env:
+          NEWSROOM_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f _site/data.json ]; then
+            python -m relocant_media.ops.newsroom_publish --snapshot _site/data.json
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save public Pages projection only
+        if: always() && steps.projection.outputs.ready == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Remove private working files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/editorial-work"
+  deploy:
+    if: always() && needs.cycle.outputs.projection == 'true'
+    needs: cycle
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: newsroom-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}

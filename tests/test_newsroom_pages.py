@@ -155,3 +155,32 @@ def test_upload_uses_sha_and_allowlist_without_transmitting_private_fields(
 
 def test_server_cycle_hook_remains_executable() -> None:
     assert (ROOT / "deploy/server/run-cycle.sh").stat().st_mode & 0o111
+
+
+def test_pages_workflows_use_matching_artifacts_unique_per_run_and_attempt() -> None:
+    import yaml
+
+    for filename in ("newsroom-pages.yml", "editorial-actions.yml"):
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+        steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
+        upload = next(step for step in steps
+                      if step.get("uses", "").startswith("actions/upload-pages-artifact@"))
+        deploy = next(step for step in steps
+                      if step.get("uses", "").startswith("actions/deploy-pages@"))
+        name = upload["with"]["name"]
+        assert "${{ github.run_id }}" in name
+        assert "${{ github.run_attempt }}" in name
+        assert deploy["with"]["artifact_name"] == name
+
+
+def test_archive_export_does_not_refresh_observation_time(tmp_path: Path) -> None:
+    from relocant_media.storage.sqlite_schema import initialize_sqlite
+    database = tmp_path / 'archive.sqlite3'
+    initialize_sqlite(database)
+    output = tmp_path / 'public.json'
+    observed = '2026-01-01T00:00:00+00:00'
+    result = subprocess.run([sys.executable, '-m', 'relocant_media.ops.newsroom_export',
+        '--database', str(database), '--output', str(output), '--observed-at', observed],
+        capture_output=True, text=True)
+    assert result.returncode == 0
+    assert all(c['observed_at'] == observed for c in json.loads(output.read_text())['cities'])

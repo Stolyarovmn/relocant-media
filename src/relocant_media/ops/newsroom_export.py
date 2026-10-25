@@ -141,6 +141,7 @@ def main() -> None:
                         help="existing canonical SQLite; never creates one")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-directory", type=Path)
+    parser.add_argument("--observed-at", help="snapshot observation time; never refresh old data")
     args = parser.parse_args()
     if args.database:
         database = args.database.resolve()
@@ -155,6 +156,13 @@ def main() -> None:
             engine.dispose()
     else:
         payload = snapshot(args.root)
+    if args.observed_at:
+        observed = datetime.fromisoformat(args.observed_at)
+        if observed.tzinfo is None or observed > datetime.now(UTC):
+            parser.error("timezone-aware observation time not in the future required")
+        for city in payload["cities"]:
+            if city["runtime_status"] == "available":
+                city["observed_at"] = observed.isoformat()
     if args.run_directory:
         report_path = args.run_directory / "server-report.json"
         manifest_path = args.run_directory / "manifest.json"
