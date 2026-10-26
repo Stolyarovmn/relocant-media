@@ -50,7 +50,7 @@ lock-файлами: сначала проверенная БД v7, затем �
 ```sh
 sudo /bin/sh <<'SH'
 set -eu
-umask 077
+umask 022
 recovery_sha='REPLACE_WITH_VERIFIED_FULL_MAIN_SHA'
 case "$recovery_sha" in *[!0-9a-f]*) echo 'full verified SHA required' >&2; exit 78;; esac
 [ "${#recovery_sha}" -eq 40 ]
@@ -85,6 +85,13 @@ RELOCANT_EXPECTED_TARGET_SHA="$recovery_sha" RELOCANT_REPAIR_DATABASE=true \
 systemctl is-active relocant-editorial.timer relocant-intake.timer relocant-deploy.timer
 SH
 ```
+
+Bootstrap использует `umask 022`: git и editable-установка Python должны оставаться
+читаемыми служебному пользователю `relocant`. Маска `077` создаёт `.pth` с режимом
+`0600` и делает установленный пакет недоступным коллектору. Это не открывает секреты:
+временный каталог создаётся через `mktemp -d`, скрипт имеет `0700`, а maintenance
+явно создаёт резервную базу и квитанцию с `0600`. Права существующего env и ключей
+не меняются.
 
 Повторная проверка pinned SHA внутри deploy исключает выполнение скрипта со старого
 SHA поверх нового, продвинувшегося `main`: операция отложится до остановки таймеров.
