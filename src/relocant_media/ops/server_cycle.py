@@ -38,7 +38,14 @@ from relocant_media.collectors.news_discovery import (
     collect_news_feed,
     load_verified_news_feeds,
 )
-from relocant_media.collectors.telegram_topics import DEFAULT_CHANNELS, collect_topics
+from relocant_media.collectors.telegram_topics import (
+    DEFAULT_CHANNELS as DEFAULT_CHANNELS,
+)
+from relocant_media.collectors.telegram_topics import (
+    collect_topics,
+    messenger_sources_for_city,
+    runtime_channels_for_city,
+)
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.dedup import event_key
@@ -300,6 +307,7 @@ async def collect_sources(
     topics: list[dict[str, Any]] = []
     news_topics: list[dict[str, Any]] = []
     channel_errors: list[dict[str, str]] = []
+    channel_coverage: list[dict[str, Any]] = []
     news_errors: list[dict[str, str]] = []
     venue_errors: list[dict[str, str]] = []
     articles = []
@@ -472,9 +480,12 @@ async def collect_sources(
                 result["venue_article_failures"] += len(item_failures)
                 venue_errors.extend({"source_id": source_id, **error}
                                     for error in item_failures)
-        for channel in (() if submissions_only else DEFAULT_CHANNELS):
+        runtime_channels = () if submissions_only else runtime_channels_for_city("belgrade")
+        for channel in runtime_channels:
+            observation: dict[str, Any] = {"channel": channel, "status": "not_checked"}
+            channel_coverage.append(observation)
             try:
-                leads = await collect_topics(channel, client, now=now)
+                leads = await collect_topics(channel, client, now=now, observation=observation)
                 attention_leads.extend(leads)
                 for lead in leads[:20]:
                     result["channel_leads"] += 1
@@ -497,6 +508,8 @@ async def collect_sources(
             except Exception as error:
                 result["channel_failures"] += 1
                 channel_errors.append({"channel": channel, "error_type": type(error).__name__})
+                if observation["status"] == "not_checked":
+                    observation["status"] = "access_error"
 
         for feed in news_feeds:
             try:
@@ -566,6 +579,19 @@ async def collect_sources(
             json.dumps(attention, ensure_ascii=False, indent=2), encoding="utf-8")
         (output / "triage.json").write_text(json.dumps(triage, ensure_ascii=False, indent=2),
                                            encoding="utf-8")
+        blocked = [{"source_id": row["id"], "platform": row["platform"],
+                    "status": ("blocked_no_message_access"
+                               if row["platform"] in {"viber", "whatsapp"} else "catalog_only")}
+                   for row in messenger_sources_for_city("belgrade")
+                   if row.get("collection", {}).get("status") != "runtime_public_preview"]
+        (output / "messenger-coverage.json").write_text(json.dumps({
+            "observed_at": now.isoformat(), "city": "belgrade",
+            "scope": "submissions_only" if submissions_only else "editorial_discovery",
+            "interval_coverage": "not_checked" if submissions_only else "partial",
+            "sources": channel_coverage + blocked,
+            "publication_evidence": False,
+            "web_fallback_is_messenger_access": False,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
         (output / "channel-topics.json").write_text(json.dumps({"topics": topics,
             "failures": channel_errors, "publication_evidence": False},
             ensure_ascii=False, indent=2), encoding="utf-8")
