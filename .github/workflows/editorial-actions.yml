@@ -5,8 +5,13 @@ on:
       mode:
         description: Read-only preview or canonical worker (requires completed cutover)
         type: choice
-        options: [preview, editorial, intake]
+        options: [preview, editorial, intake, discovery]
         default: preview
+      discovery_batch:
+        description: 'Discovery only: JSON {"version":1,"city":"belgrade","urls":["https://..."]}'
+        type: string
+        required: false
+        default: ''
   schedule:
     - cron: '17 0,3,6,9,12,15,18,21 * * *'
     - cron: '2,7,12,22,27,32,37,42,47,52,57 * * * *'
@@ -85,6 +90,7 @@ jobs:
           JEV_ENABLED: ${{ vars.JEV_ENABLED || 'false' }}
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           WORKER_MODE: ${{ steps.mode.outputs.value }}
+          CLOUD_DISCOVERY_BATCH: ${{ inputs.discovery_batch }}
         run: |
           mkdir -p _site
           cp web/newsroom/* _site/

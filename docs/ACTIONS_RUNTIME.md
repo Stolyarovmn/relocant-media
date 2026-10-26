@@ -7,6 +7,10 @@ source policy, freshness, high-risk owner review и delivery guards не зам�
 
 ## Текущий предел готовности
 
+Облачные URL-кандидаты принимаются через mode=discovery в том же workflow и той же
+SQLite; формат и квитанции описаны в [CLOUD_DISCOVERY.md](CLOUD_DISCOVERY.md).
+Этот вход не включает runtime и не изменяет условия переключения ниже.
+
 Наличие workflow в main не означает выполненное переключение. Расписание выключено,
 пока `ACTIONS_EDITORIAL_ENABLED` не равно `true`; отправка по умолчанию выключена.
 Состояние старого сервера, остановка всех писателей и авторизация Drive из Actions

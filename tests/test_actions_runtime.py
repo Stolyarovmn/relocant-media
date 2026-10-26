@@ -7,9 +7,11 @@ from pathlib import Path
 import httpx
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
 
 from relocant_media.ops import actions_runtime as runtime
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
+from relocant_media.storage.models import Submission
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -180,6 +182,85 @@ def test_preview_keeps_observation_timestamp_and_does_not_claim(context, tmp_pat
 def test_stale_bootstrap_is_rejected(state):
     with pytest.raises(ValueError, match='fresh final snapshot'):
         runtime.bootstrap_record(state['snapshot'], now=datetime.now(UTC) + timedelta(days=1))
+
+
+def test_discovery_claims_then_enters_existing_queue_and_checkpoints_receipt(
+    context, tmp_path, monkeypatch,
+):
+    store, drive = context
+    batch = json.dumps({'version': 1, 'city': 'belgrade',
+                        'urls': ['https://www.beograd.rs/cir/beoinfo-vesti/a116374/work.html']})
+    env = {'ACTIONS_CUTOVER_CONFIRMED': 'true', 'GITHUB_REPOSITORY': runtime.REPO,
+           'GITHUB_REF': 'refs/heads/main', 'CLOUD_DISCOVERY_BATCH': batch}
+    calls = []
+    def child(command, environment):
+        assert store.state['status'] == 'busy'
+        assert command[-1] == '--submissions-only'
+        assert environment['EDITORIAL_INTAKE_MODE'] == 'batch'
+        assert environment['EDITORIAL_PRIVATE_FEEDBACK_ENABLED'] == 'false'
+        assert 'CLOUD_DISCOVERY_BATCH' not in environment
+        engine = create_engine(environment['DATABASE_URL'])
+        with Session(engine) as session:
+            row = session.get(Submission, 1)
+            assert row.payload['publication_evidence'] is False and row.status == 'new'
+        engine.dispose()
+        calls.append(command)
+        return 1  # A failed worker still checkpoints accepted candidates for the next cycle.
+    monkeypatch.setattr(runtime, 'run_child', child)
+    assert execute(context, tmp_path, monkeypatch, mode='discovery', environment=env) == 1
+    assert store.state['status'] == 'ready'
+    receipt = store.state['last_discovery']
+    assert receipt['created'] == 1 and receipt['runtime_exit_code'] == 1
+    assert len(receipt['batch_sha256']) == 64
+    assert receipt['candidates'][0]['intake_status'] == 'new'
+    assert receipt['candidates'][0]['deliveries'] == []
+    # A replay restores the committed DB, observes the same candidate and calls no worker.
+    (tmp_path / 'again').mkdir()
+    assert execute(context, tmp_path / 'again', monkeypatch,
+                   mode='discovery', environment=env) == 0
+    assert len(calls) == 1
+    assert store.state['last_discovery']['created'] == 0
+    assert store.state['last_discovery']['candidates'][0]['submission_id'] == 1
+    assert len(drive.files) == 2
+
+
+@pytest.mark.parametrize('mode,batch', [
+    ('discovery', '{"version":1,"city":"belgrade","urls":[],"ready":true}'),
+    ('discovery', ''), ('preview', '{"version":1}'), ('editorial', '{"version":1}'),
+    ('invalid', ''),
+])
+def test_invalid_discovery_never_claims_or_runs(context, tmp_path, monkeypatch, mode, batch):
+    store, _ = context
+    monkeypatch.setattr(runtime, 'run_child', lambda *a: pytest.fail('side effects'))
+    with pytest.raises(ValueError):
+        execute(context, tmp_path, monkeypatch, mode=mode,
+                environment={'CLOUD_DISCOVERY_BATCH': batch})
+    assert store.sha == 'initial'
+
+
+@pytest.mark.parametrize('failure', ['claim', 'upload', 'commit', 'cutover'])
+def test_discovery_requires_canonical_claim_and_durable_checkpoint(
+    context, tmp_path, monkeypatch, failure,
+):
+    store, drive = context
+    env = {'ACTIONS_CUTOVER_CONFIRMED': 'true', 'GITHUB_REPOSITORY': runtime.REPO,
+           'GITHUB_REF': 'refs/heads/main', 'CLOUD_DISCOVERY_BATCH': json.dumps({
+               'version': 1, 'city': 'belgrade', 'urls': ['https://www.beograd.rs/example']})}
+    calls = []
+    monkeypatch.setattr(runtime, 'run_child', lambda *a: calls.append(a) or 0)
+    if failure == 'claim':
+        monkeypatch.setattr(store, 'write', lambda *a: (_ for _ in ()).throw(ValueError('CAS')))
+    if failure == 'cutover':
+        env['ACTIONS_CUTOVER_CONFIRMED'] = 'false'
+    store.fail_commit = failure == 'commit'
+    drive.fail_upload = failure == 'upload'
+    with pytest.raises(ValueError):
+        execute(context, tmp_path, monkeypatch, mode='discovery', environment=env)
+    assert 'last_discovery' not in store.state
+    if failure in {'claim', 'cutover'}:
+        assert not calls and store.state['status'] == 'ready'
+    else:
+        assert len(calls) == 1 and store.state['status'] == 'busy'
 
 
 def test_github_control_updates_have_sha_precondition():
