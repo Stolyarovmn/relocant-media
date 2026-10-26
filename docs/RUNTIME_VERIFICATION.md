@@ -58,8 +58,14 @@ Telegram или отдельным подтверждением активной
 workflow использовал staging CLI, не получал Telegram token и не запускал
 полный `server_runtime`. Он не объясняет действующую публикацию.
 
-Текущие workflows — CI, source-health, daily-analysis placeholder и
-[jev-smoke](../.github/workflows/jev-smoke.yml). Отдельный Jev smoke проверяет
+После PR #158 `daily-analysis` — ручной read-only отчёт с JSON/Markdown artifact,
+а не placeholder. `Editorial Actions` поддерживает preview и канонические режимы,
+но сервер остаётся единственным писателем до завершённого cutover.
+Ручной [preview 40376069053](https://github.com/Stolyarovmn/relocant-media/actions/runs/40376069053)
+26 октября остановился на отсутствии доступных Drive credentials до обработки;
+это не запуск серверной редакции и не квитанция доставки.
+
+Отдельный [Jev smoke](../.github/workflows/jev-smoke.yml) проверяет
 Actions Secret на фиксированном публичном примере; он не подключает этот secret
 к окружению systemd и не является benchmark редакции.
 
