@@ -7,6 +7,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -38,22 +39,27 @@ def main() -> None:
                                  ('signature', 'attempts', 'backup_pending') if key in intake}
         args.work.mkdir(parents=True, exist_ok=False)
         with httpx.Client(timeout=60, follow_redirects=False) as client:
-            store = StateStore(client, os.environ['GH_STATE_TOKEN'])
-            store.require_private()
+            store = StateStore(client, os.environ['GH_STATE_TOKEN'],
+                               repository=os.environ.get('GH_STATE_REPOSITORY') or REPO)
+            metadata = store.require_private()
             # A known state of ANY status is never replaced by bootstrap.
             existing = client.get(store.url, params={'ref': STATE_BRANCH}, headers=store.headers)
             if existing.status_code != 404:
                 raise ValueError('existing or unreadable canonical state; bootstrap refused')
             restored(Drive(client), state['snapshot'], args.work)
-            base = f'https://api.github.com/repos/{REPO}'
+            base = store.base_url
             branch = client.get(f'{base}/git/ref/heads/{STATE_BRANCH}', headers=store.headers)
             if branch.status_code == 404:
-                main_ref = client.get(f'{base}/git/ref/heads/main', headers=store.headers)
-                main_ref.raise_for_status()
+                default_branch = metadata.get('default_branch')
+                if not isinstance(default_branch, str) or not default_branch:
+                    raise ValueError('initialized private state repository required')
+                base_ref = client.get(f'{base}/git/ref/heads/{quote(default_branch, safe="")}',
+                                      headers=store.headers)
+                base_ref.raise_for_status()
                 store.require_private()
                 created = client.post(f'{base}/git/refs', headers=store.headers,
                     json={'ref': f'refs/heads/{STATE_BRANCH}',
-                          'sha': main_ref.json()['object']['sha']})
+                          'sha': base_ref.json()['object']['sha']})
                 created.raise_for_status()
             else:
                 branch.raise_for_status()

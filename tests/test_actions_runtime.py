@@ -1,3 +1,4 @@
+import base64
 import copy
 import hashlib
 import json
@@ -67,6 +68,7 @@ def execute(context, tmp_path, monkeypatch, **kwargs):
     monkeypatch.setattr(runtime, 'export_public', lambda *args: None)
     env = {'ACTIONS_CUTOVER_CONFIRMED': 'true', 'GITHUB_REPOSITORY': runtime.REPO,
            'GITHUB_REF': 'refs/heads/main', 'GH_STATE_TOKEN': 'SECRET',
+           'GH_STATE_REPOSITORY': 'Owner/private-control',
            'DRIVE_CREDENTIALS_JSON': 'SECRET'}
     return runtime.execute(*context, work=tmp_path / 'work', output=tmp_path / 'public.json',
                            folder='folder_id_1', mode=kwargs.pop('mode', 'editorial'),
@@ -79,6 +81,7 @@ def test_success_claims_before_side_effect_and_restores_receipts(context, tmp_pa
     def child(command, env):
         assert store.state['status'] == 'busy'
         assert 'GH_STATE_TOKEN' not in env and 'DRIVE_CREDENTIALS_JSON' not in env
+        assert 'GH_STATE_REPOSITORY' not in env
         database = Path(env['DATABASE_URL'].removeprefix('sqlite:///'))
         saved_budget = json.loads((database.parent / 'intake-batch-state.json').read_text())
         assert saved_budget['attempts'] == 2
@@ -355,6 +358,128 @@ def test_unknown_repository_privacy_blocks_state_network_operations():
     assert len(requests) == 1 and requests[0].method == 'GET'
 
 
+@pytest.mark.parametrize('repository', [
+    'https://github.com/Owner/state', 'Owner/state/extra', '../state', 'Owner/..',
+    'Owner/state?token=secret', 'Owner/state#fragment', 'Owner\\state', '/Owner/state',
+    ' Owner/state', 'Owner/state ', 'Owner/', '',
+])
+def test_state_repository_rejects_paths_urls_and_invalid_names(repository):
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda request: pytest.fail('invalid repository must not reach network'),
+    )) as client:
+        with pytest.raises(ValueError, match='owner/name'):
+            runtime.StateStore(client, 'secret', repository=repository)
+
+
+def test_public_code_repository_uses_one_private_control_checkpoint(state, tmp_path, monkeypatch):
+    control = 'Owner/private-control'
+    checkpoint = copy.deepcopy(state)
+    sha = 'initial'
+    requests = []
+    def handle(request):
+        nonlocal checkpoint, sha
+        requests.append(request)
+        assert request.url.host == 'api.github.com'
+        assert request.url.path.startswith(f'/repos/{control}')
+        assert request.headers['Authorization'] == 'Bearer scoped-state-secret'
+        if request.url.path == f'/repos/{control}':
+            return httpx.Response(200, json={'full_name': control, 'private': True})
+        assert request.url.path == f'/repos/{control}/contents/state/current.json'
+        if request.method == 'GET':
+            return httpx.Response(200, json={
+                'content': base64.b64encode(json.dumps(checkpoint).encode()).decode(),
+                'sha': sha,
+            })
+        body = json.loads(request.content)
+        assert body['sha'] == sha and body['branch'] == 'editorial-state'
+        checkpoint = json.loads(base64.b64decode(body['content']))
+        sha += 'x'
+        return httpx.Response(200, json={'content': {'sha': sha}})
+    def child(command, env):
+        assert checkpoint['status'] == 'busy'
+        assert env['GITHUB_REPOSITORY'] == runtime.REPO
+        assert 'GH_STATE_TOKEN' not in env and 'GH_STATE_REPOSITORY' not in env
+        return 0
+    monkeypatch.setattr(runtime, 'run_child', child)
+    monkeypatch.setattr(runtime, 'export_public', lambda *args: None)
+    drive = MemoryDrive((tmp_path / 'original/editorial.sqlite3').read_bytes())
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        store = runtime.StateStore(client, 'scoped-state-secret', repository=control)
+        assert runtime.execute(store, drive, work=tmp_path / 'private-work',
+            output=tmp_path / 'public.json', folder='folder_id_1', mode='editorial', environment={
+                'ACTIONS_CUTOVER_CONFIRMED': 'true', 'GITHUB_REPOSITORY': runtime.REPO,
+                'GITHUB_REF': 'refs/heads/main', 'GH_STATE_REPOSITORY': control,
+                'GH_STATE_TOKEN': 'scoped-state-secret'}) == 0
+    assert checkpoint['status'] == 'ready' and sha == 'initialxx'
+    assert len([r for r in requests if r.method == 'PUT']) == 2
+
+
+@pytest.mark.parametrize('metadata', [
+    {'full_name': 'Owner/private-control', 'private': False},
+    {'full_name': 'Owner/other', 'private': True},
+    {'full_name': runtime.REPO, 'private': True},
+])
+def test_selected_control_repository_requires_its_own_verified_privacy(metadata):
+    requests = []
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json=metadata)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ValueError, match='private repository required'):
+            runtime.StateStore(client, 'secret', repository='Owner/private-control').read()
+    assert len(requests) == 1
+
+
+def test_bootstrap_targets_private_repository_and_its_default_branch(state, tmp_path, monkeypatch):
+    import base64
+    import sys
+
+    from relocant_media.ops import actions_bootstrap
+
+    control = 'Owner/private-control'
+    manifest = tmp_path / 'final.json'
+    manifest.write_text(json.dumps(state['snapshot']))
+    intake = tmp_path / 'intake.json'
+    intake.write_text('{"attempts":2}')
+    monkeypatch.setenv('GH_STATE_REPOSITORY', control)
+    monkeypatch.setenv('GH_STATE_TOKEN', 'scoped-state-secret')
+    monkeypatch.setattr(sys, 'argv', ['bootstrap', '--final-manifest', str(manifest),
+        '--intake-state', str(intake), '--work', str(tmp_path / 'work'),
+        '--confirm-all-former-writers-fenced'])
+    requests, saved = [], []
+    def handle(request):
+        requests.append(request)
+        assert request.url.path.startswith(f'/repos/{control}')
+        if request.url.path == f'/repos/{control}':
+            return httpx.Response(200, json={'full_name': control, 'private': True,
+                                           'default_branch': 'control/trunk'})
+        if request.url.path.endswith('/contents/state/current.json'):
+            if request.method == 'GET':
+                return httpx.Response(200, json={'content': base64.b64encode(
+                    json.dumps(saved[0]).encode()).decode(), 'sha': 'created'}) if saved else (
+                        httpx.Response(404))
+            saved.append(json.loads(base64.b64decode(json.loads(request.content)['content'])))
+            return httpx.Response(201, json={})
+        if request.url.path.endswith('/git/ref/heads/editorial-state'):
+            return httpx.Response(404)
+        if request.method == 'GET':
+            assert request.url.raw_path.endswith(b'/git/ref/heads/control%2Ftrunk')
+            return httpx.Response(200, json={'object': {'sha': 'private-default-head'}})
+        assert request.url.path.endswith('/git/refs')
+        assert json.loads(request.content) == {
+            'ref': 'refs/heads/editorial-state', 'sha': 'private-default-head'}
+        return httpx.Response(201, json={})
+    client = httpx.Client(transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(actions_bootstrap.httpx, 'Client', lambda **kwargs: client)
+    monkeypatch.setattr(actions_bootstrap, 'Drive', lambda *args: object())
+    restores = []
+    monkeypatch.setattr(actions_bootstrap, 'restored', lambda *args: restores.append(args))
+    actions_bootstrap.main()
+    assert saved[0]['status'] == 'ready' and saved[0]['intake_state']['attempts'] == 2
+    assert len(restores) == 1
+    assert len([r for r in requests if r.method == 'POST']) == 1
+
+
 @pytest.mark.parametrize('failure', ['commit', 'termination'])
 def test_projection_is_not_publishable_before_ready_checkpoint(
     context, tmp_path, monkeypatch, failure,
@@ -397,6 +522,9 @@ def test_workflow_never_uploads_private_database_or_runs_on_pr():
     uploads = [s for s in steps if s.get('uses', '').startswith('actions/upload-')]
     assert len(uploads) == 1 and uploads[0]['with']['path'] == '_site'
     assert 'ACTIONS_EDITORIAL_ENABLED' in document['jobs']['cycle']['if']
+    worker = next(step for step in steps if step.get('id') == 'runtime')
+    assert worker['env']['GH_STATE_REPOSITORY'] == '${{ vars.EDITORIAL_STATE_REPOSITORY }}'
+    assert worker['env']['GH_STATE_TOKEN'] == '${{ secrets.EDITORIAL_STATE_TOKEN || github.token }}'
 
 
 def test_drive_upload_requires_full_readback_hash(tmp_path, monkeypatch):
