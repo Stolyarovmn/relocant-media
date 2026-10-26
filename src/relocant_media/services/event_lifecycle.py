@@ -95,6 +95,7 @@ def materialize_source_revision(session: Session, revision_id: int) -> RawItem:
         title=document.title,
         body=document.body,
         published_at=document.published_at,
+        published_at_precision=document.published_at_precision,
     )
     session.add(item)
     session.flush()

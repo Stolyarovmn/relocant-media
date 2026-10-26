@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -112,6 +113,24 @@ async def test_article_freshness_before_persistence_without_ai(collection, age, 
     assert result["raw_items_written"] == expected
     assert len(rows(engine)) == expected
     assert result["discarded_before_persistence"] == 1 - expected
+
+
+@pytest.mark.asyncio
+async def test_day_precision_boundary_is_visible_as_hold_without_ai(collection, tmp_path):
+    from relocant_media.storage.models import EditorialRun
+
+    engine, cards, articles, _, _ = collection
+    article = replace(item(timedelta(days=2)), published_at_precision='day')
+    cards.append(article)
+    articles[BEOGRAD] = article
+    result = await server_cycle.collect_sources(engine, output=tmp_path)
+    assert result['metadata_holds'] == 1 and result['raw_items_written'] == 1
+    assert result['discarded_before_persistence'] == 0
+    with Session(engine) as session:
+        run = session.scalar(select(EditorialRun))
+        assert run.outcome['status'] == 'human_review'
+        assert run.outcome['reason'] == 'publication_day_straddles_news_window'
+        assert run.outcome['ai_calls'] == 0
 
 
 @pytest.mark.asyncio

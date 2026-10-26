@@ -10,6 +10,8 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from relocant_media.domain.publication_time import publication_interval
+
 
 @dataclass(frozen=True)
 class FreshnessDecision:
@@ -92,12 +94,16 @@ def _relative_deadlines(text: str, published: datetime) -> list[date]:
     return result
 
 
-def publication_date_context(published: datetime | None) -> dict[str, str | None]:
+def publication_date_context(
+    published: datetime | None, precision: str = "unknown",
+) -> dict[str, str | None]:
     if published is None or published.tzinfo is None:
         return {"published_at_belgrade": None, "tomorrow_belgrade": None}
     local = published.astimezone(ZoneInfo("Europe/Belgrade"))
     return {
-        "published_at_belgrade": local.isoformat(),
+        "published_at_belgrade": local.isoformat() if precision == "instant" else None,
+        "published_on_belgrade": local.date().isoformat(),
+        "published_at_precision": precision,
         "tomorrow_belgrade": (local.date() + timedelta(days=1)).isoformat(),
     }
 
@@ -156,6 +162,7 @@ def freshness_decision(
     now: datetime,
     *,
     horizon_hours: int = 48,
+    published_at_precision: str = "unknown",
 ) -> FreshnessDecision:
     """Use 24 hours for public-channel candidates, 48 for normal sources."""
     if horizon_hours not in (24, 48):
@@ -165,10 +172,13 @@ def freshness_decision(
     now = now.astimezone(UTC)
     if published_at is None or published_at.tzinfo is None:
         return FreshnessDecision("hold", "publication_date_unknown")
-    published_at = published_at.astimezone(UTC)
+    published_at, interval_end = publication_interval(published_at, published_at_precision)
     age = now - published_at
     if age < timedelta(0):
         return FreshnessDecision("hold", "publication_date_future")
+    if (published_at_precision == "day" and age > timedelta(days=7)
+            and now - interval_end <= timedelta(days=7)):
+        return FreshnessDecision("hold", "publication_day_straddles_max_age")
     if age > timedelta(days=7):
         return FreshnessDecision("discard", "publication_older_than_seven_days")
     text = f"{title}\n{body}"
@@ -176,6 +186,10 @@ def freshness_decision(
     local_date = now.astimezone(ZoneInfo("Europe/Belgrade")).date()
     if deadlines and all(deadline < local_date for deadline in deadlines):
         return FreshnessDecision("discard", "event_expired")
+    if (published_at_precision == "day" and age > timedelta(hours=horizon_hours)
+            and now - interval_end <= timedelta(hours=horizon_hours)
+            and not any(deadline >= local_date for deadline in deadlines)):
+        return FreshnessDecision("hold", "publication_day_straddles_news_window")
     if age > timedelta(hours=horizon_hours):
         if deadlines and any(deadline >= local_date for deadline in deadlines):
             return FreshnessDecision("keep", "dated_event_still_relevant")

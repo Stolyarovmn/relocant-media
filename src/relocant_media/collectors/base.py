@@ -20,6 +20,8 @@ class RawItem:
     # Extra image hosts explicitly bound by a source-specific collector. The source-page
     # host itself is always allowed by the generic media candidate extractor.
     approved_image_hosts: tuple[str, ...] = ()
+    # A day timestamp is a scheduling boundary, never an observed publication clock.
+    published_at_precision: str = "unknown"
 
 
 class Collector(Protocol):

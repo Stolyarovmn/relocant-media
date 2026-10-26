@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from relocant_media.storage.sqlite_schema import initialize_sqlite
+from relocant_media.storage.sqlite_schema import SQLITE_SCHEMA_VERSION, initialize_sqlite
 
 
 def test_fresh_process_initialization_registers_media_snapshot_model(tmp_path):
@@ -36,7 +36,7 @@ def test_version_six_adds_media_snapshot_and_keeps_existing_rows(tmp_path):
     backup = initialize_sqlite(path)
     assert backup == path.with_name(path.name + ".before-v7.backup")
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
         assert db.execute("SELECT * FROM post").fetchall() == before
         assert db.execute("SELECT count(*) FROM raw_item_media_snapshot").fetchone()[0] == 0
     with sqlite3.connect(backup) as db:

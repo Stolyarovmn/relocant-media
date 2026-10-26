@@ -26,4 +26,4 @@ def recent_source_load(session: Session, *, now: datetime) -> dict[str, int]:
 
 def evidence_changed(original: RawItem, current: Any) -> bool:
     return any(getattr(original, key) != getattr(current, key)
-               for key in ("url", "title", "body", "published_at"))
+               for key in ("url", "title", "body", "published_at", "published_at_precision"))

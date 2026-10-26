@@ -77,6 +77,7 @@ def test_parse_beograd_article_extracts_normalized_evidence() -> None:
     assert "Navigation" not in item.body
     assert "Footer" not in item.body
     assert item.published_at == datetime(2026, 10, 15, tzinfo=ZoneInfo("Europe/Belgrade"))
+    assert item.published_at_precision == "day"
     assert item.source_html is None
 
 

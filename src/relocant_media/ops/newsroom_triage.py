@@ -32,7 +32,8 @@ def triage_queue(engine: Engine, *, now: datetime) -> dict[str, Any]:
                     or "_package" in run.outcome or "_autonomous_assessment" in run.outcome):
                 continue
             result = freshness_decision(title=item.title, body=item.body,
-                published_at=item.published_at, now=now)
+                published_at=item.published_at, now=now,
+                published_at_precision=item.published_at_precision)
             boilerplate = boilerplate_reason(item.title, item.body)
             if result.action == "keep" and boilerplate is None:
                 continue

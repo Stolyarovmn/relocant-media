@@ -10,6 +10,7 @@ class EvidenceDocument(BaseModel):
     title: str = Field(min_length=1)
     body: str = Field(min_length=1)
     published_at: datetime | None = None
+    published_at_precision: str = Field(default="unknown", pattern="^(unknown|day|instant)$")
 
 
 class RankingResult(BaseModel):

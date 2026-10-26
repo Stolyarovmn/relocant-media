@@ -28,7 +28,8 @@ def eligible_empty_policy_hold(
             or "_package" in outcome or "_autonomous_assessment" in outcome):
         return False
     if freshness_decision(item.title, item.body, item.published_at,
-                          now or datetime.now(UTC)).action != "keep":
+                          now or datetime.now(UTC),
+                          published_at_precision=item.published_at_precision).action != "keep":
         return False
     members = _event_items(session, anchor=item, anchor_source=source)
     expected = [_snapshot_member(member, policy) for member, policy in members]

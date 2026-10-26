@@ -90,7 +90,10 @@ def reviewed_package(
             "Причину и флаги пиши по-русски. При сомнении не одобряй. "
             "Дату объявления и слова sutra/завтра привязывай к календарю Europe/Belgrade, "
             "а не к UTC-дню. source_local_dates содержит явный местный момент публикации "
-            "и следующий день. В готовом тексте должны быть абсолютные даты. "
+            "и следующий день. При precision=day это календарная дата, не время публикации; "
+            "при unknown точность не записана. Нельзя приписывать таким источникам часы "
+            "или точное попадание в трёхчасовой интервал. "
+            "В готовом тексте должны быть абсолютные даты. "
             "Основной текст и заголовок должны быть полностью по-русски. Сербский допустим "
             "только в собственных именах. Непереведённое предложение или фрагмент — "
             "блокирующий недостаток даже при верных фактах; требуй исправление, не approve. "
@@ -115,7 +118,8 @@ def reviewed_package(
             prompt=canonical_json({
                 "role": role, "package": context,
                 "source_local_dates":[dict(source_id=d.source_id,url=d.url,
-                    **publication_date_context(d.published_at)) for d in package.event.documents],
+                    **publication_date_context(d.published_at, d.published_at_precision))
+                    for d in package.event.documents],
                 "now_utc": (now or datetime.now(UTC)).astimezone(UTC).isoformat(),
                 "draft_sha256": draft_hash, "context_sha256": context_hash,
             }),

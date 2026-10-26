@@ -720,6 +720,7 @@ async def deliver_owner_approved(
             title=item.title,
             body=item.body,
             published_at=item.published_at,
+            published_at_precision=item.published_at_precision,
             now=datetime.now(UTC),
         )
         if fresh.action != "keep":

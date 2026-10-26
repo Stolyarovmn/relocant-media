@@ -79,6 +79,7 @@ async def audit_sources(
                             item.body,
                             item.published_at,
                             datetime.now(UTC),
+                            published_at_precision=item.published_at_precision,
                         ).action
                         == "keep"
                     ]

@@ -48,6 +48,7 @@ def export_revisions(*, city: str, output: Path) -> dict[str, Any]:
                     "source_id": raw.source_id, "article_id": raw.external_id,
                     "url": raw.url, "title": raw.title, "body": raw.body,
                     "published_at": raw.published_at.isoformat() if raw.published_at else None,
+                    "published_at_precision": raw.published_at_precision,
                 },
                 "source_policy": {"enabled": source.enabled, "ownership": source.ownership,
                                   "auto_publish": source.auto_publish,

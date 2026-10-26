@@ -139,7 +139,7 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
         ).with_for_update().execution_options(populate_existing=True))
         if existing is not None and _referencing_runs(session, existing.id):
             if any(getattr(existing, key) != getattr(item, key)
-                   for key in ("url", "title", "body", "published_at")):
+                   for key in ("url", "title", "body", "published_at", "published_at_precision")):
                 raise ReviewedEvidenceChangedError(existing.id)
             # Derived metadata is safe to backfill: it is deterministic from the exact
             # evidence already reviewed and does not change the evidence snapshot itself.
@@ -157,6 +157,7 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
             "title": item.title,
             "body": item.body,
             "published_at": item.published_at,
+            "published_at_precision": item.published_at_precision,
         }
         statement = (sqlite_insert(RawItem) if session.get_bind().dialect.name == "sqlite"
                      else insert(RawItem)).values(**values)
@@ -169,6 +170,7 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
                 "title": item.title,
                 "body": item.body,
                 "published_at": item.published_at,
+                "published_at_precision": item.published_at_precision,
             },
         )
         session.execute(statement)
@@ -200,6 +202,7 @@ def capture_collected_batch(
             evidence = {
                 "source_id": item.source_id, "article_id": item.external_id,
                 "url": item.url, "title": item.title, "body": item.body,
+                "published_at_precision": item.published_at_precision,
                 "published_at": (item.published_at.astimezone(UTC).isoformat()
                                  if item.published_at is not None else None),
             }

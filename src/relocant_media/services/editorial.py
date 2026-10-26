@@ -49,6 +49,7 @@ def _document(item: RawItem) -> EvidenceDocument:
         title=item.title,
         body=item.body,
         published_at=item.published_at,
+        published_at_precision=item.published_at_precision,
     )
 
 
@@ -292,7 +293,8 @@ class EditorialService:
             if any(snapshot.get(key) != value for key, value in expected.items()):
                 raise DeliveryBlockedError("event evidence changed after verification")
             saved = EvidenceDocument.model_validate(snapshot)
-            if _timestamp(saved.published_at) != _timestamp(member.published_at):
+            if (saved.published_at_precision != member.published_at_precision
+                    or _timestamp(saved.published_at) != _timestamp(member.published_at)):
                 raise DeliveryBlockedError(
                     "event evidence publication time changed after verification"
                 )
@@ -345,7 +347,8 @@ class EditorialService:
         }.items()):
             raise DeliveryBlockedError("source evidence changed after verification")
         saved_document = EvidenceDocument.model_validate(run.evidence)
-        if _timestamp(saved_document.published_at) != _timestamp(item.published_at):
+        if (saved_document.published_at_precision != item.published_at_precision
+                or _timestamp(saved_document.published_at) != _timestamp(item.published_at)):
             raise DeliveryBlockedError("source publication time changed after verification")
 
         members = self._validate_evidence_bundle(run, anchor_item=item, anchor_source=source)
