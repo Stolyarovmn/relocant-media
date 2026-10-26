@@ -21,10 +21,13 @@ from typing import Any
 import google.auth
 import httpx
 from google.auth.transport.requests import Request
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.ops.sqlite_restore import restore
+from relocant_media.services.cloud_discovery import batch_receipt, ingest_batch, parse_batch
 
 REPO = "Stolyarovmn/relocant-media"
 STATE_BRANCH = "editorial-state"
@@ -173,6 +176,12 @@ def export_public(database: Path, output: Path, observed_at: str, run_dir: Path 
 
 def execute(store: StateStore, drive: Drive, *, work: Path, output: Path,
             folder: str, mode: str, environment: dict[str, str]) -> int:
+    if mode not in {"preview", "editorial", "intake", "discovery"}:
+        raise ValueError("unsupported runtime mode")
+    incoming = environment.get("CLOUD_DISCOVERY_BATCH", "")
+    batch = parse_batch(incoming) if mode == "discovery" else None
+    if incoming and mode != "discovery":
+        raise ValueError("discovery input requires discovery mode")
     state, sha = store.read()
     validate_ready(state)
     work.mkdir(parents=True, exist_ok=False)
@@ -197,21 +206,34 @@ def execute(store: StateStore, drive: Drive, *, work: Path, output: Path,
     intake_state.write_text(json.dumps(state.get("intake_state", {})), encoding="utf-8")
     env = {**environment, "DATABASE_URL": f"sqlite:///{database.resolve().as_posix()}",
            "RELOCANT_RUNTIME_PLATFORM": "github-actions", "TELEGRAM_MTPROTO_ENABLED": "false"}
-    for name in ("GH_STATE_TOKEN", "DRIVE_CREDENTIALS_JSON", "GOOGLE_APPLICATION_CREDENTIALS"):
+    for name in ("GH_STATE_TOKEN", "DRIVE_CREDENTIALS_JSON", "GOOGLE_APPLICATION_CREDENTIALS",
+                 "CLOUD_DISCOVERY_BATCH"):
         env.pop(name, None)
     run_dir = work / "cycle"
     run_dir.mkdir()
+    discovery_ids: list[int] = []
+    created = 0
+    if batch is not None:
+        engine = create_engine(env["DATABASE_URL"])
+        try:
+            with Session(engine) as session:
+                discovery_ids, created = ingest_batch(session, batch)
+                session.commit()
+        finally:
+            engine.dispose()
     if mode == "intake":
         env["EDITORIAL_INTAKE_MODE"] = "batch"
         command = [sys.executable, "-m", "relocant_media.ops.intake_batch"]
-    elif mode == "editorial":
+    else:
         # The five-minute batch is the only update consumer; no second getUpdates poller.
         env["EDITORIAL_INTAKE_MODE"] = "batch"
         command = [sys.executable, "-m", "relocant_media.ops.server_runtime",
                    "--output", str(run_dir)]
-    else:
-        raise ValueError("unsupported runtime mode")
-    code = run_child(command, env)
+        if mode == "discovery":
+            command.append("--submissions-only")
+            env["EDITORIAL_PRIVATE_FEEDBACK_ENABLED"] = "false"
+    # Replayed intake observes the existing receipt; it never re-triggers a send.
+    code = 0 if mode == "discovery" and not created else run_child(command, env)
     # A signal/forced termination has uncertain effects: do not unlock even if bytes survived.
     if code < 0:
         raise RuntimeError("runtime terminated; reconcile busy generation")
@@ -223,7 +245,8 @@ def execute(store: StateStore, drive: Drive, *, work: Path, output: Path,
     # Retry budget lives outside SQLite; preserve it across ephemeral runners.
     budget = {key: saved_intake[key] for key in ("signature", "attempts", "backup_pending")
               if key in saved_intake}
-    observed_run = run_dir if mode == "editorial" else next(
+    observed_run = run_dir if mode in {"editorial", "discovery"} and (mode != "discovery"
+        or created) else next(
         iter(sorted((directory / "runs").glob("*/server-report.json"), reverse=True)), None)
     if observed_run is not None and observed_run.is_file():
         observed_run = observed_run.parent
@@ -240,6 +263,19 @@ def execute(store: StateStore, drive: Drive, *, work: Path, output: Path,
     ready = {**busy, "status": "ready", "generation": attempt, "snapshot": manifest,
              "intake_state": budget, "finished_at": datetime.now(UTC).isoformat(),
              "last_exit_code": code, "last_cycle": last_cycle}
+    if batch is not None:
+        engine = create_engine(env["DATABASE_URL"])
+        try:
+            with Session(engine) as session:
+                ready["last_discovery"] = {
+                    "created": created, "runtime_exit_code": code,
+                    "run_id": environment.get("GITHUB_RUN_ID"),
+                    "batch_sha256": hashlib.sha256(
+                        batch.model_dump_json().encode()).hexdigest(),
+                    "candidates": batch_receipt(session, discovery_ids),
+                }
+        finally:
+            engine.dispose()
     store.write(ready, busy_sha)
     # Publication of this artifact happens only after the canonical checkpoint.
     return code
@@ -259,7 +295,8 @@ def bootstrap_record(manifest: dict[str, Any], *, now: datetime) -> dict[str, An
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["preview", "editorial", "intake"], default="preview")
+    parser.add_argument("--mode", choices=["preview", "editorial", "intake", "discovery"],
+                        default="preview")
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

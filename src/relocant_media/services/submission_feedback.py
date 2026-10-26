@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
+from relocant_media.services.cloud_discovery import ORIGIN as CLOUD_DISCOVERY_ORIGIN
 from relocant_media.services.submission_queue import NEWS_KINDS
 from relocant_media.storage.models import Submission
 
@@ -74,6 +75,8 @@ async def reply_to_submissions(
     sent = uncertain = blocked = 0
     with Session(engine) as session:
         query = select(Submission.id).where(Submission.kind.in_(NEWS_KINDS),
+            or_(Submission.payload["origin"].as_string().is_(None),
+                Submission.payload["origin"].as_string() != CLOUD_DISCOVERY_ORIGIN),
             Submission.status.in_(("waiting_primary", "source_linked", "expired")),
             Submission.payload["city"].as_string() == "belgrade",
             Submission.payload["test_only"].as_boolean().is_not(True),
