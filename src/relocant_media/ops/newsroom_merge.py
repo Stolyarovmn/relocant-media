@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from relocant_media.ops.public_observations import public_coverage
+
 
 def rows(value: Any, keys: tuple[str, ...]) -> list[dict[str, Any]] | None:
     if value is None:
@@ -28,9 +30,21 @@ def merge(catalog: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         recorded = next((item for item in runtime["cities"] if item.get("id") == city["id"]), None)
         if recorded is None:
             continue
+        # Older exporters marked empty cities as available merely because the
+        # Belgrade database was readable. Require a city-specific observation.
+        runtime_sources = recorded.get("sources", [])
+        source_count = recorded.get("runtime_source_count")
+        event_count = recorded.get("total_events")
+        has_runtime = ((type(source_count) is int and source_count > 0)
+                       or (type(event_count) is int and event_count > 0)
+                       or any(row.get("runtime_enabled") is not None for row in runtime_sources)
+                       or bool(recorded.get("items")) or bool(recorded.get("runs"))
+                       or bool(recorded.get("ai_usage")))
+        if recorded.get("runtime_status") == "available" and not has_runtime:
+            continue
         # Ignore unknown top-level and per-city fields; catalog definitions come from main.
         for key in ("runtime_status", "observed_at", "counts", "total_events", "returned_events",
-                    "items", "runs", "ai_usage", "last_cycle"):
+                    "items", "runs", "ai_usage", "last_cycle", "runtime_source_count"):
             if key in recorded:
                 city[key] = recorded[key]
         if city.get("items") is not None:
@@ -39,6 +53,8 @@ def merge(catalog: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
                 "review_status", "delivery_status", "post_id", "telegram_message_id",
                 "editorial_rule_version", "source_revision_count", "title", "source_id",
                 "discovered_by", "editor_model", "reviews",
+                "published_at_precision",
+                "url",
             ))
             for event in city["items"]:
                 event["reviews"] = rows(event.get("reviews", []), (
@@ -58,6 +74,8 @@ def merge(catalog: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
             safe_cycle["ai_calls"] = rows(cycle.get("ai_calls", []), (
                 "provider", "model", "task", "status", "occurred_at", "duration_seconds",
             ))
+            safe_cycle["messenger_coverage"] = public_coverage(
+                cycle.get("messenger_coverage"), city["sources"])
             jev = cycle.get("jev")
             safe_cycle["jev"] = None
             if isinstance(jev, dict):

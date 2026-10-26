@@ -7,17 +7,32 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.telegram_topics import DEFAULT_CHANNELS_BY_CITY
+from relocant_media.ops.public_observations import public_coverage
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.newsroom_control import build_newsroom_inbox
 from relocant_media.sources.registry import load_source_registry
 from relocant_media.storage.models import AIUsageEvent, EditorialRun, RawItem, Source
 
 CITIES = {"belgrade": "Белград", "novi_sad": "Нови-Сад"}
+
+
+def public_article_url(value: str, source_url: str) -> str | None:
+    try:
+        url, source = urlsplit(value), urlsplit(source_url)
+        if (url.scheme == "https" and url.hostname and source.hostname
+                and url.hostname.removeprefix("www.") == source.hostname.removeprefix("www.")
+                and url.port in (None, 443) and not url.username and not url.password
+                and not url.query and not url.fragment):
+            return value
+    except ValueError:
+        pass
+    return None
 
 
 def iso(value: datetime | None) -> str | None:
@@ -71,6 +86,10 @@ def city_snapshot(root: Path, city: str, session: Session | None) -> dict[str, A
     if session is None:
         return result
     sources = {row.id: row for row in session.scalars(select(Source).where(Source.city == city))}
+    # Reading a database does not establish that every configured city has a runtime.
+    if not sources:
+        return result
+    result["runtime_source_count"] = len(sources)
     for row in result["sources"]:
         source = sources.get(row["id"])
         if source is not None:
@@ -95,7 +114,10 @@ def city_snapshot(root: Path, city: str, session: Session | None) -> dict[str, A
         if not re.fullmatch(r"[a-z][a-z0-9_:-]{0,159}", public["reason_code"]):
             public["reason_code"] = "editorial_decision_see_private_audit"
         public.update(title=raw.title[:300] if source.ownership == "official" else None,
-                      source_id=source.id, discovered_by=None, editor_model=None, reviews=[])
+                      source_id=source.id, discovered_by=None, editor_model=None, reviews=[],
+                      published_at_precision=raw.published_at_precision)
+        public["url"] = (public_article_url(raw.url, source.url)
+                         if source.ownership == "official" else None)
         package = run.outcome.get("_package", {}) if run else {}
         if isinstance(package, dict):
             for review in package.get("reviews", []):
@@ -185,6 +207,10 @@ def main() -> None:
                 )} for row in shadow.get("signals", []) if isinstance(row, dict)
             ]
         calls = args.run_directory / "ai-calls.jsonl"
+        coverage = args.run_directory / "messenger-coverage.json"
+        if coverage.is_file():
+            cycle["messenger_coverage"] = public_coverage(
+                json.loads(coverage.read_text()), payload["cities"][0]["sources"])
         cycle["ai_calls"] = []
         if calls.is_file():
             for line in calls.read_text().splitlines()[-200:]:
