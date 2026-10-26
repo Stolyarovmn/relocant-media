@@ -60,6 +60,8 @@ def test_public_projection_is_read_only_and_does_not_leak_private_material() -> 
         assert bg["counts"] == {"uncertain": 2}
         assert all(item["discovered_by"] is None for item in bg["items"])
         assert all(item["reviews"][0]["verdict"] == "hold" for item in bg["items"])
+        assert any(item['url'] == 'https://example.org/official' for item in bg['items'])
+        assert all(item['url'] is None for item in bg['items'] if item['source_id'] == 'private')
         assert not session.dirty and not session.new and not session.deleted
         after = [(r.raw_item_id, r.delivery_status, r.outcome)
                  for r in session.scalars(select(EditorialRun))]
@@ -81,7 +83,8 @@ def test_build_does_not_retimestamp_runtime_or_cross_city() -> None:
     old = "2026-10-20T10:00:00+00:00"
     runtime = {"schema_version": 1, "mode": "public_read_only", "secret": "SECRET",
                "cities": [{"id": "belgrade", "observed_at": old, "runtime_status": "available",
-                           "items": [], "counts": {}, "total_events": 0, "secret": "SECRET"}]}
+                           "runtime_source_count": 1, "items": [], "counts": {},
+                           "total_events": 0, "secret": "SECRET"}]}
     result = merge(catalog, runtime)
     assert result["cities"][0]["observed_at"] == old
     assert result["cities"][1]["items"] is None
@@ -177,10 +180,67 @@ def test_archive_export_does_not_refresh_observation_time(tmp_path: Path) -> Non
     from relocant_media.storage.sqlite_schema import initialize_sqlite
     database = tmp_path / 'archive.sqlite3'
     initialize_sqlite(database)
+    engine = create_engine(f'sqlite:///{database}')
+    with Session(engine) as session:
+        session.add(Source(id='official', city='belgrade', name='Official',
+                           url='https://example.org', source_type='news', trust=Decimal('1')))
+        session.commit()
+    engine.dispose()
     output = tmp_path / 'public.json'
     observed = '2026-01-01T00:00:00+00:00'
     result = subprocess.run([sys.executable, '-m', 'relocant_media.ops.newsroom_export',
         '--database', str(database), '--output', str(output), '--observed-at', observed],
         capture_output=True, text=True)
     assert result.returncode == 0
-    assert all(c['observed_at'] == observed for c in json.loads(output.read_text())['cities'])
+    bg, ns = json.loads(output.read_text())['cities']
+    assert bg['observed_at'] == observed
+    assert ns['observed_at'] is None and ns['runtime_status'] == 'unavailable'
+
+
+def test_legacy_empty_city_is_not_a_running_newsroom() -> None:
+    runtime = snapshot(ROOT)
+    runtime['cities'][1].update(runtime_status='available', counts={}, total_events=0,
+                                items=[], observed_at='2026-10-24T09:24:05+00:00')
+    city = merge(snapshot(ROOT), runtime)['cities'][1]
+    assert city['runtime_status'] == 'unavailable'
+    assert city['observed_at'] is None and city['counts'] is None
+
+
+def test_coverage_is_allowlisted_city_scoped_and_survives_rebuild() -> None:
+    from relocant_media.ops.public_observations import public_coverage
+
+    runtime = snapshot(ROOT)
+    bg = runtime['cities'][0]
+    bg.update(runtime_status='available', runtime_source_count=1)
+    audit = {'city': 'belgrade', 'observed_at': '2026-10-26T12:00:00+00:00',
+             'scope': 'editorial_discovery', 'private': 'PRIVATE_TEXT', 'sources': [
+                 {'channel': 'Serbia', 'status': 'dated_messages', 'leads': 2,
+                  'body': 'PRIVATE_TEXT', 'url': 'https://private.example/SECRET'},
+                 {'channel': 'SECRET', 'status': 'access_error'},
+             ]}
+    bg['last_cycle'] = {'messenger_coverage': public_coverage(audit, bg['sources'])}
+    result = merge(snapshot(ROOT), runtime)
+    coverage = result['cities'][0]['last_cycle']['messenger_coverage']
+    assert coverage['interval_coverage'] == 'partial'
+    assert coverage['sources'][0]['leads'] == 2
+    assert len(coverage['sources']) == 1
+    assert 'PRIVATE_TEXT' not in json.dumps(result) and 'SECRET' not in json.dumps(result)
+    assert 'last_cycle' not in result['cities'][1]
+    audit['scope'] = 'submissions_only'
+    safe = public_coverage(audit, bg['sources'])
+    assert public_coverage(safe, bg['sources'])['interval_coverage'] == 'not_checked'
+
+
+def test_malformed_coverage_does_not_abort_checkpoint_projection() -> None:
+    from relocant_media.ops.public_observations import public_coverage
+
+    sources = snapshot(ROOT)['cities'][0]['sources']
+    for rows in (None, 123, {'channel': 'Serbia'}):
+        assert public_coverage({'city': 'belgrade', 'sources': rows}, sources) is None
+    safe = public_coverage({'city': 'belgrade', 'sources': [
+        {'channel': 'Serbia', 'status': [], 'leads': 'PRIVATE_TEXT'},
+        {'source_id': ['SECRET'], 'status': 'access_error'},
+    ]}, sources)
+    assert len(safe['sources']) == 1
+    assert safe['sources'][0]['status'] == 'not_checked'
+    assert safe['sources'][0]['leads'] is None
