@@ -42,6 +42,14 @@ def identifier(value: str) -> str:
     return value
 
 
+def repository_name(value: str) -> str:
+    if (not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_.-]{1,100}", value)
+            or value.rsplit("/", 1)[-1] in {".", ".."}):
+        raise ValueError("GitHub state repository must be owner/name")
+    return value
+
+
 class Drive:
     def __init__(self, client: httpx.Client) -> None:
         self.client = client
@@ -97,22 +105,27 @@ class Drive:
 class StateStore:
     """Contents SHA is the compare-and-swap token; branch code is never executed."""
 
-    def __init__(self, client: httpx.Client, token: str) -> None:
+    def __init__(self, client: httpx.Client, token: str, repository: str = REPO) -> None:
         if not token:
             raise ValueError("GitHub state credential required")
+        self.repository = repository_name(repository)
         self.client = client
         self.headers = {"Authorization": f"Bearer {token}",
                         "Accept": "application/vnd.github+json"}
-        self.url = f"https://api.github.com/repos/{REPO}/contents/{STATE_PATH}"
+        self.base_url = f"https://api.github.com/repos/{self.repository}"
+        self.url = f"{self.base_url}/contents/{STATE_PATH}"
 
-    def require_private(self) -> None:
+    def require_private(self) -> dict[str, Any]:
         # A data branch in a public repository is public too. Never infer privacy
         # from the workflow environment, token permissions, or a previous check.
-        response = self.client.get(f"https://api.github.com/repos/{REPO}", headers=self.headers)
+        response = self.client.get(self.base_url, headers=self.headers)
         response.raise_for_status()
         repository = response.json()
-        if (repository.get("full_name") != REPO or repository.get("private") is not True):
+        if (not isinstance(repository, dict)
+                or repository.get("full_name") != self.repository
+                or repository.get("private") is not True):
             raise ValueError("private repository required for canonical editorial state")
+        return repository
 
     def read(self) -> tuple[dict[str, Any], str]:
         self.require_private()
@@ -218,7 +231,8 @@ def execute(store: StateStore, drive: Drive, *, work: Path, output: Path,
     intake_state.write_text(json.dumps(state.get("intake_state", {})), encoding="utf-8")
     env = {**environment, "DATABASE_URL": f"sqlite:///{database.resolve().as_posix()}",
            "RELOCANT_RUNTIME_PLATFORM": "github-actions", "TELEGRAM_MTPROTO_ENABLED": "false"}
-    for name in ("GH_STATE_TOKEN", "DRIVE_CREDENTIALS_JSON", "GOOGLE_APPLICATION_CREDENTIALS",
+    for name in ("GH_STATE_TOKEN", "GH_STATE_REPOSITORY", "DRIVE_CREDENTIALS_JSON",
+                 "GOOGLE_APPLICATION_CREDENTIALS",
                  "CLOUD_DISCOVERY_BATCH"):
         env.pop(name, None)
     run_dir = work / "cycle"
@@ -328,7 +342,9 @@ def main() -> None:
                 code = preview_archive(drive, os.environ["DRIVE_PREVIEW_MANIFEST_ID"],
                                        args.work, args.output)
             else:
-                code = execute(StateStore(client, os.environ["GH_STATE_TOKEN"]), drive,
+                store = StateStore(client, os.environ["GH_STATE_TOKEN"],
+                                   repository=os.environ.get("GH_STATE_REPOSITORY") or REPO)
+                code = execute(store, drive,
                                work=args.work, output=args.output, mode=args.mode,
                                folder=os.environ.get("DRIVE_STATE_FOLDER_ID", ""),
                                environment=dict(os.environ))

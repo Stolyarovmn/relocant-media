@@ -74,7 +74,8 @@ jobs:
       - name: Restore, claim, process, save and export
         id: runtime
         env:
-          GH_STATE_TOKEN: ${{ github.token }}
+          GH_STATE_REPOSITORY: ${{ vars.EDITORIAL_STATE_REPOSITORY }}
+          GH_STATE_TOKEN: ${{ secrets.EDITORIAL_STATE_TOKEN || github.token }}
           DRIVE_CREDENTIALS_JSON: ${{ secrets.DRIVE_CREDENTIALS_JSON }}
           DRIVE_STATE_FOLDER_ID: ${{ vars.DRIVE_STATE_FOLDER_ID }}
           DRIVE_PREVIEW_MANIFEST_ID: ${{ vars.DRIVE_PREVIEW_MANIFEST_ID }}
