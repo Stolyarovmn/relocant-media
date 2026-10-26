@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -250,16 +251,20 @@ def execute(store: StateStore, drive: Drive, *, work: Path, output: Path,
         iter(sorted((directory / "runs").glob("*/server-report.json"), reverse=True)), None)
     if observed_run is not None and observed_run.is_file():
         observed_run = observed_run.parent
-    export_public(database, output, manifest["created_at"], observed_run)
+    # Keep the projection outside _site until the ready CAS succeeds. A hard
+    # termination may bypass main's exception cleanup; file presence in _site
+    # must still never imply an unconfirmed checkpoint.
+    provisional = work / "public-projection.json"
+    export_public(database, provisional, manifest["created_at"], observed_run)
     last_cycle = state.get("last_cycle")
-    if output.is_file():
-        projection = json.loads(output.read_text())
+    if provisional.is_file():
+        projection = json.loads(provisional.read_text())
         city = projection["cities"][0]
         if "last_cycle" not in city and isinstance(last_cycle, dict):
             city["last_cycle"] = last_cycle
         projection = merge(projection, projection)
         last_cycle = projection["cities"][0].get("last_cycle")
-        output.write_text(json.dumps(projection, ensure_ascii=False), encoding="utf-8")
+        provisional.write_text(json.dumps(projection, ensure_ascii=False), encoding="utf-8")
     ready = {**busy, "status": "ready", "generation": attempt, "snapshot": manifest,
              "intake_state": budget, "finished_at": datetime.now(UTC).isoformat(),
              "last_exit_code": code, "last_cycle": last_cycle}
@@ -278,6 +283,11 @@ def execute(store: StateStore, drive: Drive, *, work: Path, output: Path,
             engine.dispose()
     store.write(ready, busy_sha)
     # Publication of this artifact happens only after the canonical checkpoint.
+    if provisional.is_file():
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(".tmp")
+        shutil.copyfile(provisional, temporary)
+        temporary.replace(output)
     return code
 
 

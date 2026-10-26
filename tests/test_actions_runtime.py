@@ -327,3 +327,37 @@ def test_intake_preserves_last_editorial_models(context, tmp_path, monkeypatch):
     city = json.loads(output.read_text())['cities'][0]
     assert city['last_cycle']['observed_at'] == old['observed_at']
     assert city['last_cycle']['ai_calls'][0]['model'] == 'verified-model'
+
+
+@pytest.mark.parametrize('interruption', [ValueError, KeyboardInterrupt])
+def test_projection_never_enters_site_before_ready_cas(
+    context, tmp_path, monkeypatch, interruption,
+):
+    from relocant_media.ops.newsroom_export import snapshot
+
+    store, _ = context
+    output = tmp_path / '_site/data.json'
+
+    def exported(database, destination, observed_at, run_dir):
+        assert destination != output
+        destination.write_text(json.dumps(snapshot(ROOT)))
+
+    original_write = store.write
+
+    def interrupted(state, sha):
+        assert not output.exists()
+        if state['status'] == 'ready':
+            raise interruption('checkpoint interrupted')
+        return original_write(state, sha)
+
+    monkeypatch.setattr(runtime, 'export_public', exported)
+    monkeypatch.setattr(runtime, 'run_child', lambda *args: 0)
+    monkeypatch.setattr(store, 'write', interrupted)
+    with pytest.raises(interruption):
+        runtime.execute(*context, work=tmp_path / 'work', output=output,
+                        folder='folder_id_1', mode='editorial', environment={
+                            'ACTIONS_CUTOVER_CONFIRMED': 'true',
+                            'GITHUB_REPOSITORY': runtime.REPO, 'GITHUB_REF': 'refs/heads/main'})
+    assert store.state['status'] == 'busy'
+    assert not output.exists()
+    assert (tmp_path / 'work/public-projection.json').is_file()
