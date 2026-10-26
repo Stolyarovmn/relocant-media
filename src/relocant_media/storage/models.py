@@ -66,6 +66,9 @@ class RawItem(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(UTC_DATE)
+    published_at_precision: Mapped[str] = mapped_column(
+        String, nullable=False, default="unknown", server_default="unknown",
+    )
     ingested_at: Mapped[datetime] = mapped_column(
         UTC_DATE, server_default=func.now(), nullable=False
     )

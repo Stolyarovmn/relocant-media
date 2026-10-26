@@ -209,7 +209,8 @@ def review_only_venue_sources() -> dict[str, SourceConfig]:
 def _is_review_only_venue_hold(item: Any, *, now: datetime) -> bool:
     if event_content_reason(item.title, item.body, now=now) is not None:
         return False
-    fresh = freshness_decision(item.title, item.body, item.published_at, now)
+    fresh = freshness_decision(item.title, item.body, item.published_at, now,
+                published_at_precision=item.published_at_precision)
     return fresh.action == "hold" and fresh.reason == "publication_date_unknown"
 
 
@@ -251,7 +252,8 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             if document.source_id in venues:
                 item = asyncio.run(fetch_venue(venues[document.source_id], document.url))
                 documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
-                    title=item.title, body=item.body, published_at=item.published_at))
+                    title=item.title, body=item.body, published_at=item.published_at,
+                    published_at_precision=item.published_at_precision))
                 continue
             if document.source_id not in {"city_beograd_news", "cukarica_news"}:
                 raise ValueError("unsupported live source")
@@ -268,7 +270,8 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
                       else parse_cukarica_article)
             item = parser(response.text, source, str(response.url))
             documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
-                title=item.title, body=item.body, published_at=item.published_at))
+                title=item.title, body=item.body, published_at=item.published_at,
+                    published_at_precision=item.published_at_precision))
     return tuple(documents)
 
 
@@ -311,6 +314,7 @@ async def collect_sources(
     news_errors: list[dict[str, str]] = []
     venue_errors: list[dict[str, str]] = []
     articles = []
+    metadata_holds = []
     review_holds = []
     review_hold_urls: set[str] = set()
     fetched: dict[str, str] = {}
@@ -347,13 +351,19 @@ async def collect_sources(
             if url in fetched:
                 return fetched[url]
             item = await _collect_exact_url(collectors[source_id], url)
-            fresh = freshness_decision(item.title, item.body, item.published_at, now)
+            fresh = freshness_decision(item.title, item.body, item.published_at, now,
+                published_at_precision=item.published_at_precision)
             venue_reason = (event_content_reason(item.title, item.body, now=now)
                             if source_id in runtime_venues else None)
             if (source_id in review_venues and venue_reason is None
                     and _is_review_only_venue_hold(item, now=now)):
                 register_review_hold(item)
                 return fetched[url]
+            if (fresh.action == "hold" and item.published_at_precision == "day"
+                    and venue_reason is None):
+                metadata_holds.append(item)
+                fetched[url] = fresh.reason
+                return fresh.reason
             if fresh.action != "keep" or venue_reason is not None:
                 result["discarded_before_persistence"] += 1
                 fetched[url] = venue_reason or fresh.reason
@@ -385,7 +395,8 @@ async def collect_sources(
 
         def accept_official(item: Any) -> bool:
             return (
-                freshness_decision(item.title, item.body, item.published_at, now).action == "keep"
+                freshness_decision(item.title, item.body, item.published_at, now,
+                published_at_precision=item.published_at_precision).action == "keep"
                 and event_content_reason(item.title, item.body, now=now) is None
             )
 
@@ -462,7 +473,8 @@ async def collect_sources(
                 for item in await collector.collect():
                     result["venue_items"] += 1
                     reason = event_content_reason(item.title, item.body, now=now)
-                    fresh = freshness_decision(item.title, item.body, item.published_at, now)
+                    fresh = freshness_decision(item.title, item.body, item.published_at, now,
+                published_at_precision=item.published_at_precision)
                     if (source_id in review_venues and reason is None
                             and _is_review_only_venue_hold(item, now=now)):
                         result["venue_deferred"] += 1
@@ -538,11 +550,13 @@ async def collect_sources(
                 news_errors.append({"source_id": feed.source_id,
                                     "error_type": type(error).__name__})
     with Session(engine) as session:
-        written, changes = capture_collected_batch(session, [*articles, *review_holds])
+        written, changes = capture_collected_batch(
+            session, [*articles, *review_holds, *metadata_holds])
         for submission_id, payload in tips:
             urls = submission_links[submission_id]
             urls.extend(url for url in tip_urls(payload)
-                        if fetched.get(url) == "primary_source_collected")
+                        if fetched.get(url) == "primary_source_collected"
+                        or any(item.url == url for item in metadata_holds))
             # Local matching sends no private text to a search engine or model.
             for article in articles:
                 if topic_matches(str(payload.get("text", "")), article.title):
@@ -561,6 +575,7 @@ async def collect_sources(
             result["submission_raw_ids"].extend(ids)
         session.commit()
     result["raw_items_written"] = written
+    result["metadata_holds"] = len(metadata_holds)
     result["review_required"] = changes
     triage = triage_queue(engine, now=now)
     result["discarded_queue"] = triage["discarded"]
@@ -621,7 +636,8 @@ def prepare_reviewed(
         identity = dict(raw_item_id=raw.id, source_id=raw.source_id, article_id=raw.external_id)
         key = event_key(_candidate(raw))
     freshness = freshness_decision(title=raw.title, body=raw.body,
-        published_at=raw.published_at, now=datetime.now(UTC))
+        published_at=raw.published_at, now=datetime.now(UTC),
+        published_at_precision=raw.published_at_precision)
     venue_reason = (event_content_reason(raw.title, raw.body, now=datetime.now(UTC))
                     if source.source_type == "official_venue_events" else None)
     if freshness.action != "keep" or venue_reason is not None:
@@ -754,7 +770,8 @@ async def publish_pending(
                 item = session.get(RawItem, raw_id)
                 assert item is not None
                 fresh = freshness_decision(title=item.title, body=item.body,
-                    published_at=item.published_at, now=datetime.now(UTC))
+                    published_at=item.published_at, now=datetime.now(UTC),
+                    published_at_precision=item.published_at_precision)
                 if fresh.action != "keep":
                     if blocked is not None:
                         blocked.append({"raw_item_id": raw_id, "reason": fresh.reason})

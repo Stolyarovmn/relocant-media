@@ -114,6 +114,7 @@ def parse_beograd_article(html: str, source: SourceConfig, url: str) -> RawItem:
         title=title,
         body=article_text,
         published_at=_parse_day_only_date(root_text),
+        published_at_precision="day",
     )
 
 

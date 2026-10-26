@@ -98,7 +98,8 @@ async def _collect_direct_tips(
     for url, submission_ids in list(url_to_submissions.items())[:budget]:
         try:
             item = await collector.collect_url(url)
-            fresh = freshness_decision(item.title, item.body, item.published_at, now)
+            fresh = freshness_decision(item.title, item.body, item.published_at, now,
+                published_at_precision=item.published_at_precision)
             if fresh.action != "keep":
                 stale += 1
                 continue
@@ -269,6 +270,7 @@ def _fetch_srbija_document(document: EvidenceDocument) -> EvidenceDocument:
                 title=item.title,
                 body=item.body,
                 published_at=item.published_at,
+                published_at_precision=item.published_at_precision,
             )
     raise ValueError("too many Government of Serbia redirects")
 

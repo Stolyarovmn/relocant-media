@@ -54,7 +54,8 @@ def import_package(
             raise PackageConflictError("source/article/city mismatch")
         if any(getattr(item, key) != getattr(package.evidence, key)
                for key in ("url", "title", "body")) or (
-            _timestamp(item.published_at) != _timestamp(package.evidence.published_at)
+            item.published_at_precision != package.evidence.published_at_precision
+            or _timestamp(item.published_at) != _timestamp(package.evidence.published_at)
         ):
             raise PackageConflictError("raw evidence changed")
         existing = session.get(EditorialRun, item.id)

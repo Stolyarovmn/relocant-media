@@ -59,7 +59,8 @@ def pending_high_risk_holds(engine: Engine, *, now: datetime | None = None) -> l
             and post.telegram_message_id is None
             and post.published_at is None
             and freshness_decision(
-                item.title, item.body, item.published_at, checked_at
+                item.title, item.body, item.published_at, checked_at,
+                published_at_precision=item.published_at_precision,
             ).action == "keep"
         ]
 

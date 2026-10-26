@@ -4,14 +4,15 @@ import argparse
 import hashlib
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import and_, create_engine, func, or_, select, text
 from sqlalchemy.orm import Session, aliased
 
 from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key, same_event
+from relocant_media.domain.publication_time import publication_interval
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -49,6 +50,7 @@ def _evidence(item: RawItem) -> dict[str, Any]:
         "title": item.title,
         "body": item.body,
         "published_at": item.published_at.astimezone(UTC).isoformat(),
+        "published_at_precision": item.published_at_precision,
     }
 
 
@@ -79,8 +81,35 @@ def select_candidates(
     )
     if allowed_raw_ids is not None:
         base = base.where(RawItem.id.in_(allowed_raw_ids))
-    eligible = base.where(RawItem.published_at >= since, RawItem.published_at < until)
-    rows = session.execute(eligible.order_by(RawItem.published_at, RawItem.id)).all()
+    # A day boundary is not the publication instant. Include overlapping days
+    # (allow 26 hours for DST), plus newly discovered dated articles, then check
+    # the real local calendar interval below. All publication guards still run.
+    eligible = base.where(RawItem.published_at.is_not(None), RawItem.published_at < until, or_(
+        RawItem.published_at >= since,
+        and_(RawItem.published_at_precision == "day", or_(
+            RawItem.published_at >= since - timedelta(hours=26),
+            and_(RawItem.ingested_at >= since, RawItem.ingested_at < until),
+        )),
+    ))
+    queried = session.execute(eligible.order_by(RawItem.published_at, RawItem.id)).all()
+    window_matches: dict[int, str] = {}
+    retained = []
+    for item, source in queried:
+        assert item.published_at is not None
+        if item.published_at_precision == "day":
+            lower, upper = publication_interval(item.published_at, "day")
+            if lower < until and upper > since:
+                match = "calendar_day_overlap"
+            elif since <= item.ingested_at < until:
+                match = "late_discovery"
+            else:
+                continue
+        else:
+            match = ("exact_timestamp" if item.published_at_precision == "instant"
+                     else "stored_timestamp_precision_unknown")
+        window_matches[item.id] = match
+        retained.append((item, source))
+    rows = retained
 
     # Compare against the full previously reviewed evidence, not only exact URLs/hashes.
     # Otherwise a later report of the same event from a second publisher could re-enter
@@ -151,6 +180,7 @@ def select_candidates(
             "raw_item_id": item.id,
             "article_id": item.external_id,
             "source_id": item.source_id,
+            "window_match": window_matches[item.id],
             "evidence": evidence,
             "evidence_sha256": evidence_sha256(evidence),
             "source": {
@@ -185,7 +215,7 @@ def select_candidates(
         "window": {
             "since": since.isoformat(),
             "until": until.isoformat(),
-            "semantics": "published_at >= since AND published_at < until",
+            "semantics": "timestamp window; calendar-day overlap or newly ingested day-only item",
         },
         "exported_at": datetime.now(UTC).isoformat(),
         "candidate_count": len(candidates),
