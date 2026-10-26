@@ -217,3 +217,30 @@ async def test_news_rss_lead_only_persists_independent_primary_source(
     assert audit["publication_evidence"] is False
     assert audit["topics"][0]["status"] == "primary_source_resolved"
     assert audit["topics"][0]["source_id"] == "rts_news"
+
+
+@pytest.mark.asyncio
+async def test_runtime_union_coverage_and_blocked_messengers_are_observed(
+    collection, tmp_path, monkeypatch,
+):
+    engine, _, _, _, _ = collection
+    checked = []
+
+    async def topics(channel, client, *, observation, **kwargs):
+        checked.append(channel)
+        observation.update(status="freshness_unknown", leads=0)
+        return []
+
+    monkeypatch.setattr(server_cycle, "collect_topics", topics)
+    monkeypatch.setattr(server_cycle, "runtime_channels_for_city", lambda _: ("newchannel",))
+    await server_cycle.collect_sources(engine, output=tmp_path)
+    report = json.loads((tmp_path / "messenger-coverage.json").read_text())
+    assert checked == ["newchannel"]
+    assert report["interval_coverage"] == "partial"
+    assert report["sources"][0] == {
+        "channel": "newchannel", "status": "freshness_unknown", "leads": 0,
+    }
+    blocked = [row for row in report["sources"] if row.get("platform") in {"viber", "whatsapp"}]
+    assert len(blocked) == 7
+    assert all(row["status"] == "blocked_no_message_access" for row in blocked)
+    assert report["web_fallback_is_messenger_access"] is False

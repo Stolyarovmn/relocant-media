@@ -116,3 +116,72 @@ async def test_unavailable_preview_fails_closed(status: int, html: str) -> None:
     ), trust_env=False) as client:
         with pytest.raises(PreviewError):
             await collect_topics("example", client, now=NOW)
+
+
+def test_runtime_union_is_city_scoped_deduplicated_and_excludes_catalog(tmp_path) -> None:
+    import json
+
+    from relocant_media.collectors.telegram_topics import runtime_channels_for_city
+
+    def entry(channel, *, city="belgrade", status="runtime_public_preview"):
+        return {"platform": "telegram", "url": f"https://t.me/s/{channel}", "scope": [city],
+                "collection": {"status": status, "adapter": "telegram_public_preview",
+                               "account_required": False}}
+
+    registry = tmp_path / "messengers.json"
+    registry.write_text(json.dumps({"sources": [entry("SERBIA"), entry("newchannel"),
+        entry("novisad", city="novi_sad"), entry("jobschannel", status="catalog_only")]}))
+    channels = runtime_channels_for_city("belgrade", registry)
+    assert channels == (*DEFAULT_CHANNELS, "newchannel")
+    assert runtime_channels_for_city("novi_sad", registry) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("date,status", [
+    ("2026-10-10T18:00:00Z", "stale_snapshot"),
+    ("2026-10-21T18:00:00Z", "future_dates"),
+    ("17:00", "freshness_unknown"),
+])
+async def test_empty_collection_does_not_claim_fresh_coverage(date, status) -> None:
+    observation = {}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, text=card(1, date))
+    ), trust_env=False) as client:
+        assert await collect_topics("example", client, now=NOW, observation=observation) == []
+    assert observation["status"] == status
+    assert observation["publication_evidence"] is False
+
+
+@pytest.mark.asyncio
+async def test_clock_only_post_uses_exact_public_permalink_date() -> None:
+    requests = []
+
+    def handle(request):
+        requests.append(str(request.url))
+        return httpx.Response(200, text=card(1, "17:00" if len(requests) == 1
+                                           else "2026-10-20T17:00:00Z"))
+
+    observation = {}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), trust_env=False) as client:
+        leads = await collect_topics("example", client, now=NOW, observation=observation)
+    assert len(leads) == 1
+    assert leads[0].published_at == datetime(2026, 10, 20, 17, tzinfo=UTC)
+    assert requests == ["https://t.me/s/example", "https://t.me/example/1?embed=1"]
+    assert observation["status"] == "dated_messages"
+    assert observation["permalink_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_permalink_recovery_is_bounded_and_does_not_invent_dates() -> None:
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, text="".join(card(n, "17:00") for n in range(1, 25)))
+
+    observation = {}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), trust_env=False) as client:
+        assert await collect_topics("example", client, now=NOW, observation=observation) == []
+    assert len(requests) == 21
+    assert observation["freshness_unknown"] == 24
+    assert observation["status"] == "freshness_unknown"
