@@ -267,13 +267,123 @@ def test_github_control_updates_have_sha_precondition():
     requests = []
     def handle(request):
         requests.append(request)
+        if request.method == 'GET':
+            return httpx.Response(200, json={'full_name': runtime.REPO, 'private': True})
         return httpx.Response(409, json={'message': 'conflict'})
     with httpx.Client(transport=httpx.MockTransport(handle)) as client:
         store = runtime.StateStore(client, 'secret')
         with pytest.raises(httpx.HTTPStatusError):
             store.write({'status': 'busy'}, 'known-sha')
-    assert json.loads(requests[0].content)['sha'] == 'known-sha'
-    assert json.loads(requests[0].content)['branch'] == 'editorial-state'
+    assert json.loads(requests[1].content)['sha'] == 'known-sha'
+    assert json.loads(requests[1].content)['branch'] == 'editorial-state'
+
+
+@pytest.mark.parametrize('metadata', [
+    {'full_name': runtime.REPO, 'private': False},
+    {'full_name': runtime.REPO, 'private': 'true'},
+    {'full_name': runtime.REPO}, {'full_name': 'other/repository', 'private': True},
+])
+@pytest.mark.parametrize('operation', ['read', 'write'])
+def test_public_or_unknown_repository_never_exposes_state(metadata, operation):
+    requests = []
+    def handle(request):
+        requests.append(request)
+        assert request.method == 'GET'
+        assert request.url.path == f'/repos/{runtime.REPO}'
+        return httpx.Response(200, json=metadata)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        store = runtime.StateStore(client, 'secret')
+        with pytest.raises(ValueError, match='private repository required'):
+            store.read() if operation == 'read' else store.write({'private': 'data'}, 'sha')
+    assert len(requests) == 1
+
+
+def test_privacy_is_rechecked_before_each_state_write():
+    checks = []
+    writes = []
+    def handle(request):
+        if request.method == 'GET':
+            checks.append(request)
+            return httpx.Response(200, json={
+                'full_name': runtime.REPO, 'private': len(checks) == 1})
+        writes.append(request)
+        return httpx.Response(200, json={'content': {'sha': 'claimed'}})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        store = runtime.StateStore(client, 'secret')
+        assert store.write({'status': 'busy'}, 'initial') == 'claimed'
+        with pytest.raises(ValueError, match='private repository required'):
+            store.write({'status': 'ready'}, 'claimed')
+    assert len(checks) == 2 and len(writes) == 1
+
+
+def test_bootstrap_public_repository_is_blocked_before_drive_or_branch_creation(
+    state, tmp_path, monkeypatch,
+):
+    import sys
+
+    from relocant_media.ops import actions_bootstrap
+
+    manifest = tmp_path / 'final.json'
+    manifest.write_text(json.dumps(state['snapshot']))
+    intake = tmp_path / 'intake.json'
+    intake.write_text('{}')
+    monkeypatch.setenv('GH_STATE_TOKEN', 'secret')
+    monkeypatch.setattr(sys, 'argv', ['bootstrap', '--final-manifest', str(manifest),
+        '--intake-state', str(intake), '--work', str(tmp_path / 'work'),
+        '--confirm-all-former-writers-fenced'])
+    requests = []
+    def handle(request):
+        requests.append(request)
+        assert request.method == 'GET' and request.url.path == f'/repos/{runtime.REPO}'
+        return httpx.Response(200, json={'full_name': runtime.REPO, 'private': False})
+    client = httpx.Client(transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(actions_bootstrap.httpx, 'Client', lambda **kwargs: client)
+    monkeypatch.setattr(actions_bootstrap, 'Drive', lambda *args: pytest.fail('Drive access'))
+    with pytest.raises(SystemExit) as error:
+        actions_bootstrap.main()
+    assert error.value.code == 1 and len(requests) == 1
+
+
+def test_unknown_repository_privacy_blocks_state_network_operations():
+    requests = []
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(403, json={'message': 'metadata unavailable'})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            runtime.StateStore(client, 'secret').write({'sensitive': 'state'}, 'sha')
+    assert len(requests) == 1 and requests[0].method == 'GET'
+
+
+@pytest.mark.parametrize('failure', ['commit', 'termination'])
+def test_projection_is_not_publishable_before_ready_checkpoint(
+    context, tmp_path, monkeypatch, failure,
+):
+    from relocant_media.ops.newsroom_export import snapshot
+    store, _ = context
+    output = tmp_path / '_site/data.json'
+    def exported(database, provisional, observed_at, run_dir):
+        assert provisional.parent == tmp_path / 'work'
+        assert not output.exists()
+        provisional.write_text(json.dumps(snapshot(ROOT)))
+    original_write = store.write
+    def checked_write(state, sha):
+        assert not output.exists()
+        if state['status'] == 'ready' and failure == 'termination':
+            raise KeyboardInterrupt('simulated termination before checkpoint')
+        return original_write(state, sha)
+    monkeypatch.setattr(store, 'write', checked_write)
+    store.fail_commit = failure == 'commit'
+    monkeypatch.setattr(runtime, 'export_public', exported)
+    monkeypatch.setattr(runtime, 'run_child', lambda *args: 0)
+    with pytest.raises((ValueError, KeyboardInterrupt)):
+        runtime.execute(*context, work=tmp_path / 'work', output=output,
+                        folder='folder_id_1', mode='editorial', environment={
+                            'ACTIONS_CUTOVER_CONFIRMED': 'true',
+                            'GITHUB_REPOSITORY': runtime.REPO, 'GITHUB_REF': 'refs/heads/main'})
+    assert not output.exists()
+    assert store.state['status'] == 'busy'
+    assert (tmp_path / 'work/public-projection.json').is_file()
 
 
 def test_workflow_never_uploads_private_database_or_runs_on_pr():

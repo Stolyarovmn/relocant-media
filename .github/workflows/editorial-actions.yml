@@ -29,6 +29,7 @@ jobs:
     timeout-minutes: 85
     permissions:
       contents: write
+      actions: read
     outputs:
       projection: ${{ steps.projection.outputs.ready }}
     steps:
@@ -71,6 +72,7 @@ jobs:
           assert ci and ci[0]['status'] == 'completed' and ci[0]['conclusion'] == 'success'
           PY
       - name: Restore, claim, process, save and export
+        id: runtime
         env:
           GH_STATE_TOKEN: ${{ github.token }}
           DRIVE_CREDENTIALS_JSON: ${{ secrets.DRIVE_CREDENTIALS_JSON }}
@@ -102,11 +104,20 @@ jobs:
         id: projection
         env:
           NEWSROOM_GITHUB_TOKEN: ${{ github.token }}
+          RUNTIME_OUTCOME: ${{ steps.runtime.outcome }}
+          WORKER_MODE: ${{ steps.mode.outputs.value }}
         run: |
-          if [ -f _site/data.json ]; then
-            python -m relocant_media.ops.newsroom_publish --snapshot _site/data.json
-            echo 'ready=true' >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          mkdir -p _site
+          cp web/newsroom/* _site/
+          previous="$RUNNER_TEMP/newsroom-previous.json"
+          rm -f "$previous"
+          python -m relocant_media.ops.newsroom_attempt --output _site/data.json \
+            --previous "$previous" --fetch-previous --outcome "${RUNTIME_OUTCOME:-skipped}" \
+            --mode "${WORKER_MODE:-not_selected}" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+          python -m relocant_media.ops.newsroom_publish --snapshot _site/data.json
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
       - name: Save public Pages projection only
         if: always() && steps.projection.outputs.ready == 'true'
         uses: actions/upload-pages-artifact@v3

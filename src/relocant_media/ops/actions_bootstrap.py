@@ -39,6 +39,7 @@ def main() -> None:
         args.work.mkdir(parents=True, exist_ok=False)
         with httpx.Client(timeout=60, follow_redirects=False) as client:
             store = StateStore(client, os.environ['GH_STATE_TOKEN'])
+            store.require_private()
             # A known state of ANY status is never replaced by bootstrap.
             existing = client.get(store.url, params={'ref': STATE_BRANCH}, headers=store.headers)
             if existing.status_code != 404:
@@ -49,12 +50,14 @@ def main() -> None:
             if branch.status_code == 404:
                 main_ref = client.get(f'{base}/git/ref/heads/main', headers=store.headers)
                 main_ref.raise_for_status()
+                store.require_private()
                 created = client.post(f'{base}/git/refs', headers=store.headers,
                     json={'ref': f'refs/heads/{STATE_BRANCH}',
                           'sha': main_ref.json()['object']['sha']})
                 created.raise_for_status()
             else:
                 branch.raise_for_status()
+            store.require_private()
             response = client.put(f'{base}/contents/{STATE_PATH}', headers=store.headers,
                 json={'message': 'Initialize canonical Actions state after fenced cutover',
                       'branch': STATE_BRANCH,

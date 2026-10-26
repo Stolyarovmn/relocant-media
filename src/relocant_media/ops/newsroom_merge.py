@@ -19,6 +19,11 @@ def merge(catalog: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
     if (runtime.get("schema_version") != 1 or runtime.get("mode") != "public_read_only"
             or not isinstance(runtime.get("cities"), list)):
         raise ValueError("unsupported runtime snapshot")
+    attempt = runtime.get("last_attempt")
+    if isinstance(attempt, dict):
+        catalog["last_attempt"] = {key: attempt.get(key) for key in (
+            "status", "mode", "run_id", "run_attempt", "observed_at", "projection",
+        )}
     for city in catalog["cities"]:
         recorded = next((item for item in runtime["cities"] if item.get("id") == city["id"]), None)
         if recorded is None:
