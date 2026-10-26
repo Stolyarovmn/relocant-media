@@ -86,6 +86,16 @@ def _mocks(
         "if [ -n \"${MOCK_SYSTEMCTL_LOG:-}\" ]; then "
         "printf '%s\\n' \"$*\" >> \"$MOCK_SYSTEMCTL_LOG\"; fi\n"
         "if [ \"${1:-}\" = is-active ]; then exit 1; fi\n"
+        "if [ \"${1:-}\" = start ] && "
+        "[ \"${MOCK_FAIL_TIMER_START:-false}\" = true ]; then exit 1; fi\n"
+        "if [ \"${1:-}\" = daemon-reload ] && "
+        "[ \"${MOCK_TERM_DAEMON_RELOAD:-false}\" = true ] && "
+        "[ ! -f \"$MOCK_SYSTEMCTL_LOG.signalled\" ]; then "
+        "touch \"$MOCK_SYSTEMCTL_LOG.signalled\"; kill -TERM \"$PPID\"; fi\n"
+        "if [ \"${1:-}\" = daemon-reload ] && "
+        "[ \"${MOCK_FAIL_DAEMON_RELOAD:-false}\" = true ] && "
+        "[ ! -f \"$MOCK_SYSTEMCTL_LOG.failed\" ]; then "
+        "touch \"$MOCK_SYSTEMCTL_LOG.failed\"; exit 1; fi\n"
         "exit 0\n",
     )
     curl = bin_dir / "curl"
@@ -103,7 +113,10 @@ def _mocks(
         "\"$path\" \"$sha\" \"$conclusion\"\n",
     )
     venv_python = bin_dir / "venv-python"
-    _write_executable(venv_python, "#!/bin/sh\nexit 0\n")
+    _write_executable(venv_python, "#!/bin/sh\n"
+        "if [ \"${1:-}\" = -m ] && [ \"${2:-}\" = pip ]; then exit 0; fi\n"
+        "if [ -n \"${MOCK_MAINTENANCE_PYTHON:-}\" ]; then "
+        "exec \"$MOCK_MAINTENANCE_PYTHON\" \"$@\"; fi\nexit 0\n")
     return systemctl, curl, venv_python, systemctl_log
 
 
@@ -114,6 +127,7 @@ def _run(
     *,
     ci_conclusion: str = "success",
     ci_path: str = ".github/workflows/ci.yml",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     systemd_dir = tmp_path / "systemd"
     systemd_dir.mkdir(exist_ok=True)
@@ -135,6 +149,7 @@ def _run(
         "MOCK_CI_CONCLUSION": ci_conclusion,
         "MOCK_CI_PATH": ci_path,
         "MOCK_SYSTEMCTL_LOG": str(systemctl_log),
+        **(extra_env or {}),
     }
     result = subprocess.run(
         ["/bin/sh", str(SCRIPT)], env=env, capture_output=True, text=True, check=False
@@ -271,3 +286,105 @@ def test_root_deploy_service_executes_only_installed_root_owned_script() -> None
     assert "ExecStart=/usr/local/libexec/relocant-media/deploy-green-main.sh" in service
     assert checkout_exec not in service
     assert "NoNewPrivileges=true" in service
+
+
+def test_pinned_recovery_rejects_advanced_main_before_timer_changes(tmp_path: pathlib.Path) -> None:
+    work, remote, initial, _ = _repository(tmp_path)
+    result, log = _run(work, remote, tmp_path, extra_env={
+        'RELOCANT_EXPECTED_TARGET_SHA': initial, 'RELOCANT_REPAIR_DATABASE': 'true'})
+    assert result.returncode == 78
+    assert 'pinned recovery target' in result.stderr
+    assert _git(work, 'rev-parse', 'HEAD') == initial
+    assert not _systemctl_calls(log)
+
+
+def _v7_database(tmp_path: pathlib.Path) -> pathlib.Path:
+    import sqlite3
+
+    from relocant_media.storage.sqlite_schema import initialize_sqlite
+
+    path = tmp_path / 'editorial.sqlite3'
+    initialize_sqlite(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute('ALTER TABLE raw_item DROP COLUMN published_at_precision')
+        connection.execute('PRAGMA user_version=7')
+        connection.execute("INSERT INTO telegram_update_receipt(update_id,kind,status) "
+                           "VALUES(12345,'message','processed')")
+    return path
+
+
+def _maintenance_env(tmp_path: pathlib.Path, target: str) -> dict[str, str]:
+    database = _v7_database(tmp_path)
+    env_file = tmp_path / 'server.env'
+    env_file.write_text(f'DATABASE_URL=sqlite:///{database}\n', encoding='utf-8')
+    return {'RELOCANT_EXPECTED_TARGET_SHA': target, 'RELOCANT_REPAIR_DATABASE': 'true',
+            'RELOCANT_ENV_FILE': str(env_file), 'MOCK_MAINTENANCE_PYTHON': sys.executable,
+            'PYTHONPATH': str(ROOT / 'src')}
+
+
+def test_pinned_same_head_repair_runs_known_migration_under_both_locks(
+    tmp_path: pathlib.Path,
+) -> None:
+    import sqlite3
+
+    work, remote, _, target = _repository(tmp_path)
+    _git(work, 'reset', '--hard', target)
+    result, log = _run(work, remote, tmp_path, extra_env=_maintenance_env(tmp_path, target))
+    assert result.returncode == 0, result.stderr
+    assert 'stop relocant-editorial.timer relocant-intake.timer' in _systemctl_calls(log)
+    with sqlite3.connect(tmp_path / 'editorial.sqlite3') as connection:
+        assert connection.execute('PRAGMA user_version').fetchone() == (8,)
+        assert connection.execute('SELECT update_id FROM telegram_update_receipt').fetchall() == [
+            (12345,)]
+    assert list(tmp_path.glob('worker.lock.deploy-*.before-v8.sqlite3'))
+
+
+def test_failed_unit_install_restores_database_checkout_and_control_files(tmp_path: pathlib.Path
+                                                                        ) -> None:
+    import sqlite3
+
+    work, remote, initial, target = _repository(tmp_path)
+    systemd_dir = tmp_path / 'systemd'
+    systemd_dir.mkdir()
+    old_unit = systemd_dir / 'relocant-editorial.service'
+    old_unit.write_text('# exact previous installed unit\n', encoding='utf-8')
+    result, log = _run(work, remote, tmp_path, extra_env={
+        **_maintenance_env(tmp_path, target), 'MOCK_FAIL_DAEMON_RELOAD': 'true'})
+    assert result.returncode != 0
+    assert _git(work, 'rev-parse', 'HEAD') == initial
+    assert old_unit.read_text() == '# exact previous installed unit\n'
+    assert not (systemd_dir / 'relocant-intake.service').exists()
+    assert 'start relocant-editorial.timer relocant-intake.timer' in _systemctl_calls(log)
+    with sqlite3.connect(tmp_path / 'editorial.sqlite3') as connection:
+        assert connection.execute('PRAGMA user_version').fetchone() == (7,)
+        assert connection.execute('SELECT update_id FROM telegram_update_receipt').fetchall() == [
+            (12345,)]
+
+
+def test_timer_restart_failure_reports_failure_with_verified_new_database(tmp_path):
+    import sqlite3
+
+    work, remote, _, target = _repository(tmp_path)
+    result, _ = _run(work, remote, tmp_path, extra_env={
+        **_maintenance_env(tmp_path, target), 'MOCK_FAIL_TIMER_START': 'true'})
+    assert result.returncode != 0
+    assert 'timer restart failed' in result.stderr
+    assert _git(work, 'rev-parse', 'HEAD') == target
+    with sqlite3.connect(tmp_path / 'editorial.sqlite3') as connection:
+        assert connection.execute('PRAGMA user_version').fetchone() == (8,)
+        assert connection.execute('SELECT update_id FROM telegram_update_receipt').fetchall() == [
+            (12345,)]
+
+
+def test_same_head_control_install_signal_restores_previous_units(tmp_path):
+    work, remote, _, target = _repository(tmp_path)
+    _git(work, 'reset', '--hard', target)
+    systemd_dir = tmp_path / 'systemd'
+    systemd_dir.mkdir()
+    old_unit = systemd_dir / 'relocant-editorial.service'
+    old_unit.write_text('# previous installed unit\n', encoding='utf-8')
+    result, _ = _run(work, remote, tmp_path, extra_env={'MOCK_TERM_DAEMON_RELOAD': 'true'})
+    assert result.returncode == 143
+    assert old_unit.read_text() == '# previous installed unit\n'
+    assert not (systemd_dir / 'relocant-intake.service').exists()
+    assert not (tmp_path / 'libexec/deploy-green-main.sh').exists()
