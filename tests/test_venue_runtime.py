@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.ai.package import EditorialPackage
+from relocant_media.collectors import venue_feed
 from relocant_media.ops import server_cycle
 from relocant_media.sources.registry import ExtractionConfig, load_source_registry
 from relocant_media.storage.models import RawItem
@@ -68,6 +69,9 @@ def runtime(tmp_path, monkeypatch):
             return NOW
 
     monkeypatch.setattr(server_cycle, 'datetime', Clock)
+    # Feed freshness and readback use the collector clock independently of the
+    # runtime. Keep both on the dated fixture, including consumers of this fixture.
+    monkeypatch.setattr(venue_feed, 'datetime', Clock)
 
     def no_ai(*args, **kwargs):
         raise AssertionError('Сбор и предварительный отсев не вызывают ИИ')

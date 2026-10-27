@@ -71,9 +71,44 @@ jobs:
                 and r['head_branch'] == 'main' and r['event'] == 'push']
           assert ci and ci[0]['status'] == 'completed' and ci[0]['conclusion'] == 'success'
           PY
+      - name: Prepare storage-only SSH identity
+        id: storage
+        env:
+          STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
+          STORAGE_PRIVATE_KEY: ${{ secrets.EDITORIAL_SSH_PRIVATE_KEY }}
+          STORAGE_KNOWN_HOSTS: ${{ secrets.EDITORIAL_SSH_KNOWN_HOSTS }}
+          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
+          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
+          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          case "$STORAGE_BACKEND" in
+            drive) exit 0 ;;
+            ssh) ;;
+            *) echo 'Unsupported editorial storage backend' >&2; exit 1 ;;
+          esac
+          test -n "$STORAGE_PRIVATE_KEY"
+          test -n "$STORAGE_KNOWN_HOSTS"
+          umask 077
+          identity="$RUNNER_TEMP/editorial-storage-identity"
+          mkdir "$identity"
+          printf '%s\n' "$STORAGE_PRIVATE_KEY" > "$identity/key"
+          printf '%s\n' "$STORAGE_KNOWN_HOSTS" > "$identity/known_hosts"
+          ssh-keygen -y -P '' -f "$identity/key" > /dev/null
+          EDITORIAL_SSH_KEY_PATH="$identity/key" \
+          EDITORIAL_SSH_KNOWN_HOSTS_PATH="$identity/known_hosts" \
+            python -m relocant_media.ops.ssh_state_client --check
+          echo "key_path=$identity/key" >> "$GITHUB_OUTPUT"
+          echo "known_hosts_path=$identity/known_hosts" >> "$GITHUB_OUTPUT"
       - name: Restore, claim, process, save and export
         id: runtime
         env:
+          EDITORIAL_STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
+          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
+          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
+          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
+          EDITORIAL_SSH_KEY_PATH: ${{ steps.storage.outputs.key_path }}
+          EDITORIAL_SSH_KNOWN_HOSTS_PATH: ${{ steps.storage.outputs.known_hosts_path }}
           GH_STATE_REPOSITORY: ${{ vars.EDITORIAL_STATE_REPOSITORY }}
           GH_STATE_TOKEN: ${{ secrets.EDITORIAL_STATE_TOKEN || github.token }}
           DRIVE_CREDENTIALS_JSON: ${{ secrets.DRIVE_CREDENTIALS_JSON }}
@@ -127,7 +162,7 @@ jobs:
           name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Remove private working files
         if: always()
-        run: rm -rf "$RUNNER_TEMP/editorial-work"
+        run: rm -rf "$RUNNER_TEMP/editorial-work" "$RUNNER_TEMP/editorial-storage-identity"
   deploy:
     if: always() && needs.cycle.outputs.projection == 'true'
     needs: cycle
