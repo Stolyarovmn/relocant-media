@@ -27,19 +27,24 @@ def select_mode(tmp_path, *, event, cron="", requested=""):
     return output.read_text().strip()
 
 
-def test_registered_schedules_route_hourly_editorial_and_five_minute_intake(tmp_path):
+def test_redundant_schedules_route_editorial_and_intake_without_slot_overlap(tmp_path):
+    """GitHub drops best-effort cron slots, so each worker has independent backup slots."""
     schedules = [entry["cron"] for entry in workflow()["on"]["schedule"]]
-    assert len(schedules) == 2
-    editorial = [cron for cron in schedules
-                 if select_mode(tmp_path, event="schedule", cron=cron).splitlines()[-1]
-                 == "value=editorial"]
-    assert editorial == ["17 * * * *"]
-    intake = next(cron for cron in schedules if cron not in editorial)
-    assert intake.split()[1:] == ["*", "*", "*", "*"]
-    minutes = [int(value) for value in intake.split()[0].split(",")]
-    assert minutes == [2, 7, 12, 22, 27, 32, 37, 42, 47, 52, 57]
-    assert 17 not in minutes
-    assert select_mode(tmp_path, event="schedule", cron=intake).splitlines()[-1] == "value=intake"
+    routed = {cron: select_mode(tmp_path, event="schedule", cron=cron).splitlines()[-1]
+              for cron in schedules}
+    editorial = [cron for cron, value in routed.items() if value == "value=editorial"]
+    intake = [cron for cron, value in routed.items() if value == "value=intake"]
+    assert editorial == ["17 * * * *", "47 * * * *"]
+    assert len(intake) == 2 and len(schedules) == 4
+    editorial_minutes = {17, 47}
+    intake_minutes = []
+    for cron in intake:
+        fields = cron.split()
+        assert fields[1:] == ["*", "*", "*", "*"]
+        intake_minutes += [int(value) for value in fields[0].split(",")]
+    assert len(intake_minutes) == len(set(intake_minutes))
+    assert not editorial_minutes & set(intake_minutes)
+    assert {2, 7, 12, 22, 27, 32, 37, 42, 52, 57} <= set(intake_minutes)
 
 
 @pytest.mark.parametrize("mode", ["preview", "editorial", "intake", "discovery"])

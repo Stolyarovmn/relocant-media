@@ -23,6 +23,13 @@ with existing configuration. This is not a second newsroom or queue.
 `server_runtime` is the existing worker module name, not a requirement to run it on
 the server. The Actions subprocess invokes it locally on the hosted runner.
 
+## Schedule redundancy
+
+GitHub drops or delays scheduled runs under load. The workflow therefore registers
+editorial at :17 and :47 and intake on two disjoint minute sets. Extra slots add no
+writer: the single concurrency group serializes them and the cycle windows are
+idempotent, so a duplicate slot only finds nothing new to process.
+
 ## Storage guarantees
 
 The standalone `ssh_state_storage.py` helper uses only Python's standard library.
