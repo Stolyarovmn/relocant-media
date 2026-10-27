@@ -207,6 +207,20 @@ def review_only_venue_sources() -> dict[str, SourceConfig]:
     }
 
 
+def media_sources() -> dict[str, SourceConfig]:
+    """Verified media feeds: full-text evidence that only the owner queue may release."""
+    return {
+        source.id: source
+        for source in load_source_registry(SOURCES)
+        if source.extraction.strategy == "venue_feed"
+        and source.extraction.status == "active"
+        and source.source_type == "news_media"
+        and source.ownership == "media"
+        and not source.policy.auto_publish
+        and not source.policy.high_risk
+    }
+
+
 def _is_review_only_venue_hold(item: Any, *, now: datetime) -> bool:
     if event_content_reason(item.title, item.body, now=now) is not None:
         return False
@@ -287,12 +301,17 @@ async def collect_sources(
     venues = venue_sources()
     review_venues = review_only_venue_sources()
     runtime_venues = {**venues, **review_venues}
+    media = {} if submissions_only else media_sources()
     discovery_venues = discovery_venue_sources()
     news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
                for key in ("city_beograd_news", "cukarica_news")}
     sources.update(runtime_venues)
+    sources.update(media)
     result["sources_synced"] = len(sources)
+    result["media_sources"] = len(media)
+    result["media_items"] = 0
+    result["media_deferred"] = 0
     result["venue_sources"] = len(venues)
     result["venue_review_only_sources"] = len(review_venues)
     result["venue_items"] = 0
@@ -347,6 +366,7 @@ async def collect_sources(
         collectors.update({
             key: build_collector(source, client) for key, source in runtime_venues.items()
         })
+        collectors.update({key: build_collector(source, client) for key, source in media.items()})
 
         async def full_article(source_id: str, url: str) -> str:
             if url in fetched:
@@ -493,6 +513,18 @@ async def collect_sources(
                 result["venue_article_failures"] += len(item_failures)
                 venue_errors.extend({"source_id": source_id, **error}
                                     for error in item_failures)
+        for source_id in media:
+            try:
+                for item in await collectors[source_id].collect():
+                    result["media_items"] += 1
+                    if freshness_decision(item.title, item.body, item.published_at, now,
+                            published_at_precision=item.published_at_precision
+                            ).action != "keep":
+                        result["media_deferred"] += 1
+                        continue
+                    articles.append(item)
+            except Exception:
+                result["failures"] += 1
         runtime_channels = () if submissions_only else runtime_channels_for_city("belgrade")
         for channel in runtime_channels:
             observation: dict[str, Any] = {"channel": channel, "status": "not_checked"}

@@ -1,0 +1,31 @@
+id: media_balkan_insight
+name: Balkan Insight (BIRN)
+publisher: Balkan Insight (BIRN)
+ownership: media
+url: https://balkaninsight.com/
+language: en
+source_type: news_media
+trust: 0.8
+check_every: 1h
+categories:
+- city
+- transport
+- utilities
+- events
+- health
+- schools
+extraction:
+  strategy: venue_feed
+  status: active
+  feed_url: https://balkaninsight.com/feed/
+  article_selectors:
+  - article
+  approved_hosts:
+  - balkaninsight.com
+  - www.balkaninsight.com
+policy:
+  auto_publish: false
+  high_risk: false
+verification:
+  checked_at: '2026-10-27'
+  note: Некоммерческое расследовательское СМИ (BIRN), региональная повестка. RSS отдаёт полный content:encoded и настоящую pubDate. Источник media; публикация только через решение владельца, со ссылкой и собственным пересказом.

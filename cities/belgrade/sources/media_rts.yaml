@@ -1,0 +1,31 @@
+id: media_rts
+name: РТС (Радио-телевизија Србије)
+publisher: РТС (Радио-телевизија Србије)
+ownership: media
+url: https://www.rts.rs/lat/vesti/
+language: sr-Latn
+source_type: news_media
+trust: 0.8
+check_every: 1h
+categories:
+- city
+- transport
+- utilities
+- events
+- health
+- schools
+extraction:
+  strategy: venue_feed
+  status: active
+  feed_url: https://www.rts.rs/lat/vesti/rss.html
+  article_selectors:
+  - article
+  approved_hosts:
+  - rts.rs
+  - www.rts.rs
+policy:
+  auto_publish: false
+  high_risk: false
+verification:
+  checked_at: '2026-10-27'
+  note: Государственный вещатель. RSS отдаёт полный content:encoded и настоящую pubDate. Источник media; публикация только через решение владельца, со ссылкой и собственным пересказом.

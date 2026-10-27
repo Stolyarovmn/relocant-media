@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8" ?>
+
+
+
+
+
+
+
+
+
+
+
+
+<rss xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
+   <channel xmlns:content="https://purl.org/rss/1.0/modules/content/">
+        <title>РТС :: Вести</title>
+        <link>https://www.rts.rs/vesti/rss.html</link>
+        <description>Најновије вести, анализе и извештаји са лица места из Србије, Балкана и света.  Будите у току са политичким, друштвеним и пословним трендовима</description>
+        <language>sr</language>
+        <image>
+            
+                
+                
+                    <url>https://www.rts.rs/img/logo.png</url>
+                
+            
+            
+            <title>РТС :: Вести</title>
+            <link>https://www.rts.rs/vesti/rss.html</link>
+        </image>
+        
+        
+            <item>
+		<title>Преврнуо се минибус код Голије, нема повређених</title>
+                <link>https://www.rts.rs/vesti/hronika/6070572/prevrnuo-se-minibus-kod-golije-nema-povredjenih.html</link>
+                <description>
+                    Минибус превозника Санџак транс преврнуо се у близини села Шароње, недалеко од Голије.
+                </description>
+		<content:encoded>
+		    <![CDATA[<p>У незгоди није било повређених, а у возилу се налазио само возач, који је, према доступним информацијама, добро.</p>
+<p><!--<box box-left 51949250 video>-->Због незгоде саобраћај на овој деоници није био обустављен, али се одвијао отежано.</p>
+<p>Полиција тренутно обавља увиђај, након којег се очекује више информација о околностима под којима је дошло до незгоде.</p>]]>
+		</content:encoded>
+                <pubDate>Tue, 27 Oct 2026 15:43:44 +0100</pubDate>
+                <category>Хроника</category>
+                
+                <guid>https://www.rts.rs/vesti/hronika/6070572/prevrnuo-se-minibus-kod-golije-nema-povredjenih.html</guid>
+                <thumb><img src="https://www.rts.rs/upload/thumbnail//media/2026/9/27/15/48/75/5977975/thumbs/14221255/bus_t.jpg/bus_t.jpg" /></thumb>
+                <image><img src="https://www.rts.rs/upload/thumbnail//" /></image>
+            </item><item>
+		<title>Антонио Коста: Добар разговор са Срдановићем, Србији место у ЕУ</title>
+                <link>https://www.rts.rs/vesti/politika/6070684/antonio-kosta-dobar-razgovor-sa-srdanovicem-srbiji-mesto-u-eu.html</link>
+                <description>
+                    Председник Европског савета Антонио Коста изјавио је вечерас да је имао добар разговор са првим на листи &#034;Студентска листа - Студенти побеђују&#034; Илијом Срдановићем и да му је честитао победу на парламентарним изборима.
+                </description>
+		<content:encoded>
+		    <![CDATA[<p>"Сада је приоритет да се без одлагања конституише парламент и формира нова влада, кроз мирну транзицију и уз пуно поштовање изборних резултата", објавио је Коста на Иксу.</p>
+<p><!--<box box-left 51949466 embed>--></p>
+<p>Нагласио је да је Србији место у Европској унији и да су спремни да подрже европски пут Србије, са јасним фокусом на реформе које је српски народ тражио: владавину права, борбу против корупције и слободу медија.</p>]]>
+		</content:encoded>
+                <pubDate>Tue, 27 Oct 2026 20:29:17 +0100</pubDate>
+                <category>Политика</category>
+                
+                <guid>https://www.rts.rs/vesti/politika/6070684/antonio-kosta-dobar-razgovor-sa-srdanovicem-srbiji-mesto-u-eu.html</guid>
+                <thumb><img src="https://www.rts.rs/upload/thumbnail//media/2026/9/27/19/4/465/5978555/thumbs/14222777/Kosta.png/Kosta.png" /></thumb>
+                <image><img src="https://www.rts.rs/upload/thumbnail//" /></image>
+            </item>
+        
+    </channel>
+</rss>
+

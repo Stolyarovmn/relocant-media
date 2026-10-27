@@ -1,3 +1,5 @@
+from collections.abc import Iterable
+
 from .models import RiskClass
 
 CURRENT_EDITORIAL_RULE_VERSION = "belgrade-editorial-v2"
@@ -21,6 +23,16 @@ OWNER_DECISION_REASONS = frozenset({
     "source_auto_publish_disabled",
     "policy_requires_human_review",
 })
+
+
+def primary_evidence_kind(ownerships: Iterable[str], category: str) -> str | None:
+    """Official evidence is always enough; a verified media outlet only outside high-risk."""
+    kinds = {value.strip().casefold() for value in ownerships}
+    if "official" in kinds:
+        return "official"
+    if "media" in kinds and category.strip().lower() not in HIGH_RISK_CATEGORIES:
+        return "media"
+    return None
 
 
 def risk_for_category(category: str) -> RiskClass:
