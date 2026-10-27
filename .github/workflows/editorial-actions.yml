@@ -5,7 +5,7 @@ on:
       mode:
         description: Read-only preview or canonical worker (requires completed cutover)
         type: choice
-        options: [preview, editorial, intake, discovery]
+        options: [preview, editorial, intake, discovery, auto]
         default: preview
       discovery_batch:
         description: 'Discovery only: JSON {"version":1,"city":"belgrade","urls":["https://..."]}'
@@ -166,6 +166,33 @@ jobs:
       - name: Remove private working files
         if: always()
         run: rm -rf "$RUNNER_TEMP/editorial-work" "$RUNNER_TEMP/editorial-storage-identity"
+  chain:
+    # Scheduled runs are best effort. A healthy cycle books the next one, so the newsroom
+    # keeps running; the cron slots remain the restart path and ACTIONS_CHAIN_ENABLED is the
+    # kill switch. The concurrency group still serializes the single canonical writer.
+    if: >-
+      github.ref == 'refs/heads/main' && needs.cycle.result == 'success' &&
+      vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true' &&
+      inputs.mode != 'preview'
+    needs: cycle
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Book the next cycle unless one is already waiting
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CHAIN_DELAY_SECONDS: '120'
+        run: |
+          set -euo pipefail
+          waiting=$(gh run list --workflow editorial-actions.yml --status queued --json databaseId --jq length)
+          if [ "$waiting" -gt 0 ]; then
+            echo "a cycle is already queued"
+            exit 0
+          fi
+          sleep "$CHAIN_DELAY_SECONDS"
+          gh workflow run editorial-actions.yml --ref main -f mode=auto
   deploy:
     if: always() && needs.cycle.outputs.projection == 'true'
     needs: cycle

@@ -246,9 +246,18 @@ def export_public(database: Path, output: Path, observed_at: str, run_dir: Path 
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+EDITORIAL_INTERVAL = timedelta(minutes=55)
+
+
+def editorial_due(state: dict[str, Any], now: datetime) -> bool:
+    """Hourly editorial is due unless one was checkpointed less than 55 minutes ago."""
+    last = state.get("last_editorial_at")
+    return not isinstance(last, str) or now - datetime.fromisoformat(last) >= EDITORIAL_INTERVAL
+
+
 def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: Path,
             folder: str, mode: str, environment: dict[str, str]) -> int:
-    if mode not in {"preview", "editorial", "intake", "discovery"}:
+    if mode not in {"preview", "editorial", "intake", "discovery", "auto"}:
         raise ValueError("unsupported runtime mode")
     incoming = environment.get("CLOUD_DISCOVERY_BATCH", "")
     batch = parse_batch(incoming) if mode == "discovery" else None
@@ -256,6 +265,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         raise ValueError("discovery input requires discovery mode")
     state, sha = store.read()
     validate_ready(state)
+    if mode == "auto":
+        mode = "editorial" if editorial_due(state, datetime.now(UTC)) else "intake"
     work.mkdir(parents=True, exist_ok=False)
     database = restored(drive, state["snapshot"], work)
     if mode == "preview":
@@ -346,7 +357,10 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         provisional.write_text(json.dumps(projection, ensure_ascii=False), encoding="utf-8")
     ready = {**busy, "status": "ready", "generation": attempt, "snapshot": manifest,
              "intake_state": budget, "finished_at": datetime.now(UTC).isoformat(),
-             "last_exit_code": code, "last_cycle": last_cycle}
+             "last_exit_code": code, "last_cycle": last_cycle,
+             "last_editorial_at": (
+                 datetime.now(UTC).isoformat() if mode == "editorial" and code == 0
+                 else state.get("last_editorial_at"))}
     if batch is not None:
         engine = create_engine(env["DATABASE_URL"])
         try:
@@ -384,7 +398,7 @@ def bootstrap_record(manifest: dict[str, Any], *, now: datetime) -> dict[str, An
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["preview", "editorial", "intake", "discovery"],
+    parser.add_argument("--mode", choices=["preview", "editorial", "intake", "discovery", "auto"],
                         default="preview")
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

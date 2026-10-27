@@ -68,3 +68,44 @@ def test_hourly_timer_retains_single_service_and_persistent_serialized_runtime()
     assert runtime["env"]["EDITORIAL_SEND_ENABLED"] == (
         "${{ vars.ACTIONS_SEND_ENABLED || 'false' }}"
     )
+
+
+def _chain():
+    return workflow()["jobs"]["chain"]
+
+
+def test_chain_books_the_next_cycle_only_after_a_healthy_main_cycle():
+    chain = _chain()
+    assert chain["needs"] == "cycle"
+    for condition in ("needs.cycle.result == 'success'", "refs/heads/main",
+                      "vars.ACTIONS_EDITORIAL_ENABLED == 'true'",
+                      "vars.ACTIONS_CHAIN_ENABLED == 'true'", "inputs.mode != 'preview'"):
+        assert condition in chain["if"]
+    assert chain["permissions"] == {"actions": "write"}
+    assert "auto" in workflow()["on"]["workflow_dispatch"]["inputs"]["mode"]["options"]
+    assert workflow()["concurrency"]["group"] == "canonical-editorial-writer"
+
+
+def _run_chain(tmp_path, queued):
+    script = next(step for step in _chain()["steps"])["run"]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    stub = ["#!/bin/sh", 'echo "$@" >> "$CALLS"', '[ "$1" = run ] && echo "$QUEUED"', "exit 0", ""]
+    (bin_dir / "gh").write_text(chr(10).join(stub), encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    subprocess.run(["bash", "-eu", "-c", script], check=True, env={
+        **os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "CALLS": str(calls),
+        "QUEUED": str(queued), "CHAIN_DELAY_SECONDS": "0",
+    })
+    return calls.read_text().splitlines()
+
+
+def test_chain_dispatches_auto_mode_when_nothing_is_waiting(tmp_path):
+    calls = _run_chain(tmp_path, 0)
+    assert calls[-1] == "workflow run editorial-actions.yml --ref main -f mode=auto"
+
+
+def test_chain_does_not_pile_up_when_a_cycle_is_already_queued(tmp_path):
+    calls = _run_chain(tmp_path, 1)
+    assert all(not call.startswith("workflow run") for call in calls)

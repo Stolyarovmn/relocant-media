@@ -120,6 +120,28 @@ def test_success_claims_before_side_effect_and_restores_receipts(context, tmp_pa
     engine.dispose()
 
 
+@pytest.mark.parametrize(("minutes", "due"), [(None, True), (10, False), (54, False), (56, True)])
+def test_editorial_is_due_once_the_hourly_interval_has_passed(minutes, due):
+    now = datetime(2026, 10, 28, 12, tzinfo=UTC)
+    state = {} if minutes is None else {
+        'last_editorial_at': (now - timedelta(minutes=minutes)).isoformat()}
+    assert runtime.editorial_due(state, now) is due
+
+
+def test_auto_mode_runs_editorial_when_due_then_intake_until_the_next_hour(
+        context, tmp_path, monkeypatch):
+    commands = []
+    def child(command, env):
+        commands.append(command[2].rsplit('.', 1)[-1])
+        return 0
+    monkeypatch.setattr(runtime, 'run_child', child)
+    assert execute(context, tmp_path / 'one', monkeypatch, mode='auto') == 0
+    recorded = context[0].state['last_editorial_at']
+    assert execute(context, tmp_path / 'two', monkeypatch, mode='auto') == 0
+    assert commands == ['server_runtime', 'intake_batch']
+    assert context[0].state['last_editorial_at'] == recorded
+
+
 def test_editorial_child_receives_a_new_output_directory(context, tmp_path, monkeypatch):
     seen = []
     def child(command, env):
