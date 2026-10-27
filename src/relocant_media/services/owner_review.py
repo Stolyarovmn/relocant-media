@@ -21,6 +21,7 @@ from relocant_media.ai.models import EvidenceDocument, PublicationStatus, Russia
 from relocant_media.ai.package import (
     EditorialPackage,
     PackageDraft,
+    PackageEventDocument,
     canonical_json,
     draft_sha256,
     evaluate_package,
@@ -294,7 +295,7 @@ def _validated_pending_package(
     return run, post, item, source, package
 
 
-def _primary_document(package: EditorialPackage) -> Any:
+def _primary_document(package: EditorialPackage) -> PackageEventDocument:
     """The cited original: an official document if present, else the verified media one."""
     assert package.event is not None
     for kind in ("official", "media"):
