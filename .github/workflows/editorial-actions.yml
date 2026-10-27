@@ -140,7 +140,7 @@ jobs:
         id: projection
         env:
           NEWSROOM_GITHUB_TOKEN: ${{ github.token }}
-          RUNTIME_OUTCOME: ${{ steps.runtime.outcome }}
+          RUNTIME_OUTCOME: ${{ job.status == 'failure' && 'failure' || steps.runtime.outcome }}
           WORKER_MODE: ${{ steps.mode.outputs.value }}
         run: |
           set -euo pipefail
