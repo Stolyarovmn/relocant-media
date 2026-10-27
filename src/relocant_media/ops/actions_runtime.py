@@ -1,4 +1,4 @@
-"""Hosted runner: immutable Drive backups and a fail-closed GitHub state pointer.
+"""Hosted compute with immutable SSH/Drive backups and a fail-closed CAS state pointer.
 
 No automatic bootstrap, lock expiry, send retries, schema creation, or fallback DB.
 """
@@ -15,9 +15,10 @@ import signal
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import google.auth
 import httpx
@@ -28,6 +29,7 @@ from sqlalchemy.orm import Session
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.ops.sqlite_restore import restore
+from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
 from relocant_media.services.cloud_discovery import batch_receipt, ingest_batch, parse_batch
 
 REPO = "Stolyarovmn/relocant-media"
@@ -147,6 +149,37 @@ class StateStore:
         return str(response.json()["content"]["sha"])
 
 
+
+class CanonicalStore(Protocol):
+    def read(self) -> tuple[dict[str, Any], str]: ...
+
+    def write(self, state: dict[str, Any], sha: str) -> str: ...
+
+
+class SnapshotStore(Protocol):
+    def download(self, file_id: str) -> bytes: ...
+
+    def upload(self, path: Path, folder: str) -> str: ...
+
+
+def build_storage(
+    client: httpx.Client, environment: Mapping[str, str], *, bootstrap: bool = False,
+    drive_factory: Callable[[httpx.Client], SnapshotStore] | None = None,
+) -> tuple[CanonicalStore, SnapshotStore, str]:
+    backend = environment.get("EDITORIAL_STORAGE_BACKEND", "drive")
+    if backend == "ssh":
+        storage = SSHStateClient(SSHConfig.from_environment(environment))
+        return storage, storage, "ssh_blobs"
+    if backend != "drive":
+        raise ValueError("EDITORIAL_STORAGE_BACKEND must be ssh or drive")
+    store = StateStore(client, environment.get("GH_STATE_TOKEN", ""),
+                       repository=environment.get("GH_STATE_REPOSITORY") or REPO)
+    if bootstrap:
+        store.require_private()
+    drive = (drive_factory or Drive)(client)
+    return store, drive, environment.get("DRIVE_STATE_FOLDER_ID", "")
+
+
 def validate_ready(state: dict[str, Any]) -> None:
     if (state.get("version") != 1 or state.get("owner") != "github-actions"
             or state.get("status") != "ready" or not state.get("generation")
@@ -158,7 +191,7 @@ def validate_ready(state: dict[str, Any]) -> None:
         raise ValueError("snapshot digest required")
 
 
-def restored(drive: Drive, manifest: dict[str, Any], work: Path) -> Path:
+def restored(drive: SnapshotStore, manifest: dict[str, Any], work: Path) -> Path:
     content = drive.download(manifest["drive_file_id"])
     source = work / "download.sqlite3"
     source.write_bytes(content)
@@ -180,7 +213,7 @@ def run_child(command: list[str], environment: dict[str, str]) -> int:
         raise
 
 
-def preview_archive(drive: Drive, manifest_id: str, work: Path, output: Path) -> int:
+def preview_archive(drive: SnapshotStore, manifest_id: str, work: Path, output: Path) -> int:
     manifest = json.loads(drive.download(identifier(manifest_id)))
     manifest["drive_file_id"] = (manifest.get("drive_file_id")
                                  or manifest["drive_database_file_id"])
@@ -199,7 +232,7 @@ def export_public(database: Path, output: Path, observed_at: str, run_dir: Path 
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def execute(store: StateStore, drive: Drive, *, work: Path, output: Path,
+def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: Path,
             folder: str, mode: str, environment: dict[str, str]) -> int:
     if mode not in {"preview", "editorial", "intake", "discovery"}:
         raise ValueError("unsupported runtime mode")
@@ -231,10 +264,14 @@ def execute(store: StateStore, drive: Drive, *, work: Path, output: Path,
     intake_state.write_text(json.dumps(state.get("intake_state", {})), encoding="utf-8")
     env = {**environment, "DATABASE_URL": f"sqlite:///{database.resolve().as_posix()}",
            "RELOCANT_RUNTIME_PLATFORM": "github-actions", "TELEGRAM_MTPROTO_ENABLED": "false"}
-    for name in ("GH_STATE_TOKEN", "GH_STATE_REPOSITORY", "DRIVE_CREDENTIALS_JSON",
-                 "GOOGLE_APPLICATION_CREDENTIALS",
-                 "CLOUD_DISCOVERY_BATCH"):
-        env.pop(name, None)
+    for name in list(env):
+        if name.startswith("EDITORIAL_SSH_") or name in {
+            "EDITORIAL_STORAGE_BACKEND", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+            "GH_STATE_TOKEN", "GH_STATE_REPOSITORY", "DRIVE_CREDENTIALS_JSON",
+            "DRIVE_STATE_FOLDER_ID", "DRIVE_PREVIEW_MANIFEST_ID", "GOOGLE_APPLICATION_CREDENTIALS",
+            "CLOUD_DISCOVERY_BATCH",
+        }:
+            env.pop(name, None)
     run_dir = work / "cycle"
     run_dir.mkdir()
     discovery_ids: list[int] = []
@@ -337,17 +374,16 @@ def main() -> None:
     args = parser.parse_args()
     try:
         with httpx.Client(timeout=60, follow_redirects=False) as client:
-            drive = Drive(client)
             if args.mode == "preview" and os.environ.get("DRIVE_PREVIEW_MANIFEST_ID"):
-                code = preview_archive(drive, os.environ["DRIVE_PREVIEW_MANIFEST_ID"],
+                if os.environ.get("EDITORIAL_STORAGE_BACKEND", "drive") != "drive":
+                    raise ValueError("Drive archive preview requires the drive backend")
+                code = preview_archive(Drive(client), os.environ["DRIVE_PREVIEW_MANIFEST_ID"],
                                        args.work, args.output)
             else:
-                store = StateStore(client, os.environ["GH_STATE_TOKEN"],
-                                   repository=os.environ.get("GH_STATE_REPOSITORY") or REPO)
-                code = execute(store, drive,
+                store, blobs, folder = build_storage(client, os.environ)
+                code = execute(store, blobs,
                                work=args.work, output=args.output, mode=args.mode,
-                               folder=os.environ.get("DRIVE_STATE_FOLDER_ID", ""),
-                               environment=dict(os.environ))
+                               folder=folder, environment=dict(os.environ))
     except Exception as error:
         args.output.unlink(missing_ok=True)
         # HTTP exception messages can contain URLs/credentials/private response bodies.

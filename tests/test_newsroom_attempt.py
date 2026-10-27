@@ -89,7 +89,10 @@ def test_runtime_workflow_observes_failures_without_broadening_execution_rights(
     runtime = next(step for step in steps if step.get("id") == "runtime")
     observation = next(step for step in steps if step.get("id") == "projection")
     assert observation["if"] == "always()"
-    assert observation["env"]["RUNTIME_OUTCOME"] == "${{ steps.runtime.outcome }}"
+    # A failed CI/storage preflight also counts when the worker step never ran.
+    assert observation["env"]["RUNTIME_OUTCOME"] == (
+        "${{ job.status == 'failure' && 'failure' || steps.runtime.outcome }}"
+    )
     assert "newsroom_attempt" in observation["run"]
     assert "--fetch-previous" in observation["run"]
     assert "DATABASE_URL" not in observation["env"]

@@ -3,6 +3,20 @@
 ## Mission
 Build and maintain a reliable automation platform for Russian-language local Telegram media.
 
+## Runtime architecture (owner instruction, 27 October 2026)
+
+All editorial computation runs on GitHub-hosted Actions runners: collection,
+discovery, model calls, translation/enrichment, reviews, Telegram intake and delivery,
+reporting and public projection. The small server is a state-storage endpoint only;
+Google Drive is another supported storage backend. Do not add or enable editorial,
+intake or deployment compute timers, a self-hosted Actions runner, model processing,
+or a resident newsroom service on the storage server. Existing server compute is a
+legacy writer to fence during a verified cutover, not the target architecture.
+Keep a single canonical state, preserve Telegram receipts/offsets and require a
+verified final snapshot plus read-only Actions preflight before enabling the new
+writer. Do not stop a working legacy writer before replacement storage/authentication
+is ready; never run it alongside the Actions writer.
+
 ## Hard boundaries
 
 Never:

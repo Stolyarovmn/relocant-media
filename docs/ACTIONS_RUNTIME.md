@@ -1,4 +1,8 @@
-# Редакция в GitHub Actions, состояние в Google Drive
+# Редакция в GitHub Actions, состояние в хранилище
+
+Целевой runtime — GitHub-hosted Actions. Сервер допустим только как хранилище
+состояния, без редакционных вычислений. [SSH backend и переключение](ACTIONS_SSH_STORAGE.md)
+используют существующую SQLite и тот же workflow; ниже описан backend Google Drive.
 
 Добавлен переносимый адаптер существующей редакции. Facts/utility review, evidence,
 source policy, freshness, high-risk owner review и delivery guards не заменяются.
