@@ -72,6 +72,7 @@ from relocant_media.services.editorial import (
     _snapshot_member,
 )
 from relocant_media.services.event_eligibility import event_content_reason
+from relocant_media.services.kpi import record_subscriber_observation
 from relocant_media.services.package_import import import_package
 from relocant_media.services.pin_policy import maintain_pins
 from relocant_media.services.policy_reassessment import (
@@ -897,6 +898,8 @@ def main() -> None:
                 (args.output / "audience-observation.json").write_text(
                     json.dumps(audience, ensure_ascii=False, indent=2), encoding="utf-8")
                 result["audience_observation"] = audience
+                with Session(engine) as kpi_session:
+                    record_subscriber_observation(kpi_session, "belgrade", audience)
             with Session(engine) as audit_session:
                 cycle_checks = audit_cycle(audit_session, result)
             (args.output / "cycle-audit.json").write_text(

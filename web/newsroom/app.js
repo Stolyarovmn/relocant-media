@@ -21,7 +21,7 @@ function render(){
  }
  $('stamp').textContent='Сборка витрины: '+date(data.generated_at)+' · Очередь: '+date(city.observed_at);
  $('metrics').replaceChildren();
- for(const [name,value] of [['Событий в очереди',city.total_events],['Опубликовано',city.counts?.sent],['Готово к доставке',city.counts?.ready],['Источников в реестре',city.sources.length]]){const m=el('div',undefined,'metric');m.append(el('b',value??'—'),el('span',name));$('metrics').append(m);}
+ for(const [name,value] of [['Событий в очереди',city.total_events],['Опубликовано',city.counts?.sent],['Готово к доставке',city.counts?.ready],['Источников в реестре',city.sources.length],['Подписчики',city.kpi?.subscribers?.count],['Прирост за 24 ч',city.kpi?.subscribers?.delta_24h],['Публикаций за 24 ч',city.kpi?.published?.last_24h],['Часов с последней публикации',city.kpi?.published?.hours_since_last]]){const m=el('div',undefined,'metric');m.append(el('b',value??'—'),el('span',name));$('metrics').append(m);}
  const events=$('event-list');events.replaceChildren();const query=$('search').value.toLowerCase();const state=$('state').value;
  const items=(city.items||[]).filter(i=>(!state||i.state===state)&&(!query||[i.title,i.reason_code,i.source_id].join(' ').toLowerCase().includes(query)));
  $('event-count').textContent=city.items===null?'Данные недоступны':`${items.length} показано / ${city.total_events} всего`;
