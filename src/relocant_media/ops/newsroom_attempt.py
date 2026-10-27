@@ -43,7 +43,7 @@ def record_attempt(root: Path, output: Path, previous: Path, *, outcome: str,
                    mode: str, run_id: str, run_attempt: str) -> dict[str, Any]:
     if outcome not in {"success", "failure", "cancelled", "skipped"}:
         raise ValueError("unsupported Actions outcome")
-    if mode not in {"preview", "editorial", "intake", "discovery", "not_selected"}:
+    if mode not in {"preview", "editorial", "intake", "discovery", "auto", "not_selected"}:
         raise ValueError("unsupported worker mode")
     if not all(re.fullmatch(r"[0-9]{1,20}", value) for value in (run_id, run_attempt)):
         raise ValueError("numeric Actions identifiers required")
