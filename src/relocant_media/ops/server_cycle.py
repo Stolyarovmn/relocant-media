@@ -903,7 +903,12 @@ def main() -> None:
                 json.dumps(cycle_checks, ensure_ascii=False, indent=2), encoding="utf-8")
             result["cycle_audit_status"] = cycle_checks["status"]
     except Exception as error:
+        frame = error.__traceback__
+        while frame is not None and frame.tb_next is not None:
+            frame = frame.tb_next
         result = {"status": "SERVER_FAILED", "error_type": type(error).__name__,
+                  "error_site": (f"{Path(frame.tb_frame.f_code.co_filename).name}:"
+                                 f"{frame.tb_lineno}" if frame is not None else "unknown"),
                   "fallback_required": True}
     finally:
         if engine is not None:

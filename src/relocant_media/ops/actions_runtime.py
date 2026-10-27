@@ -213,6 +213,20 @@ def run_child(command: list[str], environment: dict[str, str]) -> int:
         raise
 
 
+def report_failure(run_dir: Path, code: int) -> None:
+    """Child output stays hidden; print only whitelisted failure coordinates to stderr."""
+    if code == 0:
+        return
+    try:
+        report = json.loads((run_dir / "server-report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    fields = {key: value for key in ("status", "error_type", "error_site", "backup_error_type")
+              if isinstance(value := report.get(key), str)
+              and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
+    print(json.dumps({"runtime_failure": fields}), file=sys.stderr)
+
+
 def preview_archive(drive: SnapshotStore, manifest_id: str, work: Path, output: Path) -> int:
     manifest = json.loads(drive.download(identifier(manifest_id)))
     manifest["drive_file_id"] = (manifest.get("drive_file_id")
@@ -297,6 +311,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             env["EDITORIAL_PRIVATE_FEEDBACK_ENABLED"] = "false"
     # Replayed intake observes the existing receipt; it never re-triggers a send.
     code = 0 if mode == "discovery" and not created else run_child(command, env)
+    report_failure(run_dir, code)
     # A signal/forced termination has uncertain effects: do not unlock even if bytes survived.
     if code < 0:
         raise RuntimeError("runtime terminated; reconcile busy generation")

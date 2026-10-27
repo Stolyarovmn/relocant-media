@@ -120,6 +120,23 @@ def test_success_claims_before_side_effect_and_restores_receipts(context, tmp_pa
     engine.dispose()
 
 
+def test_failed_child_reports_only_whitelisted_failure_coordinates(
+        context, tmp_path, monkeypatch, capsys):
+    def child(command, env):
+        report = Path(command[command.index('--output') + 1]) / 'server-report.json'
+        report.write_text(json.dumps({'status': 'SERVER_FAILED', 'error_type': 'ValueError',
+            'error_site': 'server_cycle.py:816', 'secret': 'TOKEN-123',
+            'backup_error_type': 'bad value with spaces'}), encoding='utf-8')
+        return 1
+    monkeypatch.setattr(runtime, 'run_child', child)
+    assert execute(context, tmp_path, monkeypatch) == 1
+    err = capsys.readouterr().err
+    failure = json.loads(err.strip().splitlines()[-1])['runtime_failure']
+    assert failure == {'status': 'SERVER_FAILED', 'error_type': 'ValueError',
+                       'error_site': 'server_cycle.py:816'}
+    assert 'TOKEN-123' not in err
+
+
 @pytest.mark.parametrize('failure', ['crash', 'upload', 'commit'])
 def test_uncertain_attempt_stays_busy_and_blocks_next(context, tmp_path, monkeypatch, failure):
     store, drive = context
