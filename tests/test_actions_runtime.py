@@ -565,3 +565,26 @@ def test_intake_preserves_last_editorial_models(context, tmp_path, monkeypatch):
     city = json.loads(output.read_text())['cities'][0]
     assert city['last_cycle']['observed_at'] == old['observed_at']
     assert city['last_cycle']['ai_calls'][0]['model'] == 'verified-model'
+
+
+def test_editorial_enters_real_primary_with_new_output_directory(context, tmp_path, monkeypatch):
+    from relocant_media.ops.primary_cycle import run_cycle
+
+    def child(command, env):
+        output = Path(command[command.index('--output') + 1])
+        engine = create_engine(env['DATABASE_URL'])
+        try:
+            result = run_cycle(
+                engine, city='belgrade', output=output, now=datetime.now(UTC),
+                ingest=lambda: {'failures': 0},
+                process=lambda raw_id: pytest.fail('empty queue must not call AI or Telegram'),
+            )
+        finally:
+            engine.dispose()
+        assert result['status'] == 'PRIMARY_OK'
+        return 0
+
+    monkeypatch.setattr(runtime, 'run_child', child)
+    assert execute(context, tmp_path, monkeypatch) == 0
+    assert context[0].state['status'] == 'ready'
+    assert context[0].state['last_exit_code'] == 0
