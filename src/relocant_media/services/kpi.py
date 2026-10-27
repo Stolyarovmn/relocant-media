@@ -73,7 +73,9 @@ def record_subscriber_observation(
 
 
 def _number(value: object) -> int | float | None:
-    return value if type(value) in (int, float) else None
+    if type(value) is int or type(value) is float:
+        return value
+    return None
 
 
 def _text(value: object) -> str | None:
