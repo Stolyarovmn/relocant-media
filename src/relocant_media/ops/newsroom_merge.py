@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from relocant_media.ops.public_observations import public_coverage
+from relocant_media.services.kpi import public_kpi
 
 
 def rows(value: Any, keys: tuple[str, ...]) -> list[dict[str, Any]] | None:
@@ -47,6 +48,8 @@ def merge(catalog: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
                     "items", "runs", "ai_usage", "last_cycle", "runtime_source_count"):
             if key in recorded:
                 city[key] = recorded[key]
+        if "kpi" in recorded:
+            city["kpi"] = public_kpi(recorded["kpi"])
         if city.get("items") is not None:
             city["items"] = rows(city["items"], (
                 "event_key", "state", "reason_code", "raw_item_ids", "published_at",

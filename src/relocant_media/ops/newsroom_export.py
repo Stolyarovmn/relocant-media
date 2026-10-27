@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from relocant_media.collectors.telegram_topics import DEFAULT_CHANNELS_BY_CITY
 from relocant_media.ops.public_observations import public_coverage
 from relocant_media.scheduler.models import SchedulerRun
+from relocant_media.services.kpi import compute_kpi
 from relocant_media.services.newsroom_control import build_newsroom_inbox
 from relocant_media.sources.registry import load_source_registry
 from relocant_media.storage.models import AIUsageEvent, EditorialRun, RawItem, Source
@@ -130,7 +131,8 @@ def city_snapshot(root: Path, city: str, session: Session | None) -> dict[str, A
         public_items.append(public)
     result.update(runtime_status="available", observed_at=datetime.now(UTC).isoformat(),
                   counts=inbox["counts"], total_events=inbox["total_events"],
-                  returned_events=inbox["returned_events"], items=public_items)
+                  returned_events=inbox["returned_events"], items=public_items,
+                  kpi=compute_kpi(session, city, now=datetime.now(UTC)))
     result["runs"] = [
         {"id": run.id, "status": run.status, "started_at": iso(run.started_at),
          "finished_at": iso(run.finished_at), "error_type": run.error_type}
