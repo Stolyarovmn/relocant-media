@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"
+	xmlns:content="http://purl.org/rss/1.0/modules/content/"
+	xmlns:wfw="http://wellformedweb.org/CommentAPI/"
+	xmlns:dc="http://purl.org/dc/elements/1.1/"
+	xmlns:atom="http://www.w3.org/2005/Atom"
+	xmlns:sy="http://purl.org/rss/1.0/modules/syndication/"
+	xmlns:slash="http://purl.org/rss/1.0/modules/slash/"
+	xmlns:media="http://search.yahoo.com/mrss/"
+>
+
+<channel>
+	<title>Balkan Insight</title>
+	<atom:link href="https://balkaninsight.com/feed/" rel="self" type="application/rss+xml" />
+	<link>https://balkaninsight.com/</link>
+	<description>In-depth politics, business and society from Southern and Eastern Europe.</description>
+	<lastBuildDate>Tue, 27 Oct 2026 20:47:00 +0000</lastBuildDate>
+	<language>en-US</language>
+	<sy:updatePeriod>
+	hourly	</sy:updatePeriod>
+	<sy:updateFrequency>
+	1	</sy:updateFrequency>
+	<generator>https://wordpress.org/?v=6.7.1</generator>
+
+<image>
+	<url>https://balkaninsight.com/wp-content/uploads/2018/12/cropped-balkan-insight-favicon-blue-1-32x32.png</url>
+	<title>Balkan Insight</title>
+	<link>https://balkaninsight.com/</link>
+	<width>32</width>
+	<height>32</height>
+</image> 
+	<item>
+		<title>Romanian Far-Right Politician Georgescu Put Under House Arrest</title>
+		<link>https://balkaninsight.com/2026/10/13/romanian-far-right-politician-georgescu-put-under-house-arrest/bi/</link>
+		
+		<dc:creator><![CDATA[Marian Chiriac]]></dc:creator>
+		<pubDate>Tue, 13 Oct 2026 14:17:07 +0000</pubDate>
+				<category><![CDATA[Balkan Insight]]></category>
+		<category><![CDATA[Romania]]></category>
+		<category><![CDATA[Romania - Politics and Society]]></category>
+		<category><![CDATA[Calin Georgescu]]></category>
+		<category><![CDATA[Far-right]]></category>
+		<guid isPermaLink="false">https://balkaninsight.com/?p=1124971</guid>
+
+					<description><![CDATA[Former presidential candidate Calin Georgescu’s detention replaced with house arrest for alleged involvement in major fraud case as right-wing supporters rally outside court.]]></description>
+										<content:encoded><![CDATA[Former presidential candidate Calin Georgescu’s detention replaced with house arrest for alleged involvement in major fraud case as right-wing supporters rally outside court.]]></content:encoded>
+					
+		
+		
+		
+
+                    <media:content url="https://balkaninsight.com/wp-content/uploads/2026/10/14357610-640x367.jpg" medium="image" />
+	</item><item>
+		<title>Croatian Football Fans&#8217; Pro-Nazi Chants Prompt Arrests</title>
+		<link>https://balkaninsight.com/2026/10/16/croatian-football-fans-pro-nazi-chants-prompt-arrests/bi/</link>
+		
+		<dc:creator><![CDATA[Vuk Tesija]]></dc:creator>
+		<pubDate>Fri, 16 Oct 2026 11:24:43 +0000</pubDate>
+				<category><![CDATA[Balkan Insight]]></category>
+		<category><![CDATA[Croatia]]></category>
+		<category><![CDATA[Croatia - Politics and Society]]></category>
+		<category><![CDATA[anti-semitism]]></category>
+		<category><![CDATA[football]]></category>
+		<category><![CDATA[Split]]></category>
+		<guid isPermaLink="false">https://balkaninsight.com/?p=1125267</guid>
+
+					<description><![CDATA[Hajduk Split fans' anti-Semitic and pro-Hitler chants before match against Ajax trigger arrests and draw condemnation from government and Israeli embassy.]]></description>
+										<content:encoded><![CDATA[Hajduk Split fans' anti-Semitic and pro-Hitler chants before match against Ajax trigger arrests and draw condemnation from government and Israeli embassy.]]></content:encoded>
+					
+		
+		
+		
+
+                    <media:content url="https://balkaninsight.com/wp-content/uploads/2026/10/TorcidaSplitFB-e1792141259155-640x360.jpeg" medium="image" />
+	</item>
+	</channel>
+</rss>

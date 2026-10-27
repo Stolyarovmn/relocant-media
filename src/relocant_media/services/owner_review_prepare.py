@@ -19,7 +19,8 @@ from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import freshness_decision
-from relocant_media.domain.policy import OWNER_DECISION_REASONS
+from relocant_media.domain.originality import copies_source_text
+from relocant_media.domain.policy import OWNER_DECISION_REASONS, primary_evidence_kind
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
     _candidate,
@@ -35,6 +36,18 @@ REVIEWED_STATES = frozenset({
     (PublicationStatus.HUMAN_REVIEW, "package_requires_review"),
     (PublicationStatus.READY, "package_independently_reviewed"),
 })
+
+
+def assert_primary_evidence(
+    ownerships: list[str], category: str, draft: Any, source_texts: list[str],
+) -> str:
+    """Official evidence, or verified media outside high-risk topics with our own retelling."""
+    kind = primary_evidence_kind(ownerships, category)
+    if kind is None:
+        raise DeliveryBlockedError("official primary evidence is required")
+    if kind == "media" and copies_source_text(f"{draft.title}\n{draft.body}", source_texts):
+        raise DeliveryBlockedError("draft copies the media source text")
+    return kind
 
 
 def _package_sha256(package: EditorialPackage) -> str:
@@ -109,10 +122,10 @@ def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
     frozen = run.evidence.get("documents")
     if not isinstance(frozen, list) or frozen != snapshots:
         raise DeliveryBlockedError("high-risk evidence bundle changed before owner review")
-    if not any(
-        policy.ownership.strip().casefold() == "official" for _, policy in members
-    ):
-        raise DeliveryBlockedError("official primary evidence is required")
+    assert_primary_evidence(
+        [policy.ownership for _, policy in members], outcome.ranking.category, outcome.draft,
+        [f"{member.title}\n{member.body}" for member, _ in members],
+    )
     primary = EvidenceDocument.model_validate(run.evidence)
     normalized = outcome.model_copy(
         update={

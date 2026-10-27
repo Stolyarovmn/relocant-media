@@ -44,7 +44,7 @@ from relocant_media.services.editorial import (
     _event_items,
     _snapshot_member,
 )
-from relocant_media.services.owner_review_prepare import REVIEWED_STATES
+from relocant_media.services.owner_review_prepare import REVIEWED_STATES, assert_primary_evidence
 from relocant_media.services.production_media import (
     PreparedProductionMedia,
     prepare_production_media,
@@ -286,21 +286,26 @@ def _validated_pending_package(
             or age > max_age
         ):
             raise DeliveryBlockedError("two fresh independent approvals are required")
-    if not any(
-        document.ownership.strip().casefold() == "official"
-        for document in package.event.documents
-    ):
-        raise DeliveryBlockedError("official primary evidence is required")
+    assert_primary_evidence(
+        [document.ownership for document in package.event.documents],
+        package.outcome.ranking.category, package.outcome.draft,
+        [f"{document.title}\n{document.body}" for document in package.event.documents],
+    )
     return run, post, item, source, package
 
 
-def _publication_text(package: EditorialPackage) -> str:
+def _primary_document(package: EditorialPackage) -> Any:
+    """The cited original: an official document if present, else the verified media one."""
     assert package.event is not None
-    primary = next(
-        document
-        for document in package.event.documents
-        if document.ownership.strip().casefold() == "official"
-    )
+    for kind in ("official", "media"):
+        for document in package.event.documents:
+            if document.ownership.strip().casefold() == kind:
+                return document
+    raise DeliveryBlockedError("primary evidence is required")
+
+
+def _publication_text(package: EditorialPackage) -> str:
+    primary = _primary_document(package)
     text = (
         f"{package.outcome.draft.title}\n\n{package.outcome.draft.body}"
         f"\n\nИсточник: {primary.url}"
@@ -316,12 +321,7 @@ def _review_message(package: EditorialPackage) -> tuple[str, list[dict[str, obje
 
 
 def _official_url(package: EditorialPackage) -> str:
-    assert package.event is not None
-    return next(
-        document.url
-        for document in package.event.documents
-        if document.ownership.strip().casefold() == "official"
-    )
+    return _primary_document(package).url
 
 
 async def queue_owner_reviews(
@@ -738,11 +738,10 @@ async def deliver_owner_approved(
             and package.outcome.ranking.category != "events"
         ):
             raise DeliveryBlockedError("venue source cannot authorize a high-risk topic")
-        if not any(
-            policy.ownership.strip().casefold() == "official"
-            for _, policy in members
-        ):
-            raise DeliveryBlockedError("official source is required")
+        assert_primary_evidence(
+            [policy.ownership for _, policy in members], package.outcome.ranking.category,
+            package.outcome.draft, [f"{member.title}\n{member.body}" for member, _ in members],
+        )
         for member, _ in members:
             audience_reason = audience_relevance_reason(member.title, member.body)
             if audience_reason:

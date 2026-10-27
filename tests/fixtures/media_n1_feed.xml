@@ -1,0 +1,34 @@
+<?xml version="1.0" ?>
+<rss xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:wfw="http://wellformedweb.org/CommentAPI/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:sy="http://purl.org/rss/1.0/modules/syndication/" xmlns:slash="http://purl.org/rss/1.0/modules/slash/" xmlns:media="http://search.yahoo.com/mrss/" version="2.0">
+  <channel>
+    <title>N1 Info RS - Feed</title>
+    <link>https://n1info.rs/</link>
+    <description/>
+    <lastBuildDate>Tue, 27 Oct 2026 23:29:16 +0100</lastBuildDate>
+    <atom:link href="https://n1info.rs/feed/" rel="self" type="application/rss+xml"/>
+    <item>
+      <category><![CDATA[Vesti]]></category>
+      <category><![CDATA[francuska]]></category>
+      <category><![CDATA[studentska lista - studenti pobeđuju]]></category>
+      <title>Francuske vlasti čestitale Studentskoj listi na pobedi</title>
+      <link>https://n1info.rs/vesti/francuske-vlasti-cestitale-studentskoj-listi-na-pobedi/</link>
+      <description><![CDATA[Francuske vlasti su čestitale Studentskoj listi na pobedi i saopštile da su "spremne da rade na produbljivanju bilateralne saradnje".]]></description>
+      <media:content url="https://n1info.rs/media/images/1740259042-shutterstock_2469798881.width-1200.jpg" type="image/jpeg" medium="image" width="1200"/>
+      <content:encoded><![CDATA[<img src="https://n1info.rs/media/images/1740259042-shutterstock_2469798881.width-1200.jpg"/> <p>Francuske vlasti su čestitale Studentskoj listi na pobedi i saopštile da su "spremne da rade na produbljivanju bilateralne saradnje".</p>]]></content:encoded>
+      <guid isPermaLink="true">https://n1info.rs/vesti/francuske-vlasti-cestitale-studentskoj-listi-na-pobedi/</guid>
+      <pubDate>Tue, 27 Oct 2026 17:35:31 +0100</pubDate>
+    </item><item>
+      <category><![CDATA[News]]></category>
+      <category><![CDATA[nuns]]></category>
+      <category><![CDATA[rem]]></category>
+      <category><![CDATA[informer]]></category>
+      <title>Initiative filed with REM to revoke Informer license</title>
+      <link>https://n1info.rs/english/news/initiative-filed-with-rem-to-revoke-informer-license/</link>
+      <description><![CDATA[The Independent Journalists' Association of Serbia (NUNS) and other civil society and media organizations submitted an initiative to the Regulatory Au]]></description>
+      <media:content url="https://n1info.rs/media/images/1670609937-REM-logo-novi-2-n1.width-1200.jpg" type="image/jpeg" medium="image" width="1200"/>
+      <content:encoded><![CDATA[<img src="https://n1info.rs/media/images/1670609937-REM-logo-novi-2-n1.width-1200.jpg"/> <p>The Independent Journalists' Association of Serbia (NUNS) and other civil society and media organizations submitted an initiative to the Regulatory Au</p>]]></content:encoded>
+      <guid isPermaLink="true">https://n1info.rs/english/news/initiative-filed-with-rem-to-revoke-informer-license/</guid>
+      <pubDate>Tue, 27 Oct 2026 17:40:29 +0100</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -215,19 +215,25 @@ def test_high_risk_policy_hold_gets_two_reviews_but_stays_human_review(engine):
         assert all(review.verdict == "approve" for review in package.reviews)
 
 
-def _undecided_event_hold(engine, *, reason="source_auto_publish_disabled", age=timedelta(0)):
-    """A fresh, drafted, low-risk item the editorial could not decide on its own."""
+def _undecided_event_hold(
+    engine, *, reason="source_auto_publish_disabled", age=timedelta(0),
+    ownership="official", category="events",
+):
+    """A fresh, drafted item the editorial could not decide on its own."""
     with Session(engine) as session:
-        service, _, raw_id = prepare_service(session, category="events")
+        service, _, raw_id = prepare_service(session, category=category)
         item = session.get(RawItem, raw_id)
         source = session.get(Source, item.source_id)
         item.published_at = NOW - age
         source.auto_publish = False
+        source.ownership = ownership
         session.commit()
         run = service.prepare(raw_id)
         assert run.outcome["status"] == "human_review"
-        assert run.outcome["reason"] == "source_auto_publish_disabled"
-        if reason != run.outcome["reason"]:
+        assert run.outcome["reason"] in {
+            "source_auto_publish_disabled", "policy_requires_human_review",
+        }
+        if reason != "source_auto_publish_disabled":
             run.outcome = {**run.outcome, "reason": reason}
             session.commit()
         return raw_id
@@ -482,6 +488,52 @@ async def test_owner_approval_of_low_risk_hold_still_runs_every_delivery_check(e
             target_channel_id=APPROVED_CHANNEL_ID, enabled=True,
         )
         assert result.message_id == 777 and len(publisher.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_media_story_reaches_owner_cites_the_original_and_publishes_after_checks(engine):
+    raw_id = _undecided_event_hold(engine, ownership="media")
+    assert pending_owner_decision_holds(engine, now=NOW) == [raw_id]
+    assert prepare_owner_decision_holds(engine, ReviewProvider(), _live, now=NOW)["prepared"] == 1
+    bot = ReviewBot()
+    await queue_owner_reviews(
+        engine, bot, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT, enabled=True,
+    )
+    send = next(payload for method, payload in bot.calls if method == "sendMessage")
+    assert send["link_preview_options"]["url"] == "https://www.beograd.rs/example.html"
+    publisher = Publisher()
+    with Session(engine) as session:
+        review = session.scalar(select(Submission).where(Submission.kind == OWNER_REVIEW_KIND))
+        review.status = "approved"
+        run = session.get(EditorialRun, raw_id)
+        package = _stored_package(run)
+        session.commit()
+        result = await deliver_owner_approved(
+            session, review, publisher, live_documents=_live(package),
+            target_channel_id=APPROVED_CHANNEL_ID, enabled=True,
+        )
+        assert result.message_id == 777
+        assert publisher.calls[0].endswith("Источник: https://www.beograd.rs/example.html")
+
+
+def test_media_cannot_support_a_high_risk_topic(engine):
+    _undecided_event_hold(engine, ownership="media", category="law")
+    provider = ReviewProvider()
+    assert prepare_owner_decision_holds(engine, provider, _live, now=NOW) == {
+        "prepared": 0, "blocked": 1,
+    }
+    assert provider.calls == []
+
+
+def test_media_draft_that_copies_the_source_is_blocked_before_any_review():
+    from relocant_media.services.owner_review_prepare import assert_primary_evidence
+
+    text = " ".join(f"rec{n}" for n in range(30))
+    draft = RussianDraft(title="Заголовок", body=text, claim_ids=["c1"])
+    with pytest.raises(DeliveryBlockedError, match="copies"):
+        assert_primary_evidence(["media"], "events", draft, ["Naslov " + text])
+    assert assert_primary_evidence(["media"], "events", draft, ["drugi tekst"]) == "media"
+    assert assert_primary_evidence(["official"], "law", draft, ["x " + text]) == "official"
 
 
 def test_owner_review_rows_never_enter_normal_submission_queue(engine):
