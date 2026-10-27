@@ -23,8 +23,8 @@ from relocant_media.services.owner_review import (
     revise_package,
 )
 from relocant_media.services.owner_review_prepare import (
-    pending_high_risk_holds,
-    prepare_high_risk_holds,
+    pending_owner_decision_holds,
+    prepare_owner_decision_holds,
 )
 from relocant_media.services.package_import import import_package
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
@@ -200,7 +200,7 @@ def test_high_risk_policy_hold_gets_two_reviews_but_stays_human_review(engine):
         assert "_package" not in run.outcome
 
     provider = ReviewProvider()
-    result = prepare_high_risk_holds(engine, provider, _live, now=NOW)
+    result = prepare_owner_decision_holds(engine, provider, _live, now=NOW)
 
     assert result == {"prepared": 1, "blocked": 0}
     assert provider.calls == ["independent_facts", "independent_utility"]
@@ -213,6 +213,69 @@ def test_high_risk_policy_hold_gets_two_reviews_but_stays_human_review(engine):
         assert post.status == "human_review"
         assert {review.role for review in package.reviews} == {"facts", "utility"}
         assert all(review.verdict == "approve" for review in package.reviews)
+
+
+def _undecided_event_hold(engine, *, reason="source_auto_publish_disabled", age=timedelta(0)):
+    """A fresh, drafted, low-risk item the editorial could not decide on its own."""
+    with Session(engine) as session:
+        service, _, raw_id = prepare_service(session, category="events")
+        item = session.get(RawItem, raw_id)
+        source = session.get(Source, item.source_id)
+        item.published_at = NOW - age
+        source.auto_publish = False
+        session.commit()
+        run = service.prepare(raw_id)
+        assert run.outcome["status"] == "human_review"
+        assert run.outcome["reason"] == "source_auto_publish_disabled"
+        if reason != run.outcome["reason"]:
+            run.outcome = {**run.outcome, "reason": reason}
+            session.commit()
+        return raw_id
+
+
+@pytest.mark.asyncio
+async def test_fresh_low_risk_hold_is_reviewed_and_offered_to_the_owner(engine):
+    raw_id = _undecided_event_hold(engine)
+    assert pending_owner_decision_holds(engine, now=NOW) == [raw_id]
+
+    provider = ReviewProvider()
+    assert prepare_owner_decision_holds(engine, provider, _live, now=NOW) == {
+        "prepared": 1, "blocked": 0,
+    }
+    assert provider.calls == ["independent_facts", "independent_utility"]
+    with Session(engine) as session:
+        run = session.get(EditorialRun, raw_id)
+        assert run.outcome["status"] == "human_review"
+        assert run.outcome["reason"] == "package_requires_review"
+        assert session.get(Post, run.post_id).status == "human_review"
+
+    bot = ReviewBot()
+    queued = await queue_owner_reviews(
+        engine, bot, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT, enabled=True,
+    )
+    assert queued == {"status": "ready", "queued": 1, "uncertain": 0}
+    send = next(payload for method, payload in bot.calls if method == "sendMessage")
+    assert [b["text"] for b in send["reply_markup"]["inline_keyboard"][0]] == [
+        "✅ В редакцию", "❌ Отклонить",
+    ]
+
+
+@pytest.mark.parametrize(
+    "reason", ["publication_date_unknown", "source_changed_requires_review"],
+)
+def test_provenance_and_date_holds_never_become_owner_decisions(engine, reason):
+    _undecided_event_hold(engine, reason=reason)
+    provider = ReviewProvider()
+    assert pending_owner_decision_holds(engine, now=NOW) == []
+    assert prepare_owner_decision_holds(engine, provider, _live, now=NOW) == {
+        "prepared": 0, "blocked": 0,
+    }
+    assert provider.calls == []
+
+
+def test_stale_hold_is_not_offered_to_the_owner(engine):
+    _undecided_event_hold(engine, age=timedelta(days=3))
+    assert pending_owner_decision_holds(engine, now=NOW) == []
 
 
 @pytest.mark.asyncio
@@ -241,7 +304,7 @@ async def test_owner_queue_has_publish_reject_buttons_and_is_idempotent(engine):
     assert len(sends) == 1
     sent = sends[0]
     labels = [button["text"] for button in sent["reply_markup"]["inline_keyboard"][0]]
-    assert labels == ["✅ Опубликовать", "❌ Отклонить"]
+    assert labels == ["✅ В редакцию", "❌ Отклонить"]
     assert "Источник" in sent["text"]
     assert "https://www.beograd.rs/example.html" not in sent["text"]
     assert sent["link_preview_options"]["url"] == "https://www.beograd.rs/example.html"
@@ -386,6 +449,41 @@ async def test_owner_publish_is_separate_at_most_once_path(engine):
         assert len(publisher.calls) == 1
 
 
+@pytest.mark.asyncio
+async def test_owner_approval_of_low_risk_hold_still_runs_every_delivery_check(engine):
+    raw_id = _undecided_event_hold(engine)
+    assert prepare_owner_decision_holds(engine, ReviewProvider(), _live, now=NOW)["prepared"] == 1
+    await queue_owner_reviews(
+        engine, ReviewBot(), owner_user_id=OWNER, owner_chat_id=OWNER_CHAT, enabled=True,
+    )
+    publisher = Publisher()
+    with Session(engine) as session:
+        review = session.scalar(select(Submission).where(Submission.kind == OWNER_REVIEW_KIND))
+        review.status = "approved"
+        run = session.get(EditorialRun, raw_id)
+        package = _stored_package(run)
+        session.commit()
+        with pytest.raises(DeliveryBlockedError):  # the automatic path stays closed
+            await deliver_reviewed(
+                session, raw_id, publisher, target_channel_id=APPROVED_CHANNEL_ID, enabled=True,
+            )
+        changed = tuple(
+            document.model_copy(update={"body": document.body + " Izmena izvora."})
+            for document in _live(package)
+        )
+        with pytest.raises(DeliveryBlockedError):  # approval never skips the live-source check
+            await deliver_owner_approved(
+                session, review, publisher, live_documents=changed,
+                target_channel_id=APPROVED_CHANNEL_ID, enabled=True,
+            )
+        assert publisher.calls == []
+        result = await deliver_owner_approved(
+            session, review, publisher, live_documents=_live(package),
+            target_channel_id=APPROVED_CHANNEL_ID, enabled=True,
+        )
+        assert result.message_id == 777 and len(publisher.calls) == 1
+
+
 def test_owner_review_rows_never_enter_normal_submission_queue(engine):
     raw_id = _store_reviewed_politics(engine)
     with Session(engine) as session:
@@ -424,8 +522,8 @@ def test_owner_preparation_skips_unfresh_before_network_or_ai(engine, published,
     def forbidden_fetch(package):
         raise AssertionError("stale evidence must not reach the network")
 
-    assert pending_high_risk_holds(engine, now=NOW) == []
-    assert prepare_high_risk_holds(
+    assert pending_owner_decision_holds(engine, now=NOW) == []
+    assert prepare_owner_decision_holds(
         engine, provider, forbidden_fetch, now=NOW
     ) == {"prepared": 0, "blocked": 0}
     assert provider.calls == []
@@ -443,7 +541,7 @@ def test_owner_selection_keeps_older_explicit_upcoming_event(engine):
         item.published_at = NOW - timedelta(days=4)
         item.body = "Koncert se održava 27. oktobra 2026."
         session.commit()
-    assert pending_high_risk_holds(engine, now=NOW) == [raw_id]
+    assert pending_owner_decision_holds(engine, now=NOW) == [raw_id]
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-"""Upgrade verified high-risk policy holds into independently reviewed owner packages."""
+"""Upgrade verified owner-decidable policy holds into independently reviewed owner packages."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import freshness_decision
-from relocant_media.domain.policy import HIGH_RISK_CATEGORIES
+from relocant_media.domain.policy import OWNER_DECISION_REASONS
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
     _candidate,
@@ -29,14 +29,21 @@ from relocant_media.services.editorial import (
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
+# Two fresh approvals leave a low-risk package READY by content; the source/category hold
+# keeps it HUMAN_REVIEW, so it is stored as HUMAN_REVIEW and only the owner can release it.
+REVIEWED_STATES = frozenset({
+    (PublicationStatus.HUMAN_REVIEW, "package_requires_review"),
+    (PublicationStatus.READY, "package_independently_reviewed"),
+})
+
 
 def _package_sha256(package: EditorialPackage) -> str:
     payload = canonical_json(package.model_dump(mode="json")).encode()
     return hashlib.sha256(payload).hexdigest()
 
 
-def pending_high_risk_holds(engine: Engine, *, now: datetime | None = None) -> list[int]:
-    """Return full AI outcomes held solely by the high-risk human-review policy."""
+def pending_owner_decision_holds(engine: Engine, *, now: datetime | None = None) -> list[int]:
+    """Return fresh drafted outcomes the editorial could not decide, still unreviewed."""
     checked_at = now if now is not None else datetime.now(UTC)
     with Session(engine) as session:
         rows = session.execute(
@@ -46,7 +53,6 @@ def pending_high_risk_holds(engine: Engine, *, now: datetime | None = None) -> l
             .where(
                 EditorialRun.delivery_status == "pending",
                 Post.status == PublicationStatus.HUMAN_REVIEW.value,
-                Post.category.in_(tuple(HIGH_RISK_CATEGORIES)),
             )
             .order_by(EditorialRun.raw_item_id)
         ).all()
@@ -54,7 +60,7 @@ def pending_high_risk_holds(engine: Engine, *, now: datetime | None = None) -> l
             run.raw_item_id
             for run, post, item in rows
             if "_package" not in run.outcome
-            and run.outcome.get("reason") == "policy_requires_human_review"
+            and run.outcome.get("reason") in OWNER_DECISION_REASONS
             and isinstance(run.outcome.get("draft"), dict)
             and post.telegram_message_id is None
             and post.published_at is None
@@ -89,14 +95,12 @@ def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
     ):
         raise DeliveryBlockedError("high-risk owner-review candidate has a delivery receipt")
     outcome = EditorialOutcome.model_validate(run.outcome)
-    category = outcome.ranking.category.strip().lower()
     if (
-        category not in HIGH_RISK_CATEGORIES
-        or outcome.status != PublicationStatus.HUMAN_REVIEW
-        or outcome.reason != "policy_requires_human_review"
+        outcome.status != PublicationStatus.HUMAN_REVIEW
+        or outcome.reason not in OWNER_DECISION_REASONS
         or outcome.draft is None
     ):
-        raise DeliveryBlockedError("candidate is not a pure high-risk policy hold")
+        raise DeliveryBlockedError("candidate is not an owner-decidable hold")
     if (post.title, post.body) != (outcome.draft.title, outcome.draft.body):
         raise DeliveryBlockedError("stored high-risk draft changed before owner review")
     lock_editorial_city(session, source.city)
@@ -203,7 +207,7 @@ def _live_fetcher(
     return live
 
 
-def prepare_high_risk_holds(
+def prepare_owner_decision_holds(
     engine: Engine,
     provider: StructuredAIProvider,
     live_documents: Callable[[EditorialPackage], tuple[EvidenceDocument, ...]],
@@ -215,7 +219,7 @@ def prepare_high_risk_holds(
     """Attach two fresh independent reviews while preserving final HUMAN_REVIEW status."""
     prepared = 0
     blocked = 0
-    for raw_item_id in pending_high_risk_holds(engine, now=now)[:limit]:
+    for raw_item_id in pending_owner_decision_holds(engine, now=now)[:limit]:
         try:
             with Session(engine) as session:
                 package = _build_package(session, raw_item_id)
@@ -227,8 +231,7 @@ def prepare_high_risk_holds(
             )
             evaluated = evaluate_package(package)
             if (
-                evaluated.status != PublicationStatus.HUMAN_REVIEW
-                or evaluated.reason != "package_requires_review"
+                (evaluated.status, evaluated.reason) not in REVIEWED_STATES
                 or evaluated.draft is None
                 or any(
                     review.verdict != "approve"
@@ -240,7 +243,9 @@ def prepare_high_risk_holds(
             ):
                 raise DeliveryBlockedError("high-risk package failed independent review")
             with Session(engine) as session:
-                _persist_reviewed_package(session, raw_item_id, package, evaluated)
+                _persist_reviewed_package(session, raw_item_id, package, evaluated.model_copy(
+                    update={"status": PublicationStatus.HUMAN_REVIEW,
+                            "reason": "package_requires_review"}))
             prepared += 1
         except Exception as error:
             blocked += 1

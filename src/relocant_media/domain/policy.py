@@ -12,6 +12,17 @@ HIGH_RISK_CATEGORIES = {
 }
 
 
+# Holds the editorial itself could not decide. The owner approves topic and substance;
+# provenance, freshness and fact checks still run again before any delivery. Date and
+# changed-source holds are provenance questions and are intentionally absent.
+OWNER_DECISION_REASONS = frozenset({
+    "category_not_auto_publishable",
+    "package_requires_review",
+    "source_auto_publish_disabled",
+    "policy_requires_human_review",
+})
+
+
 def risk_for_category(category: str) -> RiskClass:
     normalized = category.strip().lower()
     if normalized in HIGH_RISK_CATEGORIES:
