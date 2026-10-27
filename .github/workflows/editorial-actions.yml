@@ -13,8 +13,11 @@ on:
         required: false
         default: ''
   schedule:
+    # Scheduled runs are best effort; each worker has an independent backup slot.
     - cron: '17 * * * *'
-    - cron: '2,7,12,22,27,32,37,42,47,52,57 * * * *'
+    - cron: '47 * * * *'
+    - cron: '2,7,12,22,27,32,37,42,52,57 * * * *'
+    - cron: '9,29,49 * * * *'
 permissions:
   contents: read
 concurrency:
@@ -49,7 +52,7 @@ jobs:
         run: |
           if [ "$EVENT_NAME" = workflow_dispatch ]; then
             echo "value=$REQUESTED_MODE" >> "$GITHUB_OUTPUT"
-          elif [ "$CRON" = '17 * * * *' ]; then
+          elif [ "$CRON" = '17 * * * *' ] || [ "$CRON" = '47 * * * *' ]; then
             echo 'value=editorial' >> "$GITHUB_OUTPUT"
           else
             echo 'value=intake' >> "$GITHUB_OUTPUT"
