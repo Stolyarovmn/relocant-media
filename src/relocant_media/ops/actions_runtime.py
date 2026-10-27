@@ -286,8 +286,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             "CLOUD_DISCOVERY_BATCH",
         }:
             env.pop(name, None)
+    # The worker creates its own output directory and refuses one that already exists.
     run_dir = work / "cycle"
-    run_dir.mkdir()
     discovery_ids: list[int] = []
     created = 0
     if batch is not None:
@@ -328,6 +328,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         iter(sorted((directory / "runs").glob("*/server-report.json"), reverse=True)), None)
     if observed_run is not None and observed_run.is_file():
         observed_run = observed_run.parent
+    if observed_run is not None and not observed_run.is_dir():
+        observed_run = None  # the worker failed before creating its output
     # Preserve the prepared fix from fix/pages-failed-runtime-observation: an
     # uncommitted queue must never appear in the directory uploaded by Actions,
     # even if a hard termination bypasses main's exception cleanup.

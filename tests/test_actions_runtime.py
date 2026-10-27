@@ -120,10 +120,31 @@ def test_success_claims_before_side_effect_and_restores_receipts(context, tmp_pa
     engine.dispose()
 
 
+def test_editorial_child_receives_a_new_output_directory(context, tmp_path, monkeypatch):
+    seen = []
+    def child(command, env):
+        output = Path(command[command.index('--output') + 1])
+        seen.append(output.exists())
+        output.mkdir()
+        return 0
+    monkeypatch.setattr(runtime, 'run_child', child)
+    assert execute(context, tmp_path, monkeypatch) == 0
+    assert seen == [False]
+
+
+def test_editorial_failure_before_output_exists_still_checkpoints(
+        context, tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, 'run_child', lambda command, env: 1)
+    assert execute(context, tmp_path, monkeypatch) == 1
+    assert context[0].state['status'] == 'ready'
+
+
 def test_failed_child_reports_only_whitelisted_failure_coordinates(
         context, tmp_path, monkeypatch, capsys):
     def child(command, env):
-        report = Path(command[command.index('--output') + 1]) / 'server-report.json'
+        output = Path(command[command.index('--output') + 1])
+        output.mkdir()
+        report = output / 'server-report.json'
         report.write_text(json.dumps({'status': 'SERVER_FAILED', 'error_type': 'ValueError',
             'error_site': 'server_cycle.py:816', 'secret': 'TOKEN-123',
             'backup_error_type': 'bad value with spaces'}), encoding='utf-8')
