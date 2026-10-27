@@ -273,7 +273,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         }:
             env.pop(name, None)
     run_dir = work / "cycle"
-    run_dir.mkdir()
+    # The primary cycle owns creation and requires a fresh output directory.
     discovery_ids: list[int] = []
     created = 0
     if batch is not None:
