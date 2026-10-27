@@ -34,7 +34,7 @@ from relocant_media.domain.audience import audience_relevance_reason
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import draft_date_reason, freshness_decision
-from relocant_media.domain.policy import HIGH_RISK_CATEGORIES
+from relocant_media.domain.policy import OWNER_DECISION_REASONS
 from relocant_media.domain.presentation import valid_title_presentation
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.editorial import (
@@ -44,6 +44,7 @@ from relocant_media.services.editorial import (
     _event_items,
     _snapshot_member,
 )
+from relocant_media.services.owner_review_prepare import REVIEWED_STATES
 from relocant_media.services.production_media import (
     PreparedProductionMedia,
     prepare_production_media,
@@ -255,9 +256,6 @@ def _validated_pending_package(
         or package.city != source.city
     ):
         raise DeliveryBlockedError("owner-review package identity mismatch")
-    category = package.outcome.ranking.category.strip().lower()
-    if category not in HIGH_RISK_CATEGORIES:
-        raise DeliveryBlockedError("owner-review path is restricted to high-risk categories")
     if post.status != PublicationStatus.HUMAN_REVIEW.value:
         raise DeliveryBlockedError("owner-review post is not awaiting human review")
     if (post.title, post.body) != (package.outcome.draft.title, package.outcome.draft.body):
@@ -268,8 +266,7 @@ def _validated_pending_package(
         raise DeliveryBlockedError("owner-review package fingerprint mismatch")
     outcome = evaluate_package(package, now=now)
     if (
-        outcome.status != PublicationStatus.HUMAN_REVIEW
-        or outcome.reason != "package_requires_review"
+        (outcome.status, outcome.reason) not in REVIEWED_STATES
         or outcome.draft is None
     ):
         raise DeliveryBlockedError("package has blockers beyond owner approval")
@@ -349,7 +346,6 @@ async def queue_owner_reviews(
                 .where(
                     EditorialRun.delivery_status == "pending",
                     Post.status == PublicationStatus.HUMAN_REVIEW.value,
-                    Post.category.in_(tuple(HIGH_RISK_CATEGORIES)),
                 )
                 .order_by(EditorialRun.raw_item_id)
             )
@@ -359,8 +355,13 @@ async def queue_owner_reviews(
             break
         with Session(engine) as session:
             try:
-                run, _, _, _, package = _validated_pending_package(session, raw_item_id)
+                run, _, item, _, package = _validated_pending_package(session, raw_item_id)
             except (DeliveryBlockedError, ValueError):
+                continue
+            if run.outcome.get("reason") not in OWNER_DECISION_REASONS or freshness_decision(
+                item.title, item.body, item.published_at, datetime.now(UTC),
+                published_at_precision=item.published_at_precision,
+            ).action != "keep":
                 continue
             package_sha = _package_sha256(package)
             rows = _review_rows(session, raw_item_id)
@@ -406,7 +407,7 @@ async def queue_owner_reviews(
             "reply_markup": {
                 "inline_keyboard": [[
                     {
-                        "text": "✅ Опубликовать",
+                        "text": "✅ В редакцию",
                         "callback_data": f"or:publish:{review_id}",
                     },
                     {
@@ -536,10 +537,7 @@ def revise_package(
     ):
         raise DeliveryBlockedError("owner revision failed independent review")
     evaluated = evaluate_package(reviewed)
-    if (
-        evaluated.status != PublicationStatus.HUMAN_REVIEW
-        or evaluated.reason != "package_requires_review"
-    ):
+    if (evaluated.status, evaluated.reason) not in REVIEWED_STATES:
         raise DeliveryBlockedError("owner revision has blockers beyond owner approval")
     return reviewed
 
@@ -584,11 +582,7 @@ def replace_pending_package(
     if revised.event.event_key != event_key(_candidate(item)) or expected != actual:
         raise DeliveryBlockedError("event evidence changed before owner revision persistence")
     evaluated = evaluate_package(revised)
-    if (
-        evaluated.status != PublicationStatus.HUMAN_REVIEW
-        or evaluated.reason != "package_requires_review"
-        or evaluated.draft is None
-    ):
+    if (evaluated.status, evaluated.reason) not in REVIEWED_STATES or evaluated.draft is None:
         raise DeliveryBlockedError("revised package is not owner-review eligible")
     fingerprint = _package_sha256(revised)
     metadata = {

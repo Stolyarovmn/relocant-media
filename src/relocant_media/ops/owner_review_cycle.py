@@ -23,8 +23,8 @@ from relocant_media.services.owner_review import (
     queue_owner_reviews,
 )
 from relocant_media.services.owner_review_prepare import (
-    pending_high_risk_holds,
-    prepare_high_risk_holds,
+    pending_owner_decision_holds,
+    prepare_owner_decision_holds,
 )
 from relocant_media.storage.file_lock import file_lock
 from relocant_media.storage.models import Submission
@@ -55,7 +55,7 @@ def _revision_count(engine: Engine) -> int:
 
 
 def _provider(engine: Engine) -> ServerAI | None:
-    if not _revision_count(engine) and not pending_high_risk_holds(engine):
+    if not _revision_count(engine) and not pending_owner_decision_holds(engine):
         return None
     api_key = os.environ["GEMINI_API_KEY"]
     model = os.environ["GEMINI_MODEL"]
@@ -71,8 +71,8 @@ async def run_cycle(
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     provider = _provider(engine)
     preparation = (
-        prepare_high_risk_holds(engine, provider, fetch_documents)
-        if provider is not None and pending_high_risk_holds(engine)
+        prepare_owner_decision_holds(engine, provider, fetch_documents)
+        if provider is not None and pending_owner_decision_holds(engine)
         else {"prepared": 0, "blocked": 0}
     )
     async with httpx.AsyncClient(
