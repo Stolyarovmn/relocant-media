@@ -44,14 +44,18 @@ def test_news_keeps_its_own_freshness_rules_and_guides_ignore_publication_date()
     assert guide.action == "keep"
 
 
-def test_guide_sources_are_official_review_only_and_isolated():
+def test_guide_sources_stay_review_only_but_are_switched_off_by_the_owner():
+    """Owner decision 28.10.2026: a news channel, not a reference bot. The mechanism stays for
+    change detection; no guide source is collected until the owner re-enables one."""
     registry = {s.id: s for s in load_source_registry(SOURCES)}
-    assert set(guide_sources()) >= {"guide_nsz_foreigner_employment"}
-    for source_id in guide_sources():
-        source = registry[source_id]
-        assert source.ownership == "official" and source.source_type == "official_guide"
-        assert source.policy.auto_publish is False
-        assert source.extraction.strategy == "official_guide"
+    guides = [s for s in registry.values() if s.source_type == "official_guide"]
+    assert {s.id for s in guides} >= {"guide_nsz_foreigner_employment",
+                                       "guide_welcome_serbia_residence",
+                                       "guide_mup_foreign_licence_exchange"}
+    for source in guides:
+        assert source.ownership == "official" and source.policy.auto_publish is False
+        assert source.extraction.status == "inactive"
+    assert guide_sources() == {}
     assert not set(guide_sources()) & (set(media_sources()) | set(venue_sources()))
 
 
@@ -99,7 +103,6 @@ async def test_collector_fetches_the_official_page_once():
 def test_mup_licence_exchange_guide_extracts_only_the_official_text():
     source = next(s for s in load_source_registry(SOURCES)
                   if s.id == "guide_mup_foreign_licence_exchange")
-    assert source.id in guide_sources()
     html = Path("tests/fixtures/guide_mup_licence.html").read_text(encoding="utf-8")
 
     item = parse_official_guide(html, source)
