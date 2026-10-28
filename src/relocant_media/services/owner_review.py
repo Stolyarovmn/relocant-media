@@ -50,7 +50,11 @@ from relocant_media.services.editorial import (
     _event_items,
     _snapshot_member,
 )
-from relocant_media.services.owner_review_prepare import REVIEWED_STATES, assert_primary_evidence
+from relocant_media.services.owner_review_prepare import (
+    REVIEWED_STATES,
+    assert_primary_evidence,
+    owner_reason_text,
+)
 from relocant_media.services.production_media import (
     PreparedProductionMedia,
     prepare_production_media,
@@ -348,10 +352,16 @@ def _publication_text(package: EditorialPackage, source_type: str = "") -> str:
 
 
 def _review_message(
-    package: EditorialPackage, source_type: str = "",
+    package: EditorialPackage, source_type: str = "", why: str = "",
 ) -> tuple[str, list[dict[str, object]]]:
     text, entities = compact_source_link(_publication_text(package, source_type))
-    return text, list(entities)
+    if not why:
+        return text, list(entities)
+    # Owner-only header: entity offsets (UTF-16) shift with it; the published text is unchanged.
+    header = f"Почему это у вас: {why}\n\n"
+    shift = len(header.encode("utf-16-le")) // 2
+    moved = [{**entity, "offset": int(entity["offset"]) + shift} for entity in entities]
+    return header + text, moved
 
 
 def _official_url(package: EditorialPackage) -> str:
@@ -399,6 +409,10 @@ async def queue_owner_reviews(
             ).action != "keep":
                 continue
             source_type = source.source_type
+            why = owner_reason_text(
+                str(run.outcome.get("_owner_reason") or run.outcome.get("reason") or ""),
+                package.outcome.ranking.category,
+            )
             package_sha = _package_sha256(package)
             rows = _review_rows(session, raw_item_id)
             same = [row for row in rows if row.payload.get("package_sha256") == package_sha]
@@ -437,7 +451,7 @@ async def queue_owner_reviews(
             session.add(review)
             session.commit()
             review_id = review.id
-        text, entities = _review_message(package, source_type)
+        text, entities = _review_message(package, source_type, why)
         payload: dict[str, object] = {
             "chat_id": owner_chat_id,
             "text": text,

@@ -800,3 +800,46 @@ def test_preparation_audit_is_summarised_per_blocked_candidate_without_any_text(
         {"raw_item_id": 987, "error_type": "ValueError", "reviews": []},
     ]
     assert "PRIVATE" not in str(details)
+
+
+@pytest.mark.parametrize(("reason", "category", "needle"), [
+    ("source_auto_publish_disabled", "events", "источник"),
+    ("category_not_auto_publishable", "schools", "автоматически"),
+    ("package_requires_review", "city", "автоматически"),
+    ("policy_requires_human_review", "politics", "политика"),
+    ("borderline_relevance", "events", "сомнева"),
+])
+def test_owner_is_told_in_plain_words_why_a_story_was_not_published_automatically(
+        reason, category, needle):
+    from relocant_media.services.owner_review_prepare import owner_reason_text
+
+    text = owner_reason_text(reason, category)
+    assert needle in text.lower() and len(text) < 200
+
+
+def test_unknown_reason_is_shown_as_a_plain_code_and_never_as_free_text():
+    from relocant_media.services.owner_review_prepare import owner_reason_text
+
+    assert owner_reason_text("some_new_reason", "x").endswith("some_new_reason")
+    assert "<" not in owner_reason_text("<script>alert(1)</script>", "x")
+
+
+@pytest.mark.asyncio
+async def test_card_opens_with_the_reason_and_keeps_it_out_of_the_published_text(engine):
+    raw_id = _undecided_event_hold(engine)
+    assert prepare_owner_decision_holds(engine, ReviewProvider(), _live, now=NOW)["prepared"] == 1
+    with Session(engine) as session:
+        run = session.get(EditorialRun, raw_id)
+        assert run.outcome["_owner_reason"] == "source_auto_publish_disabled"
+        assert run.outcome["reason"] == "package_requires_review"
+    bot = ReviewBot()
+    await queue_owner_reviews(
+        engine, bot, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT, enabled=True,
+    )
+    send = next(payload for method, payload in bot.calls if method == "sendMessage")
+    assert send["text"].startswith("Почему это у вас:")
+    from relocant_media.services.owner_review import _publication_text
+
+    with Session(engine) as session:
+        package = _stored_package(session.get(EditorialRun, raw_id))
+    assert "Почему" not in _publication_text(package)
