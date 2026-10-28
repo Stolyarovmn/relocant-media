@@ -12,6 +12,7 @@ from sqlalchemy import and_, create_engine, func, or_, select, text
 from sqlalchemy.orm import Session, aliased
 
 from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key, same_event
+from relocant_media.domain.freshness import GUIDE_MAX_AGE, GUIDE_SOURCE_TYPE
 from relocant_media.domain.publication_time import publication_interval
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
@@ -43,13 +44,14 @@ def _event_candidate(item: RawItem) -> EventCandidate:
 
 
 def _evidence(item: RawItem) -> dict[str, Any]:
-    assert item.published_at is not None
     return {
         "source_id": item.source_id,
         "url": item.url,
         "title": item.title,
         "body": item.body,
-        "published_at": item.published_at.astimezone(UTC).isoformat(),
+        "published_at": (
+            item.published_at.astimezone(UTC).isoformat() if item.published_at else None
+        ),
         "published_at_precision": item.published_at_precision,
     }
 
@@ -109,6 +111,15 @@ def select_candidates(
                      else "stored_timestamp_precision_unknown")
         window_matches[item.id] = match
         retained.append((item, source))
+    # Evergreen guides have no publication date by design: they are valid for 30 days from
+    # the moment their text was first seen, whatever the editorial window is.
+    guides = session.execute(base.where(
+        Source.source_type == GUIDE_SOURCE_TYPE, RawItem.published_at.is_(None),
+        RawItem.ingested_at <= until, RawItem.ingested_at >= until - GUIDE_MAX_AGE,
+    ).order_by(RawItem.id)).all()
+    for item, source in guides:
+        window_matches[item.id] = "guide_verified"
+        retained.append((item, source))
     rows = retained
 
     # Compare against the full previously reviewed evidence, not only exact URLs/hashes.
@@ -156,8 +167,11 @@ def select_candidates(
                                    item.title.casefold())
             private_priority = any(member.raw_item_id in (priority_raw_ids or set())
                                    for member in group)
-            band = 4 if private_priority else 3 if disruption else priorities.get(source.id, 0)
-            return band, -(recent_source_counts or {}).get(source.id, 0), item.published_at, item.id
+            guide = source.source_type == GUIDE_SOURCE_TYPE
+            band = (4 if private_priority or guide else 3 if disruption
+                    else priorities.get(source.id, 0))
+            return (band, -(recent_source_counts or {}).get(source.id, 0),
+                    item.published_at or item.ingested_at, item.id)
         clusters.sort(key=queue_order, reverse=True)
     candidates = []
     for cluster in clusters[:limit]:
@@ -200,7 +214,7 @@ def select_candidates(
             },
         })
 
-    missing = base.where(RawItem.published_at.is_(None))
+    missing = base.where(RawItem.published_at.is_(None), Source.source_type != GUIDE_SOURCE_TYPE)
     missing_count = session.scalar(select(func.count()).select_from(missing.subquery())) or 0
     excluded = [{
         "raw_item_id": item.id,

@@ -95,6 +95,37 @@ def test_export_selects_exact_window_and_excludes_reviewed_url(editorial_session
     assert editorial_session.scalar(select(func.count()).select_from(EditorialRun)) == 1
 
 
+def test_guides_are_candidates_without_a_publication_date_and_go_first() -> None:
+    from sqlalchemy import create_engine
+
+    from relocant_media.storage.models import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    editorial_session = Session(engine)
+    seed(editorial_session)
+    editorial_session.add(Source(id="g", city="belgrade", name="g", url="https://example.org/g",
+                                 source_type="official_guide", trust=1, enabled=True))
+    editorial_session.flush()
+    for external_id, age in (("guide-fresh", 3), ("guide-expired", 40)):
+        editorial_session.add(RawItem(
+            source_id="g", external_id=external_id, url=f"https://example.org/{external_id}",
+            title=external_id, body="Tekst vodiča " * 20, published_at=None,
+            ingested_at=NOW - timedelta(days=age),
+        ))
+    editorial_session.commit()
+
+    result = select_candidates(editorial_session, city="belgrade", since=NOW,
+                               until=NOW + timedelta(days=1), limit=1, newest_first=True)
+
+    assert [item["article_id"] for item in result["candidates"]] == ["guide-fresh"]
+    assert result["candidates"][0]["evidence"]["published_at"] is None
+    everything = select_candidates(editorial_session, city="belgrade", since=NOW,
+                                   until=NOW + timedelta(days=1), limit=10)
+    ids = [item["article_id"] for item in everything["candidates"]]
+    assert "guide-expired" not in ids and "missing" not in ids  # undated news stay excluded
+
+
 def test_export_manifest_without_loading_runtime(
     editorial_session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
