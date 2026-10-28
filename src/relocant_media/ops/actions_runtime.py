@@ -287,7 +287,7 @@ def intake_summary(saved: dict[str, Any]) -> dict[str, Any]:
                            ("actions", ("revised", "rejected", "published", "blocked",
                                         "deferred")),
                            ("queue", ("queued", "uncertain"))):
-            counters = _counters(owner.get(key), names)
+            counters: dict[str, Any] = dict(_counters(owner.get(key), names))
             if key == "preparation" and isinstance(owner.get(key), dict):
                 details = _preparation_details(owner[key].get("details"))
                 if details:
