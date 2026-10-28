@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.gemini_process import GeminiWorkerError
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
 from relocant_media.ai.package import EditorialPackage, canonical_json, evaluate_package
 from relocant_media.ai.provider import StructuredAIProvider
@@ -214,6 +215,7 @@ def _persist_reviewed_package(
 
 
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
+_DETAIL = re.compile(r"[A-Za-z0-9_.:() -]{1,100}")
 
 
 def summarize_preparation_audit(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -245,8 +247,12 @@ def summarize_preparation_audit(entries: list[dict[str, Any]]) -> list[dict[str,
             raw_item_id = entry.get("raw_item_id")
             error_type = entry.get("error_type")
             if type(raw_item_id) is int and isinstance(error_type, str):
-                details.append({"raw_item_id": raw_item_id, "error_type": error_type[:40],
-                                "reviews": pending[-3:]})
+                detail = entry.get("error_detail")
+                item: dict[str, Any] = {"raw_item_id": raw_item_id,
+                                        "error_type": error_type[:40], "reviews": pending[-3:]}
+                if isinstance(detail, str) and _DETAIL.fullmatch(detail):
+                    item["error_detail"] = detail
+                details.append(item)
             pending = []
     return details[:5]
 
@@ -310,6 +316,9 @@ def prepare_owner_decision_holds(
                         "raw_item_id": raw_item_id,
                         "status": "blocked",
                         "error_type": type(error).__name__,
+                        # Fixed texts of our own worker errors only (class names, no values).
+                        **({"error_detail": str(error)[:100]}
+                           if isinstance(error, GeminiWorkerError) else {}),
                     }
                 )
     return {"prepared": prepared, "blocked": blocked}
