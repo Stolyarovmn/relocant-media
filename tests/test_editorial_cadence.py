@@ -89,7 +89,7 @@ def test_chain_books_the_next_cycle_only_after_a_healthy_main_cycle():
 def _run_chain(tmp_path, queued):
     script = next(step for step in _chain()["steps"])["run"]
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(parents=True)
     calls = tmp_path / "calls"
     stub = ["#!/bin/sh", 'echo "$@" >> "$CALLS"', '[ "$1" = run ] && echo "$QUEUED"', "exit 0", ""]
     (bin_dir / "gh").write_text(chr(10).join(stub), encoding="utf-8")
@@ -101,11 +101,9 @@ def _run_chain(tmp_path, queued):
     return calls.read_text().splitlines()
 
 
-def test_chain_dispatches_auto_mode_when_nothing_is_waiting(tmp_path):
-    calls = _run_chain(tmp_path, 0)
-    assert calls[-1] == "workflow run editorial-actions.yml --ref main -f mode=auto"
-
-
-def test_chain_does_not_pile_up_when_a_cycle_is_already_queued(tmp_path):
-    calls = _run_chain(tmp_path, 1)
-    assert all(not call.startswith("workflow run") for call in calls)
+def test_chain_books_the_next_cycle_even_when_a_cron_run_is_already_waiting(tmp_path):
+    """The concurrency group keeps one pending run, so booking again can never pile up;
+    a waiting cron run is a normal moment of every cycle and must not break the chain."""
+    for queued in (0, 1, 3):
+        calls = _run_chain(tmp_path / f"queued{queued}", queued)
+        assert calls[-1] == "workflow run editorial-actions.yml --ref main -f mode=auto"
