@@ -184,7 +184,9 @@ class _CachedOutcome(EditorialPipeline):
     def __init__(self, outcome: EditorialOutcome, documents: tuple[EvidenceDocument, ...]):
         self.outcome, self.documents = outcome, documents
 
-    def run(self, *, city: str, documents: tuple[EvidenceDocument, ...]) -> EditorialOutcome:
+    def run(
+        self, *, city: str, documents: tuple[EvidenceDocument, ...], evergreen: bool = False,
+    ) -> EditorialOutcome:
         if city != "belgrade" or documents != self.documents:
             raise ValueError("evidence changed before persistence")
         return self.outcome
