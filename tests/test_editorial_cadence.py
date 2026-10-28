@@ -74,7 +74,17 @@ def _chain():
     return workflow()["jobs"]["chain"]
 
 
-def test_chain_books_the_next_cycle_only_after_a_healthy_main_cycle():
+def test_chain_survives_a_failed_cycle_but_backs_off():
+    """The exact-main-CI guard fails right after every merge; that must pause the chain
+    for ten minutes, not end it. Cancelled or skipped cycles still do not chain."""
+    chain = _chain()
+    assert "needs.cycle.result == 'failure'" in chain["if"]
+    assert "needs.cycle.result == 'cancelled'" not in chain["if"]
+    delay = chain["steps"][0]["env"]["CHAIN_DELAY_SECONDS"]
+    assert "needs.cycle.result == 'success'" in delay and "'120'" in delay and "'600'" in delay
+
+
+def test_chain_books_the_next_cycle_only_after_a_finished_main_cycle():
     chain = _chain()
     assert chain["needs"] == "cycle"
     for condition in ("needs.cycle.result == 'success'", "refs/heads/main",
