@@ -132,8 +132,8 @@ def reviewed_package(
         score = response.score
         if isinstance(response, _UtilityResponse):
             score = round(100 * sum(response.rubric.model_dump().values()) / 16)
-            if (response.verdict == "approve" and
-                    min(response.rubric.local_relevance, response.rubric.practical_value) < 3):
+            if response.verdict == "approve" and (
+                    response.rubric.local_relevance < 3 or response.rubric.practical_value < 2):
                 response = response.model_copy(update={
                     "verdict": "hold", "flags": [*response.flags, AUDIENCE_MISMATCH_FLAG],
                 })

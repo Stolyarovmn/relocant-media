@@ -41,18 +41,31 @@ def test_no_blanket_ban_on_workshops_gender_venues_or_transit(title, body):
     assert audience_relevance_reason(title, body) is None
 
 
-@pytest.mark.parametrize("dimension", ["local_relevance", "practical_value"])
-def test_high_total_cannot_compensate_for_poor_audience_fit(dimension):
-    value, provider, audit = package(), Provider(), []
+@pytest.mark.parametrize(("dimension", "value", "verdict"), [
+    ("local_relevance", 2, "hold"),    # must clearly be about life in Belgrade or Serbia
+    ("practical_value", 1, "hold"),    # a reader must have some reason to care
+    ("practical_value", 2, "approve"),  # interest is enough: no personal decision required
+])
+def test_local_news_needs_a_clear_local_link_and_some_reader_interest(dimension, value, verdict):
+    pkg, provider, audit = package(), Provider(), []
     provider.responses[1]["rubric"] = dict(local_relevance=4, practical_value=4,
                                             timeliness=4, clarity=4)
-    provider.responses[1]["rubric"][dimension] = 2
-    result = reviewed_package(value, provider, lambda: documents(value), audit=audit.append)
+    provider.responses[1]["rubric"][dimension] = value
+    result = reviewed_package(pkg, provider, lambda: documents(pkg), audit=audit.append)
     review = result.reviews[1]
-    assert review.score == 88 and review.verdict == "hold" and review.flags
-    assert audit[1]["verdict"] == "hold"
-    assert "кому из наших читателей" in provider.calls[1]["system_instruction"]
+    assert review.verdict == verdict
+    assert bool(review.flags) is (verdict == "hold")
+    instruction = provider.calls[1]["system_instruction"]
+    assert "местные новости" in instruction and "не читают по-сербски" in instruction
     assert "ограничения участия" in provider.calls[0]["system_instruction"]
+
+
+def test_ranking_prompt_asks_for_local_news_to_adapt_not_for_relocant_only_material():
+    from relocant_media.ai.prompts import RANK_SYSTEM
+
+    prompt = " ".join(RANK_SYSTEM.split())
+    assert "local news" in prompt and "cannot read Serbian" in prompt
+    assert "useful to Russian-speaking relocants" not in prompt
 
 
 def test_audience_rejection_does_not_spend_calls_on_cosmetic_repairs():
@@ -61,3 +74,12 @@ def test_audience_rejection_does_not_spend_calls_on_cosmetic_repairs():
     result = review_with_repairs(value, provider, lambda: documents(value))
     assert result.reviews[1].verdict == "hold"
     assert [c["task"] for c in provider.calls] == ["independent_facts", "independent_utility"]
+
+
+def test_a_rejected_utility_review_stays_rejected_whatever_the_rubric_says():
+    pkg, provider = package(), Provider()
+    provider.responses[1]["verdict"] = "reject"
+    provider.responses[1]["rubric"] = dict(local_relevance=4, practical_value=1,
+                                            timeliness=4, clarity=4)
+    result = reviewed_package(pkg, provider, lambda: documents(pkg))
+    assert result.reviews[1].verdict == "reject"
