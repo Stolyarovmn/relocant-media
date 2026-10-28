@@ -283,7 +283,8 @@ async def _collect_exact_url(collector: Any, url: str) -> Any:
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     documents = []
-    venues = venue_sources()
+    # Venues, verified media and evergreen guides are re-read through their own collectors.
+    venues = {**venue_sources(), **media_sources(), **guide_sources()}
     async def fetch_venue(source: SourceConfig, url: str) -> Any:
         async with httpx.AsyncClient(timeout=25, trust_env=False) as venue_client:
             collector = build_collector(source, venue_client)
