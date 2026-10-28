@@ -223,7 +223,7 @@ PROCESS_LIMIT = 5
 
 
 def media_sources() -> dict[str, SourceConfig]:
-    """Verified media feeds: full-text evidence that only the owner queue may release."""
+    """Verified media feeds: full-text evidence on the normal news path (never high-risk)."""
     return {
         source.id: source
         for source in load_source_registry(SOURCES)
@@ -231,7 +231,6 @@ def media_sources() -> dict[str, SourceConfig]:
         and source.extraction.status == "active"
         and source.source_type == "news_media"
         and source.ownership == "media"
-        and not source.policy.auto_publish
         and not source.policy.high_risk
     }
 

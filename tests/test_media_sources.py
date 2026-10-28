@@ -20,13 +20,13 @@ def _registry():
     return {source.id: source for source in load_source_registry(SOURCES)}
 
 
-def test_verified_media_are_review_only_non_high_risk_sources() -> None:
+def test_verified_media_follow_the_normal_news_path_and_are_never_high_risk() -> None:
     registry = _registry()
     assert set(media_sources()) == set(MEDIA)
     for source_id in MEDIA:
         source = registry[source_id]
         assert source.ownership == "media" and source.source_type == "news_media"
-        assert source.policy.auto_publish is False and source.policy.high_risk is False
+        assert source.policy.auto_publish is True and source.policy.high_risk is False
         assert source.extraction.strategy == "venue_feed" and source.extraction.status == "active"
         assert 0 < source.trust <= 0.85
         host = str(source.extraction.feed_url).split("/")[2]

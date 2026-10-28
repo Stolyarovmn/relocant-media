@@ -24,8 +24,8 @@ extraction:
   - n1info.rs
   - www.n1info.rs
 policy:
-  auto_publish: false
+  auto_publish: true
   high_risk: false
 verification:
   checked_at: '2026-10-27'
-  note: Независимое СМИ. RSS отдаёт полный content:encoded и настоящую pubDate. Источник media; публикация только через решение владельца, со ссылкой и собственным пересказом.
+  note: Независимое СМИ. RSS отдаёт полный content:encoded и настоящую pubDate. Источник media; идёт обычным путём новости (две независимые проверки, не высокорисковые темы, ссылка на оригинал и собственный пересказ); к владельцу попадает то, что не вышло, с пояснением.
