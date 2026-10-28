@@ -154,11 +154,13 @@ class ServerAI:
         if task == "rank":
             categories = ["transport", "events", "city", "utilities", "schools", "medicine",
                           "health", "immigration", "law", "tax", "banking", "politics",
-                          "crime", "accusations", "real_estate", "jobs"]
+                          "crime", "accusations", "real_estate", "jobs", "economy"]
             policy += ("category — машинный идентификатор на английском из разрешённого списка. "
                        "Культурные анонсы и афиша относятся к events; движение транспорта — "
                        "к transport. Не переводить category на русский и не маскировать "
-                       "медицинские, правовые, политические и иные рискованные темы как events. ")
+                       "медицинские, правовые, политические и иные рискованные темы как events. "
+                       "banking — только банковские услуги и регулирование для клиентов; "
+                       "новости центрального банка, резервов, цен и курсов — economy. ")
             response_schema = copy.deepcopy(response_schema)
             if "category" in response_schema.get("properties", {}):
                 response_schema["properties"]["category"]["enum"] = categories
