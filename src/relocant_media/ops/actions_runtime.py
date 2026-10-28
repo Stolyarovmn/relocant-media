@@ -435,7 +435,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     ready = {**busy, "status": "ready", "generation": attempt, "snapshot": manifest,
              "intake_state": budget, "finished_at": datetime.now(UTC).isoformat(),
              "last_exit_code": code, "last_cycle": last_cycle,
-             "last_intake": intake_summary(saved_intake),
+             "last_intake": intake_summary(saved_intake) or state.get("last_intake") or {},
              "last_editorial_at": (
                  datetime.now(UTC).isoformat() if mode == "editorial" and code == 0
                  else state.get("last_editorial_at"))}

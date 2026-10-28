@@ -200,6 +200,14 @@ def test_intake_summary_is_checkpointed_with_only_allowlisted_counters(
     assert 'TOKEN' not in json.dumps(summary) and 'PRIVATE' not in json.dumps(summary)
 
 
+def test_editorial_cycle_does_not_erase_the_last_intake_summary(context, tmp_path, monkeypatch):
+    context[0].state['last_intake'] = {'status': 'ready', 'owner_review': {'status': 'ready'}}
+    monkeypatch.setattr(runtime, 'run_child', lambda command, env: 0)
+    assert execute(context, tmp_path, monkeypatch, mode='editorial') == 0
+    assert context[0].state['last_intake'] == {
+        'status': 'ready', 'owner_review': {'status': 'ready'}}
+
+
 def test_failed_child_reports_only_whitelisted_failure_coordinates(
         context, tmp_path, monkeypatch, capsys):
     def child(command, env):
