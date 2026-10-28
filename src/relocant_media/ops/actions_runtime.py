@@ -227,6 +227,43 @@ def report_failure(run_dir: Path, code: int) -> None:
     print(json.dumps({"runtime_failure": fields}), file=sys.stderr)
 
 
+def _counters(value: object, keys: tuple[str, ...]) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    return {key: value[key] for key in keys if type(value.get(key)) is int}
+
+
+def intake_summary(saved: dict[str, Any]) -> dict[str, Any]:
+    """Only statuses and counters of the last intake pass; never text, ids or exception values."""
+    result = saved.get("last_result")
+    if not isinstance(result, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    for key in ("status",):
+        if isinstance(result.get(key), str) and len(result[key]) <= 40:
+            summary[key] = result[key]
+    if type(result.get("owner_review_exit_code")) is int:
+        summary["owner_review_exit_code"] = result["owner_review_exit_code"]
+    intake = _counters(result.get("intake"), ("received", "inspected", "telegram_sends"))
+    if intake:
+        summary["intake"] = intake
+    owner = result.get("owner_review")
+    if isinstance(owner, dict):
+        block: dict[str, Any] = {}
+        for key in ("status", "error_type"):
+            if isinstance(owner.get(key), str) and re.fullmatch(r"[A-Za-z0-9_]{1,40}", owner[key]):
+                block[key] = owner[key]
+        for key, names in (("preparation", ("prepared", "blocked")),
+                           ("actions", ("revised", "rejected", "published", "blocked",
+                                        "deferred")),
+                           ("queue", ("queued", "uncertain"))):
+            counters = _counters(owner.get(key), names)
+            if counters:
+                block[key] = counters
+        summary["owner_review"] = block
+    return summary
+
+
 def preview_archive(drive: SnapshotStore, manifest_id: str, work: Path, output: Path) -> int:
     manifest = json.loads(drive.download(identifier(manifest_id)))
     manifest["drive_file_id"] = (manifest.get("drive_file_id")
@@ -359,6 +396,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     ready = {**busy, "status": "ready", "generation": attempt, "snapshot": manifest,
              "intake_state": budget, "finished_at": datetime.now(UTC).isoformat(),
              "last_exit_code": code, "last_cycle": last_cycle,
+             "last_intake": intake_summary(saved_intake),
              "last_editorial_at": (
                  datetime.now(UTC).isoformat() if mode == "editorial" and code == 0
                  else state.get("last_editorial_at"))}
