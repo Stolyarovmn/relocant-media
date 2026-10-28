@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol, cast
+from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import ValidationError
@@ -34,7 +35,11 @@ from relocant_media.bot.publisher import Publisher
 from relocant_media.domain.audience import audience_relevance_reason
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.draft_language import draft_language_reason
-from relocant_media.domain.freshness import draft_date_reason, freshness_decision
+from relocant_media.domain.freshness import (
+    GUIDE_SOURCE_TYPE,
+    draft_date_reason,
+    evidence_freshness,
+)
 from relocant_media.domain.policy import OWNER_DECISION_REASONS
 from relocant_media.domain.presentation import valid_title_presentation
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
@@ -305,10 +310,20 @@ def _primary_document(package: EditorialPackage) -> PackageEventDocument:
     raise DeliveryBlockedError("primary evidence is required")
 
 
-def _publication_text(package: EditorialPackage) -> str:
+def _verified_note(package: EditorialPackage, source_type: str) -> str:
+    """Evergreen guides state when the official page was last checked live."""
+    if source_type != GUIDE_SOURCE_TYPE:
+        return ""
+    checked = max(review.reviewed_at for review in package.reviews)
+    day = checked.astimezone(ZoneInfo("Europe/Belgrade")).strftime("%d.%m.%Y")
+    return f"\n\nПроверено по официальному источнику: {day}"
+
+
+def _publication_text(package: EditorialPackage, source_type: str = "") -> str:
     primary = _primary_document(package)
     text = (
         f"{package.outcome.draft.title}\n\n{package.outcome.draft.body}"
+        f"{_verified_note(package, source_type)}"
         f"\n\nИсточник: {primary.url}"
     )
     if len(text.encode("utf-16-le")) // 2 > 4096:
@@ -316,8 +331,10 @@ def _publication_text(package: EditorialPackage) -> str:
     return text
 
 
-def _review_message(package: EditorialPackage) -> tuple[str, list[dict[str, object]]]:
-    text, entities = compact_source_link(_publication_text(package))
+def _review_message(
+    package: EditorialPackage, source_type: str = "",
+) -> tuple[str, list[dict[str, object]]]:
+    text, entities = compact_source_link(_publication_text(package, source_type))
     return text, list(entities)
 
 
@@ -356,14 +373,16 @@ async def queue_owner_reviews(
             break
         with Session(engine) as session:
             try:
-                run, _, item, _, package = _validated_pending_package(session, raw_item_id)
+                run, _, item, source, package = _validated_pending_package(session, raw_item_id)
             except (DeliveryBlockedError, ValueError):
                 continue
-            if run.outcome.get("reason") not in OWNER_DECISION_REASONS or freshness_decision(
+            if run.outcome.get("reason") not in OWNER_DECISION_REASONS or evidence_freshness(
                 item.title, item.body, item.published_at, datetime.now(UTC),
-                published_at_precision=item.published_at_precision,
+                precision=item.published_at_precision, source_type=source.source_type,
+                verified_at=item.ingested_at,
             ).action != "keep":
                 continue
+            source_type = source.source_type
             package_sha = _package_sha256(package)
             rows = _review_rows(session, raw_item_id)
             same = [row for row in rows if row.payload.get("package_sha256") == package_sha]
@@ -400,7 +419,7 @@ async def queue_owner_reviews(
             session.add(review)
             session.commit()
             review_id = review.id
-        text, entities = _review_message(package)
+        text, entities = _review_message(package, source_type)
         payload: dict[str, object] = {
             "chat_id": owner_chat_id,
             "text": text,
@@ -711,12 +730,10 @@ async def deliver_owner_approved(
         if review.payload.get("draft_sha256") != draft_sha256(package.outcome.draft):
             raise DeliveryBlockedError("owner approval targets a stale draft")
         _assert_live_documents(package, live_documents)
-        fresh = freshness_decision(
-            title=item.title,
-            body=item.body,
-            published_at=item.published_at,
-            published_at_precision=item.published_at_precision,
-            now=datetime.now(UTC),
+        fresh = evidence_freshness(
+            item.title, item.body, item.published_at, datetime.now(UTC),
+            precision=item.published_at_precision, source_type=source.source_type,
+            verified_at=item.ingested_at,
         )
         if fresh.action != "keep":
             raise DeliveryBlockedError(
@@ -749,7 +766,7 @@ async def deliver_owner_approved(
                 raise DeliveryBlockedError(
                     f"audience policy blocks delivery: {audience_reason}"
                 )
-        text = _publication_text(package)
+        text = _publication_text(package, source.source_type)
         prepared_media = _prepared_media(
             package,
             post,

@@ -5,7 +5,7 @@ from relocant_media.sources.registry import load_source_registry
 
 def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    assert len(sources) == 28
+    assert len(sources) == 30
     assert len({source.id for source in sources}) == len(sources)
 
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")

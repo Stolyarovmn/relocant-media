@@ -1,0 +1,25 @@
+id: guide_welcome_serbia_residence
+name: Welcome to Serbia — как получить временное пребывание
+publisher: Government of Serbia / Welcome to Serbia
+ownership: official
+url: https://welcometoserbia.gov.rs/privremeni-boravak
+language: sr-Latn
+source_type: official_guide
+trust: 1.0
+check_every: 24h
+categories:
+- immigration
+extraction:
+  strategy: official_guide
+  status: active
+  article_selectors:
+  - main
+  approved_hosts:
+  - welcometoserbia.gov.rs
+  - www.welcometoserbia.gov.rs
+policy:
+  auto_publish: false
+  high_risk: false
+verification:
+  checked_at: '2026-10-28'
+  note: Официальный портал правительства Сербии о временном пребывании и единой разрешительной процедуре. Вечный путеводитель; публикация только через очередь владельца, иммиграция остаётся высокорисковой категорией, дата проверки ограничена 30 днями.
