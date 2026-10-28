@@ -120,8 +120,8 @@ def test_success_claims_before_side_effect_and_restores_receipts(context, tmp_pa
     engine.dispose()
 
 
-@pytest.mark.parametrize(("minutes", "due"), [(None, True), (10, False), (54, False), (56, True)])
-def test_editorial_is_due_once_the_hourly_interval_has_passed(minutes, due):
+@pytest.mark.parametrize(("minutes", "due"), [(None, True), (10, False), (29, False), (31, True)])
+def test_editorial_is_due_once_the_half_hour_interval_has_passed(minutes, due):
     now = datetime(2026, 10, 28, 12, tzinfo=UTC)
     state = {} if minutes is None else {
         'last_editorial_at': (now - timedelta(minutes=minutes)).isoformat()}

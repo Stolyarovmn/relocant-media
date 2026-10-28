@@ -177,3 +177,43 @@ def test_ranking_can_skip_irrelevant_item_without_more_model_calls() -> None:
 
     assert result.status is PublicationStatus.SKIPPED
     assert provider.calls == ["rank"]
+
+
+def _rejected(relevance: float, category: str = "events", confidence: float = 0.9) -> RankingResult:
+    return RankingResult(
+        should_process=False, relevance=relevance, category=category, confidence=confidence,
+        rationale="Ranker unsure whether this is a post.",
+    )
+
+
+def _borderline_provider(ranking: RankingResult) -> FakeProvider:
+    return FakeProvider({
+        "rank": ranking, "claims": _claims(), "verification": _verification(),
+        "verify": _verification(), "draft": _draft(),
+    })
+
+
+def test_borderline_item_is_drafted_and_left_for_the_owner_instead_of_skipped() -> None:
+    provider = _borderline_provider(_rejected(0.9, confidence=0.99))
+
+    result = _run(provider)
+
+    assert result.status is PublicationStatus.HUMAN_REVIEW
+    assert result.reason == "borderline_relevance"
+    assert result.draft is not None
+    # Nothing is weakened: claims are still extracted and independently verified.
+    assert provider.calls == ["rank", "claims", "verify", "draft"]
+
+
+def test_borderline_item_with_an_unsupported_claim_is_still_blocked() -> None:
+    provider = _borderline_provider(_rejected(0.9, confidence=0.99))
+    provider._responses["verify"] = _verification(supported=False)
+
+    assert _run(provider).status is PublicationStatus.BLOCKED
+
+
+def test_clearly_irrelevant_or_unsure_or_high_risk_items_are_still_skipped() -> None:
+    for ranking in (_rejected(0.3), _rejected(0.9, confidence=0.4), _rejected(0.95, "politics")):
+        provider = _borderline_provider(ranking)
+        assert _run(provider).status is PublicationStatus.SKIPPED
+        assert provider.calls == ["rank"]

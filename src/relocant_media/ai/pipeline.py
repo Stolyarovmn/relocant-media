@@ -21,7 +21,7 @@ from relocant_media.ai.prompts import (
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.domain.audience import audience_relevance_reason
 from relocant_media.domain.freshness import publication_date_context
-from relocant_media.domain.policy import requires_human_review
+from relocant_media.domain.policy import is_borderline, requires_human_review
 
 
 def _json_payload(value: object) -> str:
@@ -129,7 +129,10 @@ class EditorialPipeline:
             payload={"city": city, "evidence": evidence},
             response_model=RankingResult,
         )
-        if not ranking.should_process:
+        borderline = not ranking.should_process and is_borderline(
+            ranking.relevance, ranking.confidence, ranking.category,
+        )
+        if not ranking.should_process and not borderline:
             return EditorialOutcome(
                 status=PublicationStatus.SKIPPED,
                 reason="ranking_rejected",
@@ -228,6 +231,9 @@ class EditorialPipeline:
         if requires_human_review(ranking.category, overall_confidence):
             status = PublicationStatus.HUMAN_REVIEW
             reason = "policy_requires_human_review"
+        elif borderline:
+            status = PublicationStatus.HUMAN_REVIEW
+            reason = "borderline_relevance"
 
         return EditorialOutcome(
             status=status,

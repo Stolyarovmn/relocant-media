@@ -246,11 +246,12 @@ def export_public(database: Path, output: Path, observed_at: str, run_dir: Path 
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-EDITORIAL_INTERVAL = timedelta(minutes=55)
+# Each editorial assesses a bounded batch, so a shorter interval is the throughput lever.
+EDITORIAL_INTERVAL = timedelta(minutes=30)
 
 
 def editorial_due(state: dict[str, Any], now: datetime) -> bool:
-    """Hourly editorial is due unless one was checkpointed less than 55 minutes ago."""
+    """Editorial is due unless one was checkpointed less than 30 minutes ago."""
     last = state.get("last_editorial_at")
     return not isinstance(last, str) or now - datetime.fromisoformat(last) >= EDITORIAL_INTERVAL
 
