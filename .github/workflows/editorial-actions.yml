@@ -179,18 +179,14 @@ jobs:
     permissions:
       actions: write
     steps:
-      - name: Book the next cycle unless one is already waiting
+      - name: Book the next cycle
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           CHAIN_DELAY_SECONDS: '120'
         run: |
           set -euo pipefail
-          waiting=$(gh run list --workflow editorial-actions.yml --status queued --json databaseId --jq length)
-          if [ "$waiting" -gt 0 ]; then
-            echo "a cycle is already queued"
-            exit 0
-          fi
+          # The concurrency group keeps at most one pending run, so this cannot pile up.
           sleep "$CHAIN_DELAY_SECONDS"
           gh workflow run editorial-actions.yml --ref main -f mode=auto
   deploy:
