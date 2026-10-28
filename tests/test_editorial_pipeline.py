@@ -264,3 +264,30 @@ def test_evergreen_guides_are_ranked_by_lasting_value_not_news_timeliness() -> N
     news = _RecordingProvider({"rank": ranking})
     EditorialPipeline(news).run(city="belgrade", documents=(_document(),))
     assert "evergreen" not in news.rank_instruction and "evergreen" not in news.rank_prompt
+
+
+def test_serbian_draft_is_regenerated_once_in_russian() -> None:
+    serbian = RussianDraft(
+        title="Забрана пловидбе Савом",
+        body="Градоначелник је изјавио да ће радови крену током године.",
+        claim_ids=("c1",),
+    )
+
+    class Redrafting(FakeProvider):
+        drafts = 0
+
+        def generate_json(self, **kwargs: Any) -> str:
+            if kwargs["task"] == "draft":
+                self.drafts += 1
+                self._responses["draft"] = serbian if self.drafts == 1 else _draft()
+            return super().generate_json(**kwargs)
+
+    provider = Redrafting(
+        {"rank": _ranking("city"), "claims": _claims(), "verify": _verification()}
+    )
+
+    result = _run(provider)
+
+    assert provider.drafts == 2
+    assert result.draft is not None
+    assert result.draft.title == _draft().title

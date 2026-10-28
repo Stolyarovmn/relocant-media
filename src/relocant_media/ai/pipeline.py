@@ -21,6 +21,7 @@ from relocant_media.ai.prompts import (
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.domain.audience import audience_relevance_reason
+from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import publication_date_context
 from relocant_media.domain.policy import is_borderline, requires_human_review
 
@@ -81,6 +82,11 @@ def _citations_are_grounded(
     return True
 
 
+DRAFT_LANGUAGE_RETRY_NOTE = (
+    "The previous draft was not in Russian (Serbian text was left untranslated). Write the "
+    "title and body in Russian; keep only proper names in their original spelling."
+)
+
 CITATION_RETRY_NOTE = (
     "Previous quotes were not found verbatim in the evidence. Copy each quote character for "
     "character from one contiguous passage; no ellipsis, no merged passages, no corrected "
@@ -123,6 +129,15 @@ def _minimum_confidence(values: Iterable[float], fallback: float) -> float:
 class EditorialPipeline:
     def __init__(self, provider: StructuredAIProvider) -> None:
         self._provider = provider
+
+    def _ask_draft(self, payload: dict[str, object]) -> RussianDraft:
+        return _ask(
+            self._provider,
+            task="draft",
+            system_instruction=DRAFT_SYSTEM,
+            payload=payload,
+            response_model=RussianDraft,
+        )
 
     def run(
         self,
@@ -234,24 +249,21 @@ class EditorialPipeline:
         supported_claim_ids = {
             claim.claim_id for claim in claims.claims if verdicts[claim.claim_id][0]
         }
-        draft = _ask(
-            self._provider,
-            task="draft",
-            system_instruction=DRAFT_SYSTEM,
-            payload={
-                "city": city,
-                "category": ranking.category,
-                "source_local_dates":[dict(source_id=d.source_id,
-                    **publication_date_context(d.published_at, d.published_at_precision))
-                    for d in documents],
-                "claims": [
-                    claim.model_dump(mode="json")
-                    for claim in claims.claims
-                    if claim.claim_id in supported_claim_ids
-                ],
-            },
-            response_model=RussianDraft,
-        )
+        draft_payload: dict[str, object] = {
+            "city": city,
+            "category": ranking.category,
+            "source_local_dates":[dict(source_id=d.source_id,
+                **publication_date_context(d.published_at, d.published_at_precision))
+                for d in documents],
+            "claims": [
+                claim.model_dump(mode="json")
+                for claim in claims.claims
+                if claim.claim_id in supported_claim_ids
+            ],
+        }
+        draft = self._ask_draft(draft_payload)
+        if draft_language_reason(draft.title, draft.body) is not None:
+            draft = self._ask_draft({**draft_payload, "correction": DRAFT_LANGUAGE_RETRY_NOTE})
         if not set(draft.claim_ids).issubset(supported_claim_ids):
             return EditorialOutcome(
                 status=PublicationStatus.BLOCKED,
