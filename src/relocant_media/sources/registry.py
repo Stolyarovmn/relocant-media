@@ -12,6 +12,7 @@ class ExtractionConfig(BaseModel):
     feed_url: str | None = None
     article_selectors: tuple[str, ...] = (".entry-content", "article .content", "article")
     article_lead_selectors: tuple[str, ...] = ()
+    page_text: bool = False  # feed carries only a teaser: fetch the article page
     approved_hosts: tuple[str, ...] = ()
 
 
