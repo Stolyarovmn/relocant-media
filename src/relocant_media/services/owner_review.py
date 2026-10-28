@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import Session
 
@@ -60,19 +60,24 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, S
 
 OWNER_REVIEW_KIND = "owner_editorial_review"
 _CALLBACK_RE = re.compile(r"^or:(publish|reject|skip|revise|draft):(\d+)$")
-_ACTIVE_REVIEW_STATUSES = frozenset(
-    {"sending", "pending", "approved", "scheduled", "revision_requested"}
-)
+_ACTIVE_REVIEW_STATUSES = frozenset({"sending", "pending", "approved", "revision_requested"})
 _FINAL_REVIEW_STATUSES = frozenset(
     {"published", "rejected", "skipped", "cancelled", "publish_blocked", "send_uncertain"}
 )
-# One news item per interval: scheduled drafts wait while the channel already had its post.
-RELEASE_INTERVAL = timedelta(minutes=55)
+# "В черновик" postpones the decision: the same package returns as a new version once the next
+# editorial cycle is due; review age, freshness and the live source are checked again then.
+POSTPONE_FOR = timedelta(minutes=30)
+DEFAULT_REVISION_COMMENT = (
+    "На усмотрение редакции: сделай заголовок и текст привлекательнее и понятнее для "
+    "русскоязычных релокантов в Белграде; факты, даты и ссылки не менять, новые факты не "
+    "добавлять."
+)
 _DECISIONS = {
     "publish": ("approved", "Согласовано. Проверяю источник перед публикацией."),
-    "draft": ("scheduled", "В черновик. Выйдет в ближайший свободный час, проверки пройдут снова."),
+    "draft": ("postponed", "Отложено на следующий цикл. Пришлю снова; источник перепроверю перед выходом."),
     "skip": ("skipped", "Пропущено. Эта версия больше не придёт."),
     "reject": ("rejected", "Отклонено."),
+    "revise": ("revision_requested", "Доработка на усмотрение редакции запущена."),
 }
 
 
@@ -178,18 +183,14 @@ def record_owner_callback(
             message_id,
         )
     action = match.group(1)
-    if action == "revise":
-        # No state change: the reply to this message is the revision request.
-        return OwnerUpdateResult(
-            True, False,
-            "Ответьте на это сообщение, что доработать. Перепроверю и пришлю новую версию.",
-        )
     status, answer = _DECISIONS[action]
     review.status = status
     review.payload = {
         **review.payload,
         "owner_decision": action,
         "decided_at": _now_iso(),
+        # A reply to the message is a specific request; the button alone leaves it to us.
+        **({"owner_comment": DEFAULT_REVISION_COMMENT} if action == "revise" else {}),
     }
     return OwnerUpdateResult(True, True, answer, owner_chat_id, message_id)
 
@@ -398,6 +399,8 @@ async def queue_owner_reviews(
             package_sha = _package_sha256(package)
             rows = _review_rows(session, raw_item_id)
             same = [row for row in rows if row.payload.get("package_sha256") == package_sha]
+            if any(row.status == "postponed" and not _postpone_elapsed(row) for row in same):
+                continue
             if any(
                 row.status in _ACTIVE_REVIEW_STATUSES | _FINAL_REVIEW_STATUSES
                 for row in same
@@ -479,6 +482,19 @@ async def queue_owner_reviews(
             session.commit()
         queued += 1
     return {"status": "ready", "queued": queued, "uncertain": uncertain}
+
+
+def _postpone_elapsed(review: Submission) -> bool:
+    decided = review.payload.get("decided_at")
+    try:
+        when = datetime.fromisoformat(decided) if isinstance(decided, str) else None
+    except ValueError:
+        when = None
+    if when is None:
+        return True
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return datetime.now(UTC) - when >= POSTPONE_FOR
 
 
 def _owner_revision_draft(
@@ -916,18 +932,6 @@ def _reject_owner_review(
     session.commit()
 
 
-def _released_within(session: Session, interval: timedelta) -> bool:
-    """True when any news post (automatic or owner-approved) went out inside the interval."""
-    latest = session.scalar(
-        select(func.max(Post.published_at)).where(Post.telegram_message_id.is_not(None))
-    )
-    if latest is None:
-        return False
-    if latest.tzinfo is None:
-        latest = latest.replace(tzinfo=UTC)
-    return datetime.now(UTC) - latest < interval
-
-
 async def process_owner_actions(
     engine: Engine,
     bot: TelegramCaller,
@@ -948,9 +952,7 @@ async def process_owner_actions(
                 .where(
                     Submission.kind == OWNER_REVIEW_KIND,
                     Submission.telegram_user_id == owner_user_id,
-                    Submission.status.in_(
-                        ("revision_requested", "rejected", "approved", "scheduled")
-                    ),
+                    Submission.status.in_(("revision_requested", "rejected", "approved")),
                 )
                 .order_by(Submission.id)
             )
@@ -1018,13 +1020,6 @@ async def process_owner_actions(
                 else:
                     stats["revised"] += 1
                 continue
-            if review.status == "scheduled":
-                if not publish_enabled or _released_within(session, RELEASE_INTERVAL):
-                    stats["deferred"] += 1
-                    continue
-                review.status = "approved"
-                review.payload = {**review.payload, "released_at": _now_iso()}
-                session.commit()
             if review.status != "approved":
                 continue
             if not publish_enabled:
