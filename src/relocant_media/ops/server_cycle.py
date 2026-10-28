@@ -221,7 +221,7 @@ def review_only_venue_sources() -> dict[str, SourceConfig]:
 
 # Candidates fully assessed per cycle. Ranking is one cheap call and most items are rejected
 # there, so five per cycle drains the verified-media backlog without a second queue.
-PROCESS_LIMIT = 5
+PROCESS_LIMIT = 10
 
 
 def queue_priorities(attention: dict[str, int], media: Iterable[str]) -> dict[str, int]:
