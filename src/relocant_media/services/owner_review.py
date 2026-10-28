@@ -360,7 +360,11 @@ def _review_message(
     # Owner-only header: entity offsets (UTF-16) shift with it; the published text is unchanged.
     header = f"Почему это у вас: {why}\n\n"
     shift = len(header.encode("utf-16-le")) // 2
-    moved = [{**entity, "offset": int(entity["offset"]) + shift} for entity in entities]
+    moved: list[dict[str, object]] = []
+    for entity in entities:
+        offset = entity["offset"]
+        assert isinstance(offset, int)
+        moved.append({**entity, "offset": offset + shift})
     return header + text, moved
 
 
