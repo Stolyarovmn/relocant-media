@@ -207,6 +207,11 @@ def review_only_venue_sources() -> dict[str, SourceConfig]:
     }
 
 
+# Candidates fully assessed per cycle. Ranking is one cheap call and most items are rejected
+# there, so five per cycle drains the verified-media backlog without a second queue.
+PROCESS_LIMIT = 5
+
+
 def media_sources() -> dict[str, SourceConfig]:
     """Verified media feeds: full-text evidence that only the owner queue may release."""
     return {
@@ -886,7 +891,8 @@ def main() -> None:
             return set(scope.get("submission_raw_ids", []))
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=ingest,
-            process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output), limit=2,
+            process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output),
+            limit=PROCESS_LIMIT,
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
             priority_items=private_priorities,
             recent_source_counts=source_load,
