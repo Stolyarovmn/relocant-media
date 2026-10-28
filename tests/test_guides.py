@@ -94,3 +94,17 @@ async def test_collector_fetches_the_official_page_once():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         items = await OfficialGuideCollector(_source(), client).collect()
     assert len(items) == 1 and len(calls) == 1
+
+
+def test_mup_licence_exchange_guide_extracts_only_the_official_text():
+    source = next(s for s in load_source_registry(SOURCES)
+                  if s.id == "guide_mup_foreign_licence_exchange")
+    assert source.id in guide_sources()
+    html = Path("tests/fixtures/guide_mup_licence.html").read_text(encoding="utf-8")
+
+    item = parse_official_guide(html, source)
+
+    assert item.published_at is None and len(item.body) >= 800
+    assert "Z6_menu" not in item.body and "Штампај страницу" not in item.body
+    assert "возачку дозволу" in item.body
+    assert item.external_id.startswith("guide-guide_mup_foreign_licence_exchange-")

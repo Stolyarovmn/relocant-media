@@ -1,0 +1,25 @@
+id: guide_mup_foreign_licence_exchange
+name: МВД Сербии — обмен иностранных водительских прав
+publisher: Ministry of Interior of Serbia (MUP)
+ownership: official
+url: https://www.mup.gov.rs/wps/portal/sr/gradjani/dokumenta/vozacka%20dozvola/zamena%20inostrane%20vozacke%20dozvole%20za%20vozacku%20dozvolu%20republike%20srbije/
+language: sr
+source_type: official_guide
+trust: 1.0
+check_every: 24h
+categories:
+- city
+extraction:
+  strategy: official_guide
+  status: active
+  article_selectors:
+  - .contentDetail
+  approved_hosts:
+  - mup.gov.rs
+  - www.mup.gov.rs
+policy:
+  auto_publish: false
+  high_risk: false
+verification:
+  checked_at: '2026-10-28'
+  note: Официальная страница МВД Сербии об обмене иностранных водительских прав на сербские (документы для иностранцев и граждан). Вечный путеводитель; публикация только через очередь владельца, дата проверки ограничена 30 днями.
