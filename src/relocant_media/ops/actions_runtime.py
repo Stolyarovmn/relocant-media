@@ -257,9 +257,14 @@ def _preparation_details(value: object) -> list[dict[str, Any]]:
                                    if isinstance(k, str) and token.fullmatch(k) and type(v) is int}
             reviews.append(entry)
         error = item.get("error_type")
-        result.append({"raw_item_id": item["raw_item_id"],
-                       "error_type": error if isinstance(error, str) and token.fullmatch(error)
-                       else "unknown", "reviews": reviews})
+        detail = item.get("error_detail")
+        entry_out: dict[str, Any] = {
+            "raw_item_id": item["raw_item_id"],
+            "error_type": error if isinstance(error, str) and token.fullmatch(error)
+            else "unknown", "reviews": reviews}
+        if isinstance(detail, str) and re.fullmatch(r"[A-Za-z0-9_.:() -]{1,100}", detail):
+            entry_out["error_detail"] = detail
+        result.append(entry_out)
     return result
 
 

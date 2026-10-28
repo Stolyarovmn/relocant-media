@@ -521,3 +521,26 @@ def test_live_check_covers_media_and_guide_sources_but_still_refuses_unknown_one
         ("media_rts", "Naslov", None), ("guide_nsz_foreigner_employment", "Guide", None)]
     with pytest.raises(ValueError, match="unsupported live source"):
         server_cycle.fetch_documents(_live_package(("telegram_unknown", "https://t.me/x/1")))
+
+
+@pytest.mark.asyncio
+async def test_live_check_works_inside_a_running_event_loop(monkeypatch):
+    """The owner-review cycle is async: asyncio.run inside it raised RuntimeError and blocked
+    every guide and media package before the first independent review."""
+    from relocant_media.collectors.base import RawItem
+
+    class GuideCollector:
+        async def collect(self):
+            url = ("https://www.nsz.gov.rs/nsz/employment-of-foreigners-in-the-republic-of-"
+                   "serbia/11181")
+            return [RawItem("guide_nsz_foreigner_employment", "guide-x", url, "Guide", "Body",
+                            None, canonical_url=url)]
+
+    monkeypatch.setattr(server_cycle, "build_collector", lambda source, client: GuideCollector())
+    package = _live_package((
+        "guide_nsz_foreigner_employment",
+        "https://www.nsz.gov.rs/nsz/employment-of-foreigners-in-the-republic-of-serbia/11181"))
+
+    documents = server_cycle.fetch_documents(package)  # called synchronously from async code
+
+    assert [d.title for d in documents] == ["Guide"]

@@ -65,3 +65,22 @@ def test_worker_failures_do_not_leak_outputs(monkeypatch, code, output):
 def test_invalid_deadline_rejected(value):
     with pytest.raises(ValueError):
         IsolatedGeminiProvider("test-key", model="test-model", timeout_seconds=value)
+
+
+def test_worker_error_names_only_the_sdk_error_class(monkeypatch):
+    out = json.dumps({"error_type": "ClientError", "message": "SECRET api-key=abc"})
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 1, out))
+    with pytest.raises(GeminiWorkerError) as error:
+        IsolatedGeminiProvider("test-key", model="test-model").generate_json(**ARGS)
+    assert str(error.value).endswith("(ClientError)")
+    assert "SECRET" not in str(error.value) and "abc" not in str(error.value)
+
+
+def test_a_worker_error_class_that_is_not_a_plain_name_is_not_repeated(monkeypatch):
+    out = json.dumps({"error_type": "x" * 200 + " key=abc"})
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 1, out))
+    with pytest.raises(GeminiWorkerError) as error:
+        IsolatedGeminiProvider("test-key", model="test-model").generate_json(**ARGS)
+    assert "abc" not in str(error.value) and len(str(error.value)) < 120

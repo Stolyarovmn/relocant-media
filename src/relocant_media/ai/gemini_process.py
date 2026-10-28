@@ -3,9 +3,12 @@
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from typing import Any, cast
+
+_CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,60}")
 
 
 class GeminiCallTimeout(TimeoutError):
@@ -50,7 +53,10 @@ class IsolatedGeminiProvider:
             raise GeminiWorkerError("Gemini worker returned invalid output") from None
         if (result.returncode != 0 or not isinstance(response, dict)
                 or not isinstance(response.get("output"), str) or not response["output"].strip()):
-            raise GeminiWorkerError("Gemini worker did not return structured text")
+            # Only the SDK error class name may be repeated: never messages, requests or keys.
+            kind = response.get("error_type") if isinstance(response, dict) else None
+            suffix = f" ({kind})" if isinstance(kind, str) and _CLASS_NAME.fullmatch(kind) else ""
+            raise GeminiWorkerError(f"Gemini worker did not return structured text{suffix}")
         return cast(str, response["output"])
 
 
