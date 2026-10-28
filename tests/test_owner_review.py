@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -16,6 +17,7 @@ from relocant_media.services.editorial import DeliveryBlockedError, _candidate, 
 from relocant_media.services.owner_review import (
     OWNER_REVIEW_KIND,
     deliver_owner_approved,
+    process_owner_actions,
     queue_owner_reviews,
     record_owner_callback,
     record_owner_reply,
@@ -265,8 +267,8 @@ async def test_fresh_low_risk_hold_is_reviewed_and_offered_to_the_owner(engine):
     )
     assert queued == {"status": "ready", "queued": 1, "uncertain": 0}
     send = next(payload for method, payload in bot.calls if method == "sendMessage")
-    assert [b["text"] for b in send["reply_markup"]["inline_keyboard"][0]] == [
-        "✅ В редакцию", "❌ Отклонить",
+    assert _button_labels(send) == [
+        "✅ В редакцию", "📝 В черновик", "✏️ Доработать", "⏭ Пропустить", "❌ Отклонить",
     ]
 
 
@@ -313,8 +315,9 @@ async def test_owner_queue_has_publish_reject_buttons_and_is_idempotent(engine):
     sends = [payload for method, payload in bot.calls if method == "sendMessage"]
     assert len(sends) == 1
     sent = sends[0]
-    labels = [button["text"] for button in sent["reply_markup"]["inline_keyboard"][0]]
-    assert labels == ["✅ В редакцию", "❌ Отклонить"]
+    assert _button_labels(sent) == [
+        "✅ В редакцию", "📝 В черновик", "✏️ Доработать", "⏭ Пропустить", "❌ Отклонить",
+    ]
     assert "Источник" in sent["text"]
     assert "https://www.beograd.rs/example.html" not in sent["text"]
     assert sent["link_preview_options"]["url"] == "https://www.beograd.rs/example.html"
@@ -349,6 +352,91 @@ def test_owner_callback_requires_exact_user_chat_message_and_pending_version(eng
             session, callback, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT
         )
         assert stale is not None and not stale.accepted
+
+
+def _button_labels(payload):
+    return [button["text"] for row in payload["reply_markup"]["inline_keyboard"]
+            for button in row]
+
+
+def _press(session, review_id, action, *, message_id=501):
+    return record_owner_callback(session, {
+        "from": {"id": OWNER, "is_bot": False}, "data": f"or:{action}:{review_id}",
+        "message": {"message_id": message_id, "chat": {"id": OWNER_CHAT}},
+    }, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT)
+
+
+@pytest.mark.parametrize(("action", "status"), [
+    ("skip", "skipped"), ("draft", "scheduled"), ("reject", "rejected"), ("publish", "approved"),
+])
+def test_each_owner_button_moves_the_exact_version_to_its_own_pipeline(engine, action, status):
+    raw_id = _store_reviewed_politics(engine)
+    with Session(engine) as session:
+        review = _owner_review_row(session, raw_id)
+        result = _press(session, review.id, action)
+        assert result is not None and result.accepted
+        session.commit()
+        assert session.get(Submission, review.id).status == status
+        assert session.get(Submission, review.id).payload["owner_decision"] == action
+
+
+def test_revise_button_asks_for_a_reply_and_changes_nothing(engine):
+    raw_id = _store_reviewed_politics(engine)
+    with Session(engine) as session:
+        review = _owner_review_row(session, raw_id)
+        result = _press(session, review.id, "revise")
+        assert result is not None and result.handled and not result.accepted
+        assert "ответ" in result.answer_text.lower()
+        assert result.clear_chat_id is None  # the buttons stay for the next decision
+        assert session.get(Submission, review.id).status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_skipped_version_is_never_offered_again(engine):
+    raw_id = _store_reviewed_politics(engine)
+    with Session(engine) as session:
+        review = _owner_review_row(session, raw_id)
+        _press(session, review.id, "skip")
+        session.commit()
+    bot = ReviewBot()
+    queued = await queue_owner_reviews(
+        engine, bot, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT, enabled=True,
+    )
+    assert queued["queued"] == 0 and bot.calls == []
+
+
+@pytest.mark.asyncio
+async def test_scheduled_drafts_are_released_one_per_interval(engine):
+    first = _store_reviewed_politics(engine)
+    publisher = Publisher()
+
+    async def run_actions():
+        return await process_owner_actions(
+            engine, ReviewBot(), owner_user_id=OWNER, owner_chat_id=OWNER_CHAT,
+            provider=None, live_document_fetcher=_live, publisher=publisher,
+            publish_enabled=True,
+        )
+
+    with Session(engine) as session:
+        review = _owner_review_row(session, first)
+        _press(session, review.id, "draft")
+        # Another post went out ten minutes ago: the channel already has its news of this hour.
+        session.add(Post(
+            city="belgrade", category="events", status="ready", title="t", body="b",
+            confidence=Decimal("0.9"), editorial_rule_version="v", telegram_message_id=5,
+            published_at=NOW - timedelta(minutes=10),
+        ))
+        session.commit()
+    assert (await run_actions())["published"] == 0
+    assert publisher.calls == []
+    with Session(engine) as session:
+        assert session.scalar(select(Submission.status).where(
+            Submission.kind == OWNER_REVIEW_KIND)) == "scheduled"
+        recent = session.scalar(select(Post).where(Post.telegram_message_id == 5))
+        recent.published_at = NOW - timedelta(minutes=70)
+        session.commit()
+    assert (await run_actions())["published"] == 1
+    assert len(publisher.calls) == 1
 
 
 def test_owner_reply_requests_revision_only_for_exact_pending_review(engine):

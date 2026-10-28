@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import Session
 
@@ -59,11 +59,21 @@ from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 
 OWNER_REVIEW_KIND = "owner_editorial_review"
-_CALLBACK_RE = re.compile(r"^or:(publish|reject):(\d+)$")
-_ACTIVE_REVIEW_STATUSES = frozenset({"sending", "pending", "approved", "revision_requested"})
-_FINAL_REVIEW_STATUSES = frozenset(
-    {"published", "rejected", "cancelled", "publish_blocked", "send_uncertain"}
+_CALLBACK_RE = re.compile(r"^or:(publish|reject|skip|revise|draft):(\d+)$")
+_ACTIVE_REVIEW_STATUSES = frozenset(
+    {"sending", "pending", "approved", "scheduled", "revision_requested"}
 )
+_FINAL_REVIEW_STATUSES = frozenset(
+    {"published", "rejected", "skipped", "cancelled", "publish_blocked", "send_uncertain"}
+)
+# One news item per interval: scheduled drafts wait while the channel already had its post.
+RELEASE_INTERVAL = timedelta(minutes=55)
+_DECISIONS = {
+    "publish": ("approved", "Согласовано. Проверяю источник перед публикацией."),
+    "draft": ("scheduled", "В черновик. Выйдет в ближайший свободный час, проверки пройдут снова."),
+    "skip": ("skipped", "Пропущено. Эта версия больше не придёт."),
+    "reject": ("rejected", "Отклонено."),
+}
 
 
 class TelegramCaller(Protocol):
@@ -168,17 +178,19 @@ def record_owner_callback(
             message_id,
         )
     action = match.group(1)
-    review.status = "approved" if action == "publish" else "rejected"
+    if action == "revise":
+        # No state change: the reply to this message is the revision request.
+        return OwnerUpdateResult(
+            True, False,
+            "Ответьте на это сообщение, что доработать. Перепроверю и пришлю новую версию.",
+        )
+    status, answer = _DECISIONS[action]
+    review.status = status
     review.payload = {
         **review.payload,
         "owner_decision": action,
         "decided_at": _now_iso(),
     }
-    answer = (
-        "Согласовано. Проверяю источник перед публикацией."
-        if action == "publish"
-        else "Отклонено."
-    )
     return OwnerUpdateResult(True, True, answer, owner_chat_id, message_id)
 
 
@@ -425,16 +437,17 @@ async def queue_owner_reviews(
             "text": text,
             "entities": entities,
             "reply_markup": {
-                "inline_keyboard": [[
-                    {
-                        "text": "✅ В редакцию",
-                        "callback_data": f"or:publish:{review_id}",
-                    },
-                    {
-                        "text": "❌ Отклонить",
-                        "callback_data": f"or:reject:{review_id}",
-                    },
-                ]]
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ В редакцию", "callback_data": f"or:publish:{review_id}"},
+                        {"text": "📝 В черновик", "callback_data": f"or:draft:{review_id}"},
+                    ],
+                    [
+                        {"text": "✏️ Доработать", "callback_data": f"or:revise:{review_id}"},
+                        {"text": "⏭ Пропустить", "callback_data": f"or:skip:{review_id}"},
+                        {"text": "❌ Отклонить", "callback_data": f"or:reject:{review_id}"},
+                    ],
+                ]
             },
             "link_preview_options": {
                 "url": _official_url(package),
@@ -903,6 +916,18 @@ def _reject_owner_review(
     session.commit()
 
 
+def _released_within(session: Session, interval: timedelta) -> bool:
+    """True when any news post (automatic or owner-approved) went out inside the interval."""
+    latest = session.scalar(
+        select(func.max(Post.published_at)).where(Post.telegram_message_id.is_not(None))
+    )
+    if latest is None:
+        return False
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=UTC)
+    return datetime.now(UTC) - latest < interval
+
+
 async def process_owner_actions(
     engine: Engine,
     bot: TelegramCaller,
@@ -923,7 +948,9 @@ async def process_owner_actions(
                 .where(
                     Submission.kind == OWNER_REVIEW_KIND,
                     Submission.telegram_user_id == owner_user_id,
-                    Submission.status.in_(("revision_requested", "rejected", "approved")),
+                    Submission.status.in_(
+                        ("revision_requested", "rejected", "approved", "scheduled")
+                    ),
                 )
                 .order_by(Submission.id)
             )
@@ -991,6 +1018,13 @@ async def process_owner_actions(
                 else:
                     stats["revised"] += 1
                 continue
+            if review.status == "scheduled":
+                if not publish_enabled or _released_within(session, RELEASE_INTERVAL):
+                    stats["deferred"] += 1
+                    continue
+                review.status = "approved"
+                review.payload = {**review.payload, "released_at": _now_iso()}
+                session.commit()
             if review.status != "approved":
                 continue
             if not publish_enabled:
