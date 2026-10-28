@@ -484,3 +484,40 @@ def test_guide_not_re_verified_for_thirty_days_expires_in_triage(seeded):
     assert triage_queue(engine, now=datetime.now(UTC))["discarded"] == 1
     with Session(engine) as session:
         assert session.get(EditorialRun, raw_id).outcome["reason"] == "guide_verification_expired"
+
+
+def _live_package(*documents):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(event=SimpleNamespace(documents=[
+        SimpleNamespace(source_id=source_id, url=url) for source_id, url in documents
+    ]))
+
+
+def test_live_check_covers_media_and_guide_sources_but_still_refuses_unknown_ones(monkeypatch):
+    from relocant_media.collectors.base import RawItem
+
+    class MediaCollector:
+        async def collect_url(self, url):
+            return RawItem("media_rts", url, url, "Naslov", "Telo vesti", None)
+
+    class GuideCollector:
+        async def collect(self):
+            url = "https://www.nsz.gov.rs/nsz/employment-of-foreigners-in-the-republic-of-serbia/11181"
+            return [RawItem("guide_nsz_foreigner_employment", "guide-x", url, "Guide", "Body", None,
+                            canonical_url=url)]
+
+    def build(source, client):
+        return MediaCollector() if source.id == "media_rts" else GuideCollector()
+
+    monkeypatch.setattr(server_cycle, "build_collector", build)
+    guide_url = "https://www.nsz.gov.rs/nsz/employment-of-foreigners-in-the-republic-of-serbia/11181"
+    package = _live_package(("media_rts", "https://www.rts.rs/lat/vesti/a.html"),
+                            ("guide_nsz_foreigner_employment", guide_url))
+
+    documents = server_cycle.fetch_documents(package)
+
+    assert [(d.source_id, d.title, d.published_at) for d in documents] == [
+        ("media_rts", "Naslov", None), ("guide_nsz_foreigner_employment", "Guide", None)]
+    with pytest.raises(ValueError, match="unsupported live source"):
+        server_cycle.fetch_documents(_live_package(("telegram_unknown", "https://t.me/x/1")))
