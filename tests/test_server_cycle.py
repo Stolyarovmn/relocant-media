@@ -384,3 +384,36 @@ def test_unknown_publication_date_triages_to_human_review_without_ai(seeded):
         assert run.outcome["reason"] == "publication_date_unknown"
         assert run.outcome["ai_calls"] == 0
         assert run.post_id is None
+
+
+def test_fresh_guide_without_publication_date_is_left_for_the_model_and_the_owner(seeded):
+    from relocant_media.ops.newsroom_triage import triage_queue
+
+    engine, raw_id, _ = seeded
+    with Session(engine) as session:
+        item = session.get(RawItem, raw_id)
+        item.published_at = None
+        item.ingested_at = datetime.now(UTC) - timedelta(days=5)
+        session.get(Source, item.source_id).source_type = "official_guide"
+        session.commit()
+
+    report = triage_queue(engine, now=datetime.now(UTC))
+    assert report["decisions"] == []
+    with Session(engine) as session:
+        assert session.get(EditorialRun, raw_id) is None
+
+
+def test_guide_not_re_verified_for_thirty_days_expires_in_triage(seeded):
+    from relocant_media.ops.newsroom_triage import triage_queue
+
+    engine, raw_id, _ = seeded
+    with Session(engine) as session:
+        item = session.get(RawItem, raw_id)
+        item.published_at = None
+        item.ingested_at = datetime.now(UTC) - timedelta(days=31)
+        session.get(Source, item.source_id).source_type = "official_guide"
+        session.commit()
+
+    assert triage_queue(engine, now=datetime.now(UTC))["discarded"] == 1
+    with Session(engine) as session:
+        assert session.get(EditorialRun, raw_id).outcome["reason"] == "guide_verification_expired"

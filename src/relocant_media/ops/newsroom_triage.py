@@ -7,7 +7,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from relocant_media.domain.editorial_heuristics import boilerplate_reason
-from relocant_media.domain.freshness import freshness_decision
+from relocant_media.domain.freshness import evidence_freshness
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, RawItem, Source
@@ -17,10 +17,10 @@ def triage_queue(engine: Engine, *, now: datetime) -> dict[str, Any]:
     decisions: list[dict[str, Any]] = []
     with Session(engine) as session:
         lock_editorial_city(session, "belgrade")
-        rows = session.execute(select(RawItem).join(Source).where(
+        rows = session.execute(select(RawItem, Source.source_type).join(Source).where(
             Source.city == "belgrade", Source.enabled.is_(True),
-        ).order_by(RawItem.id)).scalars()
-        for item in rows:
+        ).order_by(RawItem.id)).all()
+        for item, source_type in rows:
             run = session.get(EditorialRun, item.id)
             # Completed reviews, drafts and delivery claims remain immutable.
             if run is not None and (run.post_id is not None
@@ -31,9 +31,9 @@ def triage_queue(engine: Engine, *, now: datetime) -> dict[str, Any]:
                            for k in ("claims", "draft", "verification"))
                     or "_package" in run.outcome or "_autonomous_assessment" in run.outcome):
                 continue
-            result = freshness_decision(title=item.title, body=item.body,
-                published_at=item.published_at, now=now,
-                published_at_precision=item.published_at_precision)
+            result = evidence_freshness(item.title, item.body, item.published_at, now,
+                precision=item.published_at_precision, source_type=source_type,
+                verified_at=item.ingested_at)
             boilerplate = boilerplate_reason(item.title, item.body)
             if result.action == "keep" and boilerplate is None:
                 continue

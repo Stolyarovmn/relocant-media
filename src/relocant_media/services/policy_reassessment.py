@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
 from relocant_media.domain.dedup import event_key
-from relocant_media.domain.freshness import freshness_decision
+from relocant_media.domain.freshness import evidence_freshness
 from relocant_media.services.editorial import _candidate, _document, _event_items, _snapshot_member
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, RawItem, Source
@@ -27,9 +27,9 @@ def eligible_empty_policy_hold(
             or any(outcome.get(key) is not None for key in ("claims", "verification", "draft"))
             or "_package" in outcome or "_autonomous_assessment" in outcome):
         return False
-    if freshness_decision(item.title, item.body, item.published_at,
-                          now or datetime.now(UTC),
-                          published_at_precision=item.published_at_precision).action != "keep":
+    if evidence_freshness(item.title, item.body, item.published_at, now or datetime.now(UTC),
+                          precision=item.published_at_precision, source_type=source.source_type,
+                          verified_at=item.ingested_at).action != "keep":
         return False
     members = _event_items(session, anchor=item, anchor_source=source)
     expected = [_snapshot_member(member, policy) for member, policy in members]
