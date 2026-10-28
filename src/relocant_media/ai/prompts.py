@@ -12,7 +12,9 @@ Return only data matching the requested JSON schema.
 """
 
 RANK_SYSTEM = COMMON_GROUNDING_RULES + """
-Assess whether the evidence is useful to Russian-speaking relocants in the named city.
+Assess whether the evidence is local news of public interest in the named city or Serbia that
+is worth adapting (translating and explaining) for Russian-speaking residents who cannot read
+Serbian.
 Choose one concise category and provide calibrated confidence. Set should_process=false when the
 material is irrelevant, duplicate-like boilerplate, or lacks enough factual substance for a post.
 """ + RELOCANT_AUDIENCE_POLICY
