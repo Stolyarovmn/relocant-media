@@ -15,6 +15,7 @@ from relocant_media.ai.models import (
 from relocant_media.ai.prompts import (
     CLAIMS_SYSTEM,
     DRAFT_SYSTEM,
+    RANK_EVERGREEN,
     RANK_SYSTEM,
     VERIFY_SYSTEM,
 )
@@ -108,6 +109,7 @@ class EditorialPipeline:
         *,
         city: str,
         documents: tuple[EvidenceDocument, ...],
+        evergreen: bool = False,
     ) -> EditorialOutcome:
         if not documents:
             raise ValueError("at least one evidence document is required")
@@ -125,8 +127,9 @@ class EditorialPipeline:
         ranking = _ask(
             self._provider,
             task="rank",
-            system_instruction=RANK_SYSTEM,
-            payload={"city": city, "evidence": evidence},
+            system_instruction=RANK_SYSTEM + (RANK_EVERGREEN if evergreen else ""),
+            payload={"city": city, "evidence": evidence,
+                     **({"content_type": "evergreen_guide"} if evergreen else {})},
             response_model=RankingResult,
         )
         borderline = not ranking.should_process and is_borderline(

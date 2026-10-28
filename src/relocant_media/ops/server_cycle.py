@@ -54,6 +54,7 @@ from relocant_media.domain.freshness import (
     evidence_freshness,
     freshness_decision,
 )
+from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
 from relocant_media.domain.presentation import (
     presentation_title,
     title_instruction,
@@ -73,6 +74,7 @@ from relocant_media.services.editorial import (
     _candidate,
     _document,
     _event_items,
+    _reviewed_event_item,
     _snapshot_member,
 )
 from relocant_media.services.event_eligibility import event_content_reason
@@ -182,7 +184,9 @@ class _CachedOutcome(EditorialPipeline):
     def __init__(self, outcome: EditorialOutcome, documents: tuple[EvidenceDocument, ...]):
         self.outcome, self.documents = outcome, documents
 
-    def run(self, *, city: str, documents: tuple[EvidenceDocument, ...]) -> EditorialOutcome:
+    def run(
+        self, *, city: str, documents: tuple[EvidenceDocument, ...], evergreen: bool = False,
+    ) -> EditorialOutcome:
         if city != "belgrade" or documents != self.documents:
             raise ValueError("evidence changed before persistence")
         return self.outcome
@@ -698,6 +702,20 @@ def prepare_reviewed(
         if existing is not None and not reassessing:
             return {"raw_item_id": raw_id, "status": existing.outcome["status"],
                     "reason": existing.outcome.get("reason", "already_processed")}
+        twin = _reviewed_event_item(session, anchor=raw, anchor_source=source)
+        if twin is not None:
+            # The service refuses a second review of the same event; without a run this item
+            # would fail the same way in every cycle and take a processing slot each time.
+            session.add(EditorialRun(
+                raw_item_id=raw_id, delivery_status="pending",
+                outcome={"status": "skipped", "reason": "event_already_reviewed",
+                         "duplicate_of_raw_item": twin.id, "ai_calls": 0},
+                evidence={"raw_item_id": raw_id, "source_id": raw.source_id},
+                editorial_rule_version=CURRENT_EDITORIAL_RULE_VERSION,
+            ))
+            session.commit()
+            return {"raw_item_id": raw_id, "status": "skipped",
+                    "reason": "event_already_reviewed"}
         members = _event_items(session, anchor=raw, anchor_source=source)
         documents = tuple(_document(item) for item, _ in members)
         snapshots = [_snapshot_member(item, policy) for item, policy in members]
@@ -720,7 +738,9 @@ def prepare_reviewed(
         # Source publication policy is enforced on import and delivery, separately
         # from autonomous editorial assessment. Never turn a source gate into an
         # unexamined request for the owner to read every article.
-        outcome = EditorialPipeline(provider).run(city="belgrade", documents=documents)
+        outcome = EditorialPipeline(provider).run(
+            city="belgrade", documents=documents,
+            evergreen=source.source_type == GUIDE_SOURCE_TYPE)
     if outcome.status != PublicationStatus.READY or outcome.draft is None:
         with Session(engine) as session:
             run = (persist_policy_reassessment(session, raw_id, outcome, documents)

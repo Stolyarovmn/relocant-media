@@ -17,6 +17,13 @@ Choose one concise category and provide calibrated confidence. Set should_proces
 material is irrelevant, duplicate-like boilerplate, or lacks enough factual substance for a post.
 """ + RELOCANT_AUDIENCE_POLICY
 
+RANK_EVERGREEN = """
+This item is an official evergreen guide for newcomers and has no publication date by design.
+Judge it by lasting practical value for Russian-speaking relocants in the named city, not by
+news timeliness or a local event. Set should_process=true when it gives concrete requirements,
+steps, documents, deadlines, fees or contacts that a newcomer can act on.
+"""
+
 CLAIMS_SYSTEM = COMMON_GROUNDING_RULES + """
 Extract atomic factual claims that could appear in a news post. Mark a claim material when changing
 or removing it could change a reader's decision or understanding. Every claim must cite at least one

@@ -161,6 +161,38 @@ def test_editorial_failure_before_output_exists_still_checkpoints(
     assert context[0].state['status'] == 'ready'
 
 
+def test_intake_summary_is_checkpointed_with_only_allowlisted_counters(
+        context, tmp_path, monkeypatch):
+    def child(command, env):
+        database = Path(env['DATABASE_URL'].removeprefix('sqlite:///'))
+        (database.parent / 'intake-batch-state.json').write_text(json.dumps({
+            'signature': '1', 'attempts': 0,
+            'last_result': {
+                'status': 'ready', 'checked_at': 'x',
+                'intake': {'received': 2, 'telegram_sends': 1, 'secret': 'TOKEN-1'},
+                'owner_review': {
+                    'status': 'ready',
+                    'preparation': {'prepared': 1, 'blocked': 2, 'draft': 'PRIVATE TEXT'},
+                    'queue': {'queued': 3, 'uncertain': 0},
+                    'error_type': 'ValueError', 'trace': 'Traceback token=ABC',
+                },
+                'owner_review_exit_code': 0,
+            },
+        }), encoding='utf-8')
+        return 0
+    monkeypatch.setattr(runtime, 'run_child', child)
+    assert execute(context, tmp_path, monkeypatch, mode='intake') == 0
+    summary = context[0].state['last_intake']
+    assert summary == {
+        'status': 'ready', 'owner_review_exit_code': 0,
+        'intake': {'received': 2, 'telegram_sends': 1},
+        'owner_review': {'status': 'ready', 'error_type': 'ValueError',
+                         'preparation': {'prepared': 1, 'blocked': 2},
+                         'queue': {'queued': 3, 'uncertain': 0}},
+    }
+    assert 'TOKEN' not in json.dumps(summary) and 'PRIVATE' not in json.dumps(summary)
+
+
 def test_failed_child_reports_only_whitelisted_failure_coordinates(
         context, tmp_path, monkeypatch, capsys):
     def child(command, env):
