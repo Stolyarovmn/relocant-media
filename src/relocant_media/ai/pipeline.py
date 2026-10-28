@@ -81,6 +81,26 @@ def _citations_are_grounded(
     return True
 
 
+CITATION_RETRY_NOTE = (
+    "Previous quotes were not found verbatim in the evidence. Copy each quote character for "
+    "character from one contiguous passage; no ellipsis, no merged passages, no corrected "
+    "spelling or punctuation."
+)
+
+
+def _ungrounded_quotes(
+    claims: ClaimSet,
+    documents: tuple[EvidenceDocument, ...],
+) -> list[str]:
+    bodies = {document.source_id: _normalize_text(document.body) for document in documents}
+    return [
+        citation.quote
+        for claim in claims.claims
+        for citation in claim.citations
+        if _normalize_text(citation.quote) not in bodies.get(citation.source_id, "")
+    ]
+
+
 def _verification_map(
     verification: VerificationResult,
     claims: ClaimSet,
@@ -150,6 +170,20 @@ class EditorialPipeline:
             payload={"city": city, "category": ranking.category, "evidence": evidence},
             response_model=ClaimSet,
         )
+        if not _citations_are_grounded(claims, documents):
+            claims = _ask(
+                self._provider,
+                task="claims",
+                system_instruction=CLAIMS_SYSTEM,
+                payload={
+                    "city": city,
+                    "category": ranking.category,
+                    "evidence": evidence,
+                    "correction": CITATION_RETRY_NOTE,
+                    "ungrounded_quotes": _ungrounded_quotes(claims, documents),
+                },
+                response_model=ClaimSet,
+            )
         if not _citations_are_grounded(claims, documents):
             return EditorialOutcome(
                 status=PublicationStatus.BLOCKED,

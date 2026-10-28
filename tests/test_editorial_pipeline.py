@@ -160,7 +160,31 @@ def test_fabricated_citation_blocks_before_verification() -> None:
 
     assert result.status is PublicationStatus.BLOCKED
     assert result.reason == "ungrounded_citation"
-    assert provider.calls == ["rank", "claims"]
+    assert provider.calls == ["rank", "claims", "claims"]
+
+
+def test_misquoted_citation_is_retried_once_with_verbatim_instruction() -> None:
+    class Retrying(FakeProvider):
+        def generate_json(self, **kwargs: Any) -> str:
+            if kwargs["task"] == "claims":
+                self.prompts.append(kwargs["prompt"])
+                self._responses["claims"] = (
+                    _claims("Ovaj citat ne postoji.") if len(self.prompts) == 1 else _claims()
+                )
+            return super().generate_json(**kwargs)
+
+        prompts: list[str] = []
+
+    provider = Retrying(
+        {"rank": _ranking("city"), "verify": _verification(), "draft": _draft()}
+    )
+    provider.prompts = []
+
+    result = _run(provider)
+
+    assert result.reason != "ungrounded_citation"
+    assert provider.calls.count("claims") == 2
+    assert "Ovaj citat ne postoji." in provider.prompts[1]
 
 
 def test_ranking_can_skip_irrelevant_item_without_more_model_calls() -> None:
