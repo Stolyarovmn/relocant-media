@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -210,6 +211,44 @@ def _persist_reviewed_package(
     post.body = package.outcome.draft.body
     post.confidence = Decimal(str(outcome.confidence))
     session.commit()
+
+
+_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
+
+
+def summarize_preparation_audit(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per blocked candidate: error type and each review's verdict, score, flags and rubric.
+
+    Review text, reasons and hashes are never copied; at most five candidates are kept.
+    """
+    details: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    for entry in entries:
+        role = entry.get("role")
+        if role in ("facts", "utility"):
+            review: dict[str, Any] = {"role": role}
+            if isinstance(entry.get("verdict"), str) and _TOKEN.fullmatch(entry["verdict"]):
+                review["verdict"] = entry["verdict"]
+            score = entry.get("computed_score", entry.get("score"))
+            if type(score) is int:
+                review["score"] = score
+            flags = entry.get("flags")
+            review["flags"] = [flag for flag in (flags if isinstance(flags, list) else [])[:5]
+                               if isinstance(flag, str) and _TOKEN.fullmatch(flag)]
+            rubric = entry.get("rubric")
+            if isinstance(rubric, dict):
+                review["rubric"] = {key: value for key, value in rubric.items()
+                                    if isinstance(key, str) and _TOKEN.fullmatch(key)
+                                    and type(value) is int}
+            pending.append(review)
+        elif role == "owner_review_prepare" and entry.get("status") == "blocked":
+            raw_item_id = entry.get("raw_item_id")
+            error_type = entry.get("error_type")
+            if type(raw_item_id) is int and isinstance(error_type, str):
+                details.append({"raw_item_id": raw_item_id, "error_type": error_type[:40],
+                                "reviews": pending[-3:]})
+            pending = []
+    return details[:5]
 
 
 def _live_fetcher(

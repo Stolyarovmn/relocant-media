@@ -172,7 +172,11 @@ def test_intake_summary_is_checkpointed_with_only_allowlisted_counters(
                 'intake': {'received': 2, 'telegram_sends': 1, 'secret': 'TOKEN-1'},
                 'owner_review': {
                     'status': 'ready',
-                    'preparation': {'prepared': 1, 'blocked': 2, 'draft': 'PRIVATE TEXT'},
+                    'preparation': {'prepared': 1, 'blocked': 2, 'draft': 'PRIVATE TEXT',
+                                    'details': [{'raw_item_id': 7, 'error_type': 'ValueError',
+                                                 'reviews': [{'role': 'utility', 'verdict': 'hold',
+                                                              'score': 44, 'flags': ['x'],
+                                                              'text': 'PRIVATE'}]}]},
                     'queue': {'queued': 3, 'uncertain': 0},
                     'error_type': 'ValueError', 'trace': 'Traceback token=ABC',
                 },
@@ -187,7 +191,10 @@ def test_intake_summary_is_checkpointed_with_only_allowlisted_counters(
         'status': 'ready', 'owner_review_exit_code': 0,
         'intake': {'received': 2, 'telegram_sends': 1},
         'owner_review': {'status': 'ready', 'error_type': 'ValueError',
-                         'preparation': {'prepared': 1, 'blocked': 2},
+                         'preparation': {'prepared': 1, 'blocked': 2, 'details': [
+                             {'raw_item_id': 7, 'error_type': 'ValueError', 'reviews': [
+                                 {'role': 'utility', 'verdict': 'hold', 'score': 44,
+                                  'flags': ['x']}]}]},
                          'queue': {'queued': 3, 'uncertain': 0}},
     }
     assert 'TOKEN' not in json.dumps(summary) and 'PRIVATE' not in json.dumps(summary)

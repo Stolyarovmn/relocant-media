@@ -769,3 +769,31 @@ async def test_owner_publish_rejects_expired_or_future_reviews(engine, age):
         session.refresh(run)
         assert run.delivery_status == "pending"
         assert session.get(Post, run.post_id).telegram_message_id is None
+
+
+def test_preparation_audit_is_summarised_per_blocked_candidate_without_any_text():
+    from relocant_media.services.owner_review_prepare import summarize_preparation_audit
+
+    entries = [
+        {"role": "facts", "verdict": "approve", "score": 90, "computed_score": 90,
+         "flags": [], "reason": "PRIVATE REASON TEXT", "context_sha256": "x"},
+        {"role": "utility", "verdict": "hold", "score": 40, "computed_score": 44,
+         "flags": ["audience_mismatch", "A" * 80],
+         "rubric": {"local_relevance": 2, "practical_value": 4, "timeliness": 0, "clarity": 3},
+         "reason": "PRIVATE REASON TEXT"},
+        {"role": "owner_review_prepare", "raw_item_id": 827, "status": "blocked",
+         "error_type": "DeliveryBlockedError"},
+        {"role": "owner_review_prepare", "raw_item_id": 987, "status": "blocked",
+         "error_type": "ValueError"},
+    ]
+    details = summarize_preparation_audit(entries)
+    assert details == [
+        {"raw_item_id": 827, "error_type": "DeliveryBlockedError", "reviews": [
+            {"role": "facts", "verdict": "approve", "score": 90, "flags": []},
+            {"role": "utility", "verdict": "hold", "score": 44,
+             "flags": ["audience_mismatch"],
+             "rubric": {"local_relevance": 2, "practical_value": 4, "timeliness": 0,
+                        "clarity": 3}}]},
+        {"raw_item_id": 987, "error_type": "ValueError", "reviews": []},
+    ]
+    assert "PRIVATE" not in str(details)
