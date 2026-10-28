@@ -237,3 +237,36 @@ def test_invalid_window_limit_and_timezone(
                           limit=limit, output=tmp_path / "new")
     with pytest.raises(ValueError):
         aware_datetime("2026-10-19T00:00:00")
+
+
+def test_verified_media_queue_behind_official_sources_even_when_newer() -> None:
+    from sqlalchemy import create_engine
+
+    from relocant_media.ops.server_cycle import queue_priorities
+    from relocant_media.storage.models import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    for source_id, source_type in (("off", "official_city_news"), ("med", "news_media")):
+        session.add(Source(id=source_id, city="belgrade", name=source_id,
+                           url=f"https://example.org/{source_id}", source_type=source_type,
+                           trust=1, enabled=True))
+    session.flush()
+    for source_id, external_id, when in (("off", "official-older", NOW),
+                                         ("med", "media-newer", NOW + timedelta(hours=3))):
+        session.add(RawItem(source_id=source_id, external_id=external_id,
+                            url=f"https://example.org/{external_id}", title=external_id,
+                            body="Tekst " * 30, published_at=when,
+                            published_at_precision="instant"))
+    session.commit()
+    window = dict(city="belgrade", since=NOW, until=NOW + timedelta(days=1), limit=1,
+                  newest_first=True)
+
+    newest = select_candidates(session, **window)
+    ordered = select_candidates(session, **window,
+                                source_priorities=queue_priorities({}, ["med"]))
+
+    assert [c["article_id"] for c in newest["candidates"]] == ["media-newer"]  # the problem
+    assert [c["article_id"] for c in ordered["candidates"]] == ["official-older"]
+    assert queue_priorities({"off": 2, "x": -1}, ["med"]) == {"off": 2, "x": -1, "med": -2}
