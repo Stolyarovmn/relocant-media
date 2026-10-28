@@ -9,9 +9,10 @@
 | `media_rts` | РТС | `https://www.rts.rs/lat/vesti/rss.html` | национальный вещатель, полный `content:encoded` |
 | `media_n1_srbija` | N1 Srbija | `https://n1info.rs/feed/` | независимое СМИ, полный текст в ленте |
 | `media_balkan_insight` | Balkan Insight (BIRN) | `https://balkaninsight.com/feed/` | региональная повестка, полный текст |
+| `media_nova` | Nova.rs | `https://nova.rs/feed/` | независимое онлайн-издание; в ленте анонс, текст берётся со страницы (`article`) |
+| `media_danas` | Danas | `https://www.danas.rs/feed/` | ежедневная газета; в ленте анонс, текст со страницы (`article`) |
 
-Ленты проверены запросом 27.10.2026. Не подключены: Danas и B92 (в ленте только анонсы, нужен
-разбор страниц), Blic (таблоид), Beta и 021 (лента недоступна). Добавление издания — один YAML
+Ленты проверены запросом 27.10.2026. Danas и Nova.rs добавлены 28.10.2026 после проверки, что страницы статей отдают текст. Не подключены: B92 (страница статьи не отдаёт текст), Blic и Kurir (таблоиды; технически подходят, решение за владельцем), Beta и 021 (лента недоступна). Добавление издания — один YAML
 в `cities/belgrade/sources/` с `ownership: media`, `source_type: news_media`, `auto_publish: false`.
 
 ## Правила

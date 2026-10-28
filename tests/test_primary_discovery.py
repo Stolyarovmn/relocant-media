@@ -48,7 +48,8 @@ def test_a_link_to_a_verified_media_article_resolves_to_its_source_but_a_homepag
 
     media = {s.id: s for s in load_source_registry(Path("cities/belgrade/sources"))
              if s.source_type == "news_media"}
-    assert set(media) == {"media_rts", "media_n1_srbija", "media_balkan_insight"}
+    assert set(media) == {"media_rts", "media_n1_srbija", "media_balkan_insight",
+                          "media_nova", "media_danas"}
 
     article = "https://n1info.rs/vesti/neka-vest-o-beogradu/"
     assert source_for_url(article, media) == "media_n1_srbija"

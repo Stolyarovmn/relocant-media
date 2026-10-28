@@ -1,0 +1,32 @@
+id: media_danas
+name: Danas
+publisher: Danas
+ownership: media
+url: https://danas.rs/
+language: sr-Latn
+source_type: news_media
+trust: 0.7
+check_every: 1h
+categories:
+- city
+- transport
+- utilities
+- events
+- health
+- schools
+extraction:
+  strategy: venue_feed
+  status: active
+  feed_url: https://www.danas.rs/feed/
+  page_text: true
+  article_selectors:
+  - article
+  approved_hosts:
+  - danas.rs
+  - www.danas.rs
+policy:
+  auto_publish: true
+  high_risk: false
+verification:
+  checked_at: '2026-10-28'
+  note: Ежедневная газета. RSS отдаёт анонс и настоящую pubDate, полный текст берётся со страницы статьи (селектор article, проверено 28.10.2026). Источник media; идёт обычным путём новости (две независимые проверки, не высокорисковые темы, ссылка на оригинал и собственный пересказ); к владельцу попадает то, что не вышло, с пояснением.

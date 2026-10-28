@@ -13,6 +13,8 @@ MEDIA = {
     "media_rts": "media_rts_feed.xml",
     "media_n1_srbija": "media_n1_feed.xml",
     "media_balkan_insight": "media_balkan_insight_feed.xml",
+    "media_nova": "media_nova_feed.xml",
+    "media_danas": "media_danas_feed.xml",
 }
 
 
@@ -38,11 +40,16 @@ def test_media_never_enter_the_official_venue_paths() -> None:
     assert not set(MEDIA) & set(discovery_venue_sources())
 
 
+PAGE_TEXT = {"media_nova", "media_danas"}  # feed carries a teaser; the article page is fetched
+
+
 @pytest.mark.parametrize(("source_id", "fixture"), MEDIA.items())
 def test_real_feed_samples_yield_full_text_items(source_id: str, fixture: str) -> None:
     xml = (Path("tests/fixtures") / fixture).read_text(encoding="utf-8")
     items = parse_venue_feed(xml, _registry()[source_id])
-    assert items and all(len(item.body) >= 120 and item.published_at for item in items)
+    assert items and all(item.published_at and item.url for item in items)
+    if source_id not in PAGE_TEXT:
+        assert all(len(item.body) >= 120 for item in items)
 
 
 def test_media_can_only_support_non_high_risk_topics() -> None:
@@ -64,3 +71,29 @@ def test_verbatim_copy_is_detected_but_translation_and_retelling_pass() -> None:
     assert copies_source_text(retold, [source]) is False
     assert copies_source_text("", [source]) is False
     assert copies_source_text(copied, []) is False
+
+
+def test_teaser_only_feeds_fetch_the_article_page_for_evidence() -> None:
+    import asyncio
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock
+
+    from relocant_media.collectors.venue_feed import VenueFeedCollector
+
+    registry = _registry()
+    assert registry["media_nova"].extraction.page_text
+    assert not registry["media_rts"].extraction.page_text
+
+    teaser = "Kratak anons vesti koji je dovoljno dug da pre izmene ostane jedini dokaz. " * 3
+    today = datetime.now(UTC).strftime("%a, %d %b %Y %H:%M:%S +0000")
+    feed = (f"<rss><channel><item><title>Vest</title><link>https://nova.rs/vesti/a</link>"
+            f"<description>{teaser}</description><pubDate>{today}</pubDate></item></channel></rss>")
+    page = ("<html><head><title>Vest</title></head><body><h1>Vest</h1><article>"
+            + "Pun tekst clanka sa svim detaljima. " * 20 + "</article></body></html>")
+    collector = VenueFeedCollector(registry["media_nova"], AsyncMock())
+    collector._fetch = AsyncMock(side_effect=[feed, page])  # type: ignore[method-assign]
+
+    items = asyncio.run(collector.collect())
+
+    assert len(items) == 1 and "Pun tekst clanka" in items[0].body
+    assert teaser.strip() not in items[0].body
