@@ -101,6 +101,34 @@ def test_old_source_is_discarded_without_ai(seeded, tmp_path):
         assert run.post_id is None
 
 
+def test_duplicate_of_a_reviewed_event_is_closed_once_instead_of_retried_every_cycle(
+        seeded, tmp_path):
+    engine, raw_id, _ = seeded
+    with Session(engine) as session:
+        first = session.get(RawItem, raw_id)
+        session.add(EditorialRun(raw_item_id=first.id, outcome={"status": "skipped"},
+                                 evidence={}, delivery_status="pending"))
+        twin = RawItem(source_id=first.source_id, external_id="twin-of-first", url=first.url,
+                       title=first.title, body=first.body, published_at=first.published_at)
+        session.add(twin)
+        session.commit()
+        twin_id = twin.id
+
+    class ForbiddenProvider:
+        def generate_json(self, **kwargs):
+            raise AssertionError("A duplicate must not cost a model call")
+
+    result = server_cycle.prepare_reviewed(engine, twin_id, ForbiddenProvider(), tmp_path)
+    assert result["status"] == "skipped" and result["reason"] == "event_already_reviewed"
+    with Session(engine) as session:
+        run = session.get(EditorialRun, twin_id)
+        assert run.outcome["reason"] == "event_already_reviewed" and run.post_id is None
+        assert run.outcome["duplicate_of_raw_item"] == raw_id
+    # The next cycle sees an existing run and moves on without any error.
+    again = server_cycle.prepare_reviewed(engine, twin_id, ForbiddenProvider(), tmp_path)
+    assert again["reason"] == "event_already_reviewed"
+
+
 @pytest.mark.parametrize("source_enabled", [True, False])
 def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch, source_enabled):
     engine, raw_id, provider = seeded
