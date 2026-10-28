@@ -94,6 +94,17 @@ def source_for_url(url: str, sources: dict[str, SourceConfig]) -> str | None:
             except ValueError:
                 continue
             return key
+        # A link from a channel to an article of a verified outlet becomes that outlet's item.
+        # Homepages and section pages (fewer than two path segments) are not articles.
+        for key, source in sources.items():
+            if source.source_type != "news_media":
+                continue
+            try:
+                _allowed(url, source)
+            except ValueError:
+                continue
+            if len([part for part in parts.path.split("/") if part]) >= 2:
+                return key
     except ValueError:
         pass
     return None
