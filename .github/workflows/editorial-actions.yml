@@ -167,11 +167,14 @@ jobs:
         if: always()
         run: rm -rf "$RUNNER_TEMP/editorial-work" "$RUNNER_TEMP/editorial-storage-identity"
   chain:
-    # Scheduled runs are best effort. A healthy cycle books the next one, so the newsroom
-    # keeps running; the cron slots remain the restart path and ACTIONS_CHAIN_ENABLED is the
-    # kill switch. The concurrency group still serializes the single canonical writer.
+    # Scheduled runs are best effort. A finished cycle books the next one, so the newsroom
+    # keeps running; a failed cycle (for example the exact-main-CI guard right after a merge)
+    # backs off for ten minutes instead of ending the chain. Cron slots remain the restart
+    # path and ACTIONS_CHAIN_ENABLED is the kill switch. The concurrency group still
+    # serializes the single canonical writer.
     if: >-
-      github.ref == 'refs/heads/main' && needs.cycle.result == 'success' &&
+      github.ref == 'refs/heads/main' &&
+      (needs.cycle.result == 'success' || needs.cycle.result == 'failure') &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true' &&
       inputs.mode != 'preview'
     needs: cycle
@@ -183,7 +186,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          CHAIN_DELAY_SECONDS: '120'
+          CHAIN_DELAY_SECONDS: ${{ needs.cycle.result == 'success' && '120' || '600' }}
         run: |
           set -euo pipefail
           # The concurrency group keeps at most one pending run, so this cannot pile up.

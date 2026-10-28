@@ -35,8 +35,8 @@ idempotent, so a duplicate slot only finds nothing new to process.
 Scheduled runs are best effort (one slot arrived in about three hours). With the variable
 `ACTIONS_CHAIN_ENABLED=true`, a healthy `cycle` books the next run in mode `auto` (two minutes
 later; the concurrency group keeps one pending run, so nothing piles up). `auto` runs editorial when the last checkpointed editorial is
-older than 55 minutes, otherwise intake. A failed cycle stops the chain; the cron slots restart
-it. Set the variable to anything else to stop chaining. Still one canonical writer.
+older than 55 minutes, otherwise intake. A failed cycle (for example the exact-main-CI guard right after a merge) pauses the chain for ten minutes
+and it continues; cron slots are the extra restart path. Set the variable to anything else to stop chaining. Still one canonical writer.
 
 ## Storage guarantees
 
