@@ -173,7 +173,7 @@ jobs:
     # path and ACTIONS_CHAIN_ENABLED is the kill switch. The concurrency group still
     # serializes the single canonical writer.
     if: >-
-      github.ref == 'refs/heads/main' &&
+      always() && github.ref == 'refs/heads/main' &&
       (needs.cycle.result == 'success' || needs.cycle.result == 'failure') &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true' &&
       inputs.mode != 'preview'

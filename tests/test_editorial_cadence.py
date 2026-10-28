@@ -78,6 +78,9 @@ def test_chain_survives_a_failed_cycle_but_backs_off():
     """The exact-main-CI guard fails right after every merge; that must pause the chain
     for ten minutes, not end it. Cancelled or skipped cycles still do not chain."""
     chain = _chain()
+    # Without a status function GitHub adds an implicit success(), which silently skips this
+    # job after a failed cycle (this ended the chain at 04:20 on 28.10.2026).
+    assert "always()" in chain["if"]
     assert "needs.cycle.result == 'failure'" in chain["if"]
     assert "needs.cycle.result == 'cancelled'" not in chain["if"]
     delay = chain["steps"][0]["env"]["CHAIN_DELAY_SECONDS"]
