@@ -5,7 +5,7 @@ import copy
 import json
 import os
 import time
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -220,6 +220,16 @@ def review_only_venue_sources() -> dict[str, SourceConfig]:
 # Candidates fully assessed per cycle. Ranking is one cheap call and most items are rejected
 # there, so five per cycle drains the verified-media backlog without a second queue.
 PROCESS_LIMIT = 5
+
+
+def queue_priorities(attention: dict[str, int], media: Iterable[str]) -> dict[str, int]:
+    """Official sources keep their band; verified media always queue behind every one of them.
+
+    National feeds add dozens of items an hour; without this they take the few processing
+    slots from the city news that matters to relocants.
+    """
+    floor = min([0, *attention.values()]) - 1
+    return {**attention, **{source_id: floor for source_id in media}}
 
 
 def media_sources() -> dict[str, SourceConfig]:
@@ -962,9 +972,11 @@ def main() -> None:
                               else lambda: policy_reassessment_ids(engine)),
             continue_on_error=True, submissions_only=args.submissions_only,
             allowed_items=allowed_items if args.submissions_only else None,
-            candidate_priorities=lambda: source_priorities(json.loads(
-                (args.output / "venue-attention.json").read_text(encoding="utf-8")))
-                if (args.output / "venue-attention.json").is_file() else {})
+            candidate_priorities=lambda: queue_priorities(
+                source_priorities(json.loads(
+                    (args.output / "venue-attention.json").read_text(encoding="utf-8")))
+                if (args.output / "venue-attention.json").is_file() else {},
+                media_sources()))
         result["private_intake"] = intake_status
         result["submissions_only"] = args.submissions_only
         async def feedback() -> dict[str, Any]:
