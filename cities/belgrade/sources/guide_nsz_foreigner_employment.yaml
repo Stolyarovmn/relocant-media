@@ -1,0 +1,26 @@
+id: guide_nsz_foreigner_employment
+name: Национальная служба занятости — трудоустройство иностранцев
+publisher: National Employment Service of Serbia (NSZ)
+ownership: official
+url: https://www.nsz.gov.rs/nsz/employment-of-foreigners-in-the-republic-of-serbia/11181
+language: en
+source_type: official_guide
+trust: 1.0
+check_every: 24h
+categories:
+- immigration
+- jobs
+extraction:
+  strategy: official_guide
+  status: active
+  article_selectors:
+  - article
+  approved_hosts:
+  - nsz.gov.rs
+  - www.nsz.gov.rs
+policy:
+  auto_publish: false
+  high_risk: false
+verification:
+  checked_at: '2026-10-28'
+  note: Официальная страница NSZ (английская версия) о правилах трудоустройства иностранцев. Вечный путеводитель; идёт только через очередь решений владельца, дата проверки ограничена 30 днями.

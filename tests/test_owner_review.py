@@ -217,14 +217,18 @@ def test_high_risk_policy_hold_gets_two_reviews_but_stays_human_review(engine):
 
 def _undecided_event_hold(
     engine, *, reason="source_auto_publish_disabled", age=timedelta(0),
-    ownership="official", category="events",
+    ownership="official", category="events", guide=False,
 ):
     """A fresh, drafted item the editorial could not decide on its own."""
     with Session(engine) as session:
         service, _, raw_id = prepare_service(session, category=category)
         item = session.get(RawItem, raw_id)
         source = session.get(Source, item.source_id)
-        item.published_at = NOW - age
+        item.published_at = None if guide else NOW - age
+        if guide:
+            # Evergreen guide: no publication date, valid from the day its text was first seen.
+            source.source_type = "official_guide"
+            item.ingested_at = NOW - age
         source.auto_publish = False
         source.ownership = ownership
         session.commit()
@@ -534,6 +538,55 @@ def test_media_draft_that_copies_the_source_is_blocked_before_any_review():
         assert_primary_evidence(["media"], "events", draft, ["Naslov " + text])
     assert assert_primary_evidence(["media"], "events", draft, ["drugi tekst"]) == "media"
     assert assert_primary_evidence(["official"], "law", draft, ["x " + text]) == "official"
+
+
+@pytest.mark.asyncio
+async def test_guide_reaches_owner_with_its_verification_date_and_publishes_after_checks(engine):
+    raw_id = _undecided_event_hold(engine, guide=True, age=timedelta(days=12))
+    assert pending_owner_decision_holds(engine, now=NOW) == [raw_id]
+    assert prepare_owner_decision_holds(engine, ReviewProvider(), _live, now=NOW)["prepared"] == 1
+    bot = ReviewBot()
+    await queue_owner_reviews(
+        engine, bot, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT, enabled=True,
+    )
+    send = next(payload for method, payload in bot.calls if method == "sendMessage")
+    assert "Проверено по официальному источнику: 23.10.2026" in send["text"]
+    publisher = Publisher()
+    with Session(engine) as session:
+        review = session.scalar(select(Submission).where(Submission.kind == OWNER_REVIEW_KIND))
+        review.status = "approved"
+        package = _stored_package(session.get(EditorialRun, raw_id))
+        session.commit()
+        changed = tuple(
+            document.model_copy(update={"body": document.body + " Izmena."})
+            for document in _live(package)
+        )
+        with pytest.raises(DeliveryBlockedError):  # the live official page is checked again
+            await deliver_owner_approved(
+                session, review, publisher, live_documents=changed,
+                target_channel_id=APPROVED_CHANNEL_ID, enabled=True,
+            )
+        result = await deliver_owner_approved(
+            session, review, publisher, live_documents=_live(package),
+            target_channel_id=APPROVED_CHANNEL_ID, enabled=True,
+        )
+        assert result.message_id == 777
+        assert "Проверено по официальному источнику: 23.10.2026" in publisher.calls[0]
+
+
+def test_guide_older_than_thirty_days_is_not_offered(engine):
+    _undecided_event_hold(engine, guide=True, age=timedelta(days=31))
+    assert pending_owner_decision_holds(engine, now=NOW) == []
+
+
+def test_news_text_never_gets_a_verification_line(engine):
+    raw_id = _undecided_event_hold(engine)
+    prepare_owner_decision_holds(engine, ReviewProvider(), _live, now=NOW)
+    with Session(engine) as session:
+        from relocant_media.services.owner_review import _publication_text
+
+        package = _stored_package(session.get(EditorialRun, raw_id))
+        assert "Проверено" not in _publication_text(package, "official_city_news")
 
 
 def test_owner_review_rows_never_enter_normal_submission_queue(engine):

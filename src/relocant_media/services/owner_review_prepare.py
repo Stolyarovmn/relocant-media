@@ -18,7 +18,7 @@ from relocant_media.ai.package import EditorialPackage, canonical_json, evaluate
 from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.domain.dedup import event_key
-from relocant_media.domain.freshness import freshness_decision
+from relocant_media.domain.freshness import evidence_freshness
 from relocant_media.domain.originality import copies_source_text
 from relocant_media.domain.policy import OWNER_DECISION_REASONS, primary_evidence_kind
 from relocant_media.services.editorial import (
@@ -60,9 +60,10 @@ def pending_owner_decision_holds(engine: Engine, *, now: datetime | None = None)
     checked_at = now if now is not None else datetime.now(UTC)
     with Session(engine) as session:
         rows = session.execute(
-            select(EditorialRun, Post, RawItem)
+            select(EditorialRun, Post, RawItem, Source.source_type)
             .join(Post, EditorialRun.post_id == Post.id)
             .join(RawItem, EditorialRun.raw_item_id == RawItem.id)
+            .join(Source, RawItem.source_id == Source.id)
             .where(
                 EditorialRun.delivery_status == "pending",
                 Post.status == PublicationStatus.HUMAN_REVIEW.value,
@@ -71,15 +72,16 @@ def pending_owner_decision_holds(engine: Engine, *, now: datetime | None = None)
         ).all()
         return [
             run.raw_item_id
-            for run, post, item in rows
+            for run, post, item, source_type in rows
             if "_package" not in run.outcome
             and run.outcome.get("reason") in OWNER_DECISION_REASONS
             and isinstance(run.outcome.get("draft"), dict)
             and post.telegram_message_id is None
             and post.published_at is None
-            and freshness_decision(
+            and evidence_freshness(
                 item.title, item.body, item.published_at, checked_at,
-                published_at_precision=item.published_at_precision,
+                precision=item.published_at_precision, source_type=source_type,
+                verified_at=item.ingested_at,
             ).action == "keep"
         ]
 

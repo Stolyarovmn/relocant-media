@@ -13,6 +13,7 @@ from relocant_media.collectors.euprava_service import EupravaServiceCollector
 from relocant_media.collectors.health_duty import HealthDutyCollector
 from relocant_media.collectors.musicology_blog import MusicologyBlogCollector
 from relocant_media.collectors.natural_history_news import NaturalHistoryNewsCollector
+from relocant_media.collectors.official_guide import OfficialGuideCollector
 from relocant_media.collectors.page_snapshot import PageSnapshotCollector
 from relocant_media.collectors.srbija_gov_article import SrbijaGovArticleCollector
 from relocant_media.collectors.srbijavoz_news import SrbijavozNewsCollector
@@ -55,6 +56,8 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return EupravaServiceCollector(source, client)
     if strategy == "tob_events":
         return TobEventsCollector(source, client)
+    if strategy == "official_guide":
+        return OfficialGuideCollector(source, client)
     if strategy == "welcome_serbia_guidance":
         return WelcomeSerbiaGuidanceCollector(source, client)
     if strategy == "yugoslavia_programs":

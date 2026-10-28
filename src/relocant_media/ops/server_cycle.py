@@ -49,7 +49,11 @@ from relocant_media.collectors.telegram_topics import (
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.dedup import event_key
-from relocant_media.domain.freshness import freshness_decision
+from relocant_media.domain.freshness import (
+    GUIDE_SOURCE_TYPE,
+    evidence_freshness,
+    freshness_decision,
+)
 from relocant_media.domain.presentation import (
     presentation_title,
     title_instruction,
@@ -226,6 +230,19 @@ def media_sources() -> dict[str, SourceConfig]:
     }
 
 
+def guide_sources() -> dict[str, SourceConfig]:
+    """Official evergreen guides: valid for 30 days after first sight, owner queue only."""
+    return {
+        source.id: source
+        for source in load_source_registry(SOURCES)
+        if source.extraction.strategy == "official_guide"
+        and source.extraction.status == "active"
+        and source.source_type == GUIDE_SOURCE_TYPE
+        and source.ownership == "official"
+        and not source.policy.auto_publish
+    }
+
+
 def _is_review_only_venue_hold(item: Any, *, now: datetime) -> bool:
     if event_content_reason(item.title, item.body, now=now) is not None:
         return False
@@ -307,16 +324,20 @@ async def collect_sources(
     review_venues = review_only_venue_sources()
     runtime_venues = {**venues, **review_venues}
     media = {} if submissions_only else media_sources()
+    guides = {} if submissions_only else guide_sources()
     discovery_venues = discovery_venue_sources()
     news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
                for key in ("city_beograd_news", "cukarica_news")}
     sources.update(runtime_venues)
     sources.update(media)
+    sources.update(guides)
     result["sources_synced"] = len(sources)
     result["media_sources"] = len(media)
     result["media_items"] = 0
     result["media_deferred"] = 0
+    result["guide_sources"] = len(guides)
+    result["guide_items"] = 0
     result["venue_sources"] = len(venues)
     result["venue_review_only_sources"] = len(review_venues)
     result["venue_items"] = 0
@@ -372,6 +393,7 @@ async def collect_sources(
             key: build_collector(source, client) for key, source in runtime_venues.items()
         })
         collectors.update({key: build_collector(source, client) for key, source in media.items()})
+        collectors.update({key: build_collector(source, client) for key, source in guides.items()})
 
         async def full_article(source_id: str, url: str) -> str:
             if url in fetched:
@@ -530,6 +552,14 @@ async def collect_sources(
                     articles.append(item)
             except Exception:
                 result["failures"] += 1
+        for source_id in guides:
+            try:
+                # Fetched now, so the page text is verified now: no date inference involved.
+                for item in await collectors[source_id].collect():
+                    result["guide_items"] += 1
+                    articles.append(item)
+            except Exception:
+                result["failures"] += 1
         runtime_channels = () if submissions_only else runtime_channels_for_city("belgrade")
         for channel in runtime_channels:
             observation: dict[str, Any] = {"channel": channel, "status": "not_checked"}
@@ -673,9 +703,9 @@ def prepare_reviewed(
         snapshots = [_snapshot_member(item, policy) for item, policy in members]
         identity = dict(raw_item_id=raw.id, source_id=raw.source_id, article_id=raw.external_id)
         key = event_key(_candidate(raw))
-    freshness = freshness_decision(title=raw.title, body=raw.body,
-        published_at=raw.published_at, now=datetime.now(UTC),
-        published_at_precision=raw.published_at_precision)
+    freshness = evidence_freshness(raw.title, raw.body, raw.published_at, datetime.now(UTC),
+        precision=raw.published_at_precision, source_type=source.source_type,
+        verified_at=raw.ingested_at)
     venue_reason = (event_content_reason(raw.title, raw.body, now=datetime.now(UTC))
                     if source.source_type == "official_venue_events" else None)
     if freshness.action != "keep" or venue_reason is not None:

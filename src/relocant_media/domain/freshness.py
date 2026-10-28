@@ -195,3 +195,38 @@ def freshness_decision(
             return FreshnessDecision("keep", "dated_event_still_relevant")
         return FreshnessDecision("discard", "publication_outside_news_window")
     return FreshnessDecision("keep", "within_news_window")
+
+
+GUIDE_SOURCE_TYPE = "official_guide"
+GUIDE_MAX_AGE = timedelta(days=30)
+
+
+def guide_freshness(verified_at: datetime | None, now: datetime) -> FreshnessDecision:
+    """An evergreen guide is valid for 30 days after this text was first seen at the source.
+
+    The guide text is bound to its content hash, so a changed page is a new item with a new
+    verification date; an unchanged page simply expires and must be re-verified.
+    """
+    if verified_at is None or verified_at.tzinfo is None or verified_at > now:
+        return FreshnessDecision("hold", "guide_verification_date_unknown")
+    if now - verified_at > GUIDE_MAX_AGE:
+        return FreshnessDecision("discard", "guide_verification_expired")
+    return FreshnessDecision("keep", "guide_verified")
+
+
+def evidence_freshness(
+    title: str,
+    body: str,
+    published_at: datetime | None,
+    now: datetime,
+    *,
+    precision: str,
+    source_type: str,
+    verified_at: datetime | None,
+) -> FreshnessDecision:
+    """One decision point: guides use their verification date, everything else its news date."""
+    if source_type == GUIDE_SOURCE_TYPE:
+        if verified_at is not None and verified_at.tzinfo is None:
+            verified_at = verified_at.replace(tzinfo=UTC)
+        return guide_freshness(verified_at, now)
+    return freshness_decision(title, body, published_at, now, published_at_precision=precision)
