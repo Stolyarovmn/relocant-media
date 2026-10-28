@@ -736,7 +736,9 @@ def prepare_reviewed(
         # Source publication policy is enforced on import and delivery, separately
         # from autonomous editorial assessment. Never turn a source gate into an
         # unexamined request for the owner to read every article.
-        outcome = EditorialPipeline(provider).run(city="belgrade", documents=documents)
+        outcome = EditorialPipeline(provider).run(
+            city="belgrade", documents=documents,
+            evergreen=source.source_type == GUIDE_SOURCE_TYPE)
     if outcome.status != PublicationStatus.READY or outcome.draft is None:
         with Session(engine) as session:
             run = (persist_policy_reassessment(session, raw_id, outcome, documents)

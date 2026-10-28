@@ -217,3 +217,26 @@ def test_clearly_irrelevant_or_unsure_or_high_risk_items_are_still_skipped() -> 
         provider = _borderline_provider(ranking)
         assert _run(provider).status is PublicationStatus.SKIPPED
         assert provider.calls == ["rank"]
+
+
+class _RecordingProvider(FakeProvider):
+    def generate_json(self, *, task, system_instruction, prompt, response_schema):
+        if task == "rank":
+            self.rank_instruction = system_instruction
+            self.rank_prompt = prompt
+        return super().generate_json(
+            task=task, system_instruction=system_instruction, prompt=prompt,
+            response_schema=response_schema,
+        )
+
+
+def test_evergreen_guides_are_ranked_by_lasting_value_not_news_timeliness() -> None:
+    ranking = _rejected(0.2)
+    provider = _RecordingProvider({"rank": ranking})
+    EditorialPipeline(provider).run(city="belgrade", documents=(_document(),), evergreen=True)
+    assert "official evergreen guide" in provider.rank_instruction
+    assert "evergreen_guide" in provider.rank_prompt
+
+    news = _RecordingProvider({"rank": ranking})
+    EditorialPipeline(news).run(city="belgrade", documents=(_document(),))
+    assert "evergreen" not in news.rank_instruction and "evergreen" not in news.rank_prompt
