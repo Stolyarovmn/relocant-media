@@ -14,7 +14,8 @@ from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, Publica
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.publisher import Publisher
 from relocant_media.domain.dedup import DEFAULT_EVENT_WINDOW, EventCandidate, event_key, same_event
-from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
+from relocant_media.domain.originality import copies_source_text
+from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION, primary_evidence_kind
 from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -148,7 +149,8 @@ def _auto_publish_policy_reason(
         return "source_policy_requires_review"
     if anchor_source.source_type == "official_venue_events" and category != "events":
         return "venue_events_only"
-    if not any(source.ownership.strip().casefold() == "official" for _, source in members):
+    # Official evidence always counts; a verified media outlet only outside high-risk topics.
+    if primary_evidence_kind([source.ownership for _, source in members], category or "") is None:
         return "official_source_required"
     return None
 
@@ -376,6 +378,14 @@ class EditorialService:
         )
         if policy_reason is not None:
             raise DeliveryBlockedError(f"source policy blocks delivery: {policy_reason}")
+        if primary_evidence_kind(
+            [member_source.ownership for _, member_source in members],
+            outcome.ranking.category,
+        ) == "media" and copies_source_text(
+            f"{outcome.draft.title}\n{outcome.draft.body}",
+            [f"{member.title}\n{member.body}" for member, _ in members],
+        ):
+            raise DeliveryBlockedError("draft copies the media source text")
 
         primary = next(
             (member for member, member_source in members

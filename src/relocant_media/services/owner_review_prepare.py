@@ -200,6 +200,9 @@ def _persist_reviewed_package(
     metadata = {
         key: value for key, value in run.outcome.items() if key.startswith("_")
     }
+    original = run.outcome.get("reason")
+    if "_owner_reason" not in metadata and original in OWNER_DECISION_REASONS:
+        metadata["_owner_reason"] = original
     run.outcome = {
         **outcome.model_dump(mode="json"),
         **metadata,
@@ -212,6 +215,33 @@ def _persist_reviewed_package(
     post.body = package.outcome.draft.body
     post.confidence = Decimal(str(outcome.confidence))
     session.commit()
+
+
+_REASON_TEXT = {
+    "source_auto_publish_disabled": "этот источник включён только через ваше решение",
+    "category_not_auto_publishable": "эта категория не публикуется автоматически",
+    "package_requires_review": (
+        "проверки пройдены, но автоматически выходят только транспорт и события"),
+    "policy_requires_human_review": "по правилам канала эта тема решается человеком",
+    "borderline_relevance": (
+        "ранжирование сомневалось, нужна ли такая новость (релевантность высокая); "
+        "факты проверены"),
+}
+_HIGH_RISK_TEXT = {"politics": "политика", "law": "право", "tax": "налоги",
+                   "medicine": "медицина", "banking": "банки", "immigration": "иммиграция"}
+_CODE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def owner_reason_text(reason: str, category: str) -> str:
+    """One plain sentence: why this story reached the owner instead of being published."""
+    text = _REASON_TEXT.get(reason)
+    if text is None:
+        return f"причина: {_CODE.sub('', reason)[:60]}"
+    if reason == "policy_requires_human_review":
+        topic = _HIGH_RISK_TEXT.get(category.strip().lower())
+        if topic:
+            return f"тема «{topic}» по правилам канала решается человеком"
+    return text
 
 
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,40}")

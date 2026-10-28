@@ -800,3 +800,102 @@ def test_preparation_audit_is_summarised_per_blocked_candidate_without_any_text(
         {"raw_item_id": 987, "error_type": "ValueError", "reviews": []},
     ]
     assert "PRIVATE" not in str(details)
+
+
+@pytest.mark.parametrize(("reason", "category", "needle"), [
+    ("source_auto_publish_disabled", "events", "источник"),
+    ("category_not_auto_publishable", "schools", "автоматически"),
+    ("package_requires_review", "city", "автоматически"),
+    ("policy_requires_human_review", "politics", "политика"),
+    ("borderline_relevance", "events", "сомнева"),
+])
+def test_owner_is_told_in_plain_words_why_a_story_was_not_published_automatically(
+        reason, category, needle):
+    from relocant_media.services.owner_review_prepare import owner_reason_text
+
+    text = owner_reason_text(reason, category)
+    assert needle in text.lower() and len(text) < 200
+
+
+def test_unknown_reason_is_shown_as_a_plain_code_and_never_as_free_text():
+    from relocant_media.services.owner_review_prepare import owner_reason_text
+
+    assert owner_reason_text("some_new_reason", "x").endswith("some_new_reason")
+    assert "<" not in owner_reason_text("<script>alert(1)</script>", "x")
+
+
+@pytest.mark.asyncio
+async def test_card_opens_with_the_reason_and_keeps_it_out_of_the_published_text(engine):
+    raw_id = _undecided_event_hold(engine)
+    assert prepare_owner_decision_holds(engine, ReviewProvider(), _live, now=NOW)["prepared"] == 1
+    with Session(engine) as session:
+        run = session.get(EditorialRun, raw_id)
+        assert run.outcome["_owner_reason"] == "source_auto_publish_disabled"
+        assert run.outcome["reason"] == "package_requires_review"
+    bot = ReviewBot()
+    await queue_owner_reviews(
+        engine, bot, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT, enabled=True,
+    )
+    send = next(payload for method, payload in bot.calls if method == "sendMessage")
+    assert send["text"].startswith("Почему это у вас:")
+    from relocant_media.services.owner_review import _publication_text
+
+    with Session(engine) as session:
+        package = _stored_package(session.get(EditorialRun, raw_id))
+    assert "Почему" not in _publication_text(package)
+
+
+def _store_reviewed_story(engine, *, category="events", ownership="media"):
+    """A fully reviewed story from a verified media source on the normal (auto) path."""
+    with Session(engine) as session:
+        _, _, raw_id = prepare_service(session, category=category)
+        item = session.get(RawItem, raw_id)
+        source = session.get(Source, item.source_id)
+        item.published_at = NOW
+        source.ownership = ownership
+        source.auto_publish = True
+        session.commit()
+        payload = package_payload()
+        payload.update(version=2, policy_version="subscription-editorial-v2", raw_item_id=raw_id)
+        payload["outcome"]["ranking"]["category"] = category
+        payload["evidence"]["published_at"] = NOW.isoformat()
+        payload["event"] = {
+            "event_key": event_key(_candidate(item)),
+            "editorial_rule_version": "belgrade-editorial-v2",
+            "documents": [_snapshot_member(item, source)],
+        }
+        draft = parse({**payload, "reviews": payload["reviews"]}).outcome.draft
+        for review in payload["reviews"]:
+            review["reviewed_at"] = NOW.isoformat()
+            review["draft_sha256"] = draft_sha256(draft)
+        bind_context(payload)
+        run = import_package(session, parse(payload), now=NOW)
+        return raw_id, run.outcome["status"], run.outcome.get("reason")
+
+
+@pytest.mark.asyncio
+async def test_verified_media_story_publishes_on_the_normal_path_without_the_owner(engine):
+    raw_id, status, reason = _store_reviewed_story(engine)
+    assert (status, reason) == ("ready", "package_independently_reviewed")
+    publisher = Publisher()
+    with Session(engine) as session:
+        result = await deliver_reviewed(
+            session, raw_id, publisher, target_channel_id=APPROVED_CHANNEL_ID, enabled=True,
+        )
+        assert result.message_id == 777
+        assert publisher.calls[0].endswith("Источник: https://www.beograd.rs/example.html")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("category", "ownership"), [("politics", "media"), ("law", "media"),
+                                                      ("events", "unknown")])
+async def test_media_never_auto_publishes_high_risk_topics_and_unknown_sources_never_publish(
+        engine, category, ownership):
+    raw_id, status, _ = _store_reviewed_story(engine, category=category, ownership=ownership)
+    publisher = Publisher()
+    with Session(engine) as session:
+        with pytest.raises(DeliveryBlockedError):
+            await deliver_reviewed(
+                session, raw_id, publisher, target_channel_id=APPROVED_CHANNEL_ID, enabled=True,
+            )
+    assert publisher.calls == []

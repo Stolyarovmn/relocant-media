@@ -38,3 +38,28 @@ def test_known_official_site_search_has_one_bounded_term_and_two_site_limit():
     assert len(plan) == 2
     assert all('?s=' in url and 'https%3A' not in url for _, url in plan)
     assert public_search_plan('Нет названия известной площадки', registry, aliases) == []
+
+
+def test_a_link_to_a_verified_media_article_resolves_to_its_source_but_a_homepage_does_not():
+    from pathlib import Path
+
+    from relocant_media.services.primary_discovery import source_for_url
+    from relocant_media.sources.registry import load_source_registry
+
+    media = {s.id: s for s in load_source_registry(Path("cities/belgrade/sources"))
+             if s.source_type == "news_media"}
+    assert set(media) == {"media_rts", "media_n1_srbija", "media_balkan_insight"}
+
+    article = "https://n1info.rs/vesti/neka-vest-o-beogradu/"
+    assert source_for_url(article, media) == "media_n1_srbija"
+    assert source_for_url("https://www.rts.rs/lat/vesti/drustvo/123/vest.html",
+                          media) == "media_rts"
+    assert source_for_url("https://balkaninsight.com/2026/10/13/some-story/",
+                          media) == "media_balkan_insight"
+    # Not articles, not verified hosts, not https, and credential tricks are all refused.
+    assert source_for_url("https://n1info.rs/", media) is None
+    assert source_for_url("https://n1info.rs/vesti/", media) is None
+    assert source_for_url("https://evil.example/vesti/vest/", media) is None
+    assert source_for_url("http://n1info.rs/vesti/neka-vest/", media) is None
+    assert source_for_url("https://user@n1info.rs/vesti/neka-vest/", media) is None
+    assert source_for_url("https://n1info.rs.evil.example/vesti/neka-vest/", media) is None
