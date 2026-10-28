@@ -233,6 +233,36 @@ def _counters(value: object, keys: tuple[str, ...]) -> dict[str, int]:
     return {key: value[key] for key in keys if type(value.get(key)) is int}
 
 
+def _preparation_details(value: object) -> list[dict[str, Any]]:
+    token = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
+    result: list[dict[str, Any]] = []
+    for item in value[:5] if isinstance(value, list) else []:
+        if not isinstance(item, dict) or type(item.get("raw_item_id")) is not int:
+            continue
+        reviews = []
+        for review in item.get("reviews", [])[:3] if isinstance(item.get("reviews"), list) else []:
+            if not isinstance(review, dict):
+                continue
+            entry: dict[str, Any] = {key: review[key] for key in ("role", "verdict")
+                                     if isinstance(review.get(key), str)
+                                     and token.fullmatch(review[key])}
+            if type(review.get("score")) is int:
+                entry["score"] = review["score"]
+            flags = review.get("flags")
+            entry["flags"] = [f for f in (flags if isinstance(flags, list) else [])[:5]
+                              if isinstance(f, str) and token.fullmatch(f)]
+            rubric = review.get("rubric")
+            if isinstance(rubric, dict):
+                entry["rubric"] = {k: v for k, v in rubric.items()
+                                   if isinstance(k, str) and token.fullmatch(k) and type(v) is int}
+            reviews.append(entry)
+        error = item.get("error_type")
+        result.append({"raw_item_id": item["raw_item_id"],
+                       "error_type": error if isinstance(error, str) and token.fullmatch(error)
+                       else "unknown", "reviews": reviews})
+    return result
+
+
 def intake_summary(saved: dict[str, Any]) -> dict[str, Any]:
     """Only statuses and counters of the last intake pass; never text, ids or exception values."""
     result = saved.get("last_result")
@@ -258,6 +288,10 @@ def intake_summary(saved: dict[str, Any]) -> dict[str, Any]:
                                         "deferred")),
                            ("queue", ("queued", "uncertain"))):
             counters = _counters(owner.get(key), names)
+            if key == "preparation" and isinstance(owner.get(key), dict):
+                details = _preparation_details(owner[key].get("details"))
+                if details:
+                    counters = {**counters, "details": details}
             if counters:
                 block[key] = counters
         summary["owner_review"] = block

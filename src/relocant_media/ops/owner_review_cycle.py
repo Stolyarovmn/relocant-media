@@ -7,6 +7,7 @@ import json
 import os
 import traceback
 from pathlib import Path
+from typing import Any
 
 import httpx
 from sqlalchemy import create_engine, func, select
@@ -25,6 +26,7 @@ from relocant_media.services.owner_review import (
 from relocant_media.services.owner_review_prepare import (
     pending_owner_decision_holds,
     prepare_owner_decision_holds,
+    summarize_preparation_audit,
 )
 from relocant_media.storage.file_lock import file_lock
 from relocant_media.storage.models import Submission
@@ -70,11 +72,15 @@ async def run_cycle(
 ) -> dict[str, object]:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     provider = _provider(engine)
-    preparation = (
-        prepare_owner_decision_holds(engine, provider, fetch_documents)
+    audit: list[dict[str, Any]] = []
+    preparation: dict[str, Any] = (
+        prepare_owner_decision_holds(engine, provider, fetch_documents, audit=audit.append)
         if provider is not None and pending_owner_decision_holds(engine)
         else {"prepared": 0, "blocked": 0}
     )
+    details = summarize_preparation_audit(audit)
+    if details:
+        preparation = {**preparation, "details": details}
     async with httpx.AsyncClient(
         timeout=30,
         trust_env=False,
