@@ -1,7 +1,6 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -17,7 +16,6 @@ from relocant_media.services.editorial import DeliveryBlockedError, _candidate, 
 from relocant_media.services.owner_review import (
     OWNER_REVIEW_KIND,
     deliver_owner_approved,
-    process_owner_actions,
     queue_owner_reviews,
     record_owner_callback,
     record_owner_reply,
@@ -367,7 +365,8 @@ def _press(session, review_id, action, *, message_id=501):
 
 
 @pytest.mark.parametrize(("action", "status"), [
-    ("skip", "skipped"), ("draft", "scheduled"), ("reject", "rejected"), ("publish", "approved"),
+    ("skip", "skipped"), ("draft", "postponed"), ("reject", "rejected"),
+    ("publish", "approved"), ("revise", "revision_requested"),
 ])
 def test_each_owner_button_moves_the_exact_version_to_its_own_pipeline(engine, action, status):
     raw_id = _store_reviewed_politics(engine)
@@ -380,15 +379,17 @@ def test_each_owner_button_moves_the_exact_version_to_its_own_pipeline(engine, a
         assert session.get(Submission, review.id).payload["owner_decision"] == action
 
 
-def test_revise_button_asks_for_a_reply_and_changes_nothing(engine):
+def test_revise_button_without_a_comment_leaves_the_rewrite_to_the_editorial(engine):
     raw_id = _store_reviewed_politics(engine)
     with Session(engine) as session:
         review = _owner_review_row(session, raw_id)
         result = _press(session, review.id, "revise")
-        assert result is not None and result.handled and not result.accepted
-        assert "ответ" in result.answer_text.lower()
-        assert result.clear_chat_id is None  # the buttons stay for the next decision
-        assert session.get(Submission, review.id).status == "pending"
+        assert result is not None and result.accepted
+        session.commit()
+        stored = session.get(Submission, review.id)
+        assert stored.status == "revision_requested"
+        comment = stored.payload["owner_comment"]
+        assert "усмотрение редакции" in comment and "новые факты не добавлять" in comment
 
 
 @pytest.mark.asyncio
@@ -406,37 +407,32 @@ async def test_skipped_version_is_never_offered_again(engine):
 
 
 @pytest.mark.asyncio
-async def test_scheduled_drafts_are_released_one_per_interval(engine):
-    first = _store_reviewed_politics(engine)
-    publisher = Publisher()
+async def test_draft_postpones_to_the_next_cycle_and_comes_back_as_a_new_version(engine):
+    raw_id = _store_reviewed_politics(engine)
+    with Session(engine) as session:
+        review = _owner_review_row(session, raw_id)
+        _press(session, review.id, "draft")
+        session.commit()
+    bot = ReviewBot()
 
-    async def run_actions():
-        return await process_owner_actions(
-            engine, ReviewBot(), owner_user_id=OWNER, owner_chat_id=OWNER_CHAT,
-            provider=None, live_document_fetcher=_live, publisher=publisher,
-            publish_enabled=True,
+    async def queue():
+        return await queue_owner_reviews(
+            engine, bot, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT, enabled=True,
         )
 
+    assert (await queue())["queued"] == 0  # this cycle: nothing comes back yet
     with Session(engine) as session:
-        review = _owner_review_row(session, first)
-        _press(session, review.id, "draft")
-        # Another post went out ten minutes ago: the channel already has its news of this hour.
-        session.add(Post(
-            city="belgrade", category="events", status="ready", title="t", body="b",
-            confidence=Decimal("0.9"), editorial_rule_version="v", telegram_message_id=5,
-            published_at=NOW - timedelta(minutes=10),
-        ))
+        review = session.scalar(select(Submission).where(Submission.kind == OWNER_REVIEW_KIND))
+        assert review.status == "postponed"
+        review.payload = {
+            **review.payload, "decided_at": (NOW - timedelta(minutes=40)).isoformat(),
+        }
         session.commit()
-    assert (await run_actions())["published"] == 0
-    assert publisher.calls == []
+    assert (await queue())["queued"] == 1  # next cycle: offered again as a new version
     with Session(engine) as session:
-        assert session.scalar(select(Submission.status).where(
-            Submission.kind == OWNER_REVIEW_KIND)) == "scheduled"
-        recent = session.scalar(select(Post).where(Post.telegram_message_id == 5))
-        recent.published_at = NOW - timedelta(minutes=70)
-        session.commit()
-    assert (await run_actions())["published"] == 1
-    assert len(publisher.calls) == 1
+        versions = sorted(row.payload["version"] for row in session.scalars(
+            select(Submission).where(Submission.kind == OWNER_REVIEW_KIND)))
+        assert versions == [1, 2]
 
 
 def test_owner_reply_requests_revision_only_for_exact_pending_review(engine):
