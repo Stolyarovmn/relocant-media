@@ -5,6 +5,8 @@ import copy
 import json
 import os
 import time
+from collections.abc import Coroutine
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -280,6 +282,16 @@ async def _collect_exact_url(collector: Any, url: str) -> Any:
     return matches[0]
 
 
+def _run_sync[T](coroutine: Coroutine[Any, Any, T]) -> T:
+    """asyncio.run, also from synchronous code that an async caller (the owner cycle) runs."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coroutine).result()
+
+
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     documents = []
@@ -292,7 +304,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     with httpx.Client(timeout=25, trust_env=False) as client:
         for document in package.event.documents:
             if document.source_id in venues:
-                item = asyncio.run(fetch_venue(venues[document.source_id], document.url))
+                item = _run_sync(fetch_venue(venues[document.source_id], document.url))
                 documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
                     title=item.title, body=item.body, published_at=item.published_at,
                     published_at_precision=item.published_at_precision))
