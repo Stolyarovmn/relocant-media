@@ -309,6 +309,9 @@ def test_rank_uses_machine_categories_while_reasons_stay_russian():
     assert "events" in calls[0]["response_schema"]["properties"]["category"]["enum"]
     assert "medicine" in calls[0]["response_schema"]["properties"]["category"]["enum"]
     assert "enum" not in original["properties"]["category"]
+    # Macro-economic and central-bank news must not be forced into the high-risk "banking".
+    assert "economy" in calls[0]["response_schema"]["properties"]["category"]["enum"]
+    assert "economy" in calls[0]["system_instruction"]
 
 
 

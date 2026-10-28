@@ -83,3 +83,11 @@ def test_a_rejected_utility_review_stays_rejected_whatever_the_rubric_says():
                                             timeliness=4, clarity=4)
     result = reviewed_package(pkg, provider, lambda: documents(pkg))
     assert result.reviews[1].verdict == "reject"
+
+
+def test_any_serbian_place_counts_as_local_for_the_utility_reviewer():
+    pkg, provider = package(), Provider()
+    reviewed_package(pkg, provider, lambda: documents(pkg))
+    instruction = " ".join(provider.calls[1]["system_instruction"].split())
+    assert "любое место Сербии" in instruction
+    assert "не повод снижать local_relevance" in instruction
