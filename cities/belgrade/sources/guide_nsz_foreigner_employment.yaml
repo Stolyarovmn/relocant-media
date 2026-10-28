@@ -12,7 +12,7 @@ categories:
 - jobs
 extraction:
   strategy: official_guide
-  status: active
+  status: inactive
   article_selectors:
   - article
   approved_hosts:
@@ -24,3 +24,4 @@ policy:
 verification:
   checked_at: '2026-10-28'
   note: Официальная страница NSZ (английская версия) о правилах трудоустройства иностранцев. Вечный путеводитель; идёт только через очередь решений владельца, дата проверки ограничена 30 днями.
+  # Отключено владельцем 28.10.2026: канал новостной, справочные материалы не нужны (только изменения).

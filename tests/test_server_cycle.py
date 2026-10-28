@@ -486,6 +486,13 @@ def test_guide_not_re_verified_for_thirty_days_expires_in_triage(seeded):
         assert session.get(EditorialRun, raw_id).outcome["reason"] == "guide_verification_expired"
 
 
+def _enable_guide(monkeypatch):
+    """Guides are switched off in the registry; the live-check mechanism is still covered."""
+    source = next(item for item in server_cycle.load_source_registry(server_cycle.SOURCES)
+                  if item.id == "guide_nsz_foreigner_employment")
+    monkeypatch.setattr(server_cycle, "guide_sources", lambda: {source.id: source})
+
+
 def _live_package(*documents):
     from types import SimpleNamespace
 
@@ -496,6 +503,8 @@ def _live_package(*documents):
 
 def test_live_check_covers_media_and_guide_sources_but_still_refuses_unknown_ones(monkeypatch):
     from relocant_media.collectors.base import RawItem
+
+    _enable_guide(monkeypatch)
 
     class MediaCollector:
         async def collect_url(self, url):
@@ -528,6 +537,8 @@ async def test_live_check_works_inside_a_running_event_loop(monkeypatch):
     """The owner-review cycle is async: asyncio.run inside it raised RuntimeError and blocked
     every guide and media package before the first independent review."""
     from relocant_media.collectors.base import RawItem
+
+    _enable_guide(monkeypatch)
 
     class GuideCollector:
         async def collect(self):
