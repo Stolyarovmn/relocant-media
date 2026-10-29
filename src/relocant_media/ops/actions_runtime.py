@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -203,14 +204,38 @@ def restored(drive: SnapshotStore, manifest: dict[str, Any], work: Path) -> Path
 
 def run_child(command: list[str], environment: dict[str, str]) -> int:
     # Killing only the immediate Python process can leave a Gemini/worker descendant alive.
-    child = subprocess.Popen(command, env=environment, start_new_session=True,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        return child.wait(timeout=4100)
-    except BaseException:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait()
-        raise
+    # Early failures print a report before an output directory exists. Keep raw stdout
+    # private and ephemeral; expose only the existing coordinate allowlist on failure.
+    with tempfile.TemporaryFile() as captured:
+        child = subprocess.Popen(command, env=environment, start_new_session=True,
+                                 stdout=captured, stderr=subprocess.DEVNULL)
+        try:
+            code = child.wait(timeout=4100)
+        except BaseException:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+            raise
+        if code > 0:
+            captured.seek(0, os.SEEK_END)
+            captured.seek(max(0, captured.tell() - 65536))
+            for line in reversed(captured.read().splitlines()):
+                try:
+                    report = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if isinstance(report, dict) and report.get("status") in (
+                    "SERVER_FAILED", "PRIMARY_FAILED",
+                ):
+                    print_failure_coordinates(report)
+                    break
+        return code
+
+
+def print_failure_coordinates(report: dict[str, Any]) -> None:
+    fields = {key: value for key in ("status", "error_type", "error_site", "backup_error_type")
+              if isinstance(value := report.get(key), str)
+              and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
+    print(json.dumps({"runtime_failure": fields}), file=sys.stderr)
 
 
 def report_failure(run_dir: Path, code: int) -> None:
@@ -221,10 +246,7 @@ def report_failure(run_dir: Path, code: int) -> None:
         report = json.loads((run_dir / "server-report.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
-    fields = {key: value for key in ("status", "error_type", "error_site", "backup_error_type")
-              if isinstance(value := report.get(key), str)
-              and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
-    print(json.dumps({"runtime_failure": fields}), file=sys.stderr)
+    print_failure_coordinates(report)
 
 
 def _counters(value: object, keys: tuple[str, ...]) -> dict[str, int]:
