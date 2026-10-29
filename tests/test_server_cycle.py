@@ -20,6 +20,23 @@ from relocant_media.storage.sqlite_schema import initialize_sqlite
 reviewed = _reviewed
 
 
+def test_configured_limit_enters_real_cycle_without_ai_or_telegram(tmp_path):
+    from relocant_media.ops.primary_cycle import run_cycle
+
+    path = tmp_path / "editorial.sqlite3"
+    initialize_sqlite(path)
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        result = run_cycle(
+            engine, city="belgrade", output=tmp_path / "cycle", now=datetime.now(UTC),
+            limit=server_cycle.PROCESS_LIMIT, ingest=lambda: {"failures": 0},
+            process=lambda raw_id: pytest.fail("empty queue must not call AI or Telegram"),
+        )
+        assert result["status"] == "PRIMARY_OK"
+    finally:
+        engine.dispose()
+
+
 def test_server_roles_receive_russian_policy_without_rewriting_evidence():
     calls = []
 
@@ -233,7 +250,7 @@ def test_failed_or_busy_main_never_enters_publisher(seeded, tmp_path, monkeypatc
     monkeypatch.setenv("EDITORIAL_SEND_ENABLED", "true")
     monkeypatch.setattr(sys, "argv", ["server-cycle", "--output", str(output)])
     def cycle(*args, **kwargs):
-        assert kwargs["limit"] == server_cycle.PROCESS_LIMIT == 10
+        assert kwargs["limit"] == server_cycle.PROCESS_LIMIT == 5
         output.mkdir()
         return {"status": status, "window_complete": False}
 

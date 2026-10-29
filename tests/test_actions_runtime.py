@@ -2,6 +2,8 @@ import base64
 import copy
 import hashlib
 import json
+import os
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,6 +18,32 @@ from relocant_media.storage.models import Submission
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize('exit_code', [0, 1])
+def test_child_early_failure_emits_only_safe_coordinates(capsys, exit_code):
+    report = {'status': 'SERVER_FAILED', 'error_type': 'ValueError',
+              'error_site': 'server_cycle.py:800', 'message': 'PRIVATE-TIP-TOKEN'}
+    program = ("import sys; print('PRIVATE-TIP-TOKEN' * 8000); "
+               f"print({json.dumps(report)!r}); sys.exit({exit_code})")
+    assert runtime.run_child([sys.executable, '-c', program], dict(os.environ)) == exit_code
+    captured = capsys.readouterr()
+    assert captured.out == ''
+    assert 'PRIVATE-TIP-TOKEN' not in captured.err
+    if exit_code:
+        assert json.loads(captured.err)['runtime_failure'] == {
+            'status': 'SERVER_FAILED', 'error_type': 'ValueError',
+            'error_site': 'server_cycle.py:800',
+        }
+    else:
+        assert captured.err == ''
+
+
+def test_child_failure_without_json_keeps_raw_output_hidden(capsys):
+    program = "import sys; print('PRIVATE-TIP-TOKEN'); sys.exit(1)"
+    assert runtime.run_child([sys.executable, '-c', program], dict(os.environ)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ''
 
 
 class MemoryStore:
