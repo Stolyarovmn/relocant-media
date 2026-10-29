@@ -250,7 +250,7 @@ def test_failed_or_busy_main_never_enters_publisher(seeded, tmp_path, monkeypatc
     monkeypatch.setenv("EDITORIAL_SEND_ENABLED", "true")
     monkeypatch.setattr(sys, "argv", ["server-cycle", "--output", str(output)])
     def cycle(*args, **kwargs):
-        assert kwargs["limit"] == server_cycle.PROCESS_LIMIT == 10
+        assert kwargs["limit"] == server_cycle.PROCESS_LIMIT == 5
         output.mkdir()
         return {"status": status, "window_complete": False}
 
