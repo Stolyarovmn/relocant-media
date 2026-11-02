@@ -236,3 +236,18 @@ def test_health_is_safe_before_fencing_and_never_exposes_pointer(context):
     backend.pointer.write_text('invalid-pointer')
     with pytest.raises(ValueError):
         request(backend, {'op': 'health'})
+
+
+
+def test_identical_blob_reupload_is_idempotent_and_does_not_touch_pointer(context):
+    backend, state, content = context
+    initialize(context)
+    before = backend.pointer.read_bytes()
+    digest = state["snapshot"]["sha256"]
+    for _ in range(3):
+        assert backend.put_blob(digest, len(content), io.BytesIO(content)) == {"blob_id": digest}
+    stream, size = backend.blob(digest)
+    with stream:
+        assert stream.read() == content
+    assert size == len(content) and backend.pointer.read_bytes() == before
+    assert [path.name for path in backend.blobs.iterdir()] == [digest]
