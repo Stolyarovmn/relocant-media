@@ -1,9 +1,11 @@
 """Bounded first-party RSS/Atom discovery and full-article evidence."""
 import ipaddress
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit
+from zoneinfo import ZoneInfo
 
 import feedparser
 import httpx
@@ -88,6 +90,23 @@ def parse_venue_feed(html_xml: str, source: SourceConfig) -> list[RawItem]:
     return result
 
 
+def _rts_publication(soup: BeautifulSoup) -> datetime:
+    """RTS labels publication first and an optional update after an arrow."""
+    element = soup.select_one(".storyInfo .storyDate")
+    text = element.get_text(" ", strip=True) if element else ""
+    match = re.fullmatch(
+        r"[^,\d]+,\s*(\d{2}\.\d{2}\.\d{4}),\s*(\d{2}:\d{2})"
+        r"(?:\s*->\s*\d{2}:\d{2})?", text,
+    )
+    if match is None:
+        raise ValueError("RTS article publication date missing or invalid")
+    try:
+        published = datetime.strptime(" ".join(match.groups()), "%d.%m.%Y %H:%M")
+    except ValueError as error:
+        raise ValueError("RTS article publication date missing or invalid") from error
+    return published.replace(tzinfo=ZoneInfo("Europe/Belgrade")).astimezone(UTC)
+
+
 def _article(html: str, url: str, source: SourceConfig, fallback: datetime | None) -> RawItem:
     soup = BeautifulSoup(html, "html.parser")
     lead_text = ""
@@ -133,7 +152,7 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
     body = BeautifulSoup(body, "html.parser").get_text(" ", strip=True)
     if lead_text and lead_text not in body:
         body = lead_text + " " + body
-    published = published or fallback
+    published = _rts_publication(soup) if source.id == "media_rts" else published or fallback
     if not title:
         raise ValueError("venue article title missing")
     if len(body) < 120:
