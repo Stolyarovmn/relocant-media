@@ -143,3 +143,19 @@ server compute is fenced, and the public projection is fresh. A green CI, health
 check or storage upload alone does not establish a working newsroom. Do not return
 ownership to an old server database after Actions has consumed updates or delivered
 messages. Reconcile the newest canonical state first.
+
+
+## Ограниченный повтор транспорта
+
+При `SSHStorageError.code=storage_error` клиент повторяет только идемпотентные
+`health`, `read_state`, `get_blob`, `put_blob`: не более трёх попыток всего,
+с паузами 1 и 2 секунды. Повтор передаёт тот же запрос и тот же immutable payload;
+потерянное подтверждение `put_blob` не создаёт другое поколение. Постоянные ошибки,
+включая `conflict`, `blob_missing` и `invalid_request`, не повторяются.
+`write_state` и `create_state` всегда однократны. Это не повтор worker, сбора, ИИ
+или Telegram и не повтор всего цикла.
+
+Защита действует только против будущих кратковременных сбоев транспорта. Она
+не снимает существующий `busy`, не восстанавливает потерянный retry budget intake
+и не доказывает завершение аварийного прохода. Для неизвестного исхода по-прежнему
+нужна отдельная сверка нового состояния и квитанций; откат на старую копию запрещён.

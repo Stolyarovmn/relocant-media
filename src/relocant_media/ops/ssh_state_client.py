@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ MAX_BLOB = 50 * 1024 * 1024
 MAX_HEADER = 1024 * 1024
 MAX_STATE = 512 * 1024
 REMOTE_HELPER = "/usr/local/libexec/relocant-media/ssh-state-storage"
+RETRY_SAFE_OPERATIONS = frozenset({"health", "read_state", "get_blob", "put_blob"})
 ERRORS = frozenset({"state_missing", "blob_missing", "state_exists", "conflict",
                     "invalid_request", "storage_error", "bootstrap_blocked"})
 
@@ -107,6 +109,22 @@ class SSHStateClient:
         self.config = config
 
     def exchange(
+        self, request: dict[str, Any], payload: bytes = b"",
+    ) -> tuple[dict[str, Any], bytes]:
+        # Only immutable writes and reads tolerate an unknown transport outcome.
+        # Pointer CAS/create must stay single-shot; never retry the worker itself.
+        operation = request.get("op")
+        retry_safe = isinstance(operation, str) and operation in RETRY_SAFE_OPERATIONS
+        for attempt in range(3):
+            try:
+                return self.exchange_once(request, payload)
+            except SSHStorageError as error:
+                if not retry_safe or error.code != "storage_error" or attempt == 2:
+                    raise
+                time.sleep(attempt + 1)
+        raise AssertionError("unreachable SSH retry state")
+
+    def exchange_once(
         self, request: dict[str, Any], payload: bytes = b"",
     ) -> tuple[dict[str, Any], bytes]:
         header = json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
