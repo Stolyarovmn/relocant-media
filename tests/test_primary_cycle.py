@@ -240,8 +240,10 @@ def test_server_isolates_failed_item_and_keeps_checkpoint_open(queue, tmp_path):
     report = run_cycle(engine, city="belgrade", output=tmp_path / "partial-ai", now=NOW,
         ingest=ingest_ok, process=one_failure, limit=2, continue_on_error=True)
     assert report["status"] == "PRIMARY_PARTIAL" and not report["window_complete"]
-    assert report["processing_errors"] == [{"raw_item_id": attempted[0],
-                                             "error_type": "TimeoutError"}]
+    failure = report["processing_errors"][0]
+    assert failure["raw_item_id"] == attempted[0] and failure["error_type"] == "TimeoutError"
+    assert failure["error_site"].startswith("test_primary_cycle.py:")
+    assert "Не сохранять сообщение исключения" not in json.dumps(report, ensure_ascii=False)
     assert report["processed_raw_item_ids"] == attempted[1:]
     assert report["remaining_count"] == 11
 

@@ -178,3 +178,12 @@ Actions загружает только `_site`. Не удалять стары�
 - [Drive multipart upload](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
 - [GitHub Contents SHA precondition](https://docs.github.com/en/rest/repos/contents#create-or-update-file-contents)
 - [GITHUB_TOKEN event behavior](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)
+
+
+## Диагностика частичного прохода
+
+`last_cycle.processing_error_count` и `fallback_required` сохраняются в публичной
+проекции и каноническом указателе. Отсутствующие значения остаются `null`, а не
+превращаются в отсутствие ошибок. `PRIMARY_PARTIAL` с ненулевым счётчиком требует
+разбора. Закрытый отчёт `processing_errors` дополнительно хранит только basename
+файла и номер строки `error_site`, без текста исключения, полного пути или locals.

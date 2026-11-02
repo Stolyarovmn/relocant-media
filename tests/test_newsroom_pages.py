@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -244,3 +245,38 @@ def test_malformed_coverage_does_not_abort_checkpoint_projection() -> None:
     assert len(safe['sources']) == 1
     assert safe['sources'][0]['status'] == 'not_checked'
     assert safe['sources'][0]['leads'] is None
+
+
+@pytest.mark.parametrize("errors,fallback", [
+    ([{"raw_item_id": 1, "error_type": "ValueError", "private": "PRIVATE_ERROR"}], True),
+    ([], False),
+])
+def test_partial_cycle_health_survives_export_and_merge(tmp_path, monkeypatch, errors, fallback):
+    from relocant_media.ops import newsroom_export
+
+    report = {"status": "PRIMARY_PARTIAL", "processing_errors": errors,
+              "fallback_required": fallback}
+    (tmp_path / "server-report.json").write_text(json.dumps(report))
+    output = tmp_path / "public.json"
+    monkeypatch.setattr(sys, "argv", ["export", "--root", str(ROOT), "--output", str(output),
+                                      "--run-directory", str(tmp_path)])
+    newsroom_export.main()
+    exported = json.loads(output.read_text())
+    result = merge(snapshot(ROOT), exported)
+    for payload in (exported, result):
+        cycle = payload["cities"][0]["last_cycle"]
+        assert cycle["processing_error_count"] == len(errors)
+        assert cycle["fallback_required"] is fallback
+        assert "PRIVATE_ERROR" not in json.dumps(payload)
+    assert "last_cycle" not in result["cities"][1]
+
+
+def test_cycle_health_unknown_is_not_reported_as_clean():
+    for count, fallback in [(None, None), (-1, "PRIVATE_ERROR"), (True, {})]:
+        runtime = snapshot(ROOT)
+        runtime["cities"][0]["last_cycle"] = {
+            "status": "PRIMARY_PARTIAL", "processing_error_count": count,
+            "fallback_required": fallback}
+        cycle = merge(snapshot(ROOT), runtime)["cities"][0]["last_cycle"]
+        assert cycle["processing_error_count"] is None
+        assert cycle["fallback_required"] is None
