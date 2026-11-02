@@ -19,7 +19,9 @@ extraction:
   status: active
   feed_url: https://www.rts.rs/lat/vesti/rss.html
   article_selectors:
-  - article
+  - '#story-text'
+  article_lead_selectors:
+  - .storyMainLead
   approved_hosts:
   - rts.rs
   - www.rts.rs
@@ -27,5 +29,6 @@ policy:
   auto_publish: true
   high_risk: false
 verification:
-  checked_at: '2026-10-27'
-  note: Государственный вещатель. RSS отдаёт полный content:encoded и настоящую pubDate. Источник media; идёт обычным путём новости (две независимые проверки, не высокорисковые темы, ссылка на оригинал и собственный пересказ); к владельцу попадает то, что не вышло, с пояснением.
+  checked_at: '2026-11-02'
+  note: >-
+    Государственный вещатель. RSS используется для обнаружения. Доказательство перечитывается со страницы: #story-text и storyMainLead; исходная дата/время берётся из storyInfo/storyDate в Europe/Belgrade, до стрелки обновления. Источник media; идёт обычным путём новости (две независимые проверки, не высокорисковые темы, ссылка на оригинал и собственный пересказ); к владельцу попадает то, что не вышло, с пояснением.
