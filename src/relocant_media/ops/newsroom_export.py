@@ -198,6 +198,10 @@ def main() -> None:
             "status": report.get("status"), "observed_at": datetime.now(UTC).isoformat(),
             "error_type": report.get("error_type"), "jev": None,
         }
+        errors = report.get("processing_errors")
+        cycle["processing_error_count"] = len(errors) if isinstance(errors, list) else None
+        fallback = report.get("fallback_required")
+        cycle["fallback_required"] = fallback if isinstance(fallback, bool) else None
         shadow = manifest.get("jev_shadow")
         if isinstance(shadow, dict):
             cycle["jev"] = {key: shadow.get(key) for key in (

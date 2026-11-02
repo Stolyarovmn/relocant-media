@@ -147,8 +147,13 @@ def run_cycle(
                 except Exception as error:
                     if not continue_on_error:
                         raise
+                    frame = error.__traceback__
+                    while frame is not None and frame.tb_next is not None:
+                        frame = frame.tb_next
                     processing_errors.append({"raw_item_id": raw_id,
-                                              "error_type": type(error).__name__})
+                        "error_type": type(error).__name__,
+                        "error_site": (f"{Path(frame.tb_frame.f_code.co_filename).name}:"
+                                       f"{frame.tb_lineno}" if frame is not None else "unknown")})
                     continue
                 (output / f"editorial-{raw_id}.json").write_text(
                     json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

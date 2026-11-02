@@ -74,6 +74,11 @@ def merge(catalog: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
             safe_cycle: dict[str, Any] = {
                 key: cycle.get(key) for key in ("status", "observed_at", "error_type")
             }
+            error_count = cycle.get("processing_error_count")
+            safe_cycle["processing_error_count"] = (
+                error_count if type(error_count) is int and error_count >= 0 else None)
+            fallback = cycle.get("fallback_required")
+            safe_cycle["fallback_required"] = fallback if isinstance(fallback, bool) else None
             safe_cycle["ai_calls"] = rows(cycle.get("ai_calls", []), (
                 "provider", "model", "task", "status", "occurred_at", "duration_seconds",
             ))
