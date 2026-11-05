@@ -496,7 +496,12 @@ def main() -> None:
     except Exception as error:
         args.output.unlink(missing_ok=True)
         # HTTP exception messages can contain URLs/credentials/private response bodies.
-        print(json.dumps({"status": "blocked", "error_type": type(error).__name__}))
+        blocked = {"status": "blocked", "error_type": type(error).__name__}
+        for field in ("code", "reason"):
+            value = getattr(error, field, None)
+            if isinstance(value, str) and re.fullmatch(r"[a-z_]{1,32}", value):
+                blocked[f"storage_{field}"] = value
+        print(json.dumps(blocked))
         raise SystemExit(1) from None
     print(json.dumps({"status": "completed" if code == 0 else "runtime_failed"}))
     raise SystemExit(code)

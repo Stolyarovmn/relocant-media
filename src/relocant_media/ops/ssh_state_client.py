@@ -23,10 +23,17 @@ ERRORS = frozenset({"state_missing", "blob_missing", "state_exists", "conflict",
                     "invalid_request", "storage_error", "bootstrap_blocked"})
 
 
+REASONS = frozenset({"timeout", "ssh_unavailable", "oversize_response", "bad_header",
+                     "bad_json", "bad_result", "remote_exit", "oversize_body"})
+
+
 class SSHStorageError(RuntimeError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, reason: str | None = None) -> None:
         self.code = code if code in ERRORS else "storage_error"
-        super().__init__(f"SSH storage blocked: {self.code}")
+        # Fixed vocabulary only: remote stderr and paths never reach logs.
+        self.reason = reason if reason in REASONS else None
+        super().__init__(f"SSH storage blocked: {self.code}"
+                         + (f" ({self.reason})" if self.reason else ""))
 
 
 def _sha(value: Any) -> str:
@@ -118,29 +125,31 @@ class SSHStateClient:
             try:
                 process = subprocess.run(self.config.command(), input=header + payload,
                     stdout=response, stderr=subprocess.DEVNULL, timeout=180, check=False)
-            except (OSError, subprocess.TimeoutExpired):
-                raise SSHStorageError("storage_error") from None
+            except subprocess.TimeoutExpired:
+                raise SSHStorageError("storage_error", "timeout") from None
+            except OSError:
+                raise SSHStorageError("storage_error", "ssh_unavailable") from None
             if response.tell() > MAX_HEADER + MAX_BLOB:
-                raise SSHStorageError("storage_error")
+                raise SSHStorageError("storage_error", "oversize_response")
             response.seek(0)
             raw_header = response.readline(MAX_HEADER + 1)
             if not raw_header.endswith(b"\n") or len(raw_header) > MAX_HEADER:
-                raise SSHStorageError("storage_error")
+                raise SSHStorageError("storage_error", "bad_header")
             try:
                 result = json.loads(raw_header)
             except (ValueError, UnicodeError):
-                raise SSHStorageError("storage_error") from None
+                raise SSHStorageError("storage_error", "bad_json") from None
             if not isinstance(result, dict):
-                raise SSHStorageError("storage_error")
+                raise SSHStorageError("storage_error", "bad_result")
             if "error" in result:
                 code = result["error"]
                 raise SSHStorageError(code if isinstance(code, str) and code in ERRORS
                                       else "storage_error")
             if process.returncode != 0:
-                raise SSHStorageError("storage_error")
+                raise SSHStorageError("storage_error", "remote_exit")
             body = response.read(MAX_BLOB + 1)
             if len(body) > MAX_BLOB:
-                raise SSHStorageError("storage_error")
+                raise SSHStorageError("storage_error", "oversize_body")
             return result, body
 
     def health(self) -> dict[str, bool]:
