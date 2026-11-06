@@ -11,7 +11,7 @@ from relocant_media.ai.gemini_process import (
     IsolatedGeminiProvider,
 )
 
-ARGS = dict(task="rank", system_instruction="Проверка", prompt="{}", response_schema={})
+ARGS = dict(task="rank", system_instruction="Check", prompt="{}", response_schema={})
 
 
 def test_hung_sdk_worker_is_killed_within_total_deadline(monkeypatch):
@@ -40,8 +40,9 @@ def test_worker_receives_only_provider_credentials_via_stdin(monkeypatch):
         assert all(k not in kwargs["env"] for k in (
             "TELEGRAM_BOT_TOKEN", "DATABASE_URL", "GEMINI_API_KEY"))
         data = json.loads(kwargs["input"])
-        assert data == dict(api_key="test-key", model="test-model", **ARGS)
+        assert data == dict(api_key="test-key", model="test-model", http_timeout_ms=300000, **ARGS)
         assert kwargs["stderr"] == subprocess.DEVNULL
+        assert kwargs["timeout"] == 330
         return subprocess.CompletedProcess(argv, 0, json.dumps({"output": '{"ok":true}'}))
 
     monkeypatch.setattr(subprocess, "run", run)
@@ -61,7 +62,7 @@ def test_worker_failures_do_not_leak_outputs(monkeypatch, code, output):
     assert "secret" not in str(error.value)
 
 
-@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan"), 121])
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan"), 331])
 def test_invalid_deadline_rejected(value):
     with pytest.raises(ValueError):
         IsolatedGeminiProvider("test-key", model="test-model", timeout_seconds=value)
@@ -84,3 +85,37 @@ def test_a_worker_error_class_that_is_not_a_plain_name_is_not_repeated(monkeypat
     with pytest.raises(GeminiWorkerError) as error:
         IsolatedGeminiProvider("test-key", model="test-model").generate_json(**ARGS)
     assert "abc" not in str(error.value) and len(str(error.value)) < 120
+
+
+@pytest.mark.parametrize("deadline,expected_ms", [(330, 300000), (300, 300000), (.2, 200)])
+def test_http_deadline_tracks_shorter_process_limit(monkeypatch, deadline, expected_ms):
+    def run(argv, **kwargs):
+        assert kwargs["timeout"] == deadline
+        assert json.loads(kwargs["input"])["http_timeout_ms"] == expected_ms
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"output": "{}"}))
+    monkeypatch.setattr(subprocess, "run", run)
+    IsolatedGeminiProvider("test-key", model="test-model", timeout_seconds=deadline).generate_json(
+        **ARGS)
+
+
+def test_worker_applies_http_deadline_without_sdk_retries(monkeypatch, capsys):
+    import io
+    from types import SimpleNamespace
+
+    from google import genai
+
+    from relocant_media.ai.gemini_process import _worker_main
+
+    seen = []
+    def client(**kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(interactions=SimpleNamespace(
+            create=lambda **kw: SimpleNamespace(output_text="{}")),
+            close=lambda: seen.append("closed"))
+    monkeypatch.setattr(genai, "Client", client)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(dict(
+        api_key="test-key", model="test-model", http_timeout_ms=300000, **ARGS))))
+    _worker_main()
+    assert seen == [{"api_key": "test-key", "http_options": {
+        "timeout": 300000, "retry_options": {"attempts": 0}}}, "closed"]
+    assert json.loads(capsys.readouterr().out) == {"output": "{}"}

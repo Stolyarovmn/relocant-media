@@ -20,18 +20,19 @@ class GeminiWorkerError(RuntimeError):
 
 
 class IsolatedGeminiProvider:
-    def __init__(self, api_key: str, *, model: str, timeout_seconds: float = 45) -> None:
+    def __init__(self, api_key: str, *, model: str, timeout_seconds: float = 330) -> None:
         if not api_key or not model.strip():
             raise ValueError("Gemini credentials and model required")
-        if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 120:
-            raise ValueError("Gemini call deadline must be between zero and 120 seconds")
+        if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 330:
+            raise ValueError("Gemini call deadline must be between zero and 330 seconds")
         self._api_key, self._model, self._timeout = api_key, model, timeout_seconds
 
     def generate_json(self, *, task: str, system_instruction: str, prompt: str,
                       response_schema: dict[str, Any]) -> str:
         payload = dict(api_key=self._api_key, model=self._model, task=task,
                        system_instruction=system_instruction, prompt=prompt,
-                       response_schema=response_schema)
+                       response_schema=response_schema,
+                       http_timeout_ms=max(1, min(300000, int(self._timeout * 1000))))
         allowed = {"PATH", "SYSTEMROOT", "WINDIR", "HOME", "USERPROFILE", "LANG", "LC_ALL",
                    "PYTHONPATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
                    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
@@ -68,7 +69,8 @@ def _worker_main() -> None:
 
         request = json.load(sys.stdin)
         client = genai.Client(api_key=request["api_key"],
-                              http_options={"timeout": 45000, "retry_options": {"attempts": 0}})
+                              http_options={"timeout": request["http_timeout_ms"],
+                                            "retry_options": {"attempts": 0}})
         try:
             provider = GeminiStructuredProvider(request["api_key"],
                                                 model=request["model"], client=client)
