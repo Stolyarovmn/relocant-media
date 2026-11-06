@@ -11,7 +11,7 @@ from relocant_media.ai.gemini_process import (
     IsolatedGeminiProvider,
 )
 
-ARGS = dict(task="rank", system_instruction="Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚Р С”Р В°", prompt="{}", response_schema={})
+ARGS = dict(task="rank", system_instruction="Check", prompt="{}", response_schema={})
 
 
 def test_hung_sdk_worker_is_killed_within_total_deadline(monkeypatch):
