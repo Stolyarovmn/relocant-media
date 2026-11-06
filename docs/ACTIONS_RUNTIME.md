@@ -209,3 +209,10 @@ Shorter explicit subprocess deadlines also bound HTTP. The validator permits
 at most 330 seconds. The whole worker budget remains 4100 seconds within the
 85-minute Actions job: not every call is guaranteed its full five minutes.
 Batch sizes, scheduling and cycle retries are unchanged.
+
+The Interactions API additionally receives numeric `create(timeout=300)` so its
+automatic continuation hops share a single SDK call budget; client HTTP timeout
+alone only limits each hop. Only status=completed is accepted as a structured
+result. The 330-second subprocess deadline remains the final kill boundary.
+This fixes missing SDK-level bounds; it does not establish why the remote model
+needed continuation or where a previously killed request was waiting.

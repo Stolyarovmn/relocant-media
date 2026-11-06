@@ -19,6 +19,7 @@ class GeminiStructuredProvider:
         api_key: str,
         model: str = "gemini-3.8-flash",
         client: object | None = None,
+        timeout_seconds: float = 300,
     ) -> None:
         if client is None:
             if not api_key:
@@ -26,6 +27,7 @@ class GeminiStructuredProvider:
             client = genai.Client(api_key=api_key)
         self._client = cast(_GeminiClient, client)
         self._model = model
+        self._timeout_seconds = timeout_seconds
 
     def generate_json(
         self,
@@ -42,12 +44,16 @@ class GeminiStructuredProvider:
         }
         interaction = self._client.interactions.create(
             model=self._model,
+            timeout=self._timeout_seconds,
+            automatic_continuation=True,
             input=prompt,
             system_instruction=system_instruction,
             response_format=response_format,
             store=False,
             labels={"component": "editorial", "task": task},
         )
+        if getattr(interaction, "status", None) != "completed":
+            raise StructuredOutputError("Gemini interaction did not complete")
         output_text = getattr(interaction, "output_text", None)
         if not isinstance(output_text, str) or not output_text.strip():
             raise StructuredOutputError(f"Gemini returned empty structured output for {task}")

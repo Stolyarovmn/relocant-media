@@ -4,6 +4,7 @@ from relocant_media.ai.gemini import GeminiStructuredProvider
 
 
 class FakeInteraction:
+    status = "completed"
     output_text = '{"ok":true}'
 
 
@@ -49,3 +50,25 @@ def test_gemini_provider_uses_interactions_structured_output() -> None:
         "mime_type": "application/json",
         "schema": schema,
     }
+
+
+def test_sdk_call_has_a_wall_clock_budget_across_automatic_continuations():
+    client = FakeClient()
+    provider = GeminiStructuredProvider("unused", client=client, timeout_seconds=12)
+    provider.generate_json(task="rank", system_instruction="Check", prompt="{}", response_schema={})
+    assert client.interactions.kwargs["timeout"] == 12
+    assert client.interactions.kwargs["automatic_continuation"] is True
+
+
+def test_unfinished_interaction_is_never_accepted_as_structured_success():
+    import pytest
+
+    from relocant_media.ai.provider import StructuredOutputError
+
+    client = FakeClient()
+    for status in ("requires_continuation", "incomplete", "failed", None):
+        client.interactions.create = lambda status=status, **kwargs: type(
+            "Result", (), {"status": status, "output_text": '{"ok":true}'})()
+        with pytest.raises(StructuredOutputError, match="did not complete"):
+            GeminiStructuredProvider("unused", client=client).generate_json(
+                task="rank", system_instruction="Check", prompt="{}", response_schema={})

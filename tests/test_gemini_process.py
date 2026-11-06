@@ -110,7 +110,7 @@ def test_worker_applies_http_deadline_without_sdk_retries(monkeypatch, capsys):
     def client(**kwargs):
         seen.append(kwargs)
         return SimpleNamespace(interactions=SimpleNamespace(
-            create=lambda **kw: SimpleNamespace(output_text="{}")),
+            create=lambda **kw: SimpleNamespace(output_text="{}", status="completed")),
             close=lambda: seen.append("closed"))
     monkeypatch.setattr(genai, "Client", client)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(dict(

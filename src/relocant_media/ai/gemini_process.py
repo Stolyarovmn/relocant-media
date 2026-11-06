@@ -73,7 +73,8 @@ def _worker_main() -> None:
                                             "retry_options": {"attempts": 0}})
         try:
             provider = GeminiStructuredProvider(request["api_key"],
-                                                model=request["model"], client=client)
+                                                model=request["model"], client=client,
+                                                timeout_seconds=request["http_timeout_ms"] / 1000)
             output = provider.generate_json(**{k: request[k] for k in (
                 "task", "system_instruction", "prompt", "response_schema")})
         finally:
