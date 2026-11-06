@@ -200,3 +200,12 @@ Actions загружает только `_site`. Не удалять стары�
 статьи из RSS. Две независимые проверки и остальные guards не изменены.
 Структура покрыта синтетической HTML-фикстурой; это не подтверждение успешного
 production-прохода после установки исправления.
+
+## Gemini deadlines
+
+HTTP requests allow 300 seconds, without SDK retries. The isolated subprocess
+has a 330-second hard limit, including 30 seconds for startup and cleanup.
+Shorter explicit subprocess deadlines also bound HTTP. The validator permits
+at most 330 seconds. The whole worker budget remains 4100 seconds within the
+85-minute Actions job: not every call is guaranteed its full five minutes.
+Batch sizes, scheduling and cycle retries are unchanged.
