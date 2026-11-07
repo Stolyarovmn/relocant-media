@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.telegram_topics import DEFAULT_CHANNELS_BY_CITY
+from relocant_media.ops.newsroom_merge import safe_ai_phase
 from relocant_media.ops.public_observations import public_coverage
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.kpi import compute_kpi
@@ -225,6 +226,9 @@ def main() -> None:
                     cycle["ai_calls"].append({key: record.get(key) for key in (
                         "provider", "model", "task", "status", "occurred_at", "duration_seconds",
                     )})
+                    phase = safe_ai_phase(record.get("error_phase"))
+                    if phase is not None:
+                        cycle["ai_calls"][-1]["error_phase"] = phase
         payload["cities"][0]["last_cycle"] = cycle
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(".tmp")
