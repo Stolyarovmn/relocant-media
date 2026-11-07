@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 from typing import Any, cast
@@ -12,11 +13,11 @@ _CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,60}")
 
 
 class GeminiCallTimeout(TimeoutError):
-    pass
+    phase = "unknown"
 
 
 class GeminiWorkerError(RuntimeError):
-    pass
+    phase = "unknown"
 
 
 class IsolatedGeminiProvider:
@@ -41,13 +42,15 @@ class IsolatedGeminiProvider:
             result = subprocess.run(
                 [sys.executable, "-m", "relocant_media.ai.gemini_process"],
                 input=json.dumps(payload), text=True, encoding="utf-8",
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                capture_output=True,
                 timeout=self._timeout, env=environment, check=False,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as expired:
             # subprocess.run kills and waits for the child before raising. No thread
             # continues using the provider after the caller releases worker.lock.
-            raise GeminiCallTimeout("Gemini call exceeded its total deadline") from None
+            error = GeminiCallTimeout("Gemini call exceeded its total deadline")
+            error.phase = _last_phase(expired.stderr)
+            raise error from None
         try:
             response = json.loads(result.stdout)
         except (ValueError, TypeError):
@@ -57,17 +60,52 @@ class IsolatedGeminiProvider:
             # Only the SDK error class name may be repeated: never messages, requests or keys.
             kind = response.get("error_type") if isinstance(response, dict) else None
             suffix = f" ({kind})" if isinstance(kind, str) and _CLASS_NAME.fullmatch(kind) else ""
-            raise GeminiWorkerError(f"Gemini worker did not return structured text{suffix}")
+            worker_error = GeminiWorkerError(
+                f"Gemini worker did not return structured text{suffix}")
+            worker_error.phase = _last_phase(result.stderr)
+            raise worker_error
         return cast(str, response["output"])
+
+
+def _last_phase(stderr: str | bytes | None) -> str:
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    phase = "unknown"
+    for line in (stderr or "")[-4096:].splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and value.get("phase") in {
+            "import_sdk", "initialize_client", "sdk_call", "close_client"}:
+            phase = value["phase"]
+    return phase
+
+
+class GeminiSDKDeadlineExceeded(TimeoutError):
+    pass
+
+
+def _deadline_signal(signum: int, frame: object) -> None:
+    raise GeminiSDKDeadlineExceeded("Gemini SDK wall-clock deadline exceeded")
+
+
+def _phase(name: str) -> None:
+    print(json.dumps({"phase": name}), file=sys.stderr, flush=True)
 
 
 def _worker_main() -> None:
     try:
+        _phase("import_sdk")
         from google import genai
 
         from relocant_media.ai.gemini import GeminiStructuredProvider
 
         request = json.load(sys.stdin)
+        _phase("initialize_client")
+        if hasattr(signal, "setitimer"):
+            signal.signal(signal.SIGALRM, _deadline_signal)
+            signal.setitimer(signal.ITIMER_REAL, request["http_timeout_ms"] / 1000)
         client = genai.Client(api_key=request["api_key"],
                               http_options={"timeout": request["http_timeout_ms"],
                                             "retry_options": {"attempts": 0}})
@@ -75,9 +113,14 @@ def _worker_main() -> None:
             provider = GeminiStructuredProvider(request["api_key"],
                                                 model=request["model"], client=client,
                                                 timeout_seconds=request["http_timeout_ms"] / 1000)
+            _phase("sdk_call")
             output = provider.generate_json(**{k: request[k] for k in (
                 "task", "system_instruction", "prompt", "response_schema")})
         finally:
+            if hasattr(signal, "setitimer"):
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            if sys.exc_info()[0] is None:
+                _phase("close_client")
             client.close()
         print(json.dumps({"output": output}))
     except Exception as error:
