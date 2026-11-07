@@ -7,9 +7,11 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from typing import Any, cast
 
 from relocant_media.ai.diagnostics import AI_PHASES
+from relocant_media.ai.quota_diagnostics import quota_details, safe_quota
 
 _CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,60}")
 
@@ -20,6 +22,11 @@ class GeminiCallTimeout(TimeoutError):
 
 class GeminiWorkerError(RuntimeError):
     phase = "unknown"
+    quota: dict[str, Any] = {}
+
+
+class GeminiQuotaCooldown(GeminiWorkerError):
+    """Local block honoring a previously received server retry delay."""
 
 
 class IsolatedGeminiProvider:
@@ -29,9 +36,15 @@ class IsolatedGeminiProvider:
         if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 330:
             raise ValueError("Gemini call deadline must be between zero and 330 seconds")
         self._api_key, self._model, self._timeout = api_key, model, timeout_seconds
+        self._cooldown_until = 0.0
+        self._last_quota: dict[str, Any] = {}
 
     def generate_json(self, *, task: str, system_instruction: str, prompt: str,
                       response_schema: dict[str, Any]) -> str:
+        if time.monotonic() < self._cooldown_until:
+            blocked = GeminiQuotaCooldown("Gemini server-requested cooldown active")
+            blocked.phase, blocked.quota = "quota_cooldown", dict(self._last_quota)
+            raise blocked
         payload = dict(api_key=self._api_key, model=self._model, task=task,
                        system_instruction=system_instruction, prompt=prompt,
                        response_schema=response_schema,
@@ -65,6 +78,11 @@ class IsolatedGeminiProvider:
             worker_error = GeminiWorkerError(
                 f"Gemini worker did not return structured text{suffix}")
             worker_error.phase = _last_phase(result.stderr)
+            worker_error.quota = (safe_quota(response.get("quota"))
+                                  if isinstance(response, dict) else {})
+            if worker_error.phase == "http_error_429" and worker_error.quota.get("retry_seconds"):
+                self._last_quota = worker_error.quota
+                self._cooldown_until = time.monotonic() + worker_error.quota["retry_seconds"]
             raise worker_error
         return cast(str, response["output"])
 
@@ -113,6 +131,8 @@ def _http_trace(event: str, info: dict[str, Any]) -> None:
 class GeminiHTTPRejected(RuntimeError):
     """HTTP failure must not enter the SDK's normalized retry/backoff path."""
 
+    quota: dict[str, Any] = {}
+
 
 def _trace_response(response: Any) -> None:
     status = response.status_code
@@ -120,7 +140,35 @@ def _trace_response(response: Any) -> None:
         phase = "http_error_429" if status == 429 else (
             "http_error_5xx" if status >= 500 else "http_error_4xx")
         _phase(phase)
-        raise GeminiHTTPRejected("Gemini HTTP request rejected; automatic retry disabled")
+        rejected = GeminiHTTPRejected("Gemini HTTP request rejected; automatic retry disabled")
+        if status == 429:
+            content = bytearray()
+            remaining = (signal.getitimer(signal.ITIMER_REAL)[0]
+                         if hasattr(signal, "getitimer") else 0)
+            started = time.monotonic()
+            previous_handler = None
+            if hasattr(signal, "setitimer"):
+                previous_handler = signal.signal(signal.SIGALRM, _deadline_signal)
+                signal.setitimer(signal.ITIMER_REAL, min(remaining, 2) if remaining else 2)
+            try:
+                for chunk in response.iter_bytes(chunk_size=8192):
+                    content.extend(chunk)
+                    if len(content) > 32768:
+                        break
+                payload = json.loads(content) if len(content) <= 32768 else None
+            except Exception:
+                # Optional diagnostics must not revive SDK retries or print body errors.
+                payload = None
+            finally:
+                if hasattr(signal, "setitimer"):
+                    if previous_handler is not None:
+                        signal.signal(signal.SIGALRM, previous_handler)
+                    signal.setitimer(signal.ITIMER_REAL,
+                                     max(.001, remaining - (time.monotonic() - started))
+                                     if remaining else 0)
+            rejected.quota = quota_details(payload, response.headers.get("retry-after", ""))
+            _phase(phase)
+        raise rejected
 
 
 def _trace_request(request: Any) -> None:
@@ -162,7 +210,8 @@ def _worker_main() -> None:
         print(json.dumps({"output": output}))
     except Exception as error:
         # Never print exception values, requests, keys, or SDK stderr.
-        print(json.dumps({"error_type": type(error).__name__}))
+        print(json.dumps({"error_type": type(error).__name__,
+                          "quota": safe_quota(getattr(error, "quota", None))}))
         raise SystemExit(1) from None
 
 

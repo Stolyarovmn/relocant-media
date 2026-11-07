@@ -27,6 +27,7 @@ from google.auth.transport.requests import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.ops.sqlite_restore import restore
@@ -354,6 +355,25 @@ def editorial_due(state: dict[str, Any], now: datetime) -> bool:
     return not isinstance(last, str) or now - datetime.fromisoformat(last) >= EDITORIAL_INTERVAL
 
 
+def private_quota_observation(directory: Path) -> dict[str, Any] | None:
+    path = directory / "ai-calls.jsonl"
+    if not path.is_file():
+        return None
+    entries = []
+    for line in path.read_text(encoding="utf-8").splitlines()[-200:]:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("error_phase") != "http_error_429":
+            continue
+        quota = safe_quota(record.get("quota"))
+        if quota:
+            entries.append(quota)
+    return ({"verified_at": datetime.now(UTC).isoformat(), "reports": entries[-5:]}
+            if entries else None)
+
+
 def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: Path,
             folder: str, mode: str, environment: dict[str, str]) -> int:
     if mode not in {"preview", "editorial", "intake", "discovery", "auto"}:
@@ -474,6 +494,10 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
                 }
         finally:
             engine.dispose()
+    quota_observation = private_quota_observation(run_dir)
+    if quota_observation is not None:
+        ready["last_quota_observation"] = {
+            **quota_observation, "run_id": environment.get("GITHUB_RUN_ID")}
     store.write(ready, busy_sha)
     # Publication of this artifact happens only after the canonical checkpoint.
     if provisional.is_file():
