@@ -110,6 +110,19 @@ def _http_trace(event: str, info: dict[str, Any]) -> None:
         _phase(phase)
 
 
+class GeminiHTTPRejected(RuntimeError):
+    """HTTP failure must not enter the SDK's normalized retry/backoff path."""
+
+
+def _trace_response(response: Any) -> None:
+    status = response.status_code
+    if status >= 400:
+        phase = "http_error_429" if status == 429 else (
+            "http_error_5xx" if status >= 500 else "http_error_4xx")
+        _phase(phase)
+        raise GeminiHTTPRejected("Gemini HTTP request rejected; automatic retry disabled")
+
+
 def _trace_request(request: Any) -> None:
     _phase("http_request")
     request.extensions["trace"] = _http_trace
@@ -131,7 +144,8 @@ def _worker_main() -> None:
                               http_options={"timeout": request["http_timeout_ms"],
                                             "retry_options": {"attempts": 0},
                                             "client_args": {"event_hooks": {
-                                                "request": [_trace_request]}}})
+                                                "request": [_trace_request],
+                                                "response": [_trace_response]}}})
         try:
             provider = GeminiStructuredProvider(request["api_key"],
                                                 model=request["model"], client=client,

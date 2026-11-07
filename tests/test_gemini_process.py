@@ -104,7 +104,7 @@ def test_worker_applies_http_deadline_without_sdk_retries(monkeypatch, capsys):
 
     from google import genai
 
-    from relocant_media.ai.gemini_process import _trace_request, _worker_main
+    from relocant_media.ai.gemini_process import _trace_request, _trace_response, _worker_main
 
     seen = []
     def client(**kwargs):
@@ -118,7 +118,8 @@ def test_worker_applies_http_deadline_without_sdk_retries(monkeypatch, capsys):
     _worker_main()
     assert seen == [{"api_key": "test-key", "http_options": {
         "timeout": 300000, "retry_options": {"attempts": 0},
-        "client_args": {"event_hooks": {"request": [_trace_request]}}}}, "closed"]
+        "client_args": {"event_hooks": {"request": [_trace_request],
+                                       "response": [_trace_response]}}}}, "closed"]
     assert json.loads(capsys.readouterr().out) == {"output": "{}"}
 
 

@@ -251,3 +251,16 @@ filters use the same fixed phase allowlist as the worker. An offline real-SDK
 MockTransport test forbids socket connections and verifies this route.
 A phase localizes the last observed transport event, not the remote reason for
 a slow response. Existing sdk_call failures cannot be retroactively subdivided.
+
+## Interactions retry normalization defect
+
+In google-genai 2.34.0 the parent client normalizes attempts=0 to one attempt,
+then the Interactions bridge interprets that value as one retry. An offline
+429/503 response with Retry-After:600 therefore enters a 600-second sleep after
+reading the HTTP body. This mechanism is reproduced with MockTransport and an
+intercepted sleep; it does not prove historical responses had those statuses.
+The worker response hook now rejects HTTP errors before SDK retry handling,
+using a content-free exception and fixed http_error_429/4xx/5xx phases. No
+response body, headers, Retry-After value or URL is logged. Successful HTTP
+responses and continuation behavior are untouched. This enforces the intended
+single-attempt failure policy without changing watchdogs or scheduling.
