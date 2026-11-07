@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import traceback
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,7 @@ async def run_cycle(
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     provider = _provider(engine)
     audit: list[dict[str, Any]] = []
+    print("owner_review_phase=prepare", file=sys.stderr, flush=True)
     preparation: dict[str, Any] = (
         prepare_owner_decision_holds(engine, provider, fetch_documents, audit=audit.append)
         if provider is not None and pending_owner_decision_holds(engine)
@@ -88,6 +90,7 @@ async def run_cycle(
     ) as client:
         bot = TelegramBotAPI(token, client)
         publisher = ChannelPublisher(bot)
+        print("owner_review_phase=actions", file=sys.stderr, flush=True)
         actions = await process_owner_actions(
             engine,
             bot,
@@ -98,6 +101,7 @@ async def run_cycle(
             publisher=publisher,
             publish_enabled=os.environ.get("EDITORIAL_SEND_ENABLED") == "true",
         )
+        print("owner_review_phase=queue", file=sys.stderr, flush=True)
         queued = await queue_owner_reviews(
             engine,
             bot,

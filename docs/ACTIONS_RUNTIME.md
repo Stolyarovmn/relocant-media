@@ -216,3 +216,14 @@ alone only limits each hop. Only status=completed is accepted as a structured
 result. The 330-second subprocess deadline remains the final kill boundary.
 This fixes missing SDK-level bounds; it does not establish why the remote model
 needed continuation or where a previously killed request was waiting.
+
+## Owner-review timeout containment
+
+The whole owner-review child remains bounded by 900 seconds, independently of
+the per-call Gemini deadline. Preparation may review up to five packages with
+multiple model calls; a timeout does not identify a single hung model request.
+Timeout/interrupt kills and reaps the complete child process group on Linux
+before intake can snapshot. Only fixed prepare/actions/queue phase names are
+retained from private diagnostics; prompts and raw stderr are never projected.
+These phase markers localize future failures, not historical ones. The batch
+budget still needs live operational assessment; no timeout increase is introduced.
