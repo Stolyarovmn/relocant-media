@@ -264,3 +264,27 @@ using a content-free exception and fixed http_error_429/4xx/5xx phases. No
 response body, headers, Retry-After value or URL is logged. Successful HTTP
 responses and continuation behavior are untouched. This enforces the intended
 single-attempt failure policy without changing watchdogs or scheduling.
+
+## Quota evidence and local cooldown
+
+HTTP 429 alone does not establish RPM, input TPM, RPD, tier or an exact project
+limit. Read at most 32 KiB of the existing 429 response, with a two-second Linux
+diagnostic deadline; this never creates a new request. Retain only structured
+QuotaFailure metric/value/period and RetryInfo or numeric Retry-After seconds.
+Error message, project IDs, dimensions, quota IDs, headers and body text are
+discarded. Unknown limits remain absent, including when parsing fails. Apply
+the same sanitizer before private worker transfer and AI records. Quota reports
+are retained only in last_quota_observation in the private pointer, with run/time
+attribution; the public projection deliberately excludes quota details.
+
+An explicit positive server retry delay blocks additional requests from that
+provider instance until its monotonic deadline. It does not sleep, reset a
+retry budget, persist state, alter a schedule, switch keys/models or modify
+billing. Without a server delay no cooldown duration is invented. Other
+runners are not coordinated: cross-cycle cooldown would require a separate
+reviewed canonical-state design. Actual project limits still require server
+evidence or authorized inspection of that project in Google AI Studio.
+
+Local blocks use phase=quota_cooldown and GeminiQuotaCooldown, so they cannot
+be counted as newly observed HTTP429 responses. Their quota coordinates refer
+to the previously received server response, not a fresh request.

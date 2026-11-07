@@ -24,6 +24,7 @@ from relocant_media.ai.package import EditorialPackage
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.ai.public_cache import PublicPreparationCache
+from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.collectors.beograd_article import (
@@ -179,6 +180,9 @@ class ServerAI:
             phase = getattr(error, "phase", None)
             if phase in AI_PHASES:
                 record["error_phase"] = phase
+            quota = safe_quota(getattr(error, "quota", None))
+            if quota:
+                record["quota"] = quota
             raise
         finally:
             record["duration_seconds"] = round(time.monotonic() - started, 3)
