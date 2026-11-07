@@ -41,7 +41,7 @@ def test_worker_receives_only_provider_credentials_via_stdin(monkeypatch):
             "TELEGRAM_BOT_TOKEN", "DATABASE_URL", "GEMINI_API_KEY"))
         data = json.loads(kwargs["input"])
         assert data == dict(api_key="test-key", model="test-model", http_timeout_ms=300000, **ARGS)
-        assert kwargs["stderr"] == subprocess.DEVNULL
+        assert kwargs["capture_output"] is True
         assert kwargs["timeout"] == 330
         return subprocess.CompletedProcess(argv, 0, json.dumps({"output": '{"ok":true}'}))
 
@@ -119,3 +119,24 @@ def test_worker_applies_http_deadline_without_sdk_retries(monkeypatch, capsys):
     assert seen == [{"api_key": "test-key", "http_options": {
         "timeout": 300000, "retry_options": {"attempts": 0}}}, "closed"]
     assert json.loads(capsys.readouterr().out) == {"output": "{}"}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Linux worker signal deadline")
+def test_worker_wall_clock_interrupts_blocked_sdk_without_network():
+    program = (
+        "import signal,time; "
+        "from relocant_media.ai.gemini_process import _deadline_signal; "
+        "signal.signal(signal.SIGALRM,_deadline_signal); "
+        "signal.setitimer(signal.ITIMER_REAL,.1); time.sleep(30)"
+    )
+    started = time.monotonic()
+    result = subprocess.run([sys.executable, "-c", program], capture_output=True, timeout=3)
+    assert result.returncode != 0
+    assert b"GeminiSDKDeadlineExceeded" in result.stderr
+    assert time.monotonic() - started < 3
+
+
+def test_phase_diagnostic_is_allowlisted():
+    from relocant_media.ai.gemini_process import _last_phase
+
+    assert _last_phase(b'SECRET\n{"phase":"sdk_call"}\n{"phase":"SECRET"}') == "sdk_call"

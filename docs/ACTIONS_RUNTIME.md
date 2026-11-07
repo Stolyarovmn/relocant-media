@@ -227,3 +227,15 @@ before intake can snapshot. Only fixed prepare/actions/queue phase names are
 retained from private diagnostics; prompts and raw stderr are never projected.
 These phase markers localize future failures, not historical ones. The batch
 budget still needs live operational assessment; no timeout increase is introduced.
+
+## Independent SDK watchdog
+
+The numeric Interactions budget only checks continuation boundaries and supplies
+HTTPX timeouts to the current hop. HTTPX read timeouts measure inactivity, not
+total elapsed request time. A Linux worker now arms ITIMER_REAL for the SDK
+initialization/call budget independently of those SDK checks. The 330-second
+parent kill remains a final boundary, including import/close failures. Fixed
+import_sdk/initialize_client/sdk_call/close_client markers identify the phase
+of future failures without exposing SDK stderr, prompts or credentials.
+Historical external kills have no saved inner phase and cannot be attributed
+to HTTP, model inference, continuation, or client cleanup from elapsed time alone.

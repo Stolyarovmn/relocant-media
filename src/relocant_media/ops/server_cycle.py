@@ -175,6 +175,9 @@ class ServerAI:
             return response
         except Exception as error:
             record.update(status="failed", error_type=type(error).__name__)
+            phase = getattr(error, "phase", None)
+            if phase in {"import_sdk", "initialize_client", "sdk_call", "close_client"}:
+                record["error_phase"] = phase
             raise
         finally:
             record["duration_seconds"] = round(time.monotonic() - started, 3)
