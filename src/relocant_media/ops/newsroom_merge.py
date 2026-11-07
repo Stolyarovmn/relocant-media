@@ -10,6 +10,11 @@ from relocant_media.ops.public_observations import public_coverage
 from relocant_media.services.kpi import public_kpi
 
 
+def safe_ai_phase(value: Any) -> str | None:
+    return value if isinstance(value, str) and value in {
+        "import_sdk", "initialize_client", "sdk_call", "close_client"} else None
+
+
 def rows(value: Any, keys: tuple[str, ...]) -> list[dict[str, Any]] | None:
     if value is None:
         return None
@@ -81,7 +86,14 @@ def merge(catalog: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
             safe_cycle["fallback_required"] = fallback if isinstance(fallback, bool) else None
             safe_cycle["ai_calls"] = rows(cycle.get("ai_calls", []), (
                 "provider", "model", "task", "status", "occurred_at", "duration_seconds",
+                "error_phase",
             ))
+            for call in safe_cycle["ai_calls"] or []:
+                phase = safe_ai_phase(call.get("error_phase"))
+                if phase is None:
+                    call.pop("error_phase", None)
+                else:
+                    call["error_phase"] = phase
             safe_cycle["messenger_coverage"] = public_coverage(
                 cycle.get("messenger_coverage"), city["sources"])
             jev = cycle.get("jev")
