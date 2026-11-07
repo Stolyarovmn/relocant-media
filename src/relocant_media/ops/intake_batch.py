@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Callable
@@ -92,20 +93,32 @@ def _owner_review_changed(result: dict[str, Any]) -> bool:
 
 
 def _run_owner_review() -> tuple[int, dict[str, Any]]:
+    child = subprocess.Popen(
+        [sys.executable, "-m", "relocant_media.ops.owner_review_cycle"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
     try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "relocant_media.ops.owner_review_cycle",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=900,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return 1, {"status": "failed", "error_type": "owner_review_timeout"}
+        stdout, _ = child.communicate(timeout=900)
+    except BaseException as error:
+        # Kill the entire session before the caller can snapshot/release worker locks.
+        if os.name == "posix":
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            child.kill()
+        _, stderr = child.communicate()
+        if not isinstance(error, subprocess.TimeoutExpired):
+            raise
+        result = {"status": "failed", "error_type": "owner_review_timeout"}
+        for line in (stderr or "").splitlines():
+            if line in {"owner_review_phase=prepare", "owner_review_phase=actions",
+                        "owner_review_phase=queue"}:
+                result["phase"] = line.split("=", 1)[1]
+        return 1, result
+    completed = subprocess.CompletedProcess(child.args, child.returncode, stdout)
     try:
         result = json.loads(completed.stdout) if completed.stdout else {"status": "failed"}
     except json.JSONDecodeError:

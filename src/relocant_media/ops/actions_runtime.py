@@ -307,7 +307,7 @@ def intake_summary(saved: dict[str, Any]) -> dict[str, Any]:
     owner = result.get("owner_review")
     if isinstance(owner, dict):
         block: dict[str, Any] = {}
-        for key in ("status", "error_type"):
+        for key in ("status", "error_type", "phase"):
             if isinstance(owner.get(key), str) and re.fullmatch(r"[A-Za-z0-9_]{1,40}", owner[key]):
                 block[key] = owner[key]
         for key, names in (("preparation", ("prepared", "blocked")),
