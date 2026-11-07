@@ -6,6 +6,20 @@ function el(tag, text, cls) {const e=document.createElement(tag);if(text!==undef
 function date(value){if(!value)return 'Неизвестно'; const d=new Date(value);return Number.isNaN(d.valueOf())?'Неизвестно':d.toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК';}
 function empty(parent,text){parent.append(el('div',text,'empty'));}
 function link(parent,label,url){try{const u=new URL(url);if(u.protocol!=='https:'||u.username||u.password)return;const a=el('a',label);a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';parent.append(a);}catch{ /* unknown URL stays plain text */ }}
+function renderCycle(parent, cycle) {
+ parent.replaceChildren();
+ if (!cycle) return;
+ const phases = {http_error_429:'HTTP 429 от провайдера', quota_cooldown:'Пропущено: пауза по запросу провайдера'};
+ for (const call of cycle.ai_calls || []) {
+  const phase = Object.hasOwn(phases, call.error_phase) ? phases[call.error_phase] : null;
+  parent.append(el('div', `${date(call.occurred_at)} · ${call.provider || 'Неизвестно'} / ${call.model || 'Неизвестно'} · ${call.task} · ${phase || call.status}`, 'run'));
+ }
+ parent.append(el('p', `Последний цикл: ${cycle.status ?? 'неизвестно'} · ${date(cycle.observed_at)}`));
+ const fallback = cycle.fallback_required === true ? 'требуется, результат не подтверждён' :
+  cycle.fallback_required === false ? 'не требуется' : 'нет данных';
+ parent.append(el('p', `Резервный проход: ${fallback}`));
+ parent.append(el('pre', cycle.jev ? JSON.stringify(cycle.jev, null, 2) : 'Jev: нет наблюдения для этого прогона.'));
+}
 function render(){
  if(!data)return;
  const city=data.cities.find(c=>c.id===$('city').value);if(!city)return;
@@ -30,7 +44,7 @@ function render(){
  for(const role of ['facts','utility']){const r=item.reviews.find(v=>v.role===role);details.append(el('p',role+': '+(r?`${r.verdict} · ${r.score}/100 · источник открыт: ${r.live_source_checked===true?'да':'нет'}`:'Нет сохранённого ревью')));}details.append(el('p','Версия правил: '+(item.editorial_rule_version||'Неизвестно')+' · Изменений источника: '+item.source_revision_count));if(item.url)link(details,'Официальный первоисточник',item.url);card.append(details);events.append(card);}
  $('source-list').replaceChildren();for(const s of city.sources.filter(s=>!$('platform').value||s.platform===$('platform').value)){const row=el('tr');const name=el('td');link(name,s.name,s.url);name.append(el('small',s.platform+' · '+s.id));row.append(name,el('td',s.configured_status+' / '+(s.runtime_enabled===null?'БД неизвестна':s.runtime_enabled?'Включён':'Отключён')),el('td',s.auto_publish?'По общим проверкам':s.high_risk?'High-risk review':'Автопубликация запрещена'),el('td',(s.reason||'Причина не записана')+' · '+(s.strategy||'Адаптер не подключён')));$('source-list').append(row);}
  $('ai-list').replaceChildren();if(!city.ai_usage?.length)empty($('ai-list'),city.ai_usage===null?'События моделей недоступны. Нельзя определить, что нашёл Gemini или GPT.':'В журнале AIUsageEvent нет событий. Это не доказывает отсутствие вызовов: старые прогоны могли не записывать их.');else for(const a of city.ai_usage)$('ai-list').append(el('div',`${date(a.occurred_at)} · ${a.provider} / ${a.model} · ${a.task} · ${a.status}`,'run'));
- $('cycle-info').replaceChildren();if(city.last_cycle){for(const a of city.last_cycle.ai_calls||[])$('cycle-info').append(el('div',`${date(a.occurred_at)} · ${a.provider||'Неизвестно'} / ${a.model||'Неизвестно'} · ${a.task} · ${a.status}`,'run'));$('cycle-info').append(el('p',`Последний цикл: ${city.last_cycle.status??'неизвестно'} · ${date(city.last_cycle.observed_at)}`));const j=city.last_cycle.jev; $('cycle-info').append(el('pre',j?JSON.stringify(j,null,2):'Jev: нет наблюдения для этого прогона.'));}
+ renderCycle($('cycle-info'), city.last_cycle);
  const attempt=city.id==='belgrade'?data.last_attempt:null;if(attempt){const row=el('p',`Actions (Белград): ${attempt.status} · ${attempt.mode} · ${date(attempt.observed_at)} · ${attempt.projection==='verified'?'Проверенная проекция':'Предыдущий снимок или данные недоступны'} · `);link(row,'Прогон #'+attempt.run_id,`https://github.com/Stolyarovmn/relocant-media/actions/runs/${attempt.run_id}/attempts/${attempt.run_attempt}`);$('cycle-info').append(row);}
  renderCoverage(city);
  $('run-list').replaceChildren();if(!city.runs?.length)empty($('run-list'),city.runs===null?'История прогонов недоступна.':'В scheduler_run прогонов для этого города нет.');else for(const r of city.runs)$('run-list').append(el('div',`#${r.id} · ${date(r.started_at)} → ${date(r.finished_at)} · ${r.status}${r.error_type?' · '+r.error_type:''}`,'run'));

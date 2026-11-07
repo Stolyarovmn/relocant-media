@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -280,3 +281,50 @@ def test_cycle_health_unknown_is_not_reported_as_clean():
         cycle = merge(snapshot(ROOT), runtime)["cities"][0]["last_cycle"]
         assert cycle["processing_error_count"] is None
         assert cycle["fallback_required"] is None
+
+
+def test_dashboard_distinguishes_provider_rejection_cooldown_and_unknown_fallback() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to exercise the dashboard")
+    subprocess.run(
+        [node, "-e", r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const parent = {
+  children: [],
+  replaceChildren() { this.children = []; },
+  append(child) { this.children.push(child.textContent); },
+};
+const ctx = {
+  parent, document: {
+    getElementById: () => ({ addEventListener() {} }),
+    createElement: () => ({}),
+  },
+  fetch: () => new Promise(() => {}),
+  setInterval() {},
+};
+vm.runInNewContext(fs.readFileSync('web/newsroom/app.js', 'utf8') + `
+renderCycle(parent, {
+  fallback_required: true,
+  ai_calls: [
+    {error_phase: 'http_error_429', status: 'failed'},
+    {error_phase: 'quota_cooldown', status: 'failed'},
+    {error_phase: 'private-value', status: 'failed'},
+  ],
+});
+`, ctx);
+assert.match(parent.children[0], /HTTP 429 от провайдера/);
+assert.match(parent.children[1], /Пропущено: пауза/);
+assert.match(parent.children[2], /failed/);
+assert.doesNotMatch(parent.children.join(' '), /private-value/);
+assert.match(parent.children[4], /результат не подтверждён/);
+vm.runInNewContext('renderCycle(parent, {fallback_required: false})', ctx);
+assert.match(parent.children[1], /не требуется/);
+vm.runInNewContext('renderCycle(parent, {})', ctx);
+assert.match(parent.children[1], /нет данных/);
+"""],
+        cwd=ROOT,
+        check=True,
+    )
