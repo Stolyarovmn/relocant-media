@@ -6,13 +6,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from relocant_media.ai.diagnostics import AI_PHASES
 from relocant_media.ops.public_observations import public_coverage
 from relocant_media.services.kpi import public_kpi
 
 
 def safe_ai_phase(value: Any) -> str | None:
-    return value if isinstance(value, str) and value in {
-        "import_sdk", "initialize_client", "sdk_call", "close_client"} else None
+    return value if isinstance(value, str) and value in AI_PHASES else None
 
 
 def rows(value: Any, keys: tuple[str, ...]) -> list[dict[str, Any]] | None:

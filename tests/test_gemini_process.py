@@ -104,7 +104,7 @@ def test_worker_applies_http_deadline_without_sdk_retries(monkeypatch, capsys):
 
     from google import genai
 
-    from relocant_media.ai.gemini_process import _worker_main
+    from relocant_media.ai.gemini_process import _trace_request, _worker_main
 
     seen = []
     def client(**kwargs):
@@ -117,7 +117,8 @@ def test_worker_applies_http_deadline_without_sdk_retries(monkeypatch, capsys):
         api_key="test-key", model="test-model", http_timeout_ms=300000, **ARGS))))
     _worker_main()
     assert seen == [{"api_key": "test-key", "http_options": {
-        "timeout": 300000, "retry_options": {"attempts": 0}}}, "closed"]
+        "timeout": 300000, "retry_options": {"attempts": 0},
+        "client_args": {"event_hooks": {"request": [_trace_request]}}}}, "closed"]
     assert json.loads(capsys.readouterr().out) == {"output": "{}"}
 
 
@@ -140,3 +141,42 @@ def test_phase_diagnostic_is_allowlisted():
     from relocant_media.ai.gemini_process import _last_phase
 
     assert _last_phase(b'SECRET\n{"phase":"sdk_call"}\n{"phase":"SECRET"}') == "sdk_call"
+
+
+def test_transport_trace_never_emits_request_content(capsys):
+    from relocant_media.ai.gemini_process import _http_trace, _last_phase
+
+    _http_trace("http11.receive_response_headers.started", {"headers": "SECRET"})
+    _http_trace("http11.receive_response_body.started", {"body": "PRIVATE"})
+    _http_trace("SECRET.unknown", {"url": "SECRET"})
+    output = capsys.readouterr().err
+    assert "SECRET" not in output and "PRIVATE" not in output
+    assert _last_phase(output) == "http_read_body"
+
+
+def test_real_sdk_uses_instrumented_transport_without_network(capsys, monkeypatch):
+    import socket
+
+    monkeypatch.setattr(socket.socket, "connect",
+                        lambda *args: pytest.fail("network forbidden"))
+    import httpx
+    from google import genai
+
+    from relocant_media.ai.gemini import GeminiStructuredProvider
+    from relocant_media.ai.gemini_process import _trace_request
+
+    calls = []
+    def handle(request):
+        calls.append(1)
+        request.extensions["trace"]("http11.receive_response_headers.started", {})
+        raise RuntimeError("OFFLINE_SENTINEL")
+    with genai.Client(api_key="offline-test", http_options={
+        "client_args": {"transport": httpx.MockTransport(handle),
+                        "event_hooks": {"request": [_trace_request]}},
+        "retry_options": {"attempts": 0},
+    }) as client:
+        with pytest.raises(RuntimeError, match="OFFLINE_SENTINEL"):
+            GeminiStructuredProvider("offline-test", model="gemini-3.5-flash-lite",
+                                     client=client).generate_json(**ARGS)
+    assert calls == [1]
+    assert '"http_wait_headers"' in capsys.readouterr().err

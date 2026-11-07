@@ -239,3 +239,15 @@ import_sdk/initialize_client/sdk_call/close_client markers identify the phase
 of future failures without exposing SDK stderr, prompts or credentials.
 Historical external kills have no saved inner phase and cannot be attributed
 to HTTP, model inference, continuation, or client cleanup from elapsed time alone.
+
+## Transport phase coordinates
+
+HTTPX request hooks attach an HTTP-core trace callback to the same client used
+by Interactions. The callback reads only the event name and emits fixed phases:
+http_request, http_connect, http_tls, http_send, http_wait_headers,
+http_read_body, http_body_received. Trace info, URLs, headers, bodies, exceptions
+and timing payloads are never inspected or emitted. Both canonical projection
+filters use the same fixed phase allowlist as the worker. An offline real-SDK
+MockTransport test forbids socket connections and verifies this route.
+A phase localizes the last observed transport event, not the remote reason for
+a slow response. Existing sdk_call failures cannot be retroactively subdivided.

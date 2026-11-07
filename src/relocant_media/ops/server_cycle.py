@@ -17,6 +17,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.diagnostics import AI_PHASES
 from relocant_media.ai.gemini_process import IsolatedGeminiProvider
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
 from relocant_media.ai.package import EditorialPackage
@@ -176,7 +177,7 @@ class ServerAI:
         except Exception as error:
             record.update(status="failed", error_type=type(error).__name__)
             phase = getattr(error, "phase", None)
-            if phase in {"import_sdk", "initialize_client", "sdk_call", "close_client"}:
+            if phase in AI_PHASES:
                 record["error_phase"] = phase
             raise
         finally:

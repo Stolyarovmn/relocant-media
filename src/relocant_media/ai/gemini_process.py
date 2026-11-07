@@ -9,6 +9,8 @@ import subprocess
 import sys
 from typing import Any, cast
 
+from relocant_media.ai.diagnostics import AI_PHASES
+
 _CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,60}")
 
 
@@ -76,8 +78,8 @@ def _last_phase(stderr: str | bytes | None) -> str:
             value = json.loads(line)
         except ValueError:
             continue
-        if isinstance(value, dict) and value.get("phase") in {
-            "import_sdk", "initialize_client", "sdk_call", "close_client"}:
+        if (isinstance(value, dict) and isinstance(value.get("phase"), str)
+                and value["phase"] in AI_PHASES):
             phase = value["phase"]
     return phase
 
@@ -94,6 +96,25 @@ def _phase(name: str) -> None:
     print(json.dumps({"phase": name}), file=sys.stderr, flush=True)
 
 
+def _http_trace(event: str, info: dict[str, Any]) -> None:
+    # info contains request/response objects, headers and exception values. Never inspect it.
+    suffix = event.split(".", 1)[-1]
+    phase = {
+        "connect_tcp.started": "http_connect", "start_tls.started": "http_tls",
+        "send_request_headers.started": "http_send",
+        "receive_response_headers.started": "http_wait_headers",
+        "receive_response_body.started": "http_read_body",
+        "receive_response_body.complete": "http_body_received",
+    }.get(suffix)
+    if phase is not None:
+        _phase(phase)
+
+
+def _trace_request(request: Any) -> None:
+    _phase("http_request")
+    request.extensions["trace"] = _http_trace
+
+
 def _worker_main() -> None:
     try:
         _phase("import_sdk")
@@ -108,7 +129,9 @@ def _worker_main() -> None:
             signal.setitimer(signal.ITIMER_REAL, request["http_timeout_ms"] / 1000)
         client = genai.Client(api_key=request["api_key"],
                               http_options={"timeout": request["http_timeout_ms"],
-                                            "retry_options": {"attempts": 0}})
+                                            "retry_options": {"attempts": 0},
+                                            "client_args": {"event_hooks": {
+                                                "request": [_trace_request]}}})
         try:
             provider = GeminiStructuredProvider(request["api_key"],
                                                 model=request["model"], client=client,
