@@ -1,0 +1,80 @@
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
+
+
+def test_checkpoint_retains_exact_cas_budget_and_exit_independently(tmp_path, monkeypatch):
+    client = SSHStateClient(SSHConfig('storage.example', 'state', 22, Path('key'), Path('hosts')))
+    blobs = {}
+    def upload(path, folder):
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        blobs[digest] = content
+        return digest
+    monkeypatch.setattr(client, 'upload', upload)
+    state = {'status': 'ready', 'snapshot': {'sha256': 'c' * 64},
+             'intake_state': {'attempts': 2, 'backup_pending': False}, 'last_exit_code': 1}
+    digest = client.checkpoint(state, 'b' * 64, tmp_path / 'checkpoint.json')
+    checkpoint = json.loads(blobs[digest])
+    assert checkpoint == {'version': 1, 'expected_busy_sha256': 'b' * 64, 'state': state}
+    assert hashlib.sha256(blobs[digest]).hexdigest() == digest
+
+
+def test_checkpoint_rejects_busy_or_unverified_digest_before_upload(tmp_path, monkeypatch):
+    client = SSHStateClient(SSHConfig('storage.example', 'state', 22, Path('key'), Path('hosts')))
+    monkeypatch.setattr(client, 'upload', lambda *args: pytest.fail('must not upload'))
+    with pytest.raises(ValueError):
+        client.checkpoint({'status': 'busy'}, 'b' * 64, tmp_path / 'busy.json')
+    with pytest.raises(ValueError):
+        client.checkpoint({'status': 'ready'}, 'unknown', tmp_path / 'bad.json')
+
+
+@pytest.fixture
+def recovery_fixture(tmp_path):
+    from datetime import UTC, datetime
+
+    from relocant_media.ops.actions_runtime import bootstrap_record
+    from relocant_media.ops.sqlite_backup_cli import create_snapshot
+    from relocant_media.ops.ssh_state_client import _state_digest
+    from relocant_media.storage.sqlite_schema import initialize_sqlite
+    database = tmp_path / 'source.sqlite3'
+    initialize_sqlite(database)
+    manifest = create_snapshot(database, tmp_path / 'saved')
+    manifest['drive_file_id'] = manifest['sha256']
+    busy = {**bootstrap_record(manifest, now=datetime.now(UTC)),
+            'status': 'busy', 'attempt': 'attempt1', 'run_id': '123'}
+    ready = {**busy, 'status': 'ready', 'generation': 'attempt1',
+             'intake_state': {'attempts': 2, 'backup_pending': True}, 'last_exit_code': 1}
+    checkpoint = {'version': 1, 'expected_busy_sha256': _state_digest(busy), 'state': ready}
+    return checkpoint, busy, tmp_path / 'saved/editorial.sqlite3'
+
+
+def test_prepare_verified_recovery_preserves_exact_state(recovery_fixture, tmp_path):
+    from relocant_media.ops.recovery_checkpoint import prepare
+    checkpoint, busy, snapshot = recovery_fixture
+    output = tmp_path / 'prepared'
+    audit = prepare(checkpoint, busy, snapshot, output, writers_fenced=True)
+    request = json.loads((output / 'request.json').read_text())
+    assert request == {'op': 'write_state',
+                       'expected_sha': checkpoint['expected_busy_sha256'],
+                       'state': checkpoint['state']}
+    assert audit['applied'] is False
+    assert (output / 'verified/editorial.sqlite3').read_bytes() == snapshot.read_bytes()
+
+
+@pytest.mark.parametrize('mismatch', ['pointer', 'unfenced', 'snapshot'])
+def test_prepare_refuses_inconsistent_recovery(recovery_fixture, tmp_path, mismatch):
+    from relocant_media.ops.recovery_checkpoint import prepare
+    checkpoint, busy, snapshot = recovery_fixture
+    if mismatch == 'pointer':
+        busy['run_id'] = 'new-writer'
+    elif mismatch == 'snapshot':
+        snapshot.write_bytes(b'corrupt')
+    output = tmp_path / 'prepared'
+    with pytest.raises(ValueError):
+        prepare(checkpoint, busy, snapshot, output, writers_fenced=mismatch != 'unfenced')
+    assert not (output / 'request.json').exists()
