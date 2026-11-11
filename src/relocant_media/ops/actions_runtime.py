@@ -27,6 +27,7 @@ from google.auth.transport.requests import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.package import canonical_json
 from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
@@ -40,6 +41,63 @@ STATE_PATH = "state/current.json"
 MAX_BYTES = 256 * 1024 * 1024
 SNAPSHOT_GROWTH_RESERVE = 16 * 1024 * 1024
 PUBLIC_EXPORT_TIMEOUT_SECONDS = 180
+GPT_EXCHANGE_MAX_BYTES = 512 * 1024
+MODES = {"preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback"}
+
+
+def _gpt_digest(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError("private GPT exchange digest required")
+    return value
+
+
+def _gpt_blob(storage: SnapshotStore, digest: str) -> dict[str, Any]:
+    content = storage.download(digest)
+    if len(content) > GPT_EXCHANGE_MAX_BYTES or hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError("invalid private GPT exchange blob")
+    value = json.loads(content)
+    if not isinstance(value, dict):
+        raise ValueError("private GPT exchange object required")
+    return value
+
+
+def _prepare_gpt_input(storage: SnapshotStore, digest: str, path: Path) -> None:
+    result = _gpt_blob(storage, digest)
+    packages = result.get("packages")
+    if (set(result) != {"version", "request_sha256", "packages"}
+            or type(result.get("version")) is not int or result["version"] != 1
+            or not isinstance(packages, list) or not 1 <= len(packages) <= 5):
+        raise ValueError("invalid GPT result envelope")
+    request_sha = _gpt_digest(result["request_sha256"])
+    request = _gpt_blob(storage, request_sha)
+    if hashlib.sha256(canonical_json(request).encode()).hexdigest() != request_sha:
+        raise ValueError("GPT request blob is not canonical")
+    path.write_text(canonical_json({"request": request, "result": result}), encoding="utf-8")
+
+
+def _export_gpt_request(storage: SnapshotStore, database: Path, work: Path) -> int:
+    from relocant_media.services.gpt_fallback import build_request
+
+    engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
+    try:
+        with Session(engine) as session:
+            request = build_request(session, now=datetime.now(UTC))
+    finally:
+        engine.dispose()
+    if request is None:
+        print(json.dumps({"gpt_fallback": "no_pending_candidates"}))
+        return 0
+    content = canonical_json(request).encode()
+    if len(content) > GPT_EXCHANGE_MAX_BYTES:
+        raise ValueError("GPT request exceeds private exchange bound")
+    path = work / "gpt-request.json"
+    path.write_bytes(content)
+    digest = storage.upload(path, "gpt-fallback-request")
+    if digest != hashlib.sha256(content).hexdigest():
+        raise ValueError("GPT request storage receipt differs")
+    print(json.dumps({"gpt_fallback_request_sha256": digest,
+                      "candidate_count": len(request["candidates"])}))
+    return 0
 
 
 def _runtime_phase(phase: str) -> None:
@@ -397,17 +455,27 @@ def private_quota_observation(directory: Path) -> dict[str, Any] | None:
 
 def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: Path,
             folder: str, mode: str, environment: dict[str, str]) -> int:
-    if mode not in {"preview", "editorial", "intake", "discovery", "auto"}:
+    if mode not in MODES:
         raise ValueError("unsupported runtime mode")
     incoming = environment.get("CLOUD_DISCOVERY_BATCH", "")
     batch = parse_batch(incoming) if mode == "discovery" else None
     if incoming and mode != "discovery":
         raise ValueError("discovery input requires discovery mode")
+    gpt_input = environment.get("GPT_FALLBACK_BLOB_SHA256", "")
+    if gpt_input and mode != "fallback":
+        raise ValueError("GPT result input requires fallback mode")
+    if mode in {"fallback-preview", "fallback"}:
+        if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+                or environment.get("EDITORIAL_STORAGE_BACKEND") != "ssh"
+                or not isinstance(drive, SSHStateClient)):
+            raise ValueError("GPT exchange requires a manual SSH-backed Actions run")
+        if mode == "fallback":
+            _gpt_digest(gpt_input)
     state, sha = store.read()
     validate_ready(state)
     if mode == "auto":
         mode = "editorial" if editorial_due(state, datetime.now(UTC)) else "intake"
-    work.mkdir(parents=True, exist_ok=False)
+    work.mkdir(parents=True, exist_ok=False, mode=0o700)
     database = restored(drive, state["snapshot"], work)
     if mode == "preview":
         export_public(database, output, state["snapshot"]["created_at"], None)
@@ -416,6 +484,11 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             or environment.get("GITHUB_REPOSITORY") != REPO
             or environment.get("GITHUB_REF") != "refs/heads/main"):
         raise ValueError("main-only confirmed cutover required")
+    if mode == "fallback-preview":
+        return _export_gpt_request(drive, database, work)
+    fallback_file = work / "gpt-fallback-input.json"
+    if mode == "fallback":
+        _prepare_gpt_input(drive, gpt_input, fallback_file)
     # Readback/restore and all validation precede the claim; all side effects follow it.
     identifier(folder)
     require_snapshot_capacity(database)
@@ -436,6 +509,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             "GH_STATE_TOKEN", "GH_STATE_REPOSITORY", "DRIVE_CREDENTIALS_JSON",
             "DRIVE_STATE_FOLDER_ID", "DRIVE_PREVIEW_MANIFEST_ID", "GOOGLE_APPLICATION_CREDENTIALS",
             "CLOUD_DISCOVERY_BATCH",
+            "GPT_FALLBACK_BLOB_SHA256",
         }:
             env.pop(name, None)
     # The worker creates its own output directory and refuses one that already exists.
@@ -450,12 +524,22 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
                 session.commit()
         finally:
             engine.dispose()
-    if mode == "intake":
+    if mode == "fallback":
+        for name in list(env):
+            if name in {"GEMINI_API_KEY", "GEMINI_MODEL", "TYPESAFE_API_KEY"} or name.startswith(
+                ("EDITORIAL_PRIVATE_", "EDITORIAL_OWNER_")
+            ):
+                env.pop(name)
+        command = [sys.executable, "-m", "relocant_media.ops.gpt_fallback_worker",
+                   "--input", str(fallback_file), "--output", str(run_dir)]
+    elif mode == "intake":
         env["EDITORIAL_INTAKE_MODE"] = "batch"
         command = [sys.executable, "-m", "relocant_media.ops.intake_batch"]
     else:
         # The five-minute batch is the only update consumer; no second getUpdates poller.
         env["EDITORIAL_INTAKE_MODE"] = "batch"
+        if isinstance(drive, SSHStateClient) and mode == "editorial":
+            env["EDITORIAL_GPT_FALLBACK_ENABLED"] = "true"
         command = [sys.executable, "-m", "relocant_media.ops.server_runtime",
                    "--output", str(run_dir)]
         if mode == "discovery":
@@ -483,8 +567,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     # Retry budget lives outside SQLite; preserve it across ephemeral runners.
     budget = {key: saved_intake[key] for key in ("signature", "attempts", "backup_pending")
               if key in saved_intake}
-    observed_run = run_dir if mode in {"editorial", "discovery"} and (mode != "discovery"
-        or created) else next(
+    has_cycle_report = mode in {"editorial", "fallback"} or (mode == "discovery" and created)
+    observed_run = run_dir if has_cycle_report else next(
         iter(sorted((directory / "runs").glob("*/server-report.json"), reverse=True)), None)
     if observed_run is not None and observed_run.is_file():
         observed_run = observed_run.parent
@@ -574,7 +658,7 @@ def bootstrap_record(manifest: dict[str, Any], *, now: datetime) -> dict[str, An
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["preview", "editorial", "intake", "discovery", "auto"],
+    parser.add_argument("--mode", choices=sorted(MODES),
                         default="preview")
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

@@ -79,6 +79,7 @@ def run_cycle(
     priority_items: Callable[[], set[int]] | None = None,
     recent_source_counts: Callable[[], dict[str, int]] | None = None,
     allowed_items: Callable[[], set[int]] | None = None,
+    deferred_items: Callable[[Session], set[int]] | None = None,
     submissions_only: bool = False,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
@@ -110,16 +111,18 @@ def run_cycle(
             if collection["failures"] and not allow_partial_ingest:
                 raise ValueError("source collection incomplete")
             with Session(engine) as session:
+                deferred = deferred_items(session) if deferred_items else set()
                 manifest = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
                     until=aware_datetime(window["until"]), limit=limit, newest_first=newest_first,
                     priority_raw_ids=priority_items() if priority_items else None,
                     allowed_raw_ids=allowed_items() if allowed_items else None,
+                    excluded_raw_ids=deferred,
                     recent_source_counts=recent_source_counts() if recent_source_counts else None,
                     source_priorities=candidate_priorities() if candidate_priorities else None)
             if reassessment_ids is not None:
                 selected = {candidate["raw_item_id"] for candidate in manifest["candidates"]}
-                extra = [i for i in reassessment_ids() if i not in selected]
+                extra = [i for i in reassessment_ids() if i not in selected and i not in deferred]
                 manifest["candidates"].extend({"raw_item_id": i, "reassessment": True}
                     for i in extra[:max(0, limit - len(selected))])
                 manifest["candidate_count"] = len(manifest["candidates"])
@@ -171,6 +174,7 @@ def run_cycle(
             heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
                 window_complete=complete, processed_raw_item_ids=processed,
                 processing_errors=processing_errors,
+                gpt_deferred_count=len(deferred),
                 remaining_count=remaining["eligible_count"] + additional_remaining,
                 missing_published_at_count=remaining["missing_published_at_count"],
                 review_required=collection.get("review_required", 0),

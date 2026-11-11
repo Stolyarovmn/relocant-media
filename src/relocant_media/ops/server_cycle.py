@@ -90,6 +90,7 @@ from relocant_media.services.editorial_products import (
     verify_live_map,
 )
 from relocant_media.services.event_eligibility import event_content_reason
+from relocant_media.services.gpt_fallback import pending_gpt_ids
 from relocant_media.services.kpi import record_subscriber_observation
 from relocant_media.services.package_import import import_package
 from relocant_media.services.pin_policy import maintain_pins
@@ -1033,6 +1034,8 @@ def main() -> None:
             return stats
         def allowed_items() -> set[int]:
             return set(scope.get("submission_raw_ids", []))
+        def deferred_items(session: Session) -> set[int]:
+            return pending_gpt_ids(session, now=datetime.now(UTC))
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=ingest,
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output),
@@ -1044,6 +1047,9 @@ def main() -> None:
                               else lambda: policy_reassessment_ids(engine)),
             continue_on_error=True, submissions_only=args.submissions_only,
             allowed_items=allowed_items if args.submissions_only else None,
+            deferred_items=(deferred_items if not args.submissions_only
+                            and os.environ.get("EDITORIAL_GPT_FALLBACK_ENABLED") == "true"
+                            else None),
             candidate_priorities=lambda: queue_priorities(
                 source_priorities(json.loads(
                     (args.output / "venue-attention.json").read_text(encoding="utf-8")))
@@ -1064,7 +1070,8 @@ def main() -> None:
             result["private_feedback"] = {"status": "failed",
                 "error_type": type(feedback_error).__name__}
         result["fallback_required"] = (result["status"] == "PRIMARY_FAILED"
-                                       or bool(result.get("processing_errors")))
+                                       or bool(result.get("processing_errors"))
+                                       or bool(result.get("gpt_deferred_count")))
         result["sent_message_ids"] = []
         result["channel_transport"] = "disabled"
         if result["status"] in {"PRIMARY_OK", "PRIMARY_PARTIAL"}:
