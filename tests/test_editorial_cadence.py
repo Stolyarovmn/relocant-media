@@ -60,8 +60,8 @@ def test_hourly_timer_retains_single_service_and_persistent_serialized_runtime()
     assert timer["Timer"]["Unit"] == "relocant-editorial.service"
     assert timer["Timer"]["Persistent"] == "true"
     data = workflow()
-    assert data["concurrency"] == {
-        "group": "canonical-editorial-writer", "cancel-in-progress": "false",
+    assert data["jobs"]["cycle"]["concurrency"] == {
+        "group": "canonical-editorial-state", "cancel-in-progress": "false",
     }
     assert "vars.ACTIONS_EDITORIAL_ENABLED == 'true'" in data["jobs"]["cycle"]["if"]
     runtime = next(step for step in data["jobs"]["cycle"]["steps"]
@@ -97,7 +97,18 @@ def test_chain_books_the_next_cycle_only_after_a_finished_main_cycle():
         assert condition in chain["if"]
     assert chain["permissions"] == {"actions": "write"}
     assert "auto" in workflow()["on"]["workflow_dispatch"]["inputs"]["mode"]["options"]
-    assert workflow()["concurrency"]["group"] == "canonical-editorial-writer"
+
+
+def test_gpt_fallback_has_a_separate_workflow_queue_and_shared_state_lock():
+    data = workflow()
+    assert data["concurrency"] == {
+        "group": "${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' "
+                 "|| 'canonical-editorial-writer' }}",
+        "cancel-in-progress": "false",
+    }
+    assert data["jobs"]["cycle"]["concurrency"]["group"] == "canonical-editorial-state"
+    assert "inputs.mode != 'fallback-preview'" in _chain()["if"]
+    assert "inputs.mode != 'fallback'" in _chain()["if"]
 
 
 def _run_chain(tmp_path, queued):
