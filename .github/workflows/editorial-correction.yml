@@ -1,0 +1,76 @@
+name: Editorial correction
+on:
+  workflow_dispatch:
+    inputs:
+      plan_sha256:
+        description: SHA256 of the private independently reviewed correction plan
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  correct:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: canonical-editorial-state
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e .
+      - name: Verify exact main CI before any runtime side effect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo = 'Stolyarovmn/relocant-media'
+          sha = os.environ['EXPECTED_SHA']
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/{path}']))
+          assert api('git/ref/heads/main')['object']['sha'] == sha, 'main advanced; retry current main'
+          runs = api(f'actions/runs?head_sha={sha}&event=push&per_page=100')['workflow_runs']
+          ci = [r for r in runs if r['path'] == '.github/workflows/ci.yml'
+                and r['head_branch'] == 'main' and r['event'] == 'push']
+          assert ci and ci[0]['status'] == 'completed' and ci[0]['conclusion'] == 'success'
+          PY
+      - name: Verify and edit a single existing post
+        env:
+          STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND }}
+          CUTOVER_CONFIRMED: ${{ vars.ACTIONS_CUTOVER_CONFIRMED }}
+          SEND_ENABLED: ${{ vars.ACTIONS_SEND_ENABLED }}
+          STORAGE_PRIVATE_KEY: ${{ secrets.EDITORIAL_SSH_PRIVATE_KEY }}
+          STORAGE_KNOWN_HOSTS: ${{ secrets.EDITORIAL_SSH_KNOWN_HOSTS }}
+          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
+          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
+          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CORRECTION_PLAN_SHA: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$STORAGE_BACKEND" = ssh
+          test "$CUTOVER_CONFIRMED" = true
+          test "$SEND_ENABLED" = true
+          test -n "$STORAGE_PRIVATE_KEY"
+          test -n "$STORAGE_KNOWN_HOSTS"
+          umask 077
+          identity="$RUNNER_TEMP/editorial-correction-identity"
+          mkdir "$identity"
+          printf '%s\n' "$STORAGE_PRIVATE_KEY" > "$identity/key"
+          printf '%s\n' "$STORAGE_KNOWN_HOSTS" > "$identity/known_hosts"
+          unset STORAGE_PRIVATE_KEY STORAGE_KNOWN_HOSTS
+          EDITORIAL_SSH_KEY_PATH="$identity/key" \
+          EDITORIAL_SSH_KNOWN_HOSTS_PATH="$identity/known_hosts" \
+            python -m relocant_media.ops.correction_delivery \
+              --plan-sha "$CORRECTION_PLAN_SHA" --work "$RUNNER_TEMP/editorial-correction"
+      - name: Remove private runner files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/editorial-correction" "$RUNNER_TEMP/editorial-correction-identity"

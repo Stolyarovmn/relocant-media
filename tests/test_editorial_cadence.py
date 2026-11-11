@@ -111,6 +111,23 @@ def test_gpt_fallback_has_a_separate_workflow_queue_and_shared_state_lock():
     assert "inputs.mode != 'fallback'" in _chain()["if"]
 
 
+def test_published_correction_is_manual_main_only_and_shares_state_lock():
+    path = WORKFLOW.with_name("editorial-correction.yml")
+    correction = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert set(correction["on"]) == {"workflow_dispatch"}
+    assert set(correction["on"]["workflow_dispatch"]["inputs"]) == {"plan_sha256"}
+    assert correction["permissions"] == {"contents": "read", "actions": "read"}
+    job = correction["jobs"]["correct"]
+    assert "github.ref == 'refs/heads/main'" in job["if"]
+    assert job["concurrency"] == workflow()["jobs"]["cycle"]["concurrency"]
+    steps = job["steps"]
+    gate = next(i for i, step in enumerate(steps) if "exact main CI" in step.get("name", ""))
+    edit = next(i for i, step in enumerate(steps)
+                if "ops.correction_delivery" in step.get("run", ""))
+    assert gate < edit and "TELEGRAM_BOT_TOKEN" not in steps[gate]["env"]
+    assert not any("uses" in step and "upload-" in step["uses"] for step in steps)
+
+
 def _run_chain(tmp_path, queued):
     script = next(step for step in _chain()["steps"])["run"]
     bin_dir = tmp_path / "bin"
