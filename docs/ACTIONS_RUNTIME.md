@@ -288,3 +288,44 @@ evidence or authorized inspection of that project in Google AI Studio.
 Local blocks use phase=quota_cooldown and GeminiQuotaCooldown, so they cannot
 be counted as newly observed HTTP429 responses. Their quota coordinates refer
 to the previously received server response, not a fresh request.
+
+
+### Snapshot capacity preflight
+
+Drive and SSH snapshot transfers have a finite 256 MiB bound. Deploy the matching
+SSH helper before enabling writers with this bound. Before claiming `busy`, the
+runtime requires 16 MiB free within that bound; insufficient capacity raises
+`SnapshotCapacityError` without running the worker. This reserve is an early
+warning, not a guarantee against arbitrary growth during a cycle. No SQLite
+history is deleted or database growth truncated by this guard.
+
+
+### Private SSH recovery checkpoint
+
+Before public projection processing and the final ready CAS, the SSH runtime uploads
+and reads back an immutable JSON recovery envelope. The Actions log contains only
+`recovery_checkpoint_sha256`; the private blob contains the exact busy CAS digest,
+verified snapshot manifest, child exit code and intake retry budget. SQLite and this
+envelope must never be uploaded as public GitHub artifacts (this repository is public).
+Projection failure now commits verified runtime state and fails the projection without
+leaving busy solely because rendering failed. A failed final CAS remains fail-closed.
+
+Recovery is explicit, never based on marker age. Fence every writer, fetch the current
+pointer, recovery envelope digest from the failed run log, and referenced SQLite blob
+using existing storage access. Run `python -m relocant_media.ops.recovery_checkpoint`
+with `--checkpoint`, `--busy-state`, `--snapshot`, a new `--output` directory, and
+`--writers-fenced` only after independently verifying fencing. It checks the exact
+pointer digest, run/attempt identity, nonnegative known child exit, retry budget and
+restored SQLite integrity/schema/foreign keys. Review `request.json` and `audit.json`.
+The tool does not apply changes or contact Telegram. Re-read the pointer immediately
+before submitting the generated single-shot `write_state` request to the helper;
+verify pointer and snapshot readback afterwards. Never retry an uncertain CAS blindly.
+
+This checkpoint covers final CAS/projection failure after snapshot persistence.
+Complete SSH unavailability, upload failure, hard kill before checkpoint and an
+unknown child exit still require reconciliation; there is no safe automatic unlock.
+The ephemeral runner cannot guarantee retention during a total storage outage.
+A second independently authorized private storage destination would be needed for
+that guarantee. Existing historical attempts cannot acquire missing receipts from
+this change. Explicit owner acceptance of duplicate risk permits an audited rollback,
+but does not justify invented delivery receipts or guessed child exit codes.

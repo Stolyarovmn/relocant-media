@@ -18,7 +18,7 @@ from typing import Any, BinaryIO
 
 MAX_HEADER = 1024 * 1024
 MAX_STATE = 512 * 1024
-MAX_BLOB = 50 * 1024 * 1024
+MAX_BLOB = 256 * 1024 * 1024
 CHUNK = 64 * 1024
 HELPER_COMMAND = "/usr/local/libexec/relocant-media/ssh-state-storage"
 TRUSTED_MARKER_UID = 0

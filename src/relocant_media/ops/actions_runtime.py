@@ -37,7 +37,18 @@ from relocant_media.services.cloud_discovery import batch_receipt, ingest_batch,
 REPO = "Stolyarovmn/relocant-media"
 STATE_BRANCH = "editorial-state"
 STATE_PATH = "state/current.json"
-MAX_BYTES = 50 * 1024 * 1024
+MAX_BYTES = 256 * 1024 * 1024
+SNAPSHOT_GROWTH_RESERVE = 16 * 1024 * 1024
+
+
+class SnapshotCapacityError(ValueError):
+    """Insufficient bounded storage headroom; raised before claiming the writer."""
+
+
+def require_snapshot_capacity(database: Path) -> None:
+    if database.stat().st_size > MAX_BYTES - SNAPSHOT_GROWTH_RESERVE:
+        raise SnapshotCapacityError("snapshot capacity reserve exhausted")
+
 
 
 def identifier(value: str) -> str:
@@ -397,6 +408,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         raise ValueError("main-only confirmed cutover required")
     # Readback/restore and all validation precede the claim; all side effects follow it.
     identifier(folder)
+    require_snapshot_capacity(database)
     attempt = uuid.uuid4().hex
     busy = {**state, "status": "busy", "attempt": attempt,
             "run_id": environment.get("GITHUB_RUN_ID"),
@@ -460,20 +472,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         observed_run = observed_run.parent
     if observed_run is not None and not observed_run.is_dir():
         observed_run = None  # the worker failed before creating its output
-    # Preserve the prepared fix from fix/pages-failed-runtime-observation: an
-    # uncommitted queue must never appear in the directory uploaded by Actions,
-    # even if a hard termination bypasses main's exception cleanup.
-    provisional = work / "public-projection.json"
-    export_public(database, provisional, manifest["created_at"], observed_run)
     last_cycle = state.get("last_cycle")
-    if provisional.is_file():
-        projection = json.loads(provisional.read_text())
-        city = projection["cities"][0]
-        if "last_cycle" not in city and isinstance(last_cycle, dict):
-            city["last_cycle"] = last_cycle
-        projection = merge(projection, projection)
-        last_cycle = projection["cities"][0].get("last_cycle")
-        provisional.write_text(json.dumps(projection, ensure_ascii=False), encoding="utf-8")
     ready = {**busy, "status": "ready", "generation": attempt, "snapshot": manifest,
              "intake_state": budget, "finished_at": datetime.now(UTC).isoformat(),
              "last_exit_code": code, "last_cycle": last_cycle,
@@ -498,6 +497,34 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if quota_observation is not None:
         ready["last_quota_observation"] = {
             **quota_observation, "run_id": environment.get("GITHUB_RUN_ID")}
+    # SSH retains a private, read-back-verified recovery intent before final CAS.
+    # Its digest is safe to log; the envelope and SQLite remain private blobs.
+    if isinstance(drive, SSHStateClient):
+        checkpoint_id = drive.checkpoint(ready, busy_sha, work / "checkpoint.json")
+        print(json.dumps({"recovery_checkpoint_sha256": checkpoint_id}), file=sys.stderr)
+    # Preserve the prepared fix from fix/pages-failed-runtime-observation: an
+    # uncommitted queue must never appear in the directory uploaded by Actions,
+    # even if a hard termination bypasses main's exception cleanup.
+    provisional = work / "public-projection.json"
+    projection_failed = False
+    last_cycle = state.get("last_cycle")
+    try:
+        export_public(database, provisional, manifest["created_at"], observed_run)
+        last_cycle = state.get("last_cycle")
+        if provisional.is_file():
+            projection = json.loads(provisional.read_text())
+            city = projection["cities"][0]
+            if "last_cycle" not in city and isinstance(last_cycle, dict):
+                city["last_cycle"] = last_cycle
+            projection = merge(projection, projection)
+            last_cycle = projection["cities"][0].get("last_cycle")
+            provisional.write_text(json.dumps(projection, ensure_ascii=False), encoding="utf-8")
+    except Exception as error:
+        # Projection is disposable; verified receipts and retry budget are not.
+        provisional.unlink(missing_ok=True)
+        projection_failed = True
+        print(json.dumps({"projection_error_type": type(error).__name__}), file=sys.stderr)
+    ready["last_cycle"] = last_cycle
     store.write(ready, busy_sha)
     # Publication of this artifact happens only after the canonical checkpoint.
     if provisional.is_file():
@@ -505,7 +532,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         temporary = output.with_suffix(".tmp")
         shutil.copyfile(provisional, temporary)
         temporary.replace(output)
-    return code
+    return code or int(projection_failed)
 
 
 def bootstrap_record(manifest: dict[str, Any], *, now: datetime) -> dict[str, Any]:

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-MAX_BLOB = 50 * 1024 * 1024
+MAX_BLOB = 256 * 1024 * 1024
 MAX_HEADER = 1024 * 1024
 MAX_STATE = 512 * 1024
 REMOTE_HELPER = "/usr/local/libexec/relocant-media/ssh-state-storage"
@@ -220,6 +220,24 @@ class SSHStateClient:
                 or hashlib.sha256(body).hexdigest() != file_id):
             raise SSHStorageError("storage_error")
         return body
+
+    def checkpoint(self, state: dict[str, Any], expected_sha: str, path: Path) -> str:
+        """Retain finalization intent independently of the mutable canonical pointer.
+
+        Recovery remains explicit: the recorded CAS digest never authorizes an
+        age-based unlock, and a checkpoint cannot prove that a writer has stopped.
+        """
+        if state.get("status") != "ready":
+            raise ValueError("ready checkpoint required")
+        envelope = {"version": 1, "expected_busy_sha256": _sha(expected_sha),
+                    "state": state}
+        content = json.dumps(envelope, sort_keys=True, ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False).encode()
+        if len(content) > MAX_STATE:
+            raise ValueError("checkpoint exceeds bound")
+        with path.open("xb") as stream:
+            stream.write(content)
+        return self.upload(path, "checkpoint")
 
     def upload(self, path: Path, folder: str) -> str:
         # folder is a legacy interface argument; SSH requests never contain filesystem paths.

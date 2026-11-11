@@ -700,3 +700,83 @@ def test_intake_preserves_last_editorial_models(context, tmp_path, monkeypatch):
     city = json.loads(output.read_text())['cities'][0]
     assert city['last_cycle']['observed_at'] == old['observed_at']
     assert city['last_cycle']['ai_calls'][0]['model'] == 'verified-model'
+
+
+def test_capacity_guard_blocks_before_claim_or_child(context, tmp_path, monkeypatch):
+    before = context[0].read()
+    monkeypatch.setattr(runtime, 'MAX_BYTES', 16 * 1024 * 1024)
+    monkeypatch.setattr(runtime, 'run_child', lambda *args: pytest.fail('must not run child'))
+    with pytest.raises(runtime.SnapshotCapacityError):
+        execute(context, tmp_path, monkeypatch)
+    assert context[0].read() == before
+
+
+def test_capacity_reserve_boundary(tmp_path, monkeypatch):
+    database = tmp_path / 'snapshot'
+    monkeypatch.setattr(runtime, 'MAX_BYTES', 100)
+    monkeypatch.setattr(runtime, 'SNAPSHOT_GROWTH_RESERVE', 20)
+    database.write_bytes(b'x' * 80)
+    runtime.require_snapshot_capacity(database)
+    database.write_bytes(b'x' * 81)
+    with pytest.raises(runtime.SnapshotCapacityError):
+        runtime.require_snapshot_capacity(database)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="storage helper requires fcntl")
+def test_storage_bounds_agree():
+    from relocant_media.ops import ssh_state_client, ssh_state_storage
+    assert runtime.MAX_BYTES == ssh_state_client.MAX_BLOB == ssh_state_storage.MAX_BLOB
+    assert runtime.MAX_BYTES == 256 * 1024 * 1024
+
+
+def test_projection_failure_commits_receipts_without_public_artifact(
+        context, tmp_path, monkeypatch):
+    store, drive = context
+    monkeypatch.setattr(runtime, 'run_child', lambda *args: 0)
+    def broken_projection(database, output, *args):
+        output.write_text('PRIVATE partial output')
+        raise ValueError('PRIVATE diagnostic')
+    monkeypatch.setattr(runtime, 'export_public', broken_projection)
+    env = {'ACTIONS_CUTOVER_CONFIRMED': 'true', 'GITHUB_REPOSITORY': runtime.REPO,
+           'GITHUB_REF': 'refs/heads/main'}
+    assert runtime.execute(store, drive, work=tmp_path / 'work',
+        output=tmp_path / 'public.json', folder='folder_id_1', mode='editorial',
+        environment=env) == 1
+    assert store.state['status'] == 'ready'
+    assert store.state['last_exit_code'] == 0
+    assert not (tmp_path / 'public.json').exists()
+    assert not (tmp_path / 'work/public-projection.json').exists()
+
+
+def test_private_checkpoint_precedes_projection_and_survives_failed_commit(
+        context, tmp_path, monkeypatch):
+    store, memory = context
+    checkpoints = []
+    class PrivateSSH(runtime.SSHStateClient):
+        def __init__(self):
+            pass
+        def download(self, file_id):
+            return memory.download(file_id)
+        def upload(self, path, folder):
+            return memory.upload(path, folder)
+        def checkpoint(self, state, expected_sha, path):
+            checkpoints.append(copy.deepcopy({'state': state, 'sha': expected_sha}))
+            return 'c' * 64
+    monkeypatch.setattr(runtime, 'run_child', lambda *args: 0)
+    def projection(*args):
+        assert len(checkpoints) == 1
+        assert checkpoints[0]['sha'] == store.sha
+        assert checkpoints[0]['state']['intake_state'] == {'attempts': 2}
+        assert checkpoints[0]['state']['last_exit_code'] == 0
+        raise ValueError('PRIVATE projection diagnostic')
+    monkeypatch.setattr(runtime, 'export_public', projection)
+    store.state['intake_state'] = {'attempts': 2}
+    store.fail_commit = True
+    with pytest.raises(ValueError, match='conflict'):
+        runtime.execute(store, PrivateSSH(), work=tmp_path / 'work',
+            output=tmp_path / 'public.json', folder='folder_id_1', mode='editorial',
+            environment={'ACTIONS_CUTOVER_CONFIRMED': 'true',
+                         'GITHUB_REPOSITORY': runtime.REPO, 'GITHUB_REF': 'refs/heads/main'})
+    assert store.state['status'] == 'busy'
+    assert checkpoints[0]['state']['snapshot']['sha256']
+    assert not (tmp_path / 'public.json').exists()
