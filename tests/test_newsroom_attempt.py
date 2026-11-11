@@ -88,7 +88,15 @@ def test_runtime_workflow_observes_failures_without_broadening_execution_rights(
     steps = cycle["steps"]
     runtime = next(step for step in steps if step.get("id") == "runtime")
     observation = next(step for step in steps if step.get("id") == "projection")
-    assert observation["if"] == "always()"
+    assert observation["if"] == "always() && steps.mode.outputs.value != 'recovery'"
+    # A recovery dispatch verifies the checkpoint without running the publisher.
+    assert runtime["if"] == "steps.mode.outputs.value != 'recovery'"
+    recovery = next(step for step in steps if "ops.actions_recovery" in step.get("run", ""))
+    assert recovery["if"] == "steps.mode.outputs.value == 'recovery'"
+    assert "TELEGRAM_BOT_TOKEN" not in recovery["env"]
+    assert workflow["concurrency"] == {
+        "group": "canonical-editorial-writer", "cancel-in-progress": False,
+    }
     # A failed CI/storage preflight also counts when the worker step never ran.
     assert observation["env"]["RUNTIME_OUTCOME"] == (
         "${{ job.status == 'failure' && 'failure' || steps.runtime.outcome }}"
