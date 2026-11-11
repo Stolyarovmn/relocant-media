@@ -825,6 +825,9 @@ def prepare_reviewed(
             source_url=next((item.url for item, policy in members
                              if policy.ownership.strip().casefold() == "official"), raw.url))
     draft = present_draft(draft, presentation)
+    from relocant_media.services.native_map import bind_native_map_draft
+
+    presentation = bind_native_map_draft(presentation, draft)
     outcome = outcome.model_copy(update={"draft": draft})
     placeholders = [dict(reviewer_id=f"pending-{role}", role=role,
         source_id=identity["source_id"], article_id=identity["article_id"],

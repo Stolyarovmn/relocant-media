@@ -50,11 +50,15 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
             source, raw_outcome, delivery, message_id = row
             outcome = json.loads(raw_outcome) if raw_outcome else {}
             presentation = (outcome.get("_package") or {}).get("presentation") or {}
+            native_map = bool(presentation.get("native_map"))
+            source_map = bool(presentation.get("source_map"))
+            map_format = "telegram_html" if native_map else "source_link" if source_map else None
             materials.append({
                 "raw_item_id": raw_id, "source_id": _token(source),
                 "status": _token(outcome.get("status")), "reason": _token(outcome.get("reason")),
                 "rubric": _token(presentation.get("rubric_id")),
-                "has_map": bool(presentation.get("source_map")),
+                "has_map": native_map or source_map,
+                "map_format": map_format,
                 "illustration": _token((presentation.get("illustration") or {}).get(
                     "illustration_mode")),
                 "delivery": _token(delivery), "telegram_message_id": message_id,

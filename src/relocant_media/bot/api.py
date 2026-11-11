@@ -135,6 +135,15 @@ class TelegramBotAPI:
         )
         return self._message_id(self._result("sendPhoto", response))
 
+    async def send_rich_message(self, chat_id: int | str, html: str) -> int:
+        """Отправить уже проверенный rich HTML один раз, без повторов или fallback."""
+        if not html.strip():
+            raise ValueError("rich message HTML is required")
+        result = await self._call("sendRichMessage", {
+            "chat_id": chat_id, "rich_message": {"html": html},
+        })
+        return self._message_id(result)
+
     async def send_media_group(
         self,
         chat_id: int | str,
