@@ -62,6 +62,7 @@ def select_candidates(
     priority_raw_ids: set[int] | None = None,
     recent_source_counts: dict[str, int] | None = None,
     allowed_raw_ids: set[int] | None = None,
+    excluded_raw_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     """Only SELECT; the caller supplies a consistent read-only transaction."""
     if not city.strip() or not 1 <= limit <= 50:
@@ -83,6 +84,8 @@ def select_candidates(
     )
     if allowed_raw_ids is not None:
         base = base.where(RawItem.id.in_(allowed_raw_ids))
+    if excluded_raw_ids:
+        base = base.where(RawItem.id.not_in(excluded_raw_ids))
     # A day boundary is not the publication instant. Include overlapping days
     # (allow 26 hours for DST), plus newly discovered dated articles, then check
     # the real local calendar interval below. All publication guards still run.

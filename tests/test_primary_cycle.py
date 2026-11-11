@@ -248,6 +248,19 @@ def test_server_isolates_failed_item_and_keeps_checkpoint_open(queue, tmp_path):
     assert report["remaining_count"] == 11
 
 
+def test_cycle_keeps_gpt_deferred_item_pending_and_processes_other_candidates(queue, tmp_path):
+    engine, process = queue
+    with Session(engine) as session:
+        reserved = session.scalar(select(RawItem.id).order_by(RawItem.id).limit(1))
+    assert reserved is not None
+    report = run_cycle(engine, city="belgrade", output=tmp_path / "deferred", now=NOW,
+        ingest=ingest_ok, process=process, limit=2, deferred_items=lambda _session: {reserved})
+    assert report["status"] == "PRIMARY_PARTIAL"
+    assert len(report["processed_raw_item_ids"]) == 2
+    assert reserved not in report["processed_raw_item_ids"]
+    assert report["gpt_deferred_count"] == 1 and report["remaining_count"] == 10
+
+
 def test_jev_shadow_annotates_manifest_without_changing_selection(
     queue, tmp_path, monkeypatch,
 ):

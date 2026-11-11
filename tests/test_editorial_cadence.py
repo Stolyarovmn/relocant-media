@@ -47,7 +47,8 @@ def test_redundant_schedules_route_editorial_and_intake_without_slot_overlap(tmp
     assert {2, 7, 12, 22, 27, 32, 37, 42, 52, 57} <= set(intake_minutes)
 
 
-@pytest.mark.parametrize("mode", ["preview", "editorial", "intake", "discovery"])
+@pytest.mark.parametrize("mode", ["preview", "editorial", "intake", "discovery",
+                                  "fallback-preview", "fallback"])
 def test_manual_mode_is_preserved_instead_of_treating_dispatch_as_intake(tmp_path, mode):
     assert select_mode(tmp_path, event="workflow_dispatch", requested=mode) == f"value={mode}"
 
