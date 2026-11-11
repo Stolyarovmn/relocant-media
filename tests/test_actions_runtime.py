@@ -652,8 +652,8 @@ def test_workflow_never_uploads_private_database_or_runs_on_pr():
     document = yaml.safe_load((ROOT / '.github/workflows/editorial-actions.yml').read_text())
     triggers = document.get('on', document.get(True))
     assert 'pull_request' not in triggers and 'push' not in triggers
-    assert document['concurrency'] == {
-        'group': 'canonical-editorial-writer', 'cancel-in-progress': False}
+    assert document['jobs']['cycle']['concurrency'] == {
+        'group': 'canonical-editorial-state', 'cancel-in-progress': False}
     steps = document['jobs']['cycle']['steps']
     uploads = [s for s in steps if s.get('uses', '').startswith('actions/upload-')]
     assert len(uploads) == 1 and uploads[0]['with']['path'] == '_site'

@@ -33,13 +33,18 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: canonical-editorial-writer
+  # The automatic chain can replace a pending automatic run. Keep subscription
+  # requests out of that queue; both paths still use the same state lock below.
+  group: ${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || 'canonical-editorial-writer' }}
   cancel-in-progress: false
 jobs:
   cycle:
     if: >-
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'workflow_dispatch' || vars.ACTIONS_EDITORIAL_ENABLED == 'true')
+    concurrency:
+      group: canonical-editorial-state
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 85
     permissions:
