@@ -83,6 +83,14 @@ def import_package(
             raise PackageConflictError(f"event already reviewed via raw item {reviewed.id}")
 
         members = _event_items(session, anchor=item, anchor_source=source)
+        if package.presentation is not None:
+            from relocant_media.services.editorial_products import verify_stored_presentation
+
+            assert package.event is not None
+            verify_stored_presentation(
+                session, item.id, tuple(package.event.documents),
+                document_ids=[member.id for member, _ in members],
+                presentation=package.presentation)
         snapshots = [_snapshot_member(member, policy) for member, policy in members]
         key = event_key(_candidate(item))
         if package.version == 2:

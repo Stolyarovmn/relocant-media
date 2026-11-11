@@ -70,8 +70,9 @@ _RELATIVE = re.compile(
 )
 
 
-def _relative_deadlines(text: str, published: datetime) -> list[date]:
-    local_published = published.astimezone(ZoneInfo("Europe/Belgrade")).date()
+def _relative_deadlines(text: str, published: datetime,
+                        timezone_name: str = "Europe/Belgrade") -> list[date]:
+    local_published = published.astimezone(ZoneInfo(timezone_name)).date()
     offsets = {
         "prekosutra": 2,
         "прекосутра": 2,
@@ -96,7 +97,18 @@ def _relative_deadlines(text: str, published: datetime) -> list[date]:
 
 def publication_date_context(
     published: datetime | None, precision: str = "unknown",
+    *, timezone_name: str | None = None,
 ) -> dict[str, str | None]:
+    if timezone_name is not None:
+        zone = ZoneInfo(timezone_name)
+        local = published.astimezone(zone) if published and published.tzinfo else None
+        return {
+            "timezone": timezone_name,
+            "published_at_local": local.isoformat() if local and precision == "instant" else None,
+            "published_on_local": local.date().isoformat() if local else None,
+            "published_at_precision": precision,
+            "tomorrow_local": (local.date() + timedelta(days=1)).isoformat() if local else None,
+        }
     if published is None or published.tzinfo is None:
         return {"published_at_belgrade": None, "tomorrow_belgrade": None}
     local = published.astimezone(ZoneInfo("Europe/Belgrade"))
@@ -163,6 +175,7 @@ def freshness_decision(
     *,
     horizon_hours: int = 48,
     published_at_precision: str = "unknown",
+    timezone_name: str = "Europe/Belgrade",
 ) -> FreshnessDecision:
     """Use 24 hours for public-channel candidates, 48 for normal sources."""
     if horizon_hours not in (24, 48):
@@ -172,7 +185,8 @@ def freshness_decision(
     now = now.astimezone(UTC)
     if published_at is None or published_at.tzinfo is None:
         return FreshnessDecision("hold", "publication_date_unknown")
-    published_at, interval_end = publication_interval(published_at, published_at_precision)
+    published_at, interval_end = publication_interval(
+        published_at, published_at_precision, timezone_name=timezone_name)
     age = now - published_at
     if age < timedelta(0):
         return FreshnessDecision("hold", "publication_date_future")
@@ -182,8 +196,10 @@ def freshness_decision(
     if age > timedelta(days=7):
         return FreshnessDecision("discard", "publication_older_than_seven_days")
     text = f"{title}\n{body}"
-    deadlines = _event_deadlines(text, published_at) + _relative_deadlines(text, published_at)
-    local_date = now.astimezone(ZoneInfo("Europe/Belgrade")).date()
+    local_published = published_at.astimezone(ZoneInfo(timezone_name))
+    deadlines = _event_deadlines(text, local_published) + _relative_deadlines(
+        text, published_at, timezone_name)
+    local_date = now.astimezone(ZoneInfo(timezone_name)).date()
     if deadlines and all(deadline < local_date for deadline in deadlines):
         return FreshnessDecision("discard", "event_expired")
     if (published_at_precision == "day" and age > timedelta(hours=horizon_hours)
@@ -223,10 +239,12 @@ def evidence_freshness(
     precision: str,
     source_type: str,
     verified_at: datetime | None,
+    timezone_name: str = "Europe/Belgrade",
 ) -> FreshnessDecision:
     """One decision point: guides use their verification date, everything else its news date."""
     if source_type == GUIDE_SOURCE_TYPE:
         if verified_at is not None and verified_at.tzinfo is None:
             verified_at = verified_at.replace(tzinfo=UTC)
         return guide_freshness(verified_at, now)
-    return freshness_decision(title, body, published_at, now, published_at_precision=precision)
+    return freshness_decision(title, body, published_at, now, published_at_precision=precision,
+                              timezone_name=timezone_name)

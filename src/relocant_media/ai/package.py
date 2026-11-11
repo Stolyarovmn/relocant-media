@@ -28,6 +28,7 @@ from relocant_media.ai.models import (
     VerificationResult,
 )
 from relocant_media.ai.pipeline import _citations_are_grounded, _verification_map
+from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.policy import requires_human_review
 
 
@@ -122,12 +123,15 @@ class EditorialPackage(StrictModel):
     outcome: PackageOutcome
     reviews: tuple[ReviewVerdict, ReviewVerdict]
     event: PackageEvent | None = None
+    presentation: EditorialPresentation | None = None
 
     @model_validator(mode="after")
     def validate_version_contract(self) -> Self:
         if self.policy_version != f"subscription-editorial-v{self.version}":
             raise ValueError("package policy/version mismatch")
         if self.version == 1:
+            if self.presentation is not None or self.outcome.ranking.selection is not None:
+                raise ValueError("selection and presentation require package v2")
             if self.event is not None:
                 raise ValueError("package v1 cannot attest event evidence")
         else:
@@ -152,6 +156,8 @@ class EditorialPackage(StrictModel):
         # Keep historical v1 hashes and persisted receipts byte-for-byte compatible.
         if self.version == 1:
             payload.pop("event", None)
+        if self.presentation is None:
+            payload.pop("presentation", None)
         return payload
 
     @field_validator("version", mode="before")
@@ -184,6 +190,21 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
         raise ValueError("package source does not match evidence")
     documents = (tuple(package.event.documents) if package.event is not None
                  else (package.evidence,))
+    if outcome.ranking.selection is not None:
+        from relocant_media.ai.selection import selection_reason
+        from relocant_media.domain.city_profile import load_city_profile
+        from relocant_media.services.editorial_products import validate_presentation
+
+        profile = load_city_profile(package.city)
+        reason = selection_reason(outcome.ranking, profile, documents)
+        if reason:
+            raise ValueError(reason)
+        if package.presentation is None:
+            raise ValueError("selected package requires reviewed presentation")
+        validate_presentation(package.presentation, profile, documents, draft,
+                              rubric_id=outcome.ranking.selection.rubric_id)
+    elif package.presentation is not None:
+        raise ValueError("presentation requires selection brief")
     if not _citations_are_grounded(claims, documents):
         raise ValueError("package contains ungrounded citations")
     verdicts = _verification_map(verification, claims)

@@ -31,7 +31,8 @@ _NUMERIC_DATE = re.compile(r"\b(\d{1,2})[./][ \t]*(\d{1,2})[./][ \t]*(\d{4})\b")
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 
 
-def event_content_reason(title: str, body: str, *, now: datetime) -> str | None:
+def event_content_reason(title: str, body: str, *, now: datetime,
+                         timezone_name: str = "Europe/Belgrade") -> str | None:
     """Reject undated/expired announcements using source text only.
 
     A passing result merely allows factual reviews. Those reviews must associate
@@ -40,7 +41,7 @@ def event_content_reason(title: str, body: str, *, now: datetime) -> str | None:
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
-    today = now.astimezone(ZoneInfo("Europe/Belgrade")).date()
+    today = now.astimezone(ZoneInfo(timezone_name)).date()
     text = f"{title}\n{body}".lower()
     parts: list[tuple[int, int, int]] = []
     for match in _NUMERIC_DATE.finditer(text):

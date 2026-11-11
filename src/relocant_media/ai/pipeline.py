@@ -3,6 +3,7 @@ from collections.abc import Iterable
 
 from pydantic import BaseModel, ValidationError
 
+from relocant_media.ai.audience_policy import profile_audience_policy, profile_draft_style
 from relocant_media.ai.models import (
     ClaimSet,
     EditorialOutcome,
@@ -14,13 +15,17 @@ from relocant_media.ai.models import (
 )
 from relocant_media.ai.prompts import (
     CLAIMS_SYSTEM,
+    DRAFT_BASE_SYSTEM,
     DRAFT_SYSTEM,
+    PROFILE_RANK_SYSTEM,
     RANK_EVERGREEN,
     RANK_SYSTEM,
     VERIFY_SYSTEM,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
+from relocant_media.ai.selection import selection_reason
 from relocant_media.domain.audience import audience_relevance_reason
+from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import publication_date_context
 from relocant_media.domain.policy import is_borderline, requires_human_review
@@ -127,14 +132,18 @@ def _minimum_confidence(values: Iterable[float], fallback: float) -> float:
 
 
 class EditorialPipeline:
-    def __init__(self, provider: StructuredAIProvider) -> None:
+    def __init__(
+        self, provider: StructuredAIProvider, *, city_profile: CityEditorialProfile | None = None,
+    ) -> None:
         self._provider = provider
+        self.city_profile = city_profile
 
     def _ask_draft(self, payload: dict[str, object]) -> RussianDraft:
         return _ask(
             self._provider,
             task="draft",
-            system_instruction=DRAFT_SYSTEM,
+            system_instruction=(DRAFT_BASE_SYSTEM + profile_draft_style(self.city_profile)
+                                if self.city_profile else DRAFT_SYSTEM),
             payload=payload,
             response_model=RussianDraft,
         )
@@ -145,9 +154,13 @@ class EditorialPipeline:
         city: str,
         documents: tuple[EvidenceDocument, ...],
         evergreen: bool = False,
+        recent_publications: list[dict[str, str]] | None = None,
     ) -> EditorialOutcome:
         if not documents:
             raise ValueError("at least one evidence document is required")
+        profile = self.city_profile
+        if profile is not None and profile.city_id != city:
+            raise ValueError("Город материала не совпадает с редакционным профилем")
 
         if city == "belgrade":
             reason = next((reason for document in documents
@@ -159,14 +172,30 @@ class EditorialPipeline:
                                           confidence=1, rationale=reason), confidence=1)
 
         evidence = _documents_payload(documents)
+        rank_instruction = (
+            PROFILE_RANK_SYSTEM + profile_audience_policy(profile) if profile else RANK_SYSTEM
+        )
+        profile_payload = ({"city_profile": profile.model_dump(mode="json"),
+                            "profile_sha256": profile.sha256} if profile else {})
         ranking = _ask(
             self._provider,
             task="rank",
-            system_instruction=RANK_SYSTEM + (RANK_EVERGREEN if evergreen else ""),
+            system_instruction=rank_instruction + (RANK_EVERGREEN if evergreen else ""),
             payload={"city": city, "evidence": evidence,
+                     **profile_payload,
+                     **({"recent_publications": recent_publications}
+                        if recent_publications is not None else {}),
                      **({"content_type": "evergreen_guide"} if evergreen else {})},
             response_model=RankingResult,
         )
+        if profile is not None:
+            if not ranking.should_process:
+                return EditorialOutcome(status=PublicationStatus.SKIPPED, reason="ranking_rejected",
+                    ranking=ranking, confidence=ranking.confidence)
+            reason = selection_reason(ranking, profile, documents, evergreen=evergreen)
+            if reason:
+                return EditorialOutcome(status=PublicationStatus.HUMAN_REVIEW, reason=reason,
+                    ranking=ranking, confidence=ranking.confidence)
         borderline = not ranking.should_process and is_borderline(
             ranking.relevance, ranking.confidence, ranking.category,
         )
@@ -252,8 +281,12 @@ class EditorialPipeline:
         draft_payload: dict[str, object] = {
             "city": city,
             "category": ranking.category,
+            **profile_payload,
+            **({"selection": ranking.selection.model_dump(mode="json")}
+               if ranking.selection else {}),
             "source_local_dates":[dict(source_id=d.source_id,
-                **publication_date_context(d.published_at, d.published_at_precision))
+                **publication_date_context(d.published_at, d.published_at_precision,
+                    timezone_name=profile.timezone if profile else None))
                 for d in documents],
             "claims": [
                 claim.model_dump(mode="json")

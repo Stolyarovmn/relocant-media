@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 from test_channel_delivery import reviewed as _reviewed
 from test_editorial_integration import prepare_service
 
-from relocant_media.ai.models import EvidenceDocument
+from relocant_media.ai.models import EvidenceDocument, SelectionBrief
 from relocant_media.ai.package import context_sha256, draft_sha256
 from relocant_media.collectors.base import RawItem as CollectedItem
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.freshness import FreshnessDecision
 from relocant_media.ingestion.persistence import capture_collected_batch
 from relocant_media.ops import server_cycle
@@ -63,6 +64,17 @@ def seeded(tmp_path):
     engine = create_engine(f"sqlite:///{path}")
     with Session(engine) as session:
         _, provider, raw_id = prepare_service(session, category="transport")
+        profile = load_city_profile("belgrade")
+        item = session.get(RawItem, raw_id)
+        provider._responses["rank"] = provider._responses["rank"].model_copy(update={
+            "selection": SelectionBrief(
+                policy_version=profile.policy_version, profile_sha256=profile.sha256,
+                audience="Жители района Звездара", benefit="Заранее подготовить запас воды",
+                novelty="Опубликованы часы отключения воды", why_now="Отключение предстоит жителям",
+                rubric_id="city_changes", locality="city", value_kind="action",
+                evidence_refs=({"source_id": item.source_id, "url": item.url,
+                                "quote": item.body},),
+            )})
         session.get(RawItem, raw_id).published_at = datetime.now(UTC) - timedelta(hours=1)
         session.commit()
     yield engine, raw_id, provider
@@ -161,6 +173,10 @@ def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch, 
         assert package.event.documents[0].ownership == "official"
         assert package.event.editorial_rule_version == "belgrade-editorial-v2"
         assert package.outcome.draft.title.startswith("[тестовый запуск]")
+        assert package.presentation.rubric_id == "city_changes"
+        assert "Рубрика: Что меняется в городе" in package.outcome.draft.body
+        assert (package.outcome.ranking.selection.profile_sha256
+                == load_city_profile("belgrade").sha256)
         digest = context_sha256(package)
         seen.append(digest)
         reviews = tuple(r.model_copy(update={
@@ -516,7 +532,7 @@ def _enable_guide(monkeypatch):
 def _live_package(*documents):
     from types import SimpleNamespace
 
-    return SimpleNamespace(event=SimpleNamespace(documents=[
+    return SimpleNamespace(presentation=None, event=SimpleNamespace(documents=[
         SimpleNamespace(source_id=source_id, url=url) for source_id, url in documents
     ]))
 

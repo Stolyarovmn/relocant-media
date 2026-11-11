@@ -52,7 +52,8 @@ from relocant_media.collectors.telegram_topics import (
 )
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.attention import source_priorities, venue_attention
-from relocant_media.domain.dedup import event_key
+from relocant_media.domain.city_profile import load_city_profile
+from relocant_media.domain.dedup import event_key, find_repeated_publication
 from relocant_media.domain.freshness import (
     GUIDE_SOURCE_TYPE,
     evidence_freshness,
@@ -81,6 +82,13 @@ from relocant_media.services.editorial import (
     _reviewed_event_item,
     _snapshot_member,
 )
+from relocant_media.services.editorial_products import (
+    build_presentation,
+    present_draft,
+    recent_publications,
+    rubric_plan,
+    verify_live_map,
+)
 from relocant_media.services.event_eligibility import event_content_reason
 from relocant_media.services.kpi import record_subscriber_observation
 from relocant_media.services.package_import import import_package
@@ -102,6 +110,7 @@ from relocant_media.services.published_watch import (
     published_sources,
     recent_source_load,
 )
+from relocant_media.services.source_enrichment import build_media_preparation_packet
 from relocant_media.services.submission_feedback import reply_to_submissions, resolve_submission
 from relocant_media.services.submission_queue import (
     batch_submissions,
@@ -144,7 +153,7 @@ class ServerAI:
                   f"Текущий момент UTC: {datetime.now(UTC).isoformat()}. "
                   "Отличай дату статьи от срока события: истёкшие объявления не выбирай "
                   "для новой публикации и не выдавай планы за выполненные факты. "
-                  "Завтра/sutra и сегодня/danas считай от даты публикации в Белграде; "
+                  "Относительные даты считай от даты публикации в часовом поясе профиля; "
                   "в русском черновике указывай абсолютную дату, а не перенесённое завтра. "
                   "Официальный сайт площадки подтверждает её собственный анонс, "
                   "а не независимую истинность рекламных обещаний. Для events проверь "
@@ -193,13 +202,16 @@ class ServerAI:
 
 
 class _CachedOutcome(EditorialPipeline):
-    def __init__(self, outcome: EditorialOutcome, documents: tuple[EvidenceDocument, ...]):
+    def __init__(self, outcome: EditorialOutcome, documents: tuple[EvidenceDocument, ...],
+                 city: str = "belgrade"):
         self.outcome, self.documents = outcome, documents
+        self.city = city
 
     def run(
         self, *, city: str, documents: tuple[EvidenceDocument, ...], evergreen: bool = False,
+        recent_publications: list[dict[str, str]] | None = None,
     ) -> EditorialOutcome:
-        if city != "belgrade" or documents != self.documents:
+        if city != self.city or documents != self.documents:
             raise ValueError("evidence changed before persistence")
         return self.outcome
 
@@ -327,6 +339,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
                 documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
                     title=item.title, body=item.body, published_at=item.published_at,
                     published_at_precision=item.published_at_precision))
+                verify_live_map(package.presentation, documents[-1], item.source_html)
                 continue
             if document.source_id not in {"city_beograd_news", "cukarica_news"}:
                 raise ValueError("unsupported live source")
@@ -345,6 +358,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
                 title=item.title, body=item.body, published_at=item.published_at,
                     published_at_precision=item.published_at_precision))
+            verify_live_map(package.presentation, documents[-1], response.text)
     return tuple(documents)
 
 
@@ -729,6 +743,7 @@ def prepare_reviewed(
         assert raw is not None
         source = session.get(Source, raw.source_id)
         assert source is not None
+        profile = load_city_profile(source.city)
         existing = session.get(EditorialRun, raw_id)
         reassessing = existing is not None and eligible_empty_policy_hold(session, raw_id)
         if existing is not None and not reassessing:
@@ -753,10 +768,15 @@ def prepare_reviewed(
         snapshots = [_snapshot_member(item, policy) for item, policy in members]
         identity = dict(raw_item_id=raw.id, source_id=raw.source_id, article_id=raw.external_id)
         key = event_key(_candidate(raw))
+        recent = recent_publications(session, source.city, now=datetime.now(UTC))
+        (output / "rubric-plan.json").write_text(json.dumps(
+            rubric_plan(profile, recent, now=datetime.now(UTC)),
+            ensure_ascii=False, indent=2), encoding="utf-8")
     freshness = evidence_freshness(raw.title, raw.body, raw.published_at, datetime.now(UTC),
         precision=raw.published_at_precision, source_type=source.source_type,
-        verified_at=raw.ingested_at)
-    venue_reason = (event_content_reason(raw.title, raw.body, now=datetime.now(UTC))
+        verified_at=raw.ingested_at, timezone_name=profile.timezone)
+    venue_reason = (event_content_reason(raw.title, raw.body, now=datetime.now(UTC),
+                                        timezone_name=profile.timezone)
                     if source.source_type == "official_venue_events" else None)
     if freshness.action != "keep" or venue_reason is not None:
         from relocant_media.ai.models import RankingResult
@@ -770,14 +790,26 @@ def prepare_reviewed(
         # Source publication policy is enforced on import and delivery, separately
         # from autonomous editorial assessment. Never turn a source gate into an
         # unexamined request for the owner to read every article.
-        outcome = EditorialPipeline(provider).run(
-            city="belgrade", documents=documents,
+        outcome = EditorialPipeline(provider, city_profile=profile).run(
+            city=source.city, documents=documents,
+            recent_publications=[{"id": str(row["id"]), "title": row["title"],
+                                  "body": row["body"][:1200], "status": row["status"]}
+                                 for row in recent[:20]],
             evergreen=source.source_type == GUIDE_SOURCE_TYPE)
+    if outcome.draft is not None:
+        duplicate = find_repeated_publication(
+            outcome.draft.title, outcome.draft.body,
+            [(row["id"], row["title"], row["body"]) for row in recent])
+        if duplicate is not None:
+            outcome = outcome.model_copy(update={
+                "status": PublicationStatus.SKIPPED,
+                "reason": f"draft_repeats_recent_post:{duplicate}", "draft": None})
     if outcome.status != PublicationStatus.READY or outcome.draft is None:
         with Session(engine) as session:
             run = (persist_policy_reassessment(session, raw_id, outcome, documents)
                    if reassessing else
-                   EditorialService(session, _CachedOutcome(outcome, documents)).prepare(raw_id))
+                   EditorialService(session, _CachedOutcome(
+                       outcome, documents, source.city)).prepare(raw_id))
             return {"raw_item_id": raw_id, "status": run.outcome["status"],
                     "reason": run.outcome["reason"],
                     "resolution": "deferred_policy" if run.outcome["status"] == "human_review"
@@ -785,6 +817,14 @@ def prepare_reviewed(
     draft = outcome.draft.model_copy(update={
         "title": presentation_title(outcome.draft.title),
     })
+    assert outcome.ranking.selection is not None
+    with Session(engine) as session:
+        presentation = build_presentation(
+            session, raw_id, documents, document_ids=[item.id for item, _ in members],
+            profile=profile, rubric_id=outcome.ranking.selection.rubric_id,
+            source_url=next((item.url for item, policy in members
+                             if policy.ownership.strip().casefold() == "official"), raw.url))
+    draft = present_draft(draft, presentation)
     outcome = outcome.model_copy(update={"draft": draft})
     placeholders = [dict(reviewer_id=f"pending-{role}", role=role,
         source_id=identity["source_id"], article_id=identity["article_id"],
@@ -792,7 +832,8 @@ def prepare_reviewed(
         verdict="hold", score=0, flags=["pending_review"], live_source_checked=False)
         for role in ("facts", "utility")]
     package = EditorialPackage.model_validate_json(json.dumps(dict(
-        version=2, policy_version="subscription-editorial-v2", city="belgrade", **identity,
+        version=2, policy_version="subscription-editorial-v2", city=source.city, **identity,
+        presentation=presentation.model_dump(mode="json"),
         urgent=outcome.ranking.category == "transport",
         evidence=documents[0].model_dump(mode="json"),
         event=dict(event_key=key, editorial_rule_version="belgrade-editorial-v2",
@@ -805,8 +846,25 @@ def prepare_reviewed(
     finally:
         (output / f"review-audit-{raw_id}.json").write_text(
             json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Исправления могут удалить неподтверждённую новизну: проверяем итог повторно.
+    duplicate = find_repeated_publication(
+        package.outcome.draft.title, package.outcome.draft.body,
+        [(row["id"], row["title"], row["body"]) for row in recent])
+    if duplicate is not None:
+        rejected = EditorialOutcome.model_validate(package.outcome.model_dump()).model_copy(update={
+            "status": PublicationStatus.SKIPPED,
+            "reason": f"draft_repeats_recent_post:{duplicate}", "draft": None})
+        with Session(engine) as session:
+            run = (persist_policy_reassessment(session, raw_id, rejected, documents)
+                   if reassessing else EditorialService(session, _CachedOutcome(
+                       rejected, documents, source.city)).prepare(raw_id))
+            return {"raw_item_id": raw_id, "status": run.outcome["status"],
+                    "reason": run.outcome["reason"], "resolution": "rejected"}
     with Session(engine) as session:
         run = import_package(session, package, replace_empty_hold=reassessing)
+        media_plan = build_media_preparation_packet(session, raw_id)
+        (output / f"media-plan-{raw_id}.json").write_text(
+            json.dumps(media_plan, ensure_ascii=False, indent=2), encoding="utf-8")
         result = {"raw_item_id": raw_id, "status": run.outcome["status"],
                   "reason": run.outcome["reason"],
                   "resolution": "ready" if run.outcome["status"] == "ready" else "deferred_policy",
@@ -891,7 +949,8 @@ async def publish_pending(
                 assert item is not None
                 fresh = freshness_decision(title=item.title, body=item.body,
                     published_at=item.published_at, now=datetime.now(UTC),
-                    published_at_precision=item.published_at_precision)
+                    published_at_precision=item.published_at_precision,
+                    timezone_name=load_city_profile(package.city).timezone)
                 if fresh.action != "keep":
                     if blocked is not None:
                         blocked.append({"raw_item_id": raw_id, "reason": fresh.reason})

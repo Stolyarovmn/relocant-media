@@ -6,7 +6,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from relocant_media.ai.audience_policy import AUDIENCE_MISMATCH_FLAG, RELOCANT_AUDIENCE_POLICY
+from relocant_media.ai.audience_policy import (
+    AUDIENCE_MISMATCH_FLAG,
+    PROFILE_AUDIENCE_MISMATCH_FLAG,
+    RELOCANT_AUDIENCE_POLICY,
+    profile_audience_policy,
+    profile_draft_style,
+)
 from relocant_media.ai.channel_style import CHANNEL_DRAFT_STYLE
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.ai.package import (
@@ -17,6 +23,8 @@ from relocant_media.ai.package import (
     draft_sha256,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
+from relocant_media.ai.selection import selection_reason
+from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.freshness import publication_date_context
 from relocant_media.domain.presentation import title_instruction
 
@@ -58,6 +66,7 @@ def reviewed_package(
     *,
     now: datetime | None = None,
     audit: Callable[[dict[str, Any]], None] | None = None,
+    city_profile: CityEditorialProfile | None = None,
 ) -> EditorialPackage:
     """Return reviews only; never rewrite draft, evidence or eligibility guards."""
     if package.version != 2 or package.event is None:
@@ -66,6 +75,15 @@ def reviewed_package(
         raise ValueError("independent reviews require hold placeholders")
     if now is not None and now.tzinfo is None:
         raise ValueError("review time must be timezone-aware")
+    profile = city_profile
+    if profile is None and package.outcome.ranking.selection is not None:
+        profile = load_city_profile(package.city)
+    if profile is not None:
+        if profile.city_id != package.city:
+            raise ValueError("Город пакета не совпадает с редакционным профилем")
+        reason = selection_reason(package.outcome.ranking, profile, package.event.documents)
+        if reason:
+            raise ValueError(reason)
     context = package.model_dump(mode="json", exclude={"reviews"})
     context_hash = context_sha256(package)
     draft_hash = draft_sha256(package.outcome.draft)
@@ -98,6 +116,21 @@ def reviewed_package(
             "только в собственных именах. Непереведённое предложение или фрагмент — "
             "блокирующий недостаток даже при верных фактах; требуй исправление, не approve. "
         )
+        if profile is not None:
+            instructions = instructions.replace(
+                "для русскоязычных жителей Белграда", f"для аудитории: {profile.audience.name}"
+            ).replace("Europe/Belgrade", profile.timezone).replace(
+                "Дату объявления и слова sutra/завтра", "Дату объявления и относительные даты"
+            ).replace("Сербский допустим", "Язык оригинала допустим")
+        if package.presentation is not None:
+            instructions += (
+                "Поле presentation входит в проверяемый контекст. Строка Рубрика — "
+                "редакционная навигация, не факт источника. Карта из источника — ссылка, "
+                "извлечённая из сохранённого HTML с хешем и подтверждённой цитатой; "
+                "проверь соответствие места теме статьи. Она не утверждает независимую "
+                "проверку координат. source_preview означает предпросмотр исходной страницы, "
+                "а не разрешение на повторное использование фотографии. "
+            )
         if role == "facts":
             instructions += (
                 "Роль facts: проверь каждое утверждение, цитаты и полный комплект источников, "
@@ -112,13 +145,19 @@ def reviewed_package(
                 "Обязательная рубрика: local_relevance, practical_value, timeliness, clarity "
                 "каждая целое 0–4. score = round(100 * сумма оценок / 16)."
             )
-            instructions += CHANNEL_DRAFT_STYLE + RELOCANT_AUDIENCE_POLICY
+            instructions += (
+                profile_draft_style(profile) + profile_audience_policy(profile)
+                if profile else CHANNEL_DRAFT_STYLE + RELOCANT_AUDIENCE_POLICY
+            )
         raw = provider.generate_json(
             task=f"independent_{role}", system_instruction=instructions,
             prompt=canonical_json({
                 "role": role, "package": context,
+                **({"city_profile": profile.model_dump(mode="json"),
+                    "profile_sha256": profile.sha256} if profile else {}),
                 "source_local_dates":[dict(source_id=d.source_id,url=d.url,
-                    **publication_date_context(d.published_at, d.published_at_precision))
+                    **publication_date_context(d.published_at, d.published_at_precision,
+                        timezone_name=profile.timezone if profile else None))
                     for d in package.event.documents],
                 "now_utc": (now or datetime.now(UTC)).astimezone(UTC).isoformat(),
                 "draft_sha256": draft_hash, "context_sha256": context_hash,
@@ -132,10 +171,14 @@ def reviewed_package(
         score = response.score
         if isinstance(response, _UtilityResponse):
             score = round(100 * sum(response.rubric.model_dump().values()) / 16)
+            minimum_local = profile.utility_min_local_relevance if profile else 3
+            minimum_value = profile.utility_min_practical_value if profile else 2
             if response.verdict == "approve" and (
-                    response.rubric.local_relevance < 3 or response.rubric.practical_value < 2):
+                    response.rubric.local_relevance < minimum_local
+                    or response.rubric.practical_value < minimum_value):
+                mismatch = PROFILE_AUDIENCE_MISMATCH_FLAG if profile else AUDIENCE_MISMATCH_FLAG
                 response = response.model_copy(update={
-                    "verdict": "hold", "flags": [*response.flags, AUDIENCE_MISMATCH_FLAG],
+                    "verdict": "hold", "flags": [*response.flags, mismatch],
                 })
         if audit is not None:
             audit({"role": role, **response.model_dump(), "computed_score": score,

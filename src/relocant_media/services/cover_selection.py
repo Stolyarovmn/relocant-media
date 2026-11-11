@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from relocant_media.domain.source_locations import is_public_https_url
+
 
 class CoverAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -40,6 +42,10 @@ def plan_cover(
         elif (item.rights_status != "reviewed" or item.rights_method == "unknown"
               or not item.rights_evidence_url or not item.rights_rationale or not item.attribution):
             reason = "rights_review_required"
+        elif not all(is_public_https_url(url) for url in (
+            item.image_url, item.source_page, item.rights_evidence_url,
+        )):
+            reason = "unsafe_or_missing_provenance_url"
         elif item.event_year != event_year and item.kind != "archive_photo":
             reason = "event_year_mismatch"
         elif item.kind == "archive_photo" and (
