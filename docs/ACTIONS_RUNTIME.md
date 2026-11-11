@@ -324,6 +324,16 @@ verify pointer and snapshot readback afterwards. Never retry an uncertain CAS bl
 This checkpoint covers final CAS/projection failure after snapshot persistence.
 Complete SSH unavailability, upload failure, hard kill before checkpoint and an
 unknown child exit still require reconciliation; there is no safe automatic unlock.
+
+For an interrupted SSH run that logged a checkpoint digest, dispatch
+`editorial-actions.yml` on CI-green main with `mode=recovery`,
+`recovery_run_id=<interrupted run>` and `recovery_checkpoint=<logged SHA256>`.
+The recovery job holds the canonical writer concurrency group, verifies the
+interrupted main run is stopped and matches the current busy attempt, validates the
+saved SQLite and uses a single CAS followed by readback. The private checkpoint and
+database stay on the runner and storage. Dispatch an editorial cycle separately
+after recovery succeeds. The Actions log includes a limited decision summary
+from the committed snapshot to help verify publication and formatting.
 The ephemeral runner cannot guarantee retention during a total storage outage.
 A second independently authorized private storage destination would be needed for
 that guarantee. Existing historical attempts cannot acquire missing receipts from

@@ -78,3 +78,54 @@ def test_prepare_refuses_inconsistent_recovery(recovery_fixture, tmp_path, misma
     with pytest.raises(ValueError):
         prepare(checkpoint, busy, snapshot, output, writers_fenced=mismatch != 'unfenced')
     assert not (output / 'request.json').exists()
+
+
+@pytest.mark.parametrize("stopped", [True, False])
+def test_actions_recovery_applies_only_verified_stopped_attempt(
+    recovery_fixture, tmp_path, monkeypatch, stopped,
+):
+    from relocant_media.ops import actions_recovery
+    from relocant_media.ops.ssh_state_client import _state_digest
+
+    checkpoint, busy, snapshot = recovery_fixture
+    busy.update(run_attempt="1", started_at="2026-11-11T19:55:42+00:00")
+    state = checkpoint["state"]
+    state["run_attempt"] = "1"
+    checkpoint["expected_busy_sha256"] = _state_digest(busy)
+    envelope = json.dumps(checkpoint).encode()
+    digest = hashlib.sha256(envelope).hexdigest()
+    blobs = {digest: envelope, state["snapshot"]["sha256"]: snapshot.read_bytes()}
+
+    class Storage:
+        current = busy
+        writes = 0
+
+        def read(self):
+            return self.current, _state_digest(self.current)
+
+        def download(self, sha):
+            return blobs[sha]
+
+        def write(self, value, expected):
+            assert expected == _state_digest(busy)
+            self.writes += 1
+            self.current = value
+            return _state_digest(value)
+
+    def verify(run_id, attempt):
+        assert (run_id, attempt) == ("123", "1")
+        if not stopped:
+            raise ValueError("writer still running")
+
+    monkeypatch.setattr(actions_recovery, "verify_stopped_run", verify)
+    storage = Storage()
+    if stopped:
+        report = actions_recovery.recover(storage, "123", digest, tmp_path / "actions")
+        assert report["recovered_run_id"] == "123"
+        assert storage.current == state
+        assert storage.writes == 1
+    else:
+        with pytest.raises(ValueError, match="writer still running"):
+            actions_recovery.recover(storage, "123", digest, tmp_path / "actions")
+        assert storage.current == busy
+        assert storage.writes == 0

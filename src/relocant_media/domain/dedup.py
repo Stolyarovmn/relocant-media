@@ -10,8 +10,9 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from collections import defaultdict, deque
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -21,6 +22,7 @@ from relocant_media.domain.event_facts import (
     conflicting_facts,
     enhanced_service_anchor,
     event_dates,
+    location_anchors,
     material_words,
     numeric_facts,
     street_anchors,
@@ -159,6 +161,20 @@ def _transport_actions(value: str) -> frozenset[str]:
 
 
 @dataclass(frozen=True, slots=True)
+class _EventFacts:
+    numbers: frozenset[str]
+    material: frozenset[str]
+    locations: frozenset[str]
+
+    def conflicts_with(self, other: _EventFacts) -> bool:
+        return (
+            self.numbers != other.numbers
+            or self.material != other.material
+            or bool(self.locations and other.locations and self.locations != other.locations)
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class EventCandidate:
     raw_item_id: int
     source_id: str
@@ -168,14 +184,73 @@ class EventCandidate:
     published_at: datetime | None
     canonical_url: str | None = None
     content_sha256: str | None = None
+    # Кэш принадлежит неизменяемому снимку, а не глобальной истории процесса.
+    # dataclasses.replace создаёт чистый кэш при исправлении текста или даты.
+    _canonical_cache: str | None = field(default=None, init=False, repr=False, compare=False)
+    _content_cache: str | None = field(default=None, init=False, repr=False, compare=False)
+    _title_tokens_cache: frozenset[str] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _body_facts_cache: _EventFacts | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _document_facts_cache: _EventFacts | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def resolved_canonical_url(self) -> str:
-        return self.canonical_url or canonicalize_url(self.url)
+        if self._canonical_cache is None:
+            object.__setattr__(
+                self, "_canonical_cache", self.canonical_url or canonicalize_url(self.url)
+            )
+        assert self._canonical_cache is not None
+        return self._canonical_cache
 
     @property
     def resolved_content_sha256(self) -> str:
-        return self.content_sha256 or content_sha256(self.title, self.body)
+        if self._content_cache is None:
+            object.__setattr__(
+                self,
+                "_content_cache",
+                self.content_sha256 or content_sha256(self.title, self.body),
+            )
+        assert self._content_cache is not None
+        return self._content_cache
+
+    def _facts(self, *, include_title: bool) -> _EventFacts:
+        cache_name = "_document_facts_cache" if include_title else "_body_facts_cache"
+        cached = self._document_facts_cache if include_title else self._body_facts_cache
+        if cached is None:
+            text = f"{self.title}\n{self.body}" if include_title else self.body
+            cached = _EventFacts(
+                numeric_facts(text, self.published_at.year if self.published_at else 0),
+                material_words(text),
+                location_anchors(text),
+            )
+            object.__setattr__(self, cache_name, cached)
+        return cached
+
+    def _title_similarity(self, other: EventCandidate) -> float:
+        for candidate in (self, other):
+            if candidate._title_tokens_cache is None:
+                object.__setattr__(
+                    candidate,
+                    "_title_tokens_cache",
+                    frozenset(normalize_text(candidate.title).split()),
+                )
+        left, right = self._title_tokens_cache, other._title_tokens_cache
+        assert left is not None and right is not None
+        return len(left & right) / len(left | right) if left and right else 0.0
 
 
 def _same_source_transport_reprint(
@@ -196,10 +271,9 @@ def _same_source_transport_reprint(
     if left_host is None or left_host != right_host:
         return False
 
-    if numeric_facts(left.body, left.published_at.year) != numeric_facts(
-        right.body, right.published_at.year
-    ) or material_words(f"{left.title}\n{left.body}") != material_words(
-        f"{right.title}\n{right.body}"
+    if (
+        left._facts(include_title=False).numbers != right._facts(include_title=False).numbers
+        or left._facts(include_title=True).material != right._facts(include_title=True).material
     ):
         return False
 
@@ -255,9 +329,9 @@ def _anchored_transport_reprint(left: EventCandidate, right: EventCandidate) -> 
     routes = transport_routes(left.body)
     if len(routes) < 2 or routes != transport_routes(right.body):
         return False
-    if numeric_facts(left.body, left.published_at.year) != numeric_facts(
-        right.body, right.published_at.year
-    ) or material_words(left.body) != material_words(right.body):
+    left_facts = left._facts(include_title=False)
+    right_facts = right._facts(include_title=False)
+    if left_facts.numbers != right_facts.numbers or left_facts.material != right_facts.material:
         return False
 
     # Сокращённый маршрут: совпадают улицы, конечная, все маршруты и период.
@@ -295,6 +369,13 @@ def same_event(
     if left.resolved_content_sha256 == right.resolved_content_sha256:
         return True
 
+    # Точные совпадения не ограничены датой; все неточные требуют этого окна.
+    # Отсекаем старую историю до разбора URL, заголовков и полных текстов.
+    if left.published_at is None or right.published_at is None:
+        return False
+    if abs(left.published_at - right.published_at) > event_window:
+        return False
+
     # Материализованная правка первоисточника уже назначена на новое ревью.
     # Не превращаем её обратно в прочитанный исходный материал через fuzzy.
     if any(
@@ -305,18 +386,14 @@ def same_event(
 
     if left.source_id == right.source_id:
         return _same_source_transport_reprint(left, right, event_window=event_window)
-    if left.published_at is None or right.published_at is None:
+    # Разные заголовки уже исключают межисточниковый fuzzy-повтор.
+    # Разбор фактов нужен только оставшимся похожим парам: inbox сравнивает
+    # тысячи материалов, и иначе повторно сканирует каждый body для каждой пары.
+    if not left._title_similarity(right) >= title_threshold:
         return False
-    if abs(left.published_at - right.published_at) > event_window:
+    if left._facts(include_title=True).conflicts_with(right._facts(include_title=True)):
         return False
-    if conflicting_facts(
-        f"{left.title}\n{left.body}",
-        f"{right.title}\n{right.body}",
-        left.published_at.year,
-        right.published_at.year,
-    ):
-        return False
-    return title_similarity(left.title, right.title) >= title_threshold
+    return True
 
 
 def find_repeated_publication(
@@ -376,13 +453,36 @@ def cluster_events(candidates: list[EventCandidate]) -> list[list[EventCandidate
         ),
     )
     clusters: list[list[EventCandidate]] = []
+    by_url: dict[str, set[int]] = defaultdict(set)
+    by_content: dict[str, set[int]] = defaultdict(set)
+    active: deque[tuple[datetime, int]] = deque()
+    active_counts: dict[int, int] = {}
     for candidate in ordered:
-        for cluster in clusters:
+        url, fingerprint = candidate.resolved_canonical_url, candidate.resolved_content_sha256
+        possible = by_url[url] | by_content[fingerprint]
+        if candidate.published_at is not None:
+            lower = candidate.published_at - DEFAULT_EVENT_WINDOW
+            while active and active[0][0] < lower:
+                _, expired = active.popleft()
+                active_counts[expired] -= 1
+                if active_counts[expired] == 0:
+                    del active_counts[expired]
+            possible.update(active_counts)
+        # Сохраняем прежнее правило: присоединение к самой ранней подходящей
+        # группе, без слияния остальных групп даже при транзитивном совпадении.
+        for cluster_index in sorted(possible):
+            cluster = clusters[cluster_index]
             if any(same_event(candidate, member) for member in cluster):
                 cluster.append(candidate)
                 break
         else:
+            cluster_index = len(clusters)
             clusters.append([candidate])
+        by_url[url].add(cluster_index)
+        by_content[fingerprint].add(cluster_index)
+        if candidate.published_at is not None:
+            active.append((candidate.published_at, cluster_index))
+            active_counts[cluster_index] = active_counts.get(cluster_index, 0) + 1
     return clusters
 
 

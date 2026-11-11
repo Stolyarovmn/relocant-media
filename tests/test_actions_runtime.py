@@ -249,7 +249,8 @@ def test_failed_child_reports_only_whitelisted_failure_coordinates(
     monkeypatch.setattr(runtime, 'run_child', child)
     assert execute(context, tmp_path, monkeypatch) == 1
     err = capsys.readouterr().err
-    failure = json.loads(err.strip().splitlines()[-1])['runtime_failure']
+    failure = next(record['runtime_failure'] for line in err.strip().splitlines()
+                   if 'runtime_failure' in (record := json.loads(line)))
     assert failure == {'status': 'SERVER_FAILED', 'error_type': 'ValueError',
                        'error_site': 'server_cycle.py:816'}
     assert 'TOKEN-123' not in err
