@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from test_source_enrichment import _record
@@ -14,10 +15,22 @@ from relocant_media.services.editorial_products import (
     present_draft,
     rubric_plan,
     validate_presentation,
+    verify_live_map,
     verify_stored_presentation,
 )
+from relocant_media.storage.media_models import RawItemMediaSnapshot
 
 session = source_session
+
+
+def test_installed_runtime_loads_city_config_from_application_directory(tmp_path, monkeypatch):
+    # В Docker модуль находится в site-packages, конфигурация — в /app/cities.
+    contents = Path("cities/belgrade/editorial.yaml").read_text(encoding="utf-8")
+    target = tmp_path / "cities" / "belgrade"
+    target.mkdir(parents=True)
+    (target / "editorial.yaml").write_text(contents, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert load_city_profile("belgrade").city_name == "Белград"
 
 
 def test_maps_and_rubrics_are_bound_before_review_and_rechecked_from_snapshot(session):
@@ -34,6 +47,14 @@ def test_maps_and_rubrics_are_bound_before_review_and_rechecked_from_snapshot(se
     validate_presentation(presentation, profile, (doc,), rendered, rubric_id="weekend")
     verify_stored_presentation(session, raw_id, (doc,), document_ids=[raw_id],
                               presentation=presentation)
+    html = session.get(RawItemMediaSnapshot, raw_id).source_html
+    verify_live_map(presentation, doc, html)
+    # Динамический footer не меняет карту, но подмена href при прежнем body блокируется.
+    verify_live_map(presentation, doc, html + "<footer>Обновление сайта</footer>")
+    with pytest.raises(ValueError, match="живом источнике"):
+        verify_live_map(presentation, doc, html.replace("query=belgrade", "query=other"))
+    with pytest.raises(ValueError, match="живом источнике"):
+        verify_live_map(presentation, doc, None)
     # Даже разрешённый провайдер карты не разрешает подмену места в присланном пакете.
     altered = presentation.model_copy(update={"source_map": {
         **presentation.source_map, "url": "https://www.google.com/maps/place/different"}})

@@ -11,7 +11,9 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _CITY_ID = re.compile(r"[a-z][a-z0-9_]{1,63}\Z")
-DEFAULT_CITIES_ROOT = Path(__file__).resolve().parents[3] / "cities"
+# Как реестр источников: конфигурация приложения лежит в рабочем каталоге,
+# а не рядом с установленным в site-packages Python-модулем.
+DEFAULT_CITIES_ROOT = Path("cities")
 
 
 class ProfileModel(BaseModel):

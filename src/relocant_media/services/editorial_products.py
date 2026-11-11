@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.editorial_products import EditorialPresentation
+from relocant_media.domain.source_locations import extract_source_maps
 from relocant_media.services.source_enrichment import (
     build_source_enrichment,
     plan_illustration,
@@ -141,3 +142,29 @@ def verify_stored_presentation(
         raise ValueError("Карта не совпадает с сохранённым источником")
     if presentation.illustration != plan_illustration(enrichment, source_url=source_url):
         raise ValueError("План иллюстрации изменился после проверки")
+
+
+def verify_live_map(
+    presentation: EditorialPresentation | None, document: EvidenceDocument,
+    source_html: str | None,
+) -> None:
+    """Изменение ссылки при неизменном тексте тоже требует нового пакета и ревью."""
+    if presentation is None or presentation.source_map is None:
+        return
+    expected = presentation.source_map
+    if expected["source_page"] != document.url:
+        return
+    candidates = extract_source_maps(source_html or "", document.url)
+    grounded = []
+    for candidate in candidates:
+        try:
+            validate_source_map(candidate, (document,))
+        except ValueError:
+            continue
+        grounded.append(candidate)
+    if (len({item["url"] for item in grounded}) != 1 or not any(
+        item["url"] == expected["url"]
+        and " ".join(item["source_quote"].split()) == " ".join(expected["source_quote"].split())
+        for item in grounded
+    )):
+        raise ValueError("Карта в живом источнике изменилась или недоступна")

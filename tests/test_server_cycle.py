@@ -532,7 +532,7 @@ def _enable_guide(monkeypatch):
 def _live_package(*documents):
     from types import SimpleNamespace
 
-    return SimpleNamespace(event=SimpleNamespace(documents=[
+    return SimpleNamespace(presentation=None, event=SimpleNamespace(documents=[
         SimpleNamespace(source_id=source_id, url=url) for source_id, url in documents
     ]))
 

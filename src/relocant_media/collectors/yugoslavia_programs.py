@@ -19,6 +19,7 @@ MAX_PROGRAMS = 30
 MAX_ITEM_ERROR_MESSAGE = 200
 _LIST_PATH = "/rs/kalendar"
 _DETAIL_PATH = re.compile(r"^/rs/program/(?P<slug>[a-z0-9][a-z0-9-]*)/?$")
+_LOCATION_PATH = re.compile(r"^/rs/lokacija/[a-z0-9][a-z0-9-]*/?$")
 _CALENDAR_HEADING = "ИЗЛОЖБЕ И ПРОГРАМИ"
 _DAY = re.compile(
     r"^Дан:\s*(?P<start_day>\d{2})\.(?P<start_month>\d{2})-"
@@ -123,7 +124,41 @@ def _parse_day(value: str) -> tuple[date, date]:
     return start, end
 
 
-def _detail_body(html: str) -> tuple[str, str]:
+def _program_location(title: Tag, day: Tag, source_url: str) -> str | None:
+    """Принимаем только явную ссылку места в метаданных, а не адрес из текста/подвала."""
+    locations: set[str] = set()
+    for node in title.find_all_next():
+        if node is day:
+            break
+        if not isinstance(node, Tag) or node.name != "a" or node.find_parent("p"):
+            continue
+        href = node.get("href")
+        if not isinstance(href, str):
+            continue
+        try:
+            parsed = urlsplit(urljoin(source_url, href))
+            valid = (
+                parsed.scheme == "https"
+                and parsed.hostname == urlsplit(source_url).hostname
+                and parsed.username is None and parsed.password is None
+                and parsed.port in {None, 443}
+                and not parsed.query and not parsed.fragment
+                and _LOCATION_PATH.fullmatch(parsed.path) is not None
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            continue
+        text = node.get_text(" ", strip=True)
+        if not text:
+            raise ValueError("Museum of Yugoslavia program location label missing")
+        locations.add(text)
+    if len(locations) > 1:
+        raise ValueError("Museum of Yugoslavia program location ambiguous")
+    return next(iter(locations)) if locations else None
+
+
+def _detail_body(html: str, source_url: str) -> tuple[str, str]:
     if len(html.encode("utf-8")) > MAX_BYTES:
         raise ValueError("Museum of Yugoslavia program response too large")
     soup = BeautifulSoup(html, "html.parser")
@@ -157,18 +192,15 @@ def _detail_body(html: str) -> tuple[str, str]:
         if _TIME.fullmatch(time_text) is None:
             raise ValueError("invalid Museum of Yugoslavia program time")
 
-    location_node = day_node.find_previous("a")
-    if not isinstance(location_node, Tag):
-        raise ValueError("Museum of Yugoslavia program location missing")
-    location = location_node.get_text(" ", strip=True)
-    if not location or location == "Листа програма":
-        raise ValueError("Museum of Yugoslavia program location missing")
+    location = _program_location(title_node, day_node, source_url)
 
     paragraphs: list[str] = []
     for node in title_node.find_all_next():
         if node is day_node:
             break
         if not isinstance(node, Tag) or node.name != "p":
+            continue
+        if node.find("p") is not None:
             continue
         text = node.get_text(" ", strip=True)
         if text and (not paragraphs or paragraphs[-1] != text):
@@ -177,7 +209,10 @@ def _detail_body(html: str) -> tuple[str, str]:
     if len(paragraph_text) < 120:
         raise ValueError("Museum of Yugoslavia program body shorter than 120 characters")
 
-    lines = [*paragraphs, f"Место: {location}", day_text]
+    lines = [*paragraphs]
+    if location is not None:
+        lines.append(f"Место: {location}")
+    lines.append(day_text)
     if time_text is not None:
         lines.append(time_text)
     return title, "\n".join(lines)
@@ -185,7 +220,7 @@ def _detail_body(html: str) -> tuple[str, str]:
 
 def parse_yugoslavia_program(html: str, url: str, source: SourceConfig) -> RawItem:
     canonical = _allowed_url(url, source, detail=True)
-    title, body = _detail_body(html)
+    title, body = _detail_body(html, canonical)
     return RawItem(
         source_id=source.id,
         external_id=canonical,
@@ -260,13 +295,18 @@ class YugoslaviaProgramsCollector:
         items: list[RawItem] = []
         for link in links:
             try:
-                items.append(
-                    parse_yugoslavia_program(
-                        await self._fetch(link, detail=True),
-                        link,
-                        self._source,
-                    )
+                item = parse_yugoslavia_program(
+                    await self._fetch(link, detail=True),
+                    link,
+                    self._source,
                 )
+                items.append(item)
+                if not any(line.startswith("Место: ") for line in item.body.splitlines()):
+                    self.item_failures.append({
+                        "url": link,
+                        "error_type": "IncompleteProgramEvidence",
+                        "error_message": "Museum of Yugoslavia program location absent from source",
+                    })
             except (ValueError, httpx.HTTPError) as error:
                 self.item_failures.append(
                     {

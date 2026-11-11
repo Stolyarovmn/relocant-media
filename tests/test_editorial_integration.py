@@ -138,7 +138,8 @@ def test_direct_review_rejects_same_event_from_second_source(
         external_id="same-event",
         url="https://media.example/same-event",
         title="Servisna informacija",
-        body="Drugi tekst o istoj servisnoj informaciji.",
+        # Перепечатка сохраняет существенные факты; одного общего заголовка недостаточно.
+        body="Deo Zvezdare će biti bez vode od 08 do 18 časova.",
         published_at=original.published_at + timedelta(hours=2),
     )
     editorial_session.add(duplicate)

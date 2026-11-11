@@ -87,6 +87,7 @@ from relocant_media.services.editorial_products import (
     present_draft,
     recent_publications,
     rubric_plan,
+    verify_live_map,
 )
 from relocant_media.services.event_eligibility import event_content_reason
 from relocant_media.services.kpi import record_subscriber_observation
@@ -338,6 +339,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
                 documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
                     title=item.title, body=item.body, published_at=item.published_at,
                     published_at_precision=item.published_at_precision))
+                verify_live_map(package.presentation, documents[-1], item.source_html)
                 continue
             if document.source_id not in {"city_beograd_news", "cukarica_news"}:
                 raise ValueError("unsupported live source")
@@ -356,6 +358,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
                 title=item.title, body=item.body, published_at=item.published_at,
                     published_at_precision=item.published_at_precision))
+            verify_live_map(package.presentation, documents[-1], response.text)
     return tuple(documents)
 
 

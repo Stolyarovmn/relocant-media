@@ -13,6 +13,8 @@ from relocant_media.sources.registry import load_source_file
 SOURCE_PATH = Path("cities/belgrade/sources/venue_yugoslavia.yaml")
 DETAIL_PATH = "/rs/program/besplatne-projekcije-tv-serije-banjica/"
 DETAIL_URL = f"https://muzej-jugoslavije.org{DETAIL_PATH}"
+LIVE_FIXTURE = Path("tests/fixtures/yugoslavia_program_20261111.html")
+LIVE_PATH = "/rs/program/porodicni-dan-idealni-neboder-2/"
 
 
 def _source():
@@ -95,6 +97,90 @@ def test_invalid_or_reversed_day_range_fails_closed() -> None:
             "https://muzej-jugoslavije.org/rs/program/test-program/",
             _source(),
         )
+
+
+def test_captured_program_preserves_missing_location_without_inferring_genex_or_footer() -> None:
+    html = LIVE_FIXTURE.read_text(encoding="utf-8")
+    html += "<footer>Музеј Југославије, Михаила Мике Јанковића 6, Београд</footer>"
+    item = parse_yugoslavia_program(
+        html, f"https://muzej-jugoslavije.org{LIVE_PATH}", _source(),
+    )
+    assert item.title == "Породични дан: Идеални небодер"
+    assert "Кула „Генекс”" in item.body
+    assert "Место:" not in item.body
+    assert "Михаила Мике Јанковића" not in item.body
+    assert "Дан: 08.11-08.11.2026." in item.body
+    assert "Време: 12:00" in item.body
+    assert item.body.count("Придружите нам се") == 1
+    assert item.published_at is None
+    assert not _source().policy.auto_publish
+
+
+@pytest.mark.parametrize("day", ["", "Дан: 99.11-99.11.2026."])
+def test_captured_program_still_requires_valid_day(day: str) -> None:
+    html = LIVE_FIXTURE.read_text(encoding="utf-8")
+    if not day:
+        html = html.replace("Дан:", "")
+    else:
+        html = html.replace("08.11-08.11.2026.", "99.11-99.11.2026.")
+    with pytest.raises(ValueError, match="day range"):
+        parse_yugoslavia_program(html, f"https://muzej-jugoslavije.org{LIVE_PATH}", _source())
+
+
+def test_registration_and_foreign_location_links_are_not_venue_evidence() -> None:
+    html = _detail().replace(
+        '/rs/lokacija/muzej-25-maj-bioskopska-sala/',
+        'https://foreign.example/rs/lokacija/muzej-25-maj-bioskopska-sala/',
+    )
+    item = parse_yugoslavia_program(html, DETAIL_URL, _source())
+    assert "Место:" not in item.body
+
+
+def test_current_calendar_program_with_only_list_anchor_keeps_partial_evidence() -> None:
+    html = Path("tests/fixtures/yugoslavia_current_program_20261111.html").read_text(
+        encoding="utf-8",
+    )
+    item = parse_yugoslavia_program(
+        html,
+        "https://muzej-jugoslavije.org/rs/program/"
+        "razgovori-o-jugoslaviji-jugoslovenski-avio-saobracaj/",
+        _source(),
+    )
+    assert item.title == "Разговори о Југославији: Југословенски авио-саобраћај"
+    assert "Место:" not in item.body
+    assert "Листа програма" not in item.body
+    assert any(line.startswith("Дан:") for line in item.body.splitlines())
+    assert item.published_at is None
+
+
+def test_captured_program_collects_partial_evidence_with_explicit_audit() -> None:
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/rs/kalendar/":
+            return httpx.Response(200, text=_listing().replace(DETAIL_PATH, LIVE_PATH))
+        if request.url.path == LIVE_PATH:
+            return httpx.Response(200, text=LIVE_FIXTURE.read_text(encoding="utf-8"))
+        raise AssertionError(request.url)
+
+    async def offline_collect():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            collector = YugoslaviaProgramsCollector(_source(), client)
+            items = await collector.collect()
+            return items, collector.item_failures
+
+    with pytest.raises(StopIteration) as completed:
+        offline_collect().send(None)
+    items, failures = completed.value.value
+    assert len(items) == 1
+    assert len(failures) == 1
+    assert failures[0]["error_type"] == "IncompleteProgramEvidence"
+    assert failures[0]["url"] == items[0].url
+    assert "location absent" in failures[0]["error_message"]
+    assert items[0].published_at is None
+    assert "Место:" not in items[0].body
+    assert requested == ["/rs/kalendar/", LIVE_PATH]
 
 
 @pytest.mark.asyncio
