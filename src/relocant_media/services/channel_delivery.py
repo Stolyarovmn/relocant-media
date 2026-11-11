@@ -19,6 +19,12 @@ from relocant_media.services.production_media import (
     PreparedProductionMedia,
     prepare_production_media,
 )
+from relocant_media.services.rich_delivery import (
+    RichMessageBot,
+    prepare_native_transport,
+    rich_receipt,
+    send_native_message,
+)
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -57,6 +63,8 @@ async def deliver_reviewed(
         raise DeliveryBlockedError("channel target is not approved")
     prepared_media: PreparedProductionMedia | None = None
     media_bot: MediaBot | None = None
+    rich_bot: RichMessageBot | None = None
+    rich_html: str | None = None
     try:
         city = session.scalar(select(Source.city).join(
             RawItem, RawItem.source_id == Source.id,
@@ -108,6 +116,15 @@ async def deliver_reviewed(
             )
         except ValueError as error:
             raise DeliveryBlockedError("reviewed production media bundle is invalid") from error
+        try:
+            native = prepare_native_transport(
+                package, publisher, prepared_media, editorial_text=preview.text)
+        except ValueError as error:
+            raise DeliveryBlockedError(str(error)) from error
+        if native is not None:
+            rich_bot, rich_html = native
+            run.outcome = {**run.outcome,
+                           "_rich_delivery": rich_receipt(rich_html, state="sending")}
         if prepared_media is not None:
             candidate_bot = getattr(publisher, "bot", None)
             if (
@@ -133,7 +150,10 @@ async def deliver_reviewed(
         raise
     message_ids: list[int] | None = None
     try:
-        if prepared_media is None:
+        if rich_html is not None:
+            assert rich_bot is not None
+            message_id = await send_native_message(rich_bot, target_channel_id, rich_html)
+        elif prepared_media is None:
             message_id = await publisher.publish(preview.text)
             if type(message_id) is not int or message_id <= 0:
                 raise DeliveryBlockedError("publisher returned an invalid receipt")
@@ -156,6 +176,9 @@ async def deliver_reviewed(
         current = session.get(EditorialRun, raw_item_id, populate_existing=True)
         if current is not None:
             current.delivery_status = "uncertain"
+            if rich_html is not None:
+                current.outcome = {**current.outcome,
+                                   "_rich_delivery": rich_receipt(rich_html, state="uncertain")}
             if prepared_media is not None:
                 current.outcome = {
                     **current.outcome,
@@ -167,6 +190,9 @@ async def deliver_reviewed(
     post.published_at = datetime.now(UTC)
     run.delivery_status = "sent"
     run.staging_message_id = None
+    if rich_html is not None:
+        run.outcome = {**run.outcome, "_rich_delivery": rich_receipt(
+            rich_html, state="sent", message_id=message_id)}
     if prepared_media is not None:
         assert message_ids is not None
         run.outcome = {

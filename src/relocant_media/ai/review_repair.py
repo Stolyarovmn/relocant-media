@@ -109,5 +109,12 @@ def review_with_repairs(
         placeholders = tuple(r.model_copy(update={
             "verdict": "hold", "score": 0, "flags": (), "live_source_checked": False,
         }) for r in current.reviews)
-        current = current.model_copy(update={"outcome": outcome, "reviews": placeholders})
+        presentation = current.presentation
+        if presentation is not None:
+            from relocant_media.services.native_map import bind_native_map_draft
+
+            presentation = bind_native_map_draft(presentation, draft)
+        current = current.model_copy(update={
+            "outcome": outcome, "reviews": placeholders, "presentation": presentation,
+        })
     raise AssertionError("unreachable repair loop")

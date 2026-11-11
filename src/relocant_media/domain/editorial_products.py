@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 
 class EditorialPresentation(BaseModel):
@@ -14,3 +14,11 @@ class EditorialPresentation(BaseModel):
     rubric_name: str
     source_map: dict[str, Any] | None = None
     illustration: dict[str, Any]
+    native_map: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def compatible_dump(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if self.native_map is None:
+            payload.pop("native_map", None)
+        return payload

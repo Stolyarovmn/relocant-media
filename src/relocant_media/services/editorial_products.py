@@ -11,6 +11,12 @@ from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.source_locations import extract_source_maps
+from relocant_media.services.native_map import (
+    build_native_map,
+    validate_native_map_draft,
+    verify_live_native_map,
+    verify_native_map_snapshot,
+)
 from relocant_media.services.source_enrichment import (
     build_source_enrichment,
     plan_illustration,
@@ -87,10 +93,15 @@ def build_presentation(
         raise ValueError("Первичный источник отсутствует в документах")
     # Несколько адресов не превращаем в одну произвольно выбранную точку.
     source_map = select_source_map(enrichment, source_url=source_url)
+    native_map = build_native_map(
+        session, document_ids, documents, source_url=source_url, profile=profile,
+    )
     return EditorialPresentation(
         profile_sha256=profile.sha256, rubric_id=rubric.id, rubric_name=rubric.name,
-        source_map=source_map,
-        illustration=plan_illustration(enrichment, source_url=source_url),
+        source_map=None if native_map is not None else source_map,
+        illustration=plan_illustration(
+            enrichment, source_url=source_url, allow_source_preview=native_map is None),
+        native_map=native_map,
     )
 
 
@@ -128,6 +139,7 @@ def validate_presentation(
         raise ValueError("Вложение требует отдельного проверенного media release")
     if presentation.illustration.get("source_url") != _primary_url(documents):
         raise ValueError("Иллюстрация не соответствует первичному источнику")
+    validate_native_map_draft(presentation, draft, documents, profile=profile)
 
 
 def verify_stored_presentation(
@@ -138,10 +150,16 @@ def verify_stored_presentation(
     enrichment = build_source_enrichment(session, raw_id, document_ids=document_ids)
     validate_against_documents(enrichment, documents)
     source_url = _primary_url(documents)
-    if presentation.source_map != select_source_map(enrichment, source_url=source_url):
+    expected_map = (None if presentation.native_map is not None
+                    else select_source_map(enrichment, source_url=source_url))
+    if presentation.source_map != expected_map:
         raise ValueError("Карта не совпадает с сохранённым источником")
-    if presentation.illustration != plan_illustration(enrichment, source_url=source_url):
+    if presentation.illustration != plan_illustration(
+        enrichment, source_url=source_url, allow_source_preview=presentation.native_map is None,
+    ):
         raise ValueError("План иллюстрации изменился после проверки")
+    if presentation.native_map is not None:
+        verify_native_map_snapshot(session, presentation.native_map, documents, document_ids)
 
 
 def verify_live_map(
@@ -149,6 +167,8 @@ def verify_live_map(
     source_html: str | None,
 ) -> None:
     """Изменение ссылки при неизменном тексте тоже требует нового пакета и ревью."""
+    if presentation is not None and presentation.native_map is not None:
+        verify_live_native_map(presentation.native_map, document, source_html)
     if presentation is None or presentation.source_map is None:
         return
     expected = presentation.source_map

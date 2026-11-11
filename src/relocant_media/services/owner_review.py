@@ -59,6 +59,12 @@ from relocant_media.services.production_media import (
     PreparedProductionMedia,
     prepare_production_media,
 )
+from relocant_media.services.rich_delivery import (
+    RichMessageBot,
+    prepare_native_transport,
+    rich_receipt,
+    send_native_message,
+)
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 
@@ -291,6 +297,14 @@ def _validated_pending_package(
     if run.outcome.get("_package_sha256") != _package_sha256(package):
         raise DeliveryBlockedError("owner-review package fingerprint mismatch")
     outcome = evaluate_package(package, now=now)
+    if package.presentation is not None:
+        from relocant_media.services.editorial_products import verify_stored_presentation
+
+        verify_stored_presentation(
+            session, raw_item_id, tuple(package.event.documents),
+            document_ids=[document.raw_item_id for document in package.event.documents],
+            presentation=package.presentation,
+        )
     if (
         (outcome.status, outcome.reason) not in REVIEWED_STATES
         or outcome.draft is None
@@ -580,6 +594,13 @@ def revise_package(
 ) -> EditorialPackage:
     """Apply wording feedback only, discard stale approvals and run both reviews again."""
     draft = _owner_revision_draft(package, provider, comment)
+    presentation = package.presentation
+    if presentation is not None:
+        from relocant_media.services.editorial_products import present_draft
+        from relocant_media.services.native_map import bind_native_map_draft
+
+        draft = PackageDraft.model_validate(present_draft(draft, presentation).model_dump())
+        presentation = bind_native_map_draft(presentation, draft)
     outcome = package.outcome.model_copy(update={"draft": draft})
     placeholders = tuple(
         review.model_copy(update={
@@ -591,7 +612,9 @@ def revise_package(
         })
         for review in package.reviews
     )
-    revised = package.model_copy(update={"outcome": outcome, "reviews": placeholders})
+    revised = package.model_copy(update={
+        "outcome": outcome, "reviews": placeholders, "presentation": presentation,
+    })
     reviewed = review_with_repairs(
         revised,
         provider,
@@ -659,7 +682,7 @@ def replace_pending_package(
         key: value
         for key, value in run.outcome.items()
         if key.startswith("_")
-        and key not in {"_package", "_package_sha256", "_media_delivery"}
+        and key not in {"_package", "_package_sha256", "_media_delivery", "_rich_delivery"}
     }
     run.outcome = {
         **evaluated.model_dump(mode="json"),
@@ -773,6 +796,8 @@ async def deliver_owner_approved(
         raise DeliveryBlockedError("exact owner approval is required")
     prepared_media: PreparedProductionMedia | None = None
     media_bot: MediaBot | None = None
+    rich_bot: RichMessageBot | None = None
+    rich_html: str | None = None
     try:
         run, post, item, source, package = _validated_pending_package(session, raw_item_id)
         if review.payload.get("package_sha256") != _package_sha256(package):
@@ -823,6 +848,15 @@ async def deliver_owner_approved(
             text,
             target_channel_id=target_channel_id,
         )
+        try:
+            native = prepare_native_transport(
+                package, publisher, prepared_media, editorial_text=text)
+        except ValueError as error:
+            raise DeliveryBlockedError(str(error)) from error
+        if native is not None:
+            rich_bot, rich_html = native
+            run.outcome = {**run.outcome,
+                           "_rich_delivery": rich_receipt(rich_html, state="sending")}
         if prepared_media is not None:
             media_bot = _media_bot(publisher)
             run.outcome = {
@@ -849,7 +883,10 @@ async def deliver_owner_approved(
         raise
     message_ids: list[int] | None = None
     try:
-        if prepared_media is None:
+        if rich_html is not None:
+            assert rich_bot is not None
+            message_id = await send_native_message(rich_bot, target_channel_id, rich_html)
+        elif prepared_media is None:
             message_id = await publisher.publish(text)
             if type(message_id) is not int or message_id <= 0:
                 raise DeliveryBlockedError("publisher returned an invalid receipt")
@@ -872,6 +909,9 @@ async def deliver_owner_approved(
         current = session.get(EditorialRun, raw_item_id, populate_existing=True)
         if current is not None:
             current.delivery_status = "uncertain"
+            if rich_html is not None:
+                current.outcome = {**current.outcome,
+                                   "_rich_delivery": rich_receipt(rich_html, state="uncertain")}
             if prepared_media is not None:
                 current.outcome = {
                     **current.outcome,
@@ -890,6 +930,9 @@ async def deliver_owner_approved(
     current_post.published_at = datetime.now(UTC)
     current_run.delivery_status = "sent"
     current_run.staging_message_id = None
+    if rich_html is not None:
+        current_run.outcome = {**current_run.outcome, "_rich_delivery": rich_receipt(
+            rich_html, state="sent", message_id=message_id)}
     if prepared_media is not None:
         assert message_ids is not None
         current_run.outcome = {
