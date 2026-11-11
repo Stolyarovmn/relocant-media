@@ -12,6 +12,8 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from relocant_media.domain.source_locations import is_public_https_url
+
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MIN_DECLARED_WIDTH = 200
 MIN_DECLARED_HEIGHT = 120
@@ -60,6 +62,8 @@ class DownloadedArticleMedia:
 
 
 def _source_page(url: str) -> tuple[str, str]:
+    if not is_public_https_url(url):
+        raise ArticleMediaError("unsupported source page URL")
     try:
         parts = urlsplit(url)
         port = parts.port
@@ -89,6 +93,8 @@ def _allowed_hosts(source_host: str, approved_image_hosts: frozenset[str]) -> fr
 
 def _image_url(raw: str, source_page: str, allowed_hosts: frozenset[str]) -> str:
     candidate = urljoin(source_page, raw.strip())
+    if not is_public_https_url(candidate):
+        raise ArticleMediaError("unsupported image URL")
     try:
         parts = urlsplit(candidate)
         port = parts.port

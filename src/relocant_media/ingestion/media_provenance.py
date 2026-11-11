@@ -9,6 +9,7 @@ from relocant_media.collectors.article_media import (
     extract_article_media_candidates,
 )
 from relocant_media.collectors.base import RawItem
+from relocant_media.domain.source_locations import extract_source_maps
 
 MAX_SOURCE_HTML_BYTES = 5 * 1024 * 1024
 
@@ -65,6 +66,7 @@ def build_media_provenance(item: RawItem) -> tuple[str | None, dict[str, Any] | 
         "source_html_saved": True,
         "candidate_extraction_status": "extracted",
         "candidates": serialized,
+        "map_candidates": extract_source_maps(item.source_html, item.url),
         "requires_independent_media_reviews": bool(serialized),
         "mode": "needs_visual_review" if serialized else "text",
     }

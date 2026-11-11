@@ -354,6 +354,28 @@ class EditorialService:
             raise DeliveryBlockedError("source publication time changed after verification")
 
         members = self._validate_evidence_bundle(run, anchor_item=item, anchor_source=source)
+        if "_package" in run.outcome and package.presentation is not None:
+            from relocant_media.domain.dedup import find_repeated_publication
+            from relocant_media.services.editorial_products import (
+                recent_publications,
+                verify_stored_presentation,
+            )
+
+            assert package.event is not None
+            try:
+                verify_stored_presentation(
+                    self.session, item.id, tuple(package.event.documents),
+                    document_ids=[member.id for member, _ in members],
+                    presentation=package.presentation)
+            except ValueError as error:
+                raise DeliveryBlockedError(str(error)) from error
+            recent = recent_publications(self.session, package.city, now=datetime.now(UTC))
+            repeated = find_repeated_publication(
+                outcome.draft.title, outcome.draft.body,
+                [(row["id"], row["title"], row["body"]) for row in recent
+                 if row["id"] != post.id and (row["status"] == "published" or row["id"] < post.id)])
+            if repeated is not None:
+                raise DeliveryBlockedError(f"draft repeats recent post {repeated}")
         from relocant_media.domain.audience import audience_relevance_reason
 
         if source.city == "belgrade":

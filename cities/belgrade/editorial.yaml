@@ -1,0 +1,58 @@
+schema_version: 1
+policy_version: belgrade-reader-value-v1
+city_id: belgrade
+city_name: Белград
+country_code: RS
+country_name: Сербия
+timezone: Europe/Belgrade
+content_language: ru
+audience:
+  name: Русскоязычные жители Белграда, включая недавно переехавших
+  needs:
+    - Понимать изменения, которые затрагивают повседневную жизнь
+    - Выбирать доступный досуг с понятными условиями участия
+    - Разбираться в городе и его районах
+    - Знакомиться с местными людьми, культурой и инициативами
+geography:
+  city_aliases: [Белград, Београд, Beograd, Belgrade]
+  country_aliases: [Сербия, Србија, Srbija, Serbia]
+  allow_country_scope: true
+utility_min_local_relevance: 3
+utility_min_practical_value: 3
+rubrics:
+  - id: city_changes
+    name: Что меняется в городе
+    purpose: Объяснить подтверждённое изменение, предупреждение или последствие для жителей
+    categories: [transport, city, utilities, schools, medicine, health, immigration, law, tax, banking, politics, crime, accusations, real_estate, jobs, economy]
+    mode: single_story
+    required_details: [affected_people, consequence, effective_dates, source]
+    cadence: daily
+    target_per_period: 1
+    priority: 100
+  - id: weekend
+    name: Планы в городе
+    purpose: Помочь выбрать событие или занятие по интересам и подтверждённым условиям
+    categories: [events]
+    mode: single_story
+    required_details: [date, time, venue, price, language, registration]
+    cadence: weekly
+    target_per_period: 2
+    priority: 70
+  - id: city_guide
+    name: Разобраться в городе
+    purpose: Помочь решить конкретную бытовую задачу по проверенным требованиям и шагам
+    categories: [transport, city, utilities, schools, medicine, health, immigration, law, tax, banking, real_estate, jobs, economy]
+    mode: single_story
+    required_details: [task, steps, conditions, verified_at]
+    cadence: weekly
+    target_per_period: 1
+    priority: 60
+  - id: city_life
+    name: Люди и город
+    purpose: Дать содержательное знакомство с местом, культурой, человеком или городской инициативой
+    categories: [city, events, sport, culture]
+    mode: single_story
+    required_details: [reader_interest, source, experience_attribution]
+    cadence: weekly
+    target_per_period: 1
+    priority: 50

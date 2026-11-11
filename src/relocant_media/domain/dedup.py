@@ -10,10 +10,23 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from relocant_media.domain.event_facts import (
+    clock_ranges,
+    conflicting_facts,
+    enhanced_service_anchor,
+    event_dates,
+    material_words,
+    numeric_facts,
+    street_anchors,
+    terminal_anchor,
+    transport_routes,
+)
 
 _TRACKING_KEYS = {
     "fbclid",
@@ -111,7 +124,7 @@ def _event_date_anchors(value: str, *, publication_year: int | None = None) -> f
         anchor = normalize_text(match.group(0))
         # The month-name branch ends before the optional year. Never erase an
         # explicitly different event year when comparing annual announcements.
-        following_year = re.match(r"\s+(\d{4})\b", normalized[match.end():])
+        following_year = re.match(r"\s+(\d{4})\b", normalized[match.end() :])
         if following_year:
             anchor += " " + following_year.group(1)
         elif publication_year is not None and not re.search(r"\b\d{4}\b", anchor):
@@ -183,6 +196,16 @@ def _same_source_transport_reprint(
     if left_host is None or left_host != right_host:
         return False
 
+    if numeric_facts(left.body, left.published_at.year) != numeric_facts(
+        right.body, right.published_at.year
+    ) or material_words(f"{left.title}\n{left.body}") != material_words(
+        f"{right.title}\n{right.body}"
+    ):
+        return False
+
+    if _anchored_transport_reprint(left, right):
+        return True
+
     left_dates = _event_date_anchors(left.body, publication_year=left.published_at.year)
     right_dates = _event_date_anchors(right.body, publication_year=right.published_at.year)
     if not left_dates or left_dates != right_dates:
@@ -221,6 +244,45 @@ def _same_source_transport_reprint(
     return _body_token_similarity(left.body, right.body) >= _SAME_SOURCE_BODY_TOKEN_SIMILARITY
 
 
+def _anchored_transport_reprint(left: EventCandidate, right: EventCandidate) -> bool:
+    """Две ограниченные формы объявления, не общий смысловой классификатор."""
+    if max(len(left.body), len(right.body)) > _SAME_SOURCE_MAX_BODY_CHARS:
+        return False
+    assert left.published_at is not None and right.published_at is not None
+    dates = event_dates(left.body, left.published_at.year)
+    if not dates or dates != event_dates(right.body, right.published_at.year):
+        return False
+    routes = transport_routes(left.body)
+    if len(routes) < 2 or routes != transport_routes(right.body):
+        return False
+    if numeric_facts(left.body, left.published_at.year) != numeric_facts(
+        right.body, right.published_at.year
+    ) or material_words(left.body) != material_words(right.body):
+        return False
+
+    # Сокращённый маршрут: совпадают улицы, конечная, все маршруты и период.
+    terminal = terminal_anchor(left.body)
+    streets = street_anchors(left.body)
+    if (
+        terminal
+        and terminal == terminal_anchor(right.body)
+        and len(streets) >= 2
+        and streets == street_anchors(right.body)
+    ):
+        return True
+
+    # Усиление движения: кроме большой группы маршрутов нужны одинаковые
+    # часы и временный маршрут с обоими концами (в том же порядке).
+    enhanced = enhanced_service_anchor(left.body)
+    return bool(
+        len(routes) >= 5
+        and enhanced
+        and enhanced == enhanced_service_anchor(right.body)
+        and clock_ranges(left.body)
+        and clock_ranges(left.body) == clock_ranges(right.body)
+    )
+
+
 def same_event(
     left: EventCandidate,
     right: EventCandidate,
@@ -233,13 +295,75 @@ def same_event(
     if left.resolved_content_sha256 == right.resolved_content_sha256:
         return True
 
+    # Материализованная правка первоисточника уже назначена на новое ревью.
+    # Не превращаем её обратно в прочитанный исходный материал через fuzzy.
+    if any(
+        "__source_revision" in dict(parse_qsl(urlsplit(item.resolved_canonical_url).query))
+        for item in (left, right)
+    ):
+        return False
+
     if left.source_id == right.source_id:
         return _same_source_transport_reprint(left, right, event_window=event_window)
     if left.published_at is None or right.published_at is None:
         return False
     if abs(left.published_at - right.published_at) > event_window:
         return False
+    if conflicting_facts(
+        f"{left.title}\n{left.body}",
+        f"{right.title}\n{right.body}",
+        left.published_at.year,
+        right.published_at.year,
+    ):
+        return False
     return title_similarity(left.title, right.title) >= title_threshold
+
+
+def find_repeated_publication(
+    title: str,
+    body: str,
+    publications: Sequence[tuple[int, str, str]],
+) -> int | None:
+    """Ищет дословный/почти дословный повтор уже опубликованного содержания.
+
+    Вызывающий код задаёт город и временное окно публикаций. Это отдельный
+    контроль готового текста: исходные статьи, хеши и квитанции не меняются.
+    Короткие тексты сравниваем только точно; более свободные пересказы требуют
+    редакционной оценки новизны, а не удаления по одному счёту или названию.
+    """
+    body = _publication_content(body)
+    title = re.sub(r"^\s*\[тестовый запуск\]\s*", "", title, flags=re.I)
+    normalized_body = normalize_text(body)
+    if not normalized_body:
+        return None
+    for publication_id, old_title, old_body in publications:
+        old_body = _publication_content(old_body)
+        old_title = re.sub(r"^\s*\[тестовый запуск\]\s*", "", old_title, flags=re.I)
+        previous = normalize_text(old_body)
+        if conflicting_facts(f"{title}\n{body}", f"{old_title}\n{old_body}", 0, 0):
+            continue
+        if normalized_body == previous:
+            return publication_id
+        if min(len(normalized_body), len(previous)) < 160:
+            continue
+        if max(len(normalized_body), len(previous)) > _SAME_SOURCE_MAX_BODY_CHARS:
+            continue
+        if title_similarity(title, old_title) < 0.9:
+            continue
+        if _body_token_similarity(body, old_body) < 0.96:
+            continue
+        if SequenceMatcher(None, normalized_body, previous, autojunk=False).ratio() >= 0.97:
+            return publication_id
+    return None
+
+
+def _publication_content(value: str) -> str:
+    """Убирает только известные отдельные строки оформления публикации."""
+    return re.sub(
+        r"(?m)^(?:Рубрика: [^\r\n]+|Карта из источника: https?://\S+)\r?$",
+        "",
+        value,
+    ).strip()
 
 
 def cluster_events(candidates: list[EventCandidate]) -> list[list[EventCandidate]]:

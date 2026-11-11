@@ -5,7 +5,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from relocant_media.ai.audience_policy import AUDIENCE_MISMATCH_FLAG
+from relocant_media.ai.audience_policy import (
+    AUDIENCE_MISMATCH_FLAG,
+    PROFILE_AUDIENCE_MISMATCH_FLAG,
+)
 from relocant_media.ai.independent_reviews import reviewed_package
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.ai.package import EditorialPackage, PackageDraft, canonical_json
@@ -40,7 +43,8 @@ def review_with_repairs(
                 audit({**entry, "repair_attempt": repair_attempt})
 
         current = reviewed_package(current, provider, live_documents, audit=record)
-        if any(AUDIENCE_MISMATCH_FLAG in review.flags for review in current.reviews):
+        if any({AUDIENCE_MISMATCH_FLAG, PROFILE_AUDIENCE_MISMATCH_FLAG} & set(review.flags)
+               for review in current.reviews):
             # Rewording cannot manufacture a reason for the audience to care.
             return current
         language_reason = draft_language_reason(current.outcome.draft.title,
@@ -51,7 +55,7 @@ def review_with_repairs(
                     "instruction": "Перевести весь основной текст на русский, сохранив имена."})
         if date_reason:
             record({"role":"date_guard","reason":date_reason,
-                    "instruction":"Укажи абсолютную дату по публикации в Белграде."})
+                    "instruction":"Укажи абсолютную дату по часовому поясу профиля города."})
         if language_reason is None and date_reason is None and all(
                r.verdict == "approve" and not r.flags and r.score >= 75
                for r in current.reviews):
@@ -83,6 +87,11 @@ def review_with_repairs(
             draft = PackageDraft.model_validate_json(raw)
         except ValidationError as error:
             raise StructuredOutputError("invalid repaired draft") from error
+        if current.presentation is not None:
+            from relocant_media.services.editorial_products import present_draft
+
+            draft = PackageDraft.model_validate(
+                present_draft(draft, current.presentation).model_dump())
         if (not valid_title_presentation(draft.title)
                 or not set(draft.claim_ids).issubset(supported)
                 or len(draft.claim_ids) != len(set(draft.claim_ids))):

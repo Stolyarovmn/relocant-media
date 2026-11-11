@@ -1,0 +1,143 @@
+"""Рубрики и оформление: воспроизводимый план до проверки и отправки текста."""
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import Session
+
+from relocant_media.ai.models import EvidenceDocument, RussianDraft
+from relocant_media.domain.city_profile import CityEditorialProfile
+from relocant_media.domain.editorial_products import EditorialPresentation
+from relocant_media.services.source_enrichment import (
+    build_source_enrichment,
+    plan_illustration,
+    select_source_map,
+    validate_against_documents,
+    validate_source_map,
+)
+from relocant_media.storage.models import EditorialRun, Post
+
+
+def recent_publications(
+    session: Session, city: str, *, now: datetime,
+) -> list[dict[str, Any]]:
+    """Только отправленные или уже одобренные карточки этого города за семь дней."""
+    observed_at = func.coalesce(Post.published_at, Post.created_at)
+    rows = session.execute(select(Post, EditorialRun).join(
+        EditorialRun, EditorialRun.post_id == Post.id).where(
+            Post.city == city,
+            observed_at >= now - timedelta(days=7), observed_at <= now,
+            or_(EditorialRun.delivery_status == "sent", and_(
+                EditorialRun.delivery_status == "pending",
+                EditorialRun.outcome["status"].as_string() == "ready")),
+        ).order_by(observed_at.desc(), Post.id.desc()))
+    return [{
+        "id": post.id, "title": post.title, "body": post.body,
+        "status": "published" if run.delivery_status == "sent" else "ready",
+        "published_at": (post.published_at or post.created_at).isoformat(),
+        "rubric_id": (run.outcome.get("ranking", {}).get("selection") or {}).get("rubric_id"),
+    } for post, run in rows]
+
+
+def rubric_plan(
+    profile: CityEditorialProfile, history: list[dict[str, Any]], *, now: datetime,
+) -> dict[str, Any]:
+    """Дефицит рубрик — подсказка редактору, никогда не разрешение слабой новости."""
+    if now.tzinfo is None:
+        raise ValueError("Время плана должно содержать часовой пояс")
+    local = now.astimezone(ZoneInfo(profile.timezone))
+    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    week = day - timedelta(days=day.weekday())
+    items = []
+    for rubric in sorted(profile.rubrics, key=lambda value: (-value.priority, value.id)):
+        start = day if rubric.cadence == "daily" else week
+        count = 0
+        for entry in history:
+            if entry.get("rubric_id") != rubric.id or entry.get("status") != "published":
+                continue
+            observed = datetime.fromisoformat(entry["published_at"])
+            if observed.tzinfo is None:
+                raise ValueError("Дата публикации должна содержать часовой пояс")
+            count += start <= observed.astimezone(local.tzinfo) <= local
+        items.append({"rubric_id": rubric.id, "name": rubric.name,
+                      "period_start": start.isoformat(), "published": count,
+                      "target": rubric.target_per_period,
+                      "remaining": max(0, rubric.target_per_period - count),
+                      "required_details": list(rubric.required_details)})
+    return {"version": 1, "city": profile.city_id, "profile_sha256": profile.sha256,
+            "as_of": now.astimezone(UTC).isoformat(), "timezone": profile.timezone,
+            "targets_are_not_publication_quotas": True, "rubrics": items}
+
+
+def build_presentation(
+    session: Session, raw_id: int, documents: tuple[EvidenceDocument, ...], *,
+    document_ids: list[int], profile: CityEditorialProfile, rubric_id: str,
+    source_url: str | None = None,
+) -> EditorialPresentation:
+    rubric = profile.rubric(rubric_id)
+    if rubric is None:
+        raise ValueError("Неизвестная рубрика")
+    enrichment = build_source_enrichment(session, raw_id, document_ids=document_ids)
+    validate_against_documents(enrichment, documents)
+    source_url = source_url or _primary_url(documents)
+    if source_url not in {document.url for document in documents}:
+        raise ValueError("Первичный источник отсутствует в документах")
+    # Несколько адресов не превращаем в одну произвольно выбранную точку.
+    source_map = select_source_map(enrichment, source_url=source_url)
+    return EditorialPresentation(
+        profile_sha256=profile.sha256, rubric_id=rubric.id, rubric_name=rubric.name,
+        source_map=source_map,
+        illustration=plan_illustration(enrichment, source_url=source_url),
+    )
+
+
+def present_draft(draft: RussianDraft, presentation: EditorialPresentation) -> RussianDraft:
+    """Идемпотентное оформление до двух ревью; после них текст не дополняется."""
+    label = f"Рубрика: {presentation.rubric_name}"
+    lines = [line for line in draft.body.splitlines()
+             if not line.startswith("Рубрика: ") and not line.startswith("Карта из источника: ")]
+    body = "\n".join(lines).strip()
+    if presentation.source_map:
+        body += f"\n\nКарта из источника: {presentation.source_map['url']}"
+    body += f"\n\n{label}"
+    return draft.model_copy(update={"body": body})
+
+
+def _primary_url(documents: tuple[EvidenceDocument, ...]) -> str:
+    return next((document.url for document in documents
+                 if str(getattr(document, "ownership", "")).strip().casefold() == "official"),
+                documents[0].url)
+
+
+def validate_presentation(
+    presentation: EditorialPresentation, profile: CityEditorialProfile,
+    documents: tuple[EvidenceDocument, ...], draft: RussianDraft, *, rubric_id: str,
+) -> None:
+    rubric = profile.rubric(rubric_id)
+    if (rubric is None or presentation.profile_sha256 != profile.sha256
+            or presentation.rubric_id != rubric.id or presentation.rubric_name != rubric.name):
+        raise ValueError("Редакционный профиль или рубрика изменились после проверки")
+    if presentation.source_map is not None:
+        validate_source_map(presentation.source_map, documents)
+    if present_draft(draft, presentation) != draft:
+        raise ValueError("Оформление не совпадает с проверенным текстом")
+    if presentation.illustration.get("illustration_mode") not in {"source_preview", "text"}:
+        raise ValueError("Вложение требует отдельного проверенного media release")
+    if presentation.illustration.get("source_url") != _primary_url(documents):
+        raise ValueError("Иллюстрация не соответствует первичному источнику")
+
+
+def verify_stored_presentation(
+    session: Session, raw_id: int, documents: tuple[EvidenceDocument, ...], *,
+    document_ids: list[int], presentation: EditorialPresentation,
+) -> None:
+    """Не доверяем присланному URL: повторно получаем план из сохранённого HTML."""
+    enrichment = build_source_enrichment(session, raw_id, document_ids=document_ids)
+    validate_against_documents(enrichment, documents)
+    source_url = _primary_url(documents)
+    if presentation.source_map != select_source_map(enrichment, source_url=source_url):
+        raise ValueError("Карта не совпадает с сохранённым источником")
+    if presentation.illustration != plan_illustration(enrichment, source_url=source_url):
+        raise ValueError("План иллюстрации изменился после проверки")
