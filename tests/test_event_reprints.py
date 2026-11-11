@@ -254,3 +254,18 @@ def test_reversed_score_is_a_changed_fact_even_in_long_identical_draft() -> None
         )
         is None
     )
+
+
+def test_unrelated_headlines_skip_full_text_fact_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    left = replace(item(1, "Большой исходный текст. " * 500), title="Транспорт меняет маршрут")
+    right = replace(
+        item(2, "Другая длинная статья. " * 500, source="other"),
+        title="Музей приглашает на выставку",
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("Нельзя разбирать факты у заведомо разных заголовков")
+
+    monkeypatch.setattr("relocant_media.domain.dedup.EventCandidate._facts", forbidden)
+    assert not same_event(left, right)
+    assert not same_event(right, left)

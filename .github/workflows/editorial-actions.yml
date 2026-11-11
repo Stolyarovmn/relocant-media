@@ -5,13 +5,21 @@ on:
       mode:
         description: Read-only preview or canonical worker (requires completed cutover)
         type: choice
-        options: [preview, editorial, intake, discovery, auto]
+        options: [preview, editorial, intake, discovery, auto, recovery]
         default: preview
       discovery_batch:
         description: 'Discovery only: JSON {"version":1,"city":"belgrade","urls":["https://..."]}'
         type: string
         required: false
         default: ''
+      recovery_run_id:
+        description: Interrupted run ID (recovery only)
+        type: string
+        required: false
+      recovery_checkpoint:
+        description: Checkpoint SHA256 printed by the interrupted run (recovery only)
+        type: string
+        required: false
   schedule:
     # Scheduled runs are best effort; each worker has an independent backup slot.
     - cron: '17 * * * *'
@@ -104,6 +112,7 @@ jobs:
           echo "key_path=$identity/key" >> "$GITHUB_OUTPUT"
           echo "known_hosts_path=$identity/known_hosts" >> "$GITHUB_OUTPUT"
       - name: Restore, claim, process, save and export
+        if: steps.mode.outputs.value != 'recovery'
         id: runtime
         env:
           EDITORIAL_STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
@@ -138,8 +147,38 @@ jobs:
           rm -f _site/data.json
           python -m relocant_media.ops.actions_runtime --mode "$WORKER_MODE" \
             --work "$RUNNER_TEMP/editorial-work" --output _site/data.json
+      - name: Reconcile interrupted writer from verified checkpoint
+        if: steps.mode.outputs.value == 'recovery'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EDITORIAL_STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
+          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
+          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
+          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
+          EDITORIAL_SSH_KEY_PATH: ${{ steps.storage.outputs.key_path }}
+          EDITORIAL_SSH_KNOWN_HOSTS_PATH: ${{ steps.storage.outputs.known_hosts_path }}
+          ACTIONS_CUTOVER_CONFIRMED: ${{ vars.ACTIONS_CUTOVER_CONFIRMED }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+          RECOVERY_CHECKPOINT: ${{ inputs.recovery_checkpoint }}
+        run: |
+          python -m relocant_media.ops.actions_recovery --run-id "$RECOVERY_RUN_ID" \
+            --checkpoint "$RECOVERY_CHECKPOINT" --work "$RUNNER_TEMP/editorial-work"
+      - name: Report saved editorial decisions
+        if: >-
+          steps.runtime.outcome == 'success' &&
+          (steps.mode.outputs.value == 'editorial' || steps.mode.outputs.value == 'auto') &&
+          vars.EDITORIAL_STORAGE_BACKEND == 'ssh'
+        env:
+          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
+          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
+          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
+          EDITORIAL_SSH_KEY_PATH: ${{ steps.storage.outputs.key_path }}
+          EDITORIAL_SSH_KNOWN_HOSTS_PATH: ${{ steps.storage.outputs.known_hosts_path }}
+        run: |
+          python -m relocant_media.ops.editorial_cycle_observation \
+            --snapshot "$RUNNER_TEMP/editorial-work/saved/editorial.sqlite3"
       - name: Publish only sanitized projection
-        if: always()
+        if: always() && steps.mode.outputs.value != 'recovery'
         id: projection
         env:
           NEWSROOM_GITHUB_TOKEN: ${{ github.token }}
@@ -176,7 +215,7 @@ jobs:
       always() && github.ref == 'refs/heads/main' &&
       (needs.cycle.result == 'success' || needs.cycle.result == 'failure') &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true' &&
-      inputs.mode != 'preview'
+      inputs.mode != 'preview' && inputs.mode != 'recovery'
     needs: cycle
     runs-on: ubuntu-latest
     permissions:

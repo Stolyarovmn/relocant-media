@@ -39,6 +39,12 @@ STATE_BRANCH = "editorial-state"
 STATE_PATH = "state/current.json"
 MAX_BYTES = 256 * 1024 * 1024
 SNAPSHOT_GROWTH_RESERVE = 16 * 1024 * 1024
+PUBLIC_EXPORT_TIMEOUT_SECONDS = 180
+
+
+def _runtime_phase(phase: str) -> None:
+    """Только фиксированные имена стадий; никаких исходных текстов и реквизитов."""
+    print(json.dumps({"runtime_phase": phase}), file=sys.stderr, flush=True)
 
 
 class SnapshotCapacityError(ValueError):
@@ -353,7 +359,11 @@ def export_public(database: Path, output: Path, observed_at: str, run_dir: Path 
                "--observed-at", observed_at]
     if run_dir is not None:
         command.extend(["--run-directory", str(run_dir)])
-    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # The projection is disposable. An expensive read-only export must not hold the
+    # canonical writer busy after its verified recovery checkpoint is already saved.
+    # subprocess.run kills and reaps the exporter before raising TimeoutExpired.
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=PUBLIC_EXPORT_TIMEOUT_SECONDS)
 
 
 # Each editorial assesses a bounded batch, so a shorter interval is the throughput lever.
@@ -452,15 +462,23 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             command.append("--submissions-only")
             env["EDITORIAL_PRIVATE_FEEDBACK_ENABLED"] = "false"
     # Replayed intake observes the existing receipt; it never re-triggers a send.
-    code = 0 if mode == "discovery" and not created else run_child(command, env)
+    if mode == "discovery" and not created:
+        _runtime_phase("worker_skipped")
+        code = 0
+    else:
+        _runtime_phase("worker_started")
+        code = run_child(command, env)
+        _runtime_phase("worker_completed")
     report_failure(run_dir, code)
     # A signal/forced termination has uncertain effects: do not unlock even if bytes survived.
     if code < 0:
         raise RuntimeError("runtime terminated; reconcile busy generation")
+    _runtime_phase("snapshot_started")
     manifest = create_snapshot(database, work / "saved")
     manifest["drive_file_id"] = (state["snapshot"]["drive_file_id"]
         if manifest["sha256"] == state["snapshot"]["sha256"]
         else drive.upload(work / "saved" / "editorial.sqlite3", folder))
+    _runtime_phase("snapshot_verified")
     saved_intake = json.loads(intake_state.read_text())
     # Retry budget lives outside SQLite; preserve it across ephemeral runners.
     budget = {key: saved_intake[key] for key in ("signature", "attempts", "backup_pending")
@@ -500,8 +518,10 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     # SSH retains a private, read-back-verified recovery intent before final CAS.
     # Its digest is safe to log; the envelope and SQLite remain private blobs.
     if isinstance(drive, SSHStateClient):
+        _runtime_phase("recovery_checkpoint_started")
         checkpoint_id = drive.checkpoint(ready, busy_sha, work / "checkpoint.json")
-        print(json.dumps({"recovery_checkpoint_sha256": checkpoint_id}), file=sys.stderr)
+        print(json.dumps({"recovery_checkpoint_sha256": checkpoint_id}),
+              file=sys.stderr, flush=True)
     # Preserve the prepared fix from fix/pages-failed-runtime-observation: an
     # uncommitted queue must never appear in the directory uploaded by Actions,
     # even if a hard termination bypasses main's exception cleanup.
@@ -509,6 +529,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     projection_failed = False
     last_cycle = state.get("last_cycle")
     try:
+        _runtime_phase("projection_started")
         export_public(database, provisional, manifest["created_at"], observed_run)
         last_cycle = state.get("last_cycle")
         if provisional.is_file():
@@ -519,13 +540,17 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             projection = merge(projection, projection)
             last_cycle = projection["cities"][0].get("last_cycle")
             provisional.write_text(json.dumps(projection, ensure_ascii=False), encoding="utf-8")
+        _runtime_phase("projection_completed")
     except Exception as error:
         # Projection is disposable; verified receipts and retry budget are not.
         provisional.unlink(missing_ok=True)
         projection_failed = True
+        _runtime_phase("projection_failed")
         print(json.dumps({"projection_error_type": type(error).__name__}), file=sys.stderr)
     ready["last_cycle"] = last_cycle
+    _runtime_phase("state_commit_started")
     store.write(ready, busy_sha)
+    _runtime_phase("state_committed")
     # Publication of this artifact happens only after the canonical checkpoint.
     if provisional.is_file():
         output.parent.mkdir(parents=True, exist_ok=True)
