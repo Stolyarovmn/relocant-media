@@ -532,14 +532,31 @@ def test_owner_reply_requests_revision_only_for_exact_pending_review(engine):
         assert stale is not None and not stale.accepted
 
 
-def test_owner_revision_discards_old_reviews_and_creates_new_exact_version(engine):
+@pytest.mark.parametrize("first_invalid", [None, "extra_field", "unknown_claim"])
+def test_owner_revision_discards_old_reviews_and_creates_new_exact_version(engine, first_invalid):
     raw_id = _store_reviewed_politics(engine)
     revised_draft = RussianDraft(
         title="Отключение воды на Звездаре",
         body="Часть Звездары останется без воды с 08:00 до 18:00.",
         claim_ids=("c1",),
     )
-    provider = ReviewProvider(revised_draft)
+    class RevisionProvider(ReviewProvider):
+        def generate_json(self, *, task, system_instruction, prompt, response_schema):
+            if task == "owner_revision":
+                assert json.loads(prompt)["owner_comment"] == "Сократи заголовок."
+                assert response_schema["additionalProperties"] is False
+                if first_invalid and task not in self.calls:
+                    self.calls.append(task)
+                    wrong = revised_draft.model_dump(mode="json")
+                    if first_invalid == "extra_field":
+                        wrong["comment"] = "Лишнее поле"
+                    else:
+                        wrong["claim_ids"] = ["not-verified"]
+                    return json.dumps(wrong)
+            return super().generate_json(task=task, system_instruction=system_instruction,
+                                         prompt=prompt, response_schema=response_schema)
+
+    provider = RevisionProvider(revised_draft)
     with Session(engine) as session:
         review = _owner_review_row(session, raw_id)
         review.status = "revision_requested"
@@ -554,7 +571,10 @@ def test_owner_revision_discards_old_reviews_and_creates_new_exact_version(engin
         _live,
         "Сократи заголовок.",
     )
-    assert provider.calls == ["owner_revision", "independent_facts", "independent_utility"]
+    attempts = 2 if first_invalid else 1
+    assert provider.calls == ["owner_revision"] * attempts + [
+        "independent_facts", "independent_utility",
+    ]
     assert revised.outcome.draft.title == "Отключение воды на Звездаре"
     assert all(review.reviewer_id.startswith("server-") for review in revised.reviews)
 
