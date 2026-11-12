@@ -916,6 +916,7 @@ async def deliver_owner_approved(
                 target_channel_id,
                 prepared_media.caption,
                 prepared_media.uploads,
+                formatted=True,
             )
             if (
                 len(message_ids) != len(prepared_media.uploads)

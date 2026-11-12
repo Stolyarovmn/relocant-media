@@ -283,18 +283,19 @@ class TelegramBotAPI:
         return message_id
 
     async def send_notice_message(
-        self, chat_id: int | str, html: str, *, source_url: str, map_url: str,
+        self, chat_id: int | str, html: str, *, source_url: str, map_url: str | None = None,
     ) -> int:
         if not is_public_https_url(source_url):
             raise ValueError("notice preview requires a public HTTPS source")
-        result = await self._call("sendMessage", {
+        payload: dict[str, object] = {
             "chat_id": chat_id,
             "text": html,
             "parse_mode": "HTML",
             "link_preview_options": {"url": source_url, "show_above_text": True},
-            "reply_markup": map_reply_markup(map_url),
-        })
-        return self._message_id(result)
+        }
+        if map_url is not None:
+            payload["reply_markup"] = map_reply_markup(map_url)
+        return self._message_id(await self._call("sendMessage", payload))
 
     async def delete_message(self, chat_id: int | str, message_id: int) -> None:
         result = await self._call(

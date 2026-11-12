@@ -13,11 +13,11 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin>
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=5">
   <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin defer></script>
-  <script type="module" src="app.js?v=4"></script>
+  <script type="module" src="app.js?v=5"></script>
 </head>
 <body>
   <a class="skip-link" href="#announcements">К списку объявлений</a>
@@ -36,24 +36,41 @@
   <main class="workspace">
     <section class="controls" aria-labelledby="page-title">
       <h1 id="page-title">Карта Белграда</h1>
-      <form id="address-form" class="address-form" role="search">
-        <label class="sr-only" for="address-query">Улица и номер дома</label>
-        <div class="address-field">
-          <span class="search-icon" aria-hidden="true"></span>
-          <input id="address-query" type="search" inputmode="search" placeholder="Улица и номер дома"
-                 autocomplete="off" spellcheck="false" aria-controls="address-results">
-          <button type="submit">Найти</button>
+      <nav class="map-modes" aria-label="Разделы карты">
+        <button id="show-incidents" type="button" aria-pressed="true" aria-controls="announcements">
+          Городские работы
+        </button>
+        <button id="show-places" type="button" aria-pressed="false" aria-controls="places">
+          Куда сходить
+        </button>
+      </nav>
+      <div id="incident-controls">
+        <form id="address-form" class="address-form" role="search">
+          <label class="sr-only" for="address-query">Улица и номер дома</label>
+          <div class="address-field">
+            <span class="search-icon" aria-hidden="true"></span>
+            <input id="address-query" type="search" inputmode="search" placeholder="Улица и номер дома"
+                   autocomplete="off" spellcheck="false" aria-controls="address-results">
+            <button type="submit">Найти</button>
+          </div>
+          <div id="address-results" class="address-results" hidden></div>
+        </form>
+        <div id="layer-filter" class="layers" role="group" aria-label="Слои карты">
+          <button type="button" data-kind="water" aria-pressed="true"><i aria-hidden="true"></i>Вода</button>
+          <button type="button" data-kind="power" aria-pressed="true"><i aria-hidden="true"></i>Свет</button>
+          <button type="button" data-kind="road" aria-pressed="true"><i aria-hidden="true"></i>Дороги</button>
         </div>
-        <div id="address-results" class="address-results" hidden></div>
-      </form>
-      <div id="layer-filter" class="layers" role="group" aria-label="Слои карты">
-        <button type="button" data-kind="water" aria-pressed="true"><i aria-hidden="true"></i>Вода</button>
-        <button type="button" data-kind="power" aria-pressed="true"><i aria-hidden="true"></i>Свет</button>
-        <button type="button" data-kind="road" aria-pressed="true"><i aria-hidden="true"></i>Дороги</button>
+        <div id="picked-address" class="picked-address" hidden>
+          <div><strong id="picked-label"></strong><p id="picked-match"></p></div>
+          <button id="clear-address" class="icon-button" type="button" aria-label="Сбросить выбранный адрес">×</button>
+        </div>
       </div>
-      <div id="picked-address" class="picked-address" hidden>
-        <div><strong id="picked-label"></strong><p id="picked-match"></p></div>
-        <button id="clear-address" class="icon-button" type="button" aria-label="Сбросить выбранный адрес">×</button>
+      <div id="places-controls" class="places-controls" hidden>
+        <button type="button" id="locate-places" class="locate-places">
+          <span class="locate-icon" aria-hidden="true"></span> Показать расстояния
+        </button>
+        <button type="button" id="clear-location" class="clear-location" hidden>Сбросить</button>
+        <p id="location-status" class="location-status" role="status" hidden></p>
       </div>
     </section>
 
@@ -84,6 +101,20 @@
       <div id="announcement-body" class="announcement-body">
         <label class="archive-filter"><input id="archive" type="checkbox"> Завершённые</label>
         <div id="event-list" class="event-list"></div>
+      </div>
+    </section>
+    <section id="places" class="announcements places" aria-labelledby="places-title" hidden>
+      <header class="list-header">
+        <h2 id="places-title">
+          <button id="toggle-places" type="button" aria-expanded="true" aria-controls="places-body">
+            События <span id="places-count" class="places-count"></span><i aria-hidden="true"></i>
+          </button>
+        </h2>
+      </header>
+      <div id="place-detail" class="place-detail" hidden></div>
+      <p id="places-feedback" class="feedback" role="status" hidden></p>
+      <div id="places-body" class="announcement-body">
+        <div id="places-list" class="places-list"></div>
       </div>
     </section>
   </main>

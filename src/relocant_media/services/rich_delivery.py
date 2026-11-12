@@ -3,19 +3,24 @@
 import hashlib
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from html import escape
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.bot.api import PhotoUpload, TelegramBotAPI, map_reply_markup
+from relocant_media.bot.formatting import (
+    TELEGRAM_TEXT_LIMIT,
+    editorial_message_html,
+    formatted_text_units,
+    rich_editorial_html,
+)
 from relocant_media.bot.publisher import Publisher
 from relocant_media.domain.map_links import map_event_url
 from relocant_media.services.native_map import (
     LEGACY_NOTICE_LAYOUT,
     NOTICE_COVER,
     NOTICE_LAYOUT,
-    NOTICE_TEXT_LIMIT,
-    _notice_text_size,
 )
 from relocant_media.services.notice_banner import render_notice_banner
 from relocant_media.services.production_media import PreparedProductionMedia
@@ -31,7 +36,7 @@ class RichMessageBot(Protocol):
     ) -> int: ...
 
     async def send_notice_message(
-        self, chat_id: int | str, html: str, *, source_url: str, map_url: str,
+        self, chat_id: int | str, html: str, *, source_url: str, map_url: str | None = None,
     ) -> int: ...
 
 
@@ -49,7 +54,15 @@ def prepare_native_transport(
     package: EditorialPackage, publisher: Publisher, media: PreparedProductionMedia | None,
     *, editorial_text: str,
 ) -> tuple[RichMessageBot, PreparedNativeMessage] | None:
-    native = package.presentation.native_map if package.presentation is not None else None
+    presentation = package.presentation
+    place = getattr(presentation, "event_place", None)
+    if place is not None:
+        if datetime.fromisoformat(place["expires_at"]) <= datetime.now(UTC):
+            raise ValueError("event is over")
+        if media is not None and len(media.uploads) != 1:
+            return None  # An already approved album keeps its reviewed multi-photo delivery.
+        return _prepare_event_transport(place, publisher, media, editorial_text)
+    native = presentation.native_map if presentation is not None else None
     if native is None:
         return None
     layout = native.get("layout")
@@ -64,7 +77,7 @@ def prepare_native_transport(
     html = native["message_html"]
     point = native["point"]
     source_preview = (layout == NOTICE_LAYOUT and media is None
-                      and _notice_text_size(html) <= NOTICE_TEXT_LIMIT)
+                      and formatted_text_units(html) <= TELEGRAM_TEXT_LIMIT)
     method = "send_notice_message" if source_preview else "send_rich_message"
     if not callable(getattr(bot, method, None)):
         raise ValueError("production publisher does not support reviewed native map")
@@ -81,12 +94,7 @@ def prepare_native_transport(
                     html, map_url=notice_url, source_preview_url=point["source_url"],
                 )
             reviewed_html_sha256 = native["message_html_sha256"]
-            paragraphs = []
-            for paragraph in html.split("\n\n"):
-                paragraph = paragraph.replace("\n", "<br>")
-                paragraphs.append(paragraph if paragraph.startswith("<blockquote") else
-                                  f"<p>{paragraph}</p>")
-            html = "".join(paragraphs)
+            html = rich_editorial_html(html)
             if media is None:
                 return cast(RichMessageBot, bot), PreparedNativeMessage(
                     html, map_url=notice_url, reviewed_html_sha256=reviewed_html_sha256,
@@ -131,6 +139,36 @@ def prepare_native_transport(
             point["source_url"], telegram_app=os.environ.get("RELOCANT_MAP_TELEGRAM_APP"),
         )
     return cast(RichMessageBot, bot), PreparedNativeMessage(html, photo, image_sha256, map_url)
+
+
+def _prepare_event_transport(
+    place: dict[str, Any], publisher: Publisher, media: PreparedProductionMedia | None,
+    editorial_text: str,
+) -> tuple[RichMessageBot, PreparedNativeMessage]:
+    formatted = editorial_message_html(editorial_text)
+    if formatted is None or formatted[1] != place["source_url"]:
+        raise ValueError("event map requires the exact reviewed source")
+    html, source_url = formatted
+    map_url = map_event_url(source_url, telegram_app=os.environ.get("RELOCANT_MAP_TELEGRAM_APP"),
+                            places=True)
+    source_preview = media is None and formatted_text_units(html) <= TELEGRAM_TEXT_LIMIT
+    bot = getattr(publisher, "bot", None)
+    method = "send_notice_message" if source_preview else "send_rich_message"
+    if not callable(getattr(bot, method, None)):
+        raise ValueError("production publisher does not support event map")
+    transport = cast(RichMessageBot, bot)
+    if source_preview:
+        return transport, PreparedNativeMessage(
+            html, map_url=map_url, source_preview_url=source_url,
+        )
+    html = rich_editorial_html(html)
+    if media is None:
+        return transport, PreparedNativeMessage(html, map_url=map_url)
+    photo, digest = _notice_photo({}, media, editorial_text)
+    credits = media.caption.removeprefix(editorial_text).strip().splitlines()
+    html = (f'<figure><img src="{NOTICE_COVER}"/></figure>{html}'
+            + "".join(f"<p>{escape(credit)}</p>" for credit in credits))
+    return transport, PreparedNativeMessage(html, photo, digest, map_url)
 
 
 def _notice_photo(

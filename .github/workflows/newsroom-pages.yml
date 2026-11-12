@@ -9,6 +9,8 @@ on:
       - 'docs/messenger-discovery.json'
       - 'src/relocant_media/ops/newsroom_export.py'
       - 'src/relocant_media/ops/pages_assets.py'
+      - 'src/relocant_media/ops/events_export.py'
+      - 'src/relocant_media/services/event_place*.py'
       - '.github/workflows/newsroom-pages.yml'
   workflow_dispatch:
   workflow_run:
@@ -55,6 +57,12 @@ jobs:
           else
             printf '{"version":1,"incidents":[]}\n' > _site/map/incidents.json
           fi
+          if git cat-file -e FETCH_HEAD:dashboard-data/events.json; then
+            git show FETCH_HEAD:dashboard-data/events.json > _site/map/events.json
+          else
+            printf '{"version":1,"events":[]}\n' > _site/map/events.json
+          fi
+          python -m relocant_media.ops.events_export --validate _site/map/events.json
       - uses: actions/upload-artifact@v4
         with:
           name: newsroom-preview-${{ github.run_id }}-${{ github.run_attempt }}

@@ -1,15 +1,18 @@
 """Карта из неизменного первоисточника и точный HTML, входящий в два редакционных ревью."""
 
 import hashlib
-import re
 from datetime import datetime
-from html import escape, unescape
+from html import escape
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
-from relocant_media.bot.formatting import _utf16_units
+from relocant_media.bot.formatting import (
+    TELEGRAM_TEXT_LIMIT,
+    editorial_html_parts,
+    formatted_text_units,
+)
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.source_locations import is_public_https_url
@@ -45,9 +48,6 @@ from relocant_media.storage.models import RawItem, Source
 LEGACY_NOTICE_LAYOUT = "map_notice_v1"
 NOTICE_LAYOUT = "map_notice_v2"
 NOTICE_COVER = "tg://photo?id=notice_cover"
-NOTICE_TEXT_LIMIT = 4096
-_NOTICE_LABEL = re.compile(r"^(Где|Когда|Что изменится|Объезд|Питьевая вода|Рубрика):")
-_TIME_RANGE = re.compile(r"\b\d{1,2}:\d{2}[ \t]*[–—-][ \t]*\d{1,2}:\d{2}\b")
 
 
 def _digest(text: str) -> str:
@@ -292,21 +292,10 @@ def _notice_item(item: str) -> str:
     return escape(item).replace(" целиком · ", " <u>целиком</u> · ")
 
 
-def _notice_text_size(html: str) -> int:
-    return _utf16_units(unescape(re.sub(r"<[^>]+>", "", html)))
-
-
 def _source_preview_notice_html(native: dict[str, Any], draft: RussianDraft) -> str:
-    body, separator, rubric = draft.body.rpartition("\n\nРубрика: ")
-    parts = [f"<b>{escape(draft.title)}</b>"]
-    for part in escape(body if separator else draft.body).split("\n\n"):
-        if part.startswith("«") and part.endswith("»"):
-            parts.append(f"<blockquote>{part}</blockquote>")
-        else:
-            lines = "\n".join(_NOTICE_LABEL.sub(r"<b>\1</b>:", line) for line in part.split("\n"))
-            parts.append(_TIME_RANGE.sub(r"<code>\g<0></code>", lines))
-    source = f'<a href="{escape(native["point"]["source_url"], quote=True)}">Источник</a>'
-    footer = [f"<b>Рубрика</b>: {escape(rubric)}", source] if separator else [source]
+    parts, footer = editorial_html_parts(
+        draft.title, draft.body, native["point"]["source_url"], notice=True,
+    )
     sections = native["schedule"]
     areas = [
         f'<code>{escape(section["when"])}</code>\n'
@@ -323,19 +312,19 @@ def _source_preview_notice_html(native: dict[str, Any], draft: RussianDraft) -> 
     if items:
         heading = "<b>Адреса и время работ</b> · местное время"
         overflow = "Полный список адресов — в источнике."
-        reserved = _notice_text_size(
+        reserved = formatted_text_units(
             "\n\n".join([*parts, heading, overflow, *footer]),
         )
-        budget = NOTICE_TEXT_LIMIT - reserved if reserved <= NOTICE_TEXT_LIMIT else 12_000
+        budget = TELEGRAM_TEXT_LIMIT - reserved if reserved <= TELEGRAM_TEXT_LIMIT else 12_000
         rows = []
         for interval, *addresses in items:
-            budget -= _notice_text_size(interval) + 2
-            if budget < _notice_text_size(addresses[0]) + 1:
+            budget -= formatted_text_units(interval) + 2
+            if budget < formatted_text_units(addresses[0]) + 1:
                 rows.append(overflow)
                 break
             rows.append(interval)
             for address in addresses:
-                budget -= _notice_text_size(address) + 1
+                budget -= formatted_text_units(address) + 1
                 if budget < 0:
                     rows.append(overflow)
                     break

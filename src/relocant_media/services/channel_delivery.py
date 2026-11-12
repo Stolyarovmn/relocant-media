@@ -170,6 +170,7 @@ async def deliver_reviewed(
                 target_channel_id,
                 prepared_media.caption,
                 prepared_media.uploads,
+                formatted=True,
             )
             if (
                 len(message_ids) != len(prepared_media.uploads)
