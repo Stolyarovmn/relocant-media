@@ -26,10 +26,15 @@ jobs:
   build:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.revision.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
+      - name: Record build revision
+        id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -66,7 +71,16 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Skip a superseded Pages build
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ needs.build.outputs.revision }}
+        run: |
+          actual=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$actual" = "$EXPECTED_SHA" ]; then echo 'deploy=true' >> "$GITHUB_OUTPUT"; fi
       - uses: actions/deploy-pages@v4
         id: deployment
+        if: steps.current.outputs.deploy == 'true'
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}

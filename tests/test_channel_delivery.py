@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -7,7 +8,9 @@ from test_editorial_integration import prepare_service
 from test_editorial_package import bind_context, package_payload, parse
 
 from relocant_media.ai.package import draft_sha256
+from relocant_media.bot.api import PhotoUpload
 from relocant_media.domain.dedup import event_key
+from relocant_media.services import channel_delivery
 from relocant_media.services.channel_delivery import (
     APPROVED_CHANNEL_ID,
     APPROVED_CHANNELS_BY_CITY,
@@ -15,6 +18,7 @@ from relocant_media.services.channel_delivery import (
 )
 from relocant_media.services.editorial import DeliveryBlockedError, _candidate, _snapshot_member
 from relocant_media.services.package_import import import_package
+from relocant_media.services.rich_delivery import PreparedNativeMessage
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
@@ -124,6 +128,40 @@ async def test_channel_receipt_and_duplicate_without_network(reviewed):
     assert run.delivery_status == "sent" and run.staging_message_id is None
     again = await send(session, run, publisher)
     assert again.message_id == 42 and len(publisher.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_reviewed_rich_cover_keeps_one_canonical_receipt_per_transport(reviewed, monkeypatch):
+    session, run = reviewed
+    photo = PhotoUpload("cover.png", b"fixture")
+    rendered = PreparedNativeMessage("<p>Извещение</p>", photo, "a" * 64)
+    asset = SimpleNamespace(sha256="a" * 64)
+    media = SimpleNamespace(
+        caption="Проверенная подпись",
+        release=SimpleNamespace(release_id="source-cover", assets=(asset,)),
+        uploads=(photo,), release_sha256="b" * 64,
+    )
+    publisher = FakePublisher()
+    calls = []
+
+    async def send_rich_message(target, html, *, photo):
+        calls.append((target, html, photo))
+        with Session(session.get_bind()) as other:
+            pending = other.get(EditorialRun, run.raw_item_id)
+            assert pending.outcome["_rich_delivery"]["state"] == "sending"
+            assert pending.outcome["_media_delivery"]["state"] == "sending"
+        return 43
+
+    bot = SimpleNamespace(send_rich_message=send_rich_message)
+    monkeypatch.setattr(channel_delivery, "prepare_production_media", lambda **options: media)
+    monkeypatch.setattr(channel_delivery, "prepare_native_transport",
+                        lambda *args, **options: (bot, rendered))
+    result = await send(session, run, publisher)
+    assert result.message_id == 43
+    assert run.outcome["_rich_delivery"]["message_ids"] == [43]
+    assert run.outcome["_media_delivery"]["message_ids"] == [43]
+    assert (await send(session, run, publisher)).message_id == 43
+    assert calls == [(APPROVED_CHANNEL_ID, rendered.html, photo)] and not publisher.calls
 
 
 @pytest.mark.asyncio

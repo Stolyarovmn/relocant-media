@@ -1,6 +1,7 @@
 """Карта из неизменного первоисточника и точный HTML, входящий в два редакционных ревью."""
 
 import hashlib
+from datetime import datetime
 from html import escape
 from typing import Any
 
@@ -18,6 +19,7 @@ from relocant_media.services.exhibition_map_point import (
     validate_exhibition_map_review,
 )
 from relocant_media.services.media_review_packet import _valid_snapshot
+from relocant_media.services.notice_banner import render_notice_banner
 from relocant_media.services.transport_map import (
     MAP_MODE,
     build_transport_map,
@@ -29,8 +31,13 @@ from relocant_media.services.utility_map import (
     utility_document_sha256,
     utility_map_fragment,
 )
+from relocant_media.services.utility_scope import extract_power_scopes
+from relocant_media.services.water_outage_scope import extract_water_settlement, water_outage_window
 from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import RawItem, Source
+
+NOTICE_LAYOUT = "map_notice_v1"
+NOTICE_COVER = "tg://photo?id=notice_cover"
 
 
 def _digest(text: str) -> str:
@@ -62,6 +69,44 @@ def _snapshot(session: Session, raw_id: int, document: EvidenceDocument) -> RawI
     return snapshot
 
 
+def _notice_layout(document: EvidenceDocument, point: dict[str, Any]) -> dict[str, Any]:
+    windows: dict[tuple[datetime, datetime], list[str]] = {}
+    if point["mode"] == MAP_MODE:
+        kind = "road"
+    elif power := extract_power_scopes(document):
+        kind = "power"
+        for scope in power:
+            items = windows.setdefault((scope.starts_at, scope.ends_at), [])
+            streets: dict[tuple[str, str], list[str]] = {}
+            for item in scope.addresses:
+                numbers = streets.setdefault((item["street"], item["municipality"]), [])
+                numbers.append(item["number"])
+            items.extend(f"{street}, {', '.join(dict.fromkeys(numbers))} · {municipality}"
+                         for (street, municipality), numbers in streets.items())
+            if scope.settlement is not None:
+                place = scope.settlement
+                label = f"{place.name}, {place.parent}" if place.parent else f"{place.name} целиком"
+                items.append(f"{label} · {place.municipality}")
+    else:
+        kind = "water"
+        if period := water_outage_window(document):
+            items = windows.setdefault(period, [])
+            items.extend(
+                f'{segment["street"]} от {segment["start"]} до {segment["end"]} · '
+                f'{segment["municipality"]}' for segment in point["segments"]
+            )
+            if settlement := extract_water_settlement(document):
+                items.append(f"{settlement[1]} целиком · {settlement[0]}")
+    return {
+        "layout": NOTICE_LAYOUT,
+        "cover_kind": kind,
+        "cover_sha256": hashlib.sha256(render_notice_banner(kind)).hexdigest(),
+        "schedule": [{"when": f"{start:%d.%m.%Y} · {start:%H:%M}–{end:%H:%M}",
+                      "items": list(dict.fromkeys(items))}
+                     for (start, end), items in sorted(windows.items())],
+    }
+
+
 def build_native_map(
     session: Session, document_ids: list[int], documents: tuple[EvidenceDocument, ...], *,
     source_url: str, profile: CityEditorialProfile,
@@ -72,7 +117,7 @@ def build_native_map(
     if profile.city_id == "belgrade":
         transport = build_transport_map(session, document)
         if transport is not None:
-            return transport
+            return {**transport, **_notice_layout(document, transport["point"])}
     for raw_id in document_ids:
         try:
             snapshot = _snapshot(session, raw_id, document)
@@ -86,7 +131,8 @@ def build_native_map(
                 document, snapshot.source_html, snapshot.manifest.get("utility_geography"),
             )
             if utility is not None:
-                return {"source_raw_item_id": raw_id, "point": utility}
+                return {"source_raw_item_id": raw_id, "point": utility,
+                        **_notice_layout(document, utility)}
         events = [event for event, _, _ in _events(snapshot.source_html)
                   if event.get("url") == source_url]
         if len(events) != 1:
@@ -144,6 +190,8 @@ def native_message_html(native_map: dict[str, Any], draft: RussianDraft) -> str:
     source_url = point.get("source_url")
     if not isinstance(source_url, str) or not is_public_https_url(source_url):
         raise ValueError("native map source URL is unsafe")
+    if native_map.get("layout") == NOTICE_LAYOUT:
+        return _notice_message_html(native_map, draft)
     paragraphs = [draft.title, *draft.body.split("\n\n")]
     text = "".join("<p>" + escape(part).replace("\n", "<br/>") + "</p>" for part in paragraphs)
     if point.get("mode") == MAP_MODE:
@@ -154,6 +202,50 @@ def native_message_html(native_map: dict[str, Any], draft: RussianDraft) -> str:
         fragment = _map_fragment(point)
     return (text + fragment
             + f'<p><a href="{escape(source_url, quote=True)}">Источник</a></p>')
+
+
+def _paragraphs(value: str) -> str:
+    result = []
+    for part in value.split("\n\n"):
+        paragraph = "<p>" + escape(part).replace("\n", "<br/>") + "</p>"
+        if part.startswith("«") and part.endswith("»"):
+            paragraph = "<blockquote>" + paragraph + "</blockquote>"
+        result.append(paragraph)
+    return "".join(result)
+
+
+def _notice_message_html(native: dict[str, Any], draft: RussianDraft) -> str:
+    point = native["point"]
+    parts = [f'<figure><img src="{NOTICE_COVER}"/></figure>', f"<h2>{escape(draft.title)}</h2>"]
+    if point["mode"] == UTILITY_MAP_MODE:
+        budget = 12_000
+        groups = []
+        sections = native["schedule"]
+        for section in sections[:100]:
+            groups.append(f'<p><code>{escape(section["when"])}</code> · время Белграда</p>')
+            items = []
+            for item in section["items"]:
+                label = escape(item).replace(" целиком · ", " <u>целиком</u> · ")
+                item_html = f"<li>{label}</li>"
+                budget -= len(item_html.encode())
+                if budget < 0:
+                    break
+                items.append(item_html)
+            if items:
+                groups.append("<ul>" + "".join(items) + "</ul>")
+            if budget < 0:
+                break
+        if groups:
+            if budget < 0 or len(sections) > 100:
+                groups.append("<p>Остальные адреса перечислены в первоисточнике.</p>")
+            parts.append("<details><summary>Адреса и время работ</summary>"
+                         + "".join(groups) + "</details>")
+        parts.append("<details><summary>Подробности объявления</summary>"
+                     + _paragraphs(draft.body) + "</details>")
+    else:
+        parts.append(_paragraphs(draft.body))
+    parts.append(f'<p><a href="{escape(point["source_url"], quote=True)}">Источник</a></p>')
+    return "".join(parts)
 
 
 def _transport_fragment(point: dict[str, Any]) -> str:
@@ -225,6 +317,11 @@ def validate_native_map_draft(
               _digest(EvidenceDocument.model_validate(document.model_dump()).model_dump_json()))
     if point["document_sha256"] != digest:
         raise ValueError("native map does not match evidence document")
+    if "layout" in native:
+        if (point.get("mode") not in {MAP_MODE, UTILITY_MAP_MODE}
+                or any(native.get(key) != value
+                       for key, value in _notice_layout(document, point).items())):
+            raise ValueError("notice layout does not match evidence document")
 
 
 def verify_native_map_snapshot(

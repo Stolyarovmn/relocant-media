@@ -112,12 +112,22 @@ def test_transport_map_is_bound_to_snapshot_and_reviewed_html(line):
         assert native["point"]["source_url"] == ARTICLE
         assert native["point"]["notice_url"] == NOTICE
         assert ("image_sha256" in native["point"]) == line
-        assert ("tg://photo?id=transport_map" in native["message_html"]) == line
-        assert '<tg-map lat="44.650515" long="20.404065"' in native["message_html"]
-        assert f'href="{NOTICE}">Карта Секретариата' in native["message_html"]
+        assert native["message_html"].startswith(
+            '<figure><img src="tg://photo?id=notice_cover"/></figure><h2>'
+        )
+        assert "<tg-map" not in native["message_html"]
+        assert "id=transport_map" not in native["message_html"]
+        assert f'href="{ARTICLE}">Источник' in native["message_html"]
         validate_presentation(presentation, profile, (article,), draft, rubric_id="city_changes")
         verify_stored_presentation(session, 1, (article,), document_ids=[1],
                                    presentation=presentation)
+        # Сохранённые до обновления пакеты пересобираются прежним способом.
+        historical = presentation.model_copy(update={"native_map": {
+            key: native[key] for key in ("point", "source_raw_item_id")
+        }})
+        historical = bind_native_map_draft(historical, draft)
+        assert "<tg-map" in historical.native_map["message_html"]
+        validate_presentation(historical, profile, (article,), draft, rubric_id="city_changes")
         changed_html = _map_html(line=line, latitude="44.640515")
         assert transport_point(article, notice, changed_html) != native["point"]
 

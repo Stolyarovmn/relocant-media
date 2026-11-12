@@ -11,10 +11,11 @@ from relocant_media.ai.models import EvidenceDocument
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.exhibition_map_point import _coordinate
 from relocant_media.services.transport_map_image import render_transport_map
-from relocant_media.services.utility_scope import extract_power_addresses
+from relocant_media.services.utility_scope import extract_power_addresses, extract_power_scopes
 from relocant_media.services.water_outage_scope import (
     extract_official_water_map,
     extract_water_segments,
+    extract_water_settlement,
 )
 
 UTILITY_MAP_MODE = "utility_map_review"
@@ -90,7 +91,8 @@ def build_utility_point(
 ) -> dict[str, Any] | None:
     addresses, segments = utility_scope(document)
     official = extract_official_water_map(document, html)
-    if not addresses and not segments and official is None:
+    if (not addresses and not segments and official is None
+            and not extract_power_scopes(document) and extract_water_settlement(document) is None):
         return None
     verified = _map_geography(geography, addresses, segments)
     point = {

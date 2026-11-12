@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import yaml
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -15,6 +16,21 @@ from relocant_media.ops.newsroom_merge import merge
 from relocant_media.storage.models import Base, EditorialRun, RawItem, Source, Submission
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("workflow,sha", [
+    ("newsroom-pages.yml", "${{ needs.build.outputs.revision }}"),
+    ("editorial-actions.yml", "${{ github.sha }}"),
+])
+def test_pages_deploy_requires_current_code_after_acquiring_its_slot(workflow, sha):
+    path = ROOT / ".github/workflows" / workflow
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    job = data["jobs"]["deploy"]
+    guard, deploy = job["steps"]
+    assert guard["env"]["EXPECTED_SHA"] == sha
+    assert "git/ref/heads/main" in guard["run"]
+    assert deploy["if"] == "steps.current.outputs.deploy == 'true'"
+    assert (job.get("concurrency") or data["concurrency"])["group"] == "newsroom-pages"
 
 
 def test_catalog_separates_cities_and_unknown_runtime() -> None:

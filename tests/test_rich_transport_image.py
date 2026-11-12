@@ -10,6 +10,8 @@ import pytest
 
 from relocant_media.bot.api import PhotoUpload, TelegramBotAPI
 from relocant_media.domain.map_links import map_event_id, map_event_url
+from relocant_media.services.native_map import NOTICE_COVER, NOTICE_LAYOUT
+from relocant_media.services.notice_banner import render_notice_banner
 from relocant_media.services.rich_delivery import (
     PreparedNativeMessage,
     prepare_native_transport,
@@ -24,7 +26,7 @@ SOURCE_URL = "https://transport.example/notice"
 TITLE, BODY = "Изменение маршрута", "Проверьте остановки перед поездкой."
 EVENT_ID = "event_" + hashlib.sha256(SOURCE_URL.encode()).hexdigest()[:20]
 MAP_URL = f"https://stolyarovmn.github.io/relocant-media/map/?event={EVENT_ID}"
-MAP_MARKUP = {"inline_keyboard": [[{"text": "Открыть на карте", "url": MAP_URL}]]}
+MAP_MARKUP = {"inline_keyboard": [[{"text": "Посмотреть на карте", "url": MAP_URL}]]}
 
 
 def multipart(request):
@@ -157,7 +159,7 @@ async def test_rich_utility_map_uses_registered_telegram_app_and_preserves_html(
         assert json.loads(request.content) == {
             "chat_id": -1001, "rich_message": {"html": native["message_html"]},
             "reply_markup": {"inline_keyboard": [[
-                {"text": "Открыть на карте", "url": target_url},
+                {"text": "Посмотреть на карте", "url": target_url},
             ]]},
         }
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 18}})
@@ -166,6 +168,45 @@ async def test_rich_utility_map_uses_registered_telegram_app_and_preserves_html(
         bot, prepared = prepare(package, TelegramBotAPI("fake-token", client))
         assert prepared.map_url == target_url
         assert await send_native_message(bot, -1001, prepared) == 18
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("official_cover", [False, True])
+async def test_compact_notice_sends_a_single_header_and_the_map_button(monkeypatch, official_cover):
+    monkeypatch.delenv("RELOCANT_MAP_TELEGRAM_APP", raising=False)
+    package, _ = native_package()
+    banner = render_notice_banner("power")
+    html = f'<figure><img src="{NOTICE_COVER}"/></figure><h2>Отключение света</h2>'
+    native = package.presentation.native_map
+    native.update(layout=NOTICE_LAYOUT, cover_kind="power",
+                  cover_sha256=hashlib.sha256(banner).hexdigest(), message_html=html)
+    media = None
+    expected = banner
+    if official_cover:
+        expected = b"\xff\xd8\xfffixture"
+        asset = SimpleNamespace(sha256=hashlib.sha256(expected).hexdigest())
+        media = SimpleNamespace(
+            uploads=(PhotoUpload("source.jpg", expected),),
+            release=SimpleNamespace(assets=(asset,)),
+            caption=f"{TITLE}\n\n{BODY}\n\nИсточник: {SOURCE_URL}\n\nФото: A&B",
+        )
+
+    def handler(request):
+        assert request.url.path.endswith("/sendRichMessage")
+        parts = multipart(request)
+        payload = json.loads(parts["rich_message"].get_payload(decode=True))
+        assert payload["html"] == html + ("<p>Фото: A&amp;B</p>" if official_cover else "")
+        assert payload["skip_entity_detection"] is True
+        assert payload["media"] == [{"id": "notice_cover", "media": {
+            "type": "photo", "media": "attach://notice_cover",
+        }}]
+        assert parts["notice_cover"].get_payload(decode=True) == expected
+        assert json.loads(parts["reply_markup"].get_payload(decode=True)) == MAP_MARKUP
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 28}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot, prepared = prepare(package, TelegramBotAPI("fake-token", client), media=media)
+        assert await send_native_message(bot, -1001, prepared) == 28
 
 
 @pytest.mark.asyncio

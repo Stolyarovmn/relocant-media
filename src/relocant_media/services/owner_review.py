@@ -874,7 +874,8 @@ async def deliver_owner_approved(
             run.outcome = {**run.outcome,
                            "_rich_delivery": rich_receipt(rich_message, state="sending")}
         if prepared_media is not None:
-            media_bot = _media_bot(publisher)
+            if rich_message is None:
+                media_bot = _media_bot(publisher)
             run.outcome = {
                 **run.outcome,
                 "_media_delivery": _media_receipt(prepared_media, state="sending"),
@@ -902,6 +903,8 @@ async def deliver_owner_approved(
         if rich_message is not None:
             assert rich_bot is not None
             message_id = await send_native_message(rich_bot, target_channel_id, rich_message)
+            if prepared_media is not None:
+                message_ids = [message_id]
         elif prepared_media is None:
             message_id = await publisher.publish(text)
             if type(message_id) is not int or message_id <= 0:

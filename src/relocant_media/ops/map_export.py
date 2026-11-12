@@ -15,21 +15,35 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.domain.map_links import map_event_id
+from relocant_media.services.local_outage_geometry import (
+    AreaIndex,
+    AreaPolygon,
+    load_area_index,
+    within_outage_segment,
+)
 from relocant_media.services.local_street_geometry import (
     StreetIndex,
     load_street_index,
     local_street_line,
 )
 from relocant_media.services.media_review_packet import _valid_snapshot
+from relocant_media.services.road_scope import is_road_restriction, resolve_road_segments
 from relocant_media.services.transport_map import MAP_MODE, SOURCE_ID, matches_transport_notice
 from relocant_media.services.transport_map_source import extract_transport_map
+from relocant_media.services.utility_geography import _name as geography_name
 from relocant_media.services.utility_map import (
     BVK_NEWS_SOURCE,
     UTILITY_MAP_MODE,
     build_utility_point,
 )
-from relocant_media.services.utility_scope import extract_power_schedule
-from relocant_media.services.water_outage_scope import water_outage_window
+from relocant_media.services.utility_scope import (
+    PowerScope,
+    SettlementScope,
+    extract_power_scopes,
+    house_in_range,
+    is_explicit_house,
+)
+from relocant_media.services.water_outage_scope import extract_water_settlement, water_outage_window
 from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -42,6 +56,8 @@ _ROAD_PERIOD = re.compile(
 )
 _MAX_INCIDENTS = 1500
 _MAX_FEED_BYTES = 4_000_000
+_MAX_HOUSES = 1200
+_MAX_AREAS = 650
 Label = Annotated[str, Field(min_length=1, max_length=260)]
 Latitude = Annotated[float, Field(ge=44.2, le=45.2, allow_inf_nan=False)]
 Longitude = Annotated[float, Field(ge=19.8, le=21.1, allow_inf_nan=False)]
@@ -79,10 +95,51 @@ class Segment(PublicModel):
     end: Label
 
 
+class PrintedRange(Window):
+    municipality: Label
+    street: Label
+    number: Label
+
+
+class Settlement(Window):
+    municipality: Label
+    name: Label
+    parent: Label | None = None
+
+
 class Pin(PublicModel):
     lat: Latitude
     lon: Longitude
     label: Label
+    address: Address | None = None
+    coordinate_source: Literal["rgz"] | None = None
+
+
+Ring = Annotated[tuple[Coordinate, ...], Field(min_length=4, max_length=1000)]
+
+
+class Area(Window):
+    scope: Literal["building", "settlement"]
+    rings: Annotated[tuple[Ring, ...], Field(min_length=1, max_length=16)]
+    label: Label
+    address: Address | None = None
+
+    @field_validator("rings")
+    @classmethod
+    def closed(cls, rings: tuple[Ring, ...]) -> tuple[Ring, ...]:
+        if any(ring[0] != ring[-1] or len(set(ring)) < 3 for ring in rings):
+            raise ValueError("map polygon rings must be closed")
+        return rings
+
+    @model_validator(mode="after")
+    def tied_to_address(self) -> Area:
+        if (self.scope == "building") != (self.address is not None):
+            raise ValueError("only building polygons require an address")
+        if self.address is not None and (
+            self.starts_at != self.address.starts_at or self.ends_at != self.address.ends_at
+        ):
+            raise ValueError("building and address windows must agree")
+        return self
 
 
 class Line(PublicModel):
@@ -102,9 +159,12 @@ class Incident(PublicModel):
     ends_on: date | None = None
     published_at: datetime | None = None
     archived: bool = False
-    points: Annotated[tuple[Pin, ...], Field(max_length=8)] = ()
+    points: Annotated[tuple[Pin, ...], Field(max_length=_MAX_HOUSES)] = ()
     lines: Annotated[tuple[Line, ...], Field(max_length=3)] = ()
-    addresses: Annotated[tuple[Address, ...], Field(max_length=300)] = ()
+    areas: Annotated[tuple[Area, ...], Field(max_length=_MAX_AREAS)] = ()
+    addresses: Annotated[tuple[Address, ...], Field(max_length=_MAX_HOUSES)] = ()
+    ranges: Annotated[tuple[PrintedRange, ...], Field(max_length=_MAX_HOUSES)] = ()
+    settlements: Annotated[tuple[Settlement, ...], Field(max_length=120)] = ()
     segments: Annotated[tuple[Segment, ...], Field(max_length=3)] = ()
     windows: Annotated[tuple[Window, ...], Field(max_length=300)] = ()
 
@@ -182,48 +242,137 @@ def _incident(
     )
 
 
-def _utility(
-    document: EvidenceDocument, point: dict[str, Any], title: str | None,
-    streets: StreetIndex,
-) -> Incident:
-    schedule = extract_power_schedule(document)
-    geo = point["geography"]
-    if schedule:
-        addresses = tuple(Address(starts_at=start, ends_at=end, **value)
-                          for start, end, entries in schedule for value in entries)
-        pins = []
-        for value in geo["points"]:
-            position = _coords(value["latitude"], value["longitude"])
-            if position is not None:
-                address = value["address"]
-                pins.append(Pin(lat=position[0], lon=position[1],
-                                label=f'{address["street"]} {address["number"]}'))
-        windows = tuple(Window(starts_at=start, ends_at=end)
-                        for start, end in sorted({(start, end) for start, end, _ in schedule}))
-        return _incident(document, "power", title or "Плановые отключения света", windows,
-                         addresses=addresses, points=tuple(pins))
+def _key(address: Address | dict[str, str]) -> tuple[str, ...]:
+    values = address.model_dump() if isinstance(address, Address) else address
+    return tuple(geography_name(values[field]) for field in ("municipality", "street", "number"))
 
+
+def _area(
+    polygon: AreaPolygon, window: Window, label: str, address: Address | None = None,
+) -> Area:
+    return Area(rings=polygon.rings, scope="building" if address else "settlement", label=label,
+                address=address, starts_at=window.starts_at, ends_at=window.ends_at)
+
+
+def _settlement(
+    scope: SettlementScope, window: Window, index: AreaIndex | None,
+) -> tuple[Settlement, list[Area]]:
+    entry = Settlement(municipality=scope.municipality, name=scope.name, parent=scope.parent,
+                       starts_at=window.starts_at, ends_at=window.ends_at)
+    polygons = index.settlement(scope.name, scope.municipality) if index is not None else ()
+    return entry, [_area(polygon, window, scope.name) for polygon in polygons]
+
+
+def _power(
+    document: EvidenceDocument, schedule: list[PowerScope], point: dict[str, Any] | None,
+    title: str | None, index: AreaIndex | None,
+) -> Incident:
+    windows = tuple(Window(starts_at=start, ends_at=end) for start, end in sorted({
+        (scope.starts_at, scope.ends_at) for scope in schedule
+    }))
+    geocoded = {
+        _key(entry["address"]): _coords(entry["latitude"], entry["longitude"])
+        for entry in (point["geography"]["points"] if point is not None else ())
+    }
+    addresses: dict[tuple[str, ...], Address] = {}
+    ranges: set[PrintedRange] = set()
+    settlements: list[Settlement] = []
+    areas: list[Area] = []
+    for scope in schedule:
+        window = Window(starts_at=scope.starts_at, ends_at=scope.ends_at)
+        if scope.settlement is not None:
+            entry, polygons = _settlement(scope.settlement, window, index)
+            settlements.append(entry)
+            areas.extend(polygons)
+        for value in scope.addresses:
+            number = value["number"]
+            street, municipality = value["street"], value["municipality"]
+            numbers: tuple[str, ...]
+            if is_explicit_house(number):
+                numbers = (number,)
+            else:
+                ranges.add(PrintedRange(
+                    starts_at=scope.starts_at, ends_at=scope.ends_at,
+                    municipality=municipality, street=street, number=number,
+                ))
+                locations = index.street(street, municipality) if index else ()
+                numbers = tuple(item.number for item in locations
+                                if house_in_range(item.number, number))
+            for number in numbers:
+                address = Address(
+                    starts_at=scope.starts_at, ends_at=scope.ends_at,
+                    municipality=municipality, street=street, number=number,
+                )
+                key = (*_key(address), scope.starts_at.isoformat(), scope.ends_at.isoformat())
+                addresses.setdefault(key, address)
+    pins: list[Pin] = []
+    houses = tuple(addresses.values())[:_MAX_HOUSES]
+    for address in houses:
+        label = f"{address.street}, {address.number}"
+        location = (index.address(address.street, address.number, address.municipality)
+                    if index is not None else None)
+        position = location.point if location is not None else geocoded.get(_key(address))
+        if location is not None and location.buildings and len(areas) < _MAX_AREAS:
+            areas.extend(_area(polygon, address, label, address) for polygon in location.buildings)
+        elif position is not None:
+            pins.append(Pin(lat=position[0], lon=position[1], label=label, address=address,
+                            coordinate_source="rgz" if location and location.osm_url is None
+                            else None))
+    return _incident(
+        document, "power", title or "Плановые отключения света", windows,
+        addresses=houses, points=tuple(pins), areas=tuple(areas[:_MAX_AREAS]),
+        ranges=tuple(sorted(ranges, key=lambda item: (item.starts_at, item.municipality,
+                                                      item.street, item.number))),
+        settlements=tuple(settlements[:120]),
+    )
+
+
+def _water(
+    document: EvidenceDocument, point: dict[str, Any] | None, title: str | None,
+    streets: StreetIndex, index: AreaIndex | None, settlement: tuple[str, str] | None,
+) -> Incident:
     period = water_outage_window(document)
     windows = (Window(starts_at=period[0], ends_at=period[1]),) if period else ()
-    segments = tuple(Segment.model_validate(value) for value in point["segments"])
-    geography = {Segment.model_validate(value["segment"]): value for value in geo["lines"]}
+    segments = tuple(Segment.model_validate(value) for value in point["segments"]) if point else ()
+    geography = {Segment.model_validate(value["segment"]): value
+                 for value in (point["geography"]["lines"] if point else ())}
     lines = []
+    addresses: set[Address] = set()
+    areas: list[Area] = []
+    settlements: tuple[Settlement, ...] = ()
+    if settlement is not None and windows:
+        entry, polygons = _settlement(SettlementScope(*settlement), windows[0], index)
+        settlements = (entry,)
+        areas.extend(polygons)
     for segment in segments:
         found = geography.get(segment) or local_street_line(segment.model_dump(), streets)
         if found is not None and (line := _line(found["coordinates"], segment.street)) is not None:
             lines.append(line)
+            if index is not None and windows:
+                for location in index.street(segment.street, segment.municipality):
+                    if not within_outage_segment(location.point, line.coordinates):
+                        continue
+                    address = Address(**windows[0].model_dump(), municipality=segment.municipality,
+                                      street=segment.street, number=location.number)
+                    addresses.add(address)
+                    label = f"{address.street}, {address.number}"
+                    areas.extend(_area(polygon, windows[0], label, address)
+                                 for polygon in location.buildings)
     fallback_title = f"Отключение воды · {segments[0].street}" if segments else document.title
     return _incident(
         document, "water", title or fallback_title, windows, segments=segments,
-        lines=tuple(lines), source_map_url=point["official_map_url"],
+        lines=tuple(lines), source_map_url=point["official_map_url"] if point else None,
+        addresses=tuple(sorted(addresses, key=_key))[:_MAX_HOUSES], areas=tuple(areas[:_MAX_AREAS]),
+        settlements=settlements,
     )
 
 
 def _road(
-    document: EvidenceDocument, notice: EvidenceDocument, geometry: dict[str, Any],
-    title: str | None,
+    document: EvidenceDocument, notice: EvidenceDocument, geometry: dict[str, Any] | None,
+    title: str | None, streets: StreetIndex,
 ) -> Incident | None:
-    if not notice.body or (period := _ROAD_PERIOD.fullmatch(notice.body.splitlines()[0])) is None:
+    if (not is_road_restriction(notice) or not notice.body
+            or (period := _ROAD_PERIOD.fullmatch(notice.body.splitlines()[0])) is None):
         return None
     try:
         start, end = (datetime.strptime(value, "%d.%m.%Y").date() for value in period.groups())
@@ -233,20 +382,26 @@ def _road(
         return None
     window = Window(starts_at=datetime.combine(start, time.min, tzinfo=_ZONE),
                     ends_at=datetime.combine(end + timedelta(days=1), time.min, tzinfo=_ZONE))
-    points, lines = _road_layers(geometry)
-    return (_incident(
+    lines = _road_lines(geometry)
+    segments = []
+    if not lines:
+        for resolved in resolve_road_segments(notice, streets):
+            segment = Segment.model_validate(resolved["segment"])
+            line = _line(resolved["coordinates"], segment.street)
+            if line is not None:
+                lines.append(line)
+                segments.append(segment)
+    return _incident(
         document, "road", title or notice.title, (window,), starts_on=start, ends_on=end,
-        source_map_url=notice.url, points=points, lines=lines,
-    ) if points or lines else None)
+        source_map_url=notice.url, lines=tuple(lines[:3]), segments=tuple(segments[:3]),
+    )
 
 
-def _road_layers(geometry: dict[str, Any]) -> tuple[tuple[Pin, ...], tuple[Line, ...]]:
-    position = _coords(geometry.get("latitude"), geometry.get("longitude"))
-    raw_line = geometry.get("line")
+def _road_lines(geometry: dict[str, Any] | None) -> list[Line]:
+    raw_line = geometry.get("line") if geometry is not None else None
     line = (_line(raw_line, "Участок по карте транспортного секретариата")
             if isinstance(raw_line, list) else None)
-    pin = (Pin(lat=position[0], lon=position[1], label="Место работ"),) if position else ()
-    return pin, (line,) if line is not None else ()
+    return [line] if line is not None else []
 
 
 def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
@@ -259,6 +414,7 @@ def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
 
 def _published_road(
     session: Session, document: EvidenceDocument, run: EditorialRun, post: Post,
+    streets: StreetIndex,
 ) -> Incident | None:
     native = ((run.outcome.get("_package") or {}).get("presentation") or {}).get("native_map") or {}
     point = native.get("point") or {}
@@ -274,17 +430,18 @@ def _published_road(
         geometry = extract_transport_map(notice, _source_html(session, item)[0])
         if (geometry is not None and geometry == reviewed
                 and matches_transport_notice(document, notice)):
-            incident = _road(document, notice, geometry, post.title)
+            incident = _road(document, notice, geometry, post.title, streets)
             if incident is not None:
                 return incident
     # Старый deep link открывает геометрию уже опубликованной версии как архивную.
-    points, lines = _road_layers(reviewed)
-    return (_incident(document, "road", post.title, (), archived=True, points=points, lines=lines,
-                      source_map_url=point["notice_url"]) if points or lines else None)
+    lines = _road_lines(reviewed)
+    return _incident(document, "road", post.title, (), archived=True, lines=tuple(lines),
+                     source_map_url=point["notice_url"])
 
 
 def export_map(
     session: Session, *, observed_at: datetime, streets: StreetIndex | None = None,
+    areas: AreaIndex | None = None,
 ) -> MapFeed:
     if observed_at.tzinfo is None:
         raise ValueError("snapshot timestamp requires a timezone")
@@ -314,16 +471,20 @@ def export_map(
         title = post.title if sent and post is not None and post.telegram_message_id else None
         if item.source_id == SOURCE_ID:
             geometry = extract_transport_map(document, _source_html(session, item)[0])
-            incident = _road(document, document, geometry, None) if geometry else None
+            incident = _road(document, document, geometry, None, streets or {})
             if incident is not None and incident.ends_at is not None and incident.ends_at < cutoff:
                 continue
         else:
             html, geography = _source_html(session, item)
             point = build_utility_point(document, html, geography)
-            if point is not None and point["mode"] == UTILITY_MAP_MODE:
-                incident = _utility(document, point, title, streets or {})
+            schedule = extract_power_scopes(document)
+            settlement = extract_water_settlement(document)
+            if schedule:
+                incident = _power(document, schedule, point, title, areas)
+            elif settlement is not None or (point and point["mode"] == UTILITY_MAP_MODE):
+                incident = _water(document, point, title, streets or {}, areas, settlement)
             elif title and run is not None and post is not None:
-                incident = _published_road(session, document, run, post)
+                incident = _published_road(session, document, run, post, streets or {})
             else:
                 incident = None
         if incident is None:
@@ -342,13 +503,15 @@ def export_map(
 
 def export_map_snapshot(
     database: Path, output: Path, observed_at: str, *, street_index: Path | None = None,
+    area_index: Path | None = None,
 ) -> None:
     streets = load_street_index(street_index) if street_index is not None else None
+    areas = load_area_index(area_index) if area_index is not None else None
     engine = create_engine(f"sqlite:///{database.resolve().as_uri()}?mode=ro&uri=true")
     try:
         with Session(engine) as session:
             feed = export_map(session, observed_at=datetime.fromisoformat(observed_at),
-                              streets=streets)
+                              streets=streets, areas=areas)
         write_map_feed(output, feed)
     finally:
         engine.dispose()

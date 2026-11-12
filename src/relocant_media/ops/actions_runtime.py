@@ -47,6 +47,7 @@ SNAPSHOT_GROWTH_RESERVE = 16 * 1024 * 1024
 PUBLIC_EXPORT_TIMEOUT_SECONDS = 180
 GPT_EXCHANGE_MAX_BYTES = 512 * 1024
 BELGRADE_STREETS = Path("cities/belgrade/map/roads.json.gz")
+BELGRADE_AREAS = Path("cities/belgrade/map/outage-areas.json.gz")
 MODES = {
     "preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback",
     "map-backfill",
@@ -496,6 +497,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             export_map_snapshot(
                 database, map_output, state["snapshot"]["created_at"],
                 street_index=BELGRADE_STREETS if BELGRADE_STREETS.is_file() else None,
+                area_index=BELGRADE_AREAS if BELGRADE_AREAS.is_file() else None,
             )
         return 0
     if (environment.get("ACTIONS_CUTOVER_CONFIRMED") != "true"
@@ -670,10 +672,11 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         temporary.replace(output)
     if map_output is not None:
         try:
-            export_map_snapshot(work / "saved" / "editorial.sqlite3", map_output,
-                                manifest["created_at"],
-                                street_index=BELGRADE_STREETS if BELGRADE_STREETS.is_file()
-                                else None)
+            export_map_snapshot(
+                work / "saved" / "editorial.sqlite3", map_output, manifest["created_at"],
+                street_index=BELGRADE_STREETS if BELGRADE_STREETS.is_file() else None,
+                area_index=BELGRADE_AREAS if BELGRADE_AREAS.is_file() else None,
+            )
         except Exception as error:
             print(json.dumps({"map_projection_error_type": type(error).__name__}),
                   file=sys.stderr)

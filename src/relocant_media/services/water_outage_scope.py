@@ -25,6 +25,10 @@ _MUNICIPALITY = re.compile(
     rf"\b(?:u|na|у|на)\s+(?:opštini|општини)\s+({_NAME})(?=\s*[,.;])", re.I,
 )
 _OUTAGE = r"(?:bez vode će ostati potrošači|без воде ће остати потрошачи)"
+_FULL_SETTLEMENT = re.compile(
+    rf"{_OUTAGE}\s+(?:u celom naselju|у целом насељу)\s+(?P<name>{_NAME})"
+    r"(?=\s*[.;]|\s*$)", re.I,
+)
 _SEGMENTS = (
     re.compile(
         rf"{_OUTAGE}\s+(?:u|у)\s+(?:ulici|улици)\s+(?P<street>{_NAME})"
@@ -130,6 +134,20 @@ def _street_name(value: str) -> str | None:
     if re.search(r"\b(?:broj\w*|број\w*|okoln\w*|околн\w*|bb|бб)\b", value, re.I):
         return None
     return value
+
+
+def extract_water_settlement(document: EvidenceDocument) -> tuple[str, str] | None:
+    """Явно указанное целое поселение в датированном объявлении."""
+    if water_outage_window(document) is None:
+        return None
+    text = _normalized(document.body)
+    municipalities = {_normalized(match[1]) for match in _MUNICIPALITY.finditer(text)}
+    if len(municipalities) != 1 or re.search(r"\b(?:osim|izuzev|осим|изузев)\b", text, re.I):
+        return None
+    names = {match["name"] for match in _FULL_SETTLEMENT.finditer(text)}
+    if len(names) != 1:
+        return None
+    return next(iter(municipalities)), next(iter(names))
 
 
 def extract_water_segments(document: EvidenceDocument) -> list[dict[str, str]]:

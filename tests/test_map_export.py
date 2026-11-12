@@ -17,10 +17,17 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops.map_backfill import parse_targets, plan
-from relocant_media.ops.map_export import export_map_snapshot, read_map_feed
+from relocant_media.ops.map_export import _power, export_map_snapshot, read_map_feed
 from relocant_media.ops.newsroom_publish import MAP_PATH, _publish_map
 from relocant_media.ops.pages_assets import copy_assets
+from relocant_media.services.local_outage_geometry import (
+    AddressLocation,
+    AreaIndex,
+    AreaPolygon,
+    address_key,
+)
 from relocant_media.services.transport_map import build_transport_map
+from relocant_media.services.utility_scope import extract_power_scopes
 from relocant_media.sources.registry import load_source_file
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem
 
@@ -133,6 +140,27 @@ def test_map_exports_three_layers_and_archived_button_target(tmp_path):
 def test_public_map_schema_rejects_unexpected_private_fields():
     with pytest.raises(ValidationError, match="Extra inputs"):
         read_map_feed(b'{"version":1,"incidents":[],"bot_token":"test"}')
+
+
+def test_power_uses_building_shapes_and_resolves_only_existing_numbers_on_the_same_side():
+    evidence = power_document("Vračar 9.00 - 11.00 PRVA ULICA: 2–6, 11,")
+    polygon = AreaPolygon(
+        (((44.79, 20.45), (44.792, 20.45), (44.792, 20.451), (44.79, 20.45)),),
+        "https://www.openstreetmap.org/way/100",
+    )
+    locations = [
+        AddressLocation("Prva ulica", number, "Vračar", (44.791, 20.4503), buildings, "")
+        for number, buildings in [("2", (polygon,)), ("3", ()), ("6", ())]
+    ]
+    index = AreaIndex({
+        address_key(value.street, value.number, value.municipality): value for value in locations
+    }, {})
+    event = _power(evidence, extract_power_scopes(evidence), None, None, index)
+    assert {address.number for address in event.addresses} == {"2", "6", "11"}
+    assert [pin.address.number for pin in event.points] == ["6"]
+    assert [area.address.number for area in event.areas] == ["2"]
+    assert event.areas[0].ends_at.hour == 11
+    assert event.ranges[0].number == "2–6"
 
 
 @pytest.mark.asyncio
