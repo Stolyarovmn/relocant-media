@@ -123,8 +123,8 @@ def test_water_segment_png_and_review_are_bound_to_immutable_snapshot():
         presentation = bind_native_map_draft(presentation, draft)
         native = presentation.native_map
         assert native is not None
-        assert "Рубрика: Что меняется в городе" in native["message_html"]
-        assert NOTICE_COVER in native["message_html"]
+        assert "<b>Рубрика</b>: Что меняется в городе" in native["message_html"]
+        assert NOTICE_COVER not in native["message_html"]
         assert "<tg-map" not in native["message_html"]
         assert "Kruševačke" in native["message_html"]
         validate_presentation(presentation, profile, (document,), draft, rubric_id="city_changes")
@@ -135,13 +135,13 @@ def test_water_segment_png_and_review_are_bound_to_immutable_snapshot():
         with pytest.raises(ValueError, match="changed in live source"):
             verify_live_native_map(native, changed, html)
         package = SimpleNamespace(presentation=presentation, outcome=SimpleNamespace(draft=draft))
-        bot = SimpleNamespace(send_rich_message=lambda *args: None)
+        bot = SimpleNamespace(send_notice_message=lambda *args: None)
         _, prepared = prepare_native_transport(
             package, SimpleNamespace(bot=bot), None,
             editorial_text=f"{draft.title}\n\n{draft.body}\n\nИсточник: {live.url}",
         )
-        assert prepared.photo.file_name == "notice-cover.png"
-        assert prepared.image_sha256 == native["cover_sha256"]
+        assert prepared.photo is None and prepared.source_preview_url == live.url
+        assert presentation.illustration["preview_url"] == live.url
     engine.dispose()
 
 
@@ -150,6 +150,8 @@ def test_notice_collapses_plain_power_addresses_with_their_source_intervals():
         "Vračar 9.00 - 11.00 VOJVODE ŠUPLJIKCA: 42, 44-48, BB,",
         "Zvezdara 13.00 - 15.00 BRANKA KRSMANOVIĆA: 2,",
         "Lazarevac 09.00 - 13.00 Naselje JUNKOVAC (zaseok BELAĆEVIĆI)",
+        "Novi Beograd 09.00 - 13.00 celo naselje BEŽANIJSKA KOSA; "
+        "Naselje BEŽANIJSKA KOSA PETRA LUBARDE: 9; TOŠIN BUNAR: 42",
     ]))
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -163,20 +165,26 @@ def test_notice_collapses_plain_power_addresses_with_their_source_intervals():
         presentation = build_presentation(session, 1, (evidence,), document_ids=[1],
                                           profile=profile, rubric_id="city_changes")
         draft = present_draft(RussianDraft(title="Отключения света",
-                                           body="Проверенный текст.\n\n«Дословная цитата»",
+                                           body="Проверенный текст.\n\nГде: Белград.\n"
+                                                "Когда: 09:00–13:00.\n\n«Дословная цитата»",
                                            claim_ids=("period",)), presentation)
         presentation = bind_native_map_draft(presentation, draft)
         native = presentation.native_map
-        assert native["cover_kind"] == "power"
         html = native["message_html"]
-        assert html.index("<details>") < html.index("VOJVODE ŠUPLJIKCA, 42, 44-48, BB")
-        assert "<li>BRANKA KRSMANOVIĆA, 2 · Zvezdara</li>" in html
-        assert "<code>13.11.2026 · 13:00–15:00</code>" in html
-        assert "BELAĆEVIĆI, JUNKOVAC" in html
-        assert "<blockquote><p>«Дословная цитата»</p></blockquote>" in html
+        collapsed = html.index("<blockquote expandable>")
+        assert html.index("Проверенный текст.") < collapsed
+        assert "<b>Где</b>: Белград.\n<b>Когда</b>: <code>09:00–13:00</code>" in html
+        assert collapsed < html.index("VOJVODE ŠUPLJIKCA, 42, 44-48, BB")
+        assert "• BRANKA KRSMANOVIĆA, 2 · Zvezdara" in html
+        assert "<b>13.11.2026 · 13:00–15:00</b>" in html
+        assert html.index("BELAĆEVIĆI, JUNKOVAC") < html.index("<blockquote expandable>")
+        assert html.index("BEŽANIJSKA KOSA <u>целиком</u>") < collapsed
+        assert "PETRA LUBARDE" not in html
+        assert "TOŠIN BUNAR, 42 · Novi Beograd" in html
+        assert "<blockquote>«Дословная цитата»</blockquote>" in html
         assert html.count("<a ") == 1 and "openstreetmap.org" not in html
-        assert "<tg-map" not in html and "<details open" not in html
-        fake = {**native, "schedule": [{"when": "10:00", "items": ["Выдуманный дом"]}]}
+        assert "<tg-map" not in html and "Подробности объявления" not in html
+        fake = {**native, "schedule": [{"when": "10:00", "items": ["Выдуманный дом"], "areas": []}]}
         fake["message_html"] = native_message_html(fake, draft)
         tampered = bind_native_map_draft(
             presentation.model_copy(update={"native_map": fake}), draft,

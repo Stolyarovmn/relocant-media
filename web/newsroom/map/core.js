@@ -1,7 +1,7 @@
 export const kinds = {
   water: { label: "Вода", color: "#00669f" },
   power: { label: "Свет", color: "#6937b2" },
-  road: { label: "Дороги", color: "#bc2444" },
+  road: { label: "Дороги", color: "#8b202e" },
 };
 
 const eventId = /^event_[a-f0-9]{20}$/;
@@ -87,8 +87,9 @@ function readAddress(item) {
     window: readWindow(item) } : null;
 }
 
-function readArea(item) {
-  if (!item || !["building", "settlement"].includes(item.scope)) return null;
+function readArea(item, kind) {
+  const scopes = kind === "road" ? ["road", "building", "settlement"] : ["building", "settlement"];
+  if (!item || !scopes.includes(item.scope)) return null;
   const validRing = (ring) => Array.isArray(ring) && ring.length >= 4 && ring.length <= 1000
     && ring.every((pair) => Array.isArray(pair) && pair.length === 2 && coords(...pair))
     && ring[0][0] === ring.at(-1)[0] && ring[0][1] === ring.at(-1)[1];
@@ -131,8 +132,8 @@ export function readIncidents(document) {
         && line.coordinates.length >= 2
         && line.coordinates.every((pair) => Array.isArray(pair) && coords(pair[0], pair[1]))
         ? [{ coordinates: line.coordinates.map(([lat, lon]) => [lat, lon]),
-          label: textValue(line.label) }] : []),
-      areas: array(record.areas).map(readArea).filter(Boolean),
+          label: textValue(line.label), window: readWindow(line) }] : []),
+      areas: array(record.areas).map((area) => readArea(area, record.kind)).filter(Boolean),
       addresses: array(record.addresses).map(readAddress).filter(Boolean),
       ranges: array(record.ranges).map(readAddress).filter(Boolean),
       settlements: array(record.settlements).flatMap((item) => textValue(item?.name)
@@ -167,6 +168,11 @@ export function unexpired(window, now, archive = false) {
   return archive || !window || now < window.end;
 }
 
+export function visibleMapLines(incident, now, archive = false) {
+  const fallback = incident.end === null ? null : incident;
+  return incident.lines.filter(({ window }) => unexpired(window || fallback, now, archive));
+}
+
 export function nextTransition(incidents, now) {
   let closest = Infinity;
   const consider = (value) => {
@@ -177,6 +183,11 @@ export function nextTransition(incidents, now) {
     consider(incident.start);
     consider(incident.end);
     for (const window of incident.windows) {
+      consider(window.start);
+      consider(window.end);
+    }
+    for (const { window } of incident.lines) {
+      if (!window) continue;
       consider(window.start);
       consider(window.end);
     }
@@ -365,10 +376,10 @@ export function addressHits(incident, selected) {
 }
 
 export function exactMapPoints(index, incident, now = -Infinity, archive = false) {
-  if (incident.kind === "road") return [];
   const points = incident.points.filter((point) => unexpired(point.address?.window, now, archive));
   if (!index || incident.kind !== "power") return points;
-  const covered = new Set([...points, ...incident.areas]
+  const visibleAreas = incident.areas.filter((area) => unexpired(area.window, now, archive));
+  const covered = new Set([...points, ...visibleAreas]
     .filter(({ address }) => address).map(({ address }) => addressKey(address)));
   for (const item of incident.addresses) {
     const key = addressKey(item);
@@ -380,6 +391,132 @@ export function exactMapPoints(index, incident, now = -Infinity, archive = false
       address: item });
   }
   return points;
+}
+
+function insideRing(point, ring) {
+  let inside = false;
+  for (let i = 1; i < ring.length; i += 1) {
+    const a = ring[i - 1];
+    const b = ring[i];
+    if ((a.y > point.y) !== (b.y > point.y)
+        && point.x < a.x + (b.x - a.x) * (point.y - a.y) / (b.y - a.y)) inside = !inside;
+  }
+  return inside;
+}
+
+function nearEdge(point, path, radius) {
+  for (let i = 1; i < path.length; i += 1) {
+    const a = path[i - 1];
+    const b = path[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const span = dx * dx + dy * dy;
+    const ratio = span ? ((point.x - a.x) * dx + (point.y - a.y) * dy) / span : 0;
+    const offset = Math.max(0, Math.min(1, ratio));
+    if (Math.hypot(point.x - a.x - offset * dx, point.y - a.y - offset * dy) <= radius) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function projectedShape(paths, source, area, project) {
+  const parts = paths.map((path) => path.map(project));
+  const bounds = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const part of parts) {
+    for (const { x, y } of part) {
+      bounds[0] = Math.min(bounds[0], x);
+      bounds[1] = Math.min(bounds[1], y);
+      bounds[2] = Math.max(bounds[2], x);
+      bounds[3] = Math.max(bounds[3], y);
+    }
+  }
+  const path = paths[0];
+  const middle = Math.floor((path.length - 1) / 2);
+  const a = path[middle];
+  const b = path[middle + 1];
+  return { parts, bounds, area, marker: {
+    lat: (a[0] + b[0]) / 2, lon: (a[1] + b[1]) / 2, label: source.label,
+    address: source.address, window: source.window,
+  } };
+}
+
+function coversPoint(shape, point, radius) {
+  const [left, top, right, bottom] = shape.bounds;
+  if (point.x < left - radius || point.x > right + radius
+      || point.y < top - radius || point.y > bottom + radius) return false;
+  const [exterior, ...holes] = shape.parts;
+  if (shape.area && insideRing(point, exterior) && !holes.some((hole) => insideRing(point, hole))) {
+    return true;
+  }
+  return shape.parts.some((part) => nearEdge(point, part, radius));
+}
+
+function representsPin(shape, pin, pixel) {
+  const pinWindow = pin.window || pin.address?.window;
+  const shapeWindow = shape.marker.window || shape.marker.address?.window;
+  if (pinWindow && shapeWindow
+      && (pinWindow.start !== shapeWindow.start || pinWindow.end !== shapeWindow.end)) {
+    return false;
+  }
+  if (pin.address && shape.marker.address) {
+    return addressKey(pin.address) === addressKey(shape.marker.address);
+  }
+  return coversPoint(shape, pixel, pin.address ? 0 : shape.area ? 8 : 11);
+}
+
+export function pointsAtScale(points, lines, areas, zoom, project) {
+  const shapes = [
+    ...lines.map((line) => projectedShape([line.coordinates], line, false, project)),
+    ...areas.map((area) => projectedShape(area.rings, area, true, project)),
+  ];
+  if (!shapes.length) return points;
+  const pins = points.map((pin) => ({ pin, pixel: project([pin.lat, pin.lon]) }));
+  if (zoom >= 16) {
+    return pins.filter(({ pin, pixel }) => !shapes.some((shape) =>
+      representsPin(shape, pin, pixel)))
+      .map(({ pin }) => pin);
+  }
+  const represented = new Set(points.flatMap(({ address }) => address ? [addressKey(address)] : []));
+  const overview = shapes.filter((shape) => {
+    const key = shape.marker.address && addressKey(shape.marker.address);
+    return !(key && represented.has(key)) && !pins.some(({ pixel }) => coversPoint(shape, pixel, .1));
+  });
+  return [...points, ...overview.map(({ marker }) => marker)];
+}
+
+export function clusterMapPoints(points, project, radius) {
+  const buckets = new Map();
+  const groups = [];
+  for (const point of points) {
+    const pixel = project([point.lat, point.lon]);
+    const x = Math.floor(pixel.x / radius);
+    const y = Math.floor(pixel.y / radius);
+    let target;
+    let nearest = radius;
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (const candidate of buckets.get(`${x + dx}:${y + dy}`) || []) {
+          const distance = Math.hypot(candidate.pixel.x - pixel.x, candidate.pixel.y - pixel.y);
+          if (distance < nearest) {
+            target = candidate;
+            nearest = distance;
+          }
+        }
+      }
+    }
+    if (target) {
+      target.points.push(point);
+    } else {
+      const group = { pixel, points: [point] };
+      const key = `${x}:${y}`;
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(group);
+      else buckets.set(key, [group]);
+      groups.push(group);
+    }
+  }
+  return groups.map(({ points }) => points);
 }
 
 export function streetBounds(index, incident) {

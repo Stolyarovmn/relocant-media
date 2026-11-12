@@ -43,10 +43,35 @@ _ROW = re.compile(
     rf"(?P<end>{_CLOCK})\s+(?P<addresses>.+)\Z")
 _INTERVAL = re.compile(rf"{_CLOCK}\s*[-–—]\s*{_CLOCK}")
 _SETTLEMENT = re.compile(r"(?:Naselje|Насеље)\s+([^:]+):\s*(.*)\Z", re.IGNORECASE)
+_SUBAREA = re.compile(
+    r"(?:naselje|mikronaselje|stambeno naselje|mesna zajednica|"
+    r"насеље|микронасеље|стамбено насеље|месна заједница)\s+([^:]+):\s*(.*)\Z",
+    re.I,
+)
 _ENTIRE_SETTLEMENT = re.compile(
     r"(?:Naselje|Насеље)\s+([^():]+?)"
     r"(?:\s*\((?:zaseok|засеок)\s+([^():]+)\))?\.?\Z", re.IGNORECASE,
 )
+_WHOLE_KIND = (
+    r"(?:(?:celo|čitavo|kompletno|цело|читаво|комплетно)\s+"
+    r"(?:naselje|mikronaselje|stambeno naselje|насеље|микронасеље|стамбено насеље)"
+    r"|(?:cela|čitava|kompletna|цела|читава|комплетна)\s+"
+    r"(?:mesna zajednica|месна заједница)"
+    r"|(?:ceo|čitav|kompletan|цео|читав|комплетан)\s+(?:blok|блок))"
+)
+_WHOLE_PREFIX = re.compile(rf"(?P<kind>{_WHOLE_KIND})\s+(?P<name>[^,:;]+)\Z", re.I)
+_WHOLE_SUFFIX = re.compile(rf"(?P<name>[^,:;]+?)\s*(?:[:–—]|\s-\s)\s*{_WHOLE_KIND}\Z", re.I)
+_AREA_LABEL = re.compile(
+    r"^(?:naselje|mikronaselje|stambeno naselje|mesna zajednica|"
+    r"насеље|микронасеље|стамбено насеље|месна заједница)\s+", re.I,
+)
+_AREA_PART = re.compile(
+    r"\b(?:osim|izuzev|samo|deo|dela|delu|pojedin\w*|осим|изузев|само|део|дела|делу|поједин\w*)\b",
+    re.I,
+)
+_AREA_EXCLUSION = re.compile(r"\b(?:osim|izuzev|осим|изузев)\b", re.I)
+_AREA_JOIN = re.compile(r"\s+(?:i|и)\s+(?:naselje|насеље)\b", re.I)
+_AREA_CONTEXT = re.compile(r",\s*(?:naselje|насеље)\s+", re.I)
 _HOUSE = r"[1-9][0-9]{0,4}[A-Za-zČĆŠŽĐčćšžđА-Яа-яЂЈЉЊЋЏђјљњћџ]?"
 _NUMBER = re.compile(_HOUSE + r"\Z")
 _RANGE = re.compile(rf"{_HOUSE}\s*[-–—]\s*{_HOUSE}\Z")
@@ -119,7 +144,33 @@ def _name(value: str) -> bool:
             and any(character.isalpha() for character in value) and "_" not in value)
 
 
-def _street_scopes(municipality: str, text: str) -> tuple[dict[str, str], ...]:
+def settlement_name_key(value: str) -> str:
+    """Название населённого пункта или местной общины без административного префикса."""
+    return (osm_name(value).removeprefix("мз ").removeprefix("месна заједница "))
+
+
+def settlement_matches_context(place: SettlementScope, municipality: str) -> bool:
+    """Совпадение с явно указанным поселением, а не только с общиной."""
+    parts = _AREA_CONTEXT.split(municipality, maxsplit=1)
+    return (len(parts) == 2 and place.parent is None
+            and osm_name(parts[0]) == osm_name(place.municipality)
+            and settlement_name_key(parts[1]) == settlement_name_key(place.name))
+
+
+def _explicit_whole_area(municipality: str, text: str) -> SettlementScope | None:
+    text = text.strip().rstrip(".")
+    match = _WHOLE_PREFIX.fullmatch(text) or _WHOLE_SUFFIX.fullmatch(text)
+    if not match or _AREA_PART.search(text):
+        return None
+    name = _AREA_LABEL.sub("", match["name"]).strip()
+    if "kind" in match.groupdict() and osm_name(match["kind"]).endswith(" блок"):
+        name = f"{'Блок' if 'блок' in match['kind'].casefold() else 'Blok'} {name}"
+    return SettlementScope(municipality, name) if _name(name) else None
+
+
+def _street_scopes(
+    municipality: str, text: str, *, include_micro_areas: bool = False,
+) -> tuple[dict[str, str], ...]:
     scope = municipality
     street: str | None = None
     records = []
@@ -127,20 +178,24 @@ def _street_scopes(municipality: str, text: str) -> tuple[dict[str, str], ...]:
         token = raw_token.strip()
         if not token:
             continue
-        settlement = _SETTLEMENT.fullmatch(token)
+        settlement = (_SUBAREA if include_micro_areas else _SETTLEMENT).fullmatch(token)
         if settlement:
             place, token = settlement[1].strip(), settlement[2].strip()
             if not _name(place):
                 return ()
             scope = f"{municipality}, naselje {place}"
             street = None
-        elif re.match(r"(?:Naselje|Насеље)\b", token, re.IGNORECASE):
+        elif (_AREA_LABEL.match(token) if include_micro_areas
+              else re.match(r"(?:Naselje|Насеље)\b", token, re.IGNORECASE)):
             # Поселение без явной улицы/номера не превращается в адрес всего поселения.
             return ()
         if ":" in token:
             parts = token.split(":")
             if len(parts) != 2 or not _name(parts[0].strip()):
                 return ()
+            if include_micro_areas and _AREA_PART.search(parts[0]):
+                street = None
+                continue
             street, token = parts[0].strip(), parts[1].strip()
         if not token:
             continue
@@ -165,6 +220,55 @@ def is_explicit_house(value: str) -> bool:
     return _NUMBER.fullmatch(value) is not None
 
 
+def _row_scopes(
+    municipality: str, text: str, *, include_whole_areas: bool,
+) -> tuple[tuple[dict[str, str], ...], tuple[SettlementScope, ...]]:
+    match = _ENTIRE_SETTLEMENT.fullmatch(text.rstrip(" ,"))
+    if match and _name(match[1]) and (not match[2] or _name(match[2])):
+        if not include_whole_areas or not (_AREA_PART.search(text) or _AREA_JOIN.search(text)):
+            return (), (SettlementScope(
+                municipality, match[2] or match[1], match[1] if match[2] else None,
+            ),)
+    if not include_whole_areas:
+        return _street_scopes(municipality, text), ()
+
+    # Уличные записи продолжают прежний контекст внутри секции. Явное
+    # целое поселение — отдельная запись, его контекст к соседним улицам не прилипает.
+    places: list[SettlementScope] = []
+    records: list[dict[str, str]] = []
+    has_exclusion = _AREA_EXCLUSION.search(text) is not None
+    for section in text.split(";"):
+        pending: list[str] = []
+        for token in section.split(","):
+            if not has_exclusion and (place := _explicit_whole_area(municipality, token)):
+                records.extend(_street_scopes(
+                    municipality, ",".join(pending), include_micro_areas=True,
+                ))
+                pending.clear()
+                if place not in places:
+                    places.append(place)
+            else:
+                pending.append(token)
+        records.extend(_street_scopes(municipality, ",".join(pending), include_micro_areas=True))
+    return tuple(records), tuple(places)
+
+
+def _without_redundant_addresses(scopes: list[PowerScope]) -> list[PowerScope]:
+    whole: dict[tuple[datetime, datetime], list[SettlementScope]] = {}
+    for scope in scopes:
+        if scope.settlement is not None:
+            whole.setdefault((scope.starts_at, scope.ends_at), []).append(scope.settlement)
+    result = []
+    for scope in scopes:
+        places = whole.get((scope.starts_at, scope.ends_at), ())
+        records = tuple(address for address in scope.addresses
+                        if not any(settlement_matches_context(place, address["municipality"])
+                                   for place in places))
+        if records or scope.settlement is not None:
+            result.append(PowerScope(scope.starts_at, scope.ends_at, records, scope.settlement))
+    return result
+
+
 def house_in_range(number: str, printed_range: str) -> bool:
     """Сопоставить существующий адрес с печатным диапазоном одной стороны улицы."""
     if not _RANGE.fullmatch(printed_range):
@@ -176,7 +280,9 @@ def house_in_range(number: str, printed_range: str) -> bool:
             and lower[0] % 2 == upper[0] % 2 == candidate[0] % 2)
 
 
-def extract_power_scopes(document: EvidenceDocument) -> list[PowerScope]:
+def extract_power_scopes(
+    document: EvidenceDocument, *, include_whole_areas: bool = True,
+) -> list[PowerScope]:
     """Диапазоны, точные адреса и явно названные поселения в собственных окнах."""
     day = power_outage_date(document)
     if len(document.body) > MAX_BODY or day is None:
@@ -196,20 +302,17 @@ def extract_power_scopes(document: EvidenceDocument) -> list[PowerScope]:
         # Склеенные строки с другим интервалом нельзя приписать первому району.
         if start >= end or _INTERVAL.search(text):
             continue
-        match = _ENTIRE_SETTLEMENT.fullmatch(text.rstrip(" ,"))
-        settlement = None
-        if match and _name(match[1]) and (not match[2] or _name(match[2])):
-            settlement = SettlementScope(
-                municipality, match[2] or match[1], match[1] if match[2] else None,
-            )
-        records = _street_scopes(municipality, text) if settlement is None else ()
-        if records or settlement is not None:
-            count += len(records) + int(settlement is not None)
-            if count > _MAX_SCOPE_ITEMS:
-                return []
-            scopes.append(PowerScope(midnight + timedelta(minutes=start),
-                                     midnight + timedelta(minutes=end), records, settlement))
-    return scopes
+        records, settlements = _row_scopes(
+            municipality, text, include_whole_areas=include_whole_areas,
+        )
+        count += len(records) + len(settlements)
+        if count > _MAX_SCOPE_ITEMS:
+            return []
+        begins, finishes = midnight + timedelta(minutes=start), midnight + timedelta(minutes=end)
+        if records:
+            scopes.append(PowerScope(begins, finishes, records))
+        scopes.extend(PowerScope(begins, finishes, (), settlement) for settlement in settlements)
+    return _without_redundant_addresses(scopes) if include_whole_areas else scopes
 
 
 def extract_power_addresses(document: EvidenceDocument) -> list[dict[str, str]]:
@@ -229,7 +332,7 @@ def extract_power_schedule(
     """Привязка точных домов к интервалу их строки, время Белграда."""
     schedule = []
     count = 0
-    for scope in extract_power_scopes(document):
+    for scope in extract_power_scopes(document, include_whole_areas=False):
         records = [entry for entry in scope.addresses if is_explicit_house(entry["number"])]
         if not records:
             continue

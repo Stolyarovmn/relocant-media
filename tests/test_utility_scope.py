@@ -8,6 +8,7 @@ from relocant_media.services.utility_scope import (
     extract_power_scopes,
     house_in_range,
     power_outage_date,
+    settlement_matches_context,
 )
 
 URL = ("https://www.beograd.rs/lat/servisne-informacije/elektricna-energija/"
@@ -77,6 +78,37 @@ def test_range_and_hamlet_keep_their_own_window_without_expanding_settlement():
     assert not house_in_range("8C", "8A–8B")
     assert not house_in_range("4", "2–9")
     assert not house_in_range("25A", "25–25")
+
+
+def test_explicit_whole_microdistrict_deduplicates_only_its_own_window():
+    value = document("\n".join([
+        "Novi Beograd 10.00 - 14.00 Celo mikronaselje Ledine; DRUGA: 7,",
+        "Novi Beograd 10.00 - 14.00 Naselje LEDINE: PRVA: 15,",
+        "Novi Beograd 10.00 - 14.00 Naselje BEŽANIJA: TREĆA: 5,",
+        "Novi Beograd 15.00 - 16.00 Naselje LEDINE: PRVA: 17,",
+    ]))
+    scopes = extract_power_scopes(value)
+    whole = next(scope.settlement for scope in scopes if scope.settlement)
+    assert whole.name == "Ledine"
+    assert settlement_matches_context(whole, "Нови Београд, насеље МЗ Ледине")
+    assert not settlement_matches_context(whole, "Novi Beograd")
+    assert [item["number"] for scope in scopes for item in scope.addresses] == ["7", "5", "17"]
+    assert [item["number"] for item in extract_power_addresses(value)] == ["15", "5", "17"]
+    assert not any(scope.settlement for scope in extract_power_scopes(
+        value, include_whole_areas=False,
+    ))
+
+
+@pytest.mark.parametrize("coverage", [
+    "Naselje Ledine: PRVA: 2, 4, 6, 8, 10, 12",
+    "Celo naselje Ledine osim ulice Prve",
+    "Celo naselje Ledine; osim ulice Prve",
+    "Naselje Ledine i naselje Bežanija",
+    "Naselje Ledine (deo naselja)",
+])
+def test_partial_or_long_address_list_is_never_a_whole_power_area(coverage):
+    value = document(f"Novi Beograd 10.00 - 14.00 {coverage}")
+    assert not any(scope.settlement for scope in extract_power_scopes(value))
 
 
 def test_cyrillic_names_and_numbered_streets_are_preserved():

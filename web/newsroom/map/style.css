@@ -7,7 +7,7 @@
   --stroke: #d4dbcd;
   --water: #00669f;
   --power: #6937b2;
-  --road: #bc2444;
+  --road: #8b202e;
   --gutter: clamp(16px, 2.6vw, 34px);
   color-scheme: light;
   font: 16px/1.4 "Source Sans 3", "Segoe UI", sans-serif;
@@ -297,6 +297,33 @@ h1 {
 }
 .leaflet-popup-content { margin: 10px 17px 10px 12px; font-size: .9rem; color: var(--ink); }
 .leaflet-popup-content p { margin: 4px 0; }
+.map-cluster { background: transparent; }
+.map-cluster:focus-visible { outline: 3px solid var(--green); outline-offset: 2px; border-radius: 50%; }
+.map-cluster-count {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  border: 2px solid #fffef9;
+  border-radius: 50%;
+  background: var(--kind, var(--green));
+  color: #fff;
+  box-shadow: 0 1px 6px #172e214d;
+  font-size: .88rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.map-cluster-popup ul { display: grid; gap: 4px; margin: 7px 0 0; padding: 0; list-style: none; }
+.map-cluster-popup button {
+  width: 100%;
+  min-height: 34px;
+  padding: 4px 6px;
+  border: 1px solid var(--stroke);
+  border-radius: 5px;
+  background: var(--card);
+  text-align: left;
+}
+.map-cluster-popup button:hover { background: #e7eddf; }
 
 .announcements { grid-area: announcements; min-width: 0; padding-top: 19px; }
 .list-header h2 { margin: 0; font-size: 1.45rem; letter-spacing: -.04em; line-height: 1.14; }

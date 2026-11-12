@@ -10,7 +10,13 @@ from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.bot.api import PhotoUpload, TelegramBotAPI, map_reply_markup
 from relocant_media.bot.publisher import Publisher
 from relocant_media.domain.map_links import map_event_url
-from relocant_media.services.native_map import NOTICE_COVER, NOTICE_LAYOUT
+from relocant_media.services.native_map import (
+    LEGACY_NOTICE_LAYOUT,
+    NOTICE_COVER,
+    NOTICE_LAYOUT,
+    NOTICE_TEXT_LIMIT,
+    _notice_text_size,
+)
 from relocant_media.services.notice_banner import render_notice_banner
 from relocant_media.services.production_media import PreparedProductionMedia
 from relocant_media.services.transport_map import MAP_MODE
@@ -24,6 +30,10 @@ class RichMessageBot(Protocol):
         map_url: str | None = None,
     ) -> int: ...
 
+    async def send_notice_message(
+        self, chat_id: int | str, html: str, *, source_url: str, map_url: str,
+    ) -> int: ...
+
 
 @dataclass(frozen=True)
 class PreparedNativeMessage:
@@ -31,6 +41,8 @@ class PreparedNativeMessage:
     photo: PhotoUpload | None = None
     image_sha256: str | None = None
     map_url: str | None = None
+    source_preview_url: str | None = None
+    reviewed_html_sha256: str | None = None
 
 
 def prepare_native_transport(
@@ -40,7 +52,8 @@ def prepare_native_transport(
     native = package.presentation.native_map if package.presentation is not None else None
     if native is None:
         return None
-    notice_layout = native.get("layout") == NOTICE_LAYOUT
+    layout = native.get("layout")
+    notice_layout = layout in {NOTICE_LAYOUT, LEGACY_NOTICE_LAYOUT}
     if media is not None and not notice_layout:
         raise ValueError("native map and attached media require a combined review")
     expected_text = (f"{package.outcome.draft.title}\n\n{package.outcome.draft.body}"
@@ -48,22 +61,46 @@ def prepare_native_transport(
     if expected_text != editorial_text:
         raise ValueError("native map cannot drop delivery-specific text")
     bot = getattr(publisher, "bot", None)
-    if bot is None or not callable(getattr(bot, "send_rich_message", None)):
-        raise ValueError("production publisher does not support reviewed native map")
     html = native["message_html"]
     point = native["point"]
+    source_preview = (layout == NOTICE_LAYOUT and media is None
+                      and _notice_text_size(html) <= NOTICE_TEXT_LIMIT)
+    method = "send_notice_message" if source_preview else "send_rich_message"
+    if not callable(getattr(bot, method, None)):
+        raise ValueError("production publisher does not support reviewed native map")
     if notice_layout:
-        notice_photo, notice_sha256 = _notice_photo(native, media, editorial_text)
-        if html.count(NOTICE_COVER) != 1 or "<tg-map" in html:
-            raise ValueError("reviewed notice needs one cover and no inline map")
-        if media is not None and media.caption != editorial_text:
-            credits = media.caption.removeprefix(editorial_text).strip().splitlines()
-            html += "".join(f"<p>{escape(credit)}</p>" for credit in credits)
+        reviewed_html_sha256 = None
         notice_url = map_event_url(
             point["source_url"], telegram_app=os.environ.get("RELOCANT_MAP_TELEGRAM_APP"),
         )
+        if layout == NOTICE_LAYOUT:
+            if NOTICE_COVER in html or "<tg-map" in html:
+                raise ValueError("notice has unsupported content")
+            if source_preview:
+                return cast(RichMessageBot, bot), PreparedNativeMessage(
+                    html, map_url=notice_url, source_preview_url=point["source_url"],
+                )
+            reviewed_html_sha256 = native["message_html_sha256"]
+            paragraphs = []
+            for paragraph in html.split("\n\n"):
+                paragraph = paragraph.replace("\n", "<br>")
+                paragraphs.append(paragraph if paragraph.startswith("<blockquote") else
+                                  f"<p>{paragraph}</p>")
+            html = "".join(paragraphs)
+            if media is None:
+                return cast(RichMessageBot, bot), PreparedNativeMessage(
+                    html, map_url=notice_url, reviewed_html_sha256=reviewed_html_sha256,
+                )
+            html = f'<figure><img src="{NOTICE_COVER}"/></figure>' + html
+        if html.count(NOTICE_COVER) != 1 or "<tg-map" in html:
+            raise ValueError("reviewed notice needs one cover and no inline map")
+        notice_photo, notice_sha256 = _notice_photo(native, media, editorial_text)
+        if media is not None and media.caption != editorial_text:
+            credits = media.caption.removeprefix(editorial_text).strip().splitlines()
+            html += "".join(f"<p>{escape(credit)}</p>" for credit in credits)
         return cast(RichMessageBot, bot), PreparedNativeMessage(
             html, notice_photo, notice_sha256, notice_url,
+            reviewed_html_sha256=reviewed_html_sha256,
         )
 
     geometry = point.get("transport_geometry")
@@ -130,6 +167,10 @@ def rich_receipt(
         "planned_message_count": 1, "message_ids": [message_id] if message_id else []}
     if value.image_sha256 is not None:
         receipt["image_sha256"] = value.image_sha256
+    if value.source_preview_url is not None:
+        receipt["source_preview_url"] = value.source_preview_url
+    if value.reviewed_html_sha256 is not None:
+        receipt["reviewed_html_sha256"] = value.reviewed_html_sha256
     if value.map_url is not None:
         receipt["map_url"] = value.map_url
         reply_markup = canonical_json(map_reply_markup(value.map_url))
@@ -142,7 +183,13 @@ async def send_native_message(
 ) -> int:
     """Одна попытка; неопределённый результат обрабатывает общая долговечная квитанция."""
     value = PreparedNativeMessage(prepared) if isinstance(prepared, str) else prepared
-    if value.map_url is not None:
+    if value.source_preview_url is not None:
+        if value.map_url is None or value.photo is not None:
+            raise ValueError("notice preview needs a map link and no attached photo")
+        message_id = await bot.send_notice_message(
+            target, value.html, source_url=value.source_preview_url, map_url=value.map_url,
+        )
+    elif value.map_url is not None:
         message_id = await bot.send_rich_message(
             target, value.html, photo=value.photo, map_url=value.map_url,
         )

@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from relocant_media.services.utility_geography import _name
+from relocant_media.services.utility_scope import settlement_name_key
 
 type Coordinate = tuple[float, float]
 type Rings = tuple[tuple[Coordinate, ...], ...]
@@ -87,9 +88,20 @@ class AreaIndex:
     def __init__(
         self, addresses: dict[AddressKey, AddressLocation],
         settlements: dict[tuple[str, str], tuple[AreaPolygon, ...]],
+        repeated_settlements: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         self._addresses = addresses
         self._settlements = settlements
+        self._settlement_aliases: dict[tuple[str, str], tuple[AreaPolygon, ...]] = {}
+        ambiguous = {(district, settlement_name_key(name))
+                     for district, name in repeated_settlements}
+        for (district, name), polygons in settlements.items():
+            key = district, settlement_name_key(name)
+            if key in self._settlement_aliases and self._settlement_aliases[key] != polygons:
+                ambiguous.add(key)
+            self._settlement_aliases[key] = polygons
+        for key in ambiguous:
+            self._settlement_aliases.pop(key)
         self._streets: dict[tuple[str, str], list[AddressLocation]] = {}
         for (district, street, _), location in addresses.items():
             self._streets.setdefault((district, street), []).append(location)
@@ -98,7 +110,7 @@ class AreaIndex:
         district, place = _scope(municipality)
         key = address_key(street, number, district)
         found = self._addresses.get(key) if key else None
-        area = self._settlements.get((district, place))
+        area = self.settlement(place, district)
         # При известной границе проверяем и её. Иначе точная тройка из источника
         # уже уникальна внутри общины, поэтому точку можно показать по адресу.
         if found and (not area or _within(found.point, area)):
@@ -110,11 +122,16 @@ class AreaIndex:
         found = self._streets.get((district, _street(street)), ())
         if not place:
             return tuple(found)
-        area = self._settlements.get((district, place))
+        area = self.settlement(place, district)
         return tuple(row for row in found if _within(row.point, area)) if area else ()
 
     def settlement(self, name: str, municipality: str) -> tuple[AreaPolygon, ...]:
-        return self._settlements.get((_scope(municipality)[0], _exact(name)), ())
+        district = _scope(municipality)[0]
+        return (self._settlements.get((district, _exact(name)))
+                or self._settlement_aliases.get((district, settlement_name_key(name)), ()))
+
+    def settlement_contains(self, name: str, municipality: str, point: Coordinate) -> bool:
+        return _within(point, self.settlement(name, municipality))
 
 
 def _point(latitude: Any, longitude: Any) -> Coordinate:
@@ -168,7 +185,8 @@ def _load(document: Any, fallback: dict[AddressKey, AddressLocation] | None = No
                 repeated.add(lookup)
             settlements[lookup] = polygons
     return AreaIndex({**(fallback or {}), **addresses},
-                     {key: value for key, value in settlements.items() if key not in repeated})
+                     {key: value for key, value in settlements.items() if key not in repeated},
+                     frozenset(repeated))
 
 
 def _valid_rgz_url(url: str) -> bool:

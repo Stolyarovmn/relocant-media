@@ -10,7 +10,7 @@ import pytest
 
 from relocant_media.bot.api import PhotoUpload, TelegramBotAPI
 from relocant_media.domain.map_links import map_event_id, map_event_url
-from relocant_media.services.native_map import NOTICE_COVER, NOTICE_LAYOUT
+from relocant_media.services.native_map import LEGACY_NOTICE_LAYOUT, NOTICE_COVER, NOTICE_LAYOUT
 from relocant_media.services.notice_banner import render_notice_banner
 from relocant_media.services.rich_delivery import (
     PreparedNativeMessage,
@@ -178,7 +178,7 @@ async def test_compact_notice_sends_a_single_header_and_the_map_button(monkeypat
     banner = render_notice_banner("power")
     html = f'<figure><img src="{NOTICE_COVER}"/></figure><h2>Отключение света</h2>'
     native = package.presentation.native_map
-    native.update(layout=NOTICE_LAYOUT, cover_kind="power",
+    native.update(layout=LEGACY_NOTICE_LAYOUT, cover_kind="power",
                   cover_sha256=hashlib.sha256(banner).hexdigest(), message_html=html)
     media = None
     expected = banner
@@ -207,6 +207,63 @@ async def test_compact_notice_sends_a_single_header_and_the_map_button(monkeypat
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         bot, prepared = prepare(package, TelegramBotAPI("fake-token", client), media=media)
         assert await send_native_message(bot, -1001, prepared) == 28
+
+
+@pytest.mark.asyncio
+async def test_notice_uses_native_source_preview_visible_text_and_one_map_button(monkeypatch):
+    monkeypatch.delenv("RELOCANT_MAP_TELEGRAM_APP", raising=False)
+    package, _ = native_package()
+    html = (
+        '<b>Изменение маршрута</b>\n\n'
+        'Проверьте остановки перед поездкой.\n\n'
+        f'<a href="{SOURCE_URL}">Источник</a>'
+    )
+    package.presentation.native_map.update(layout=NOTICE_LAYOUT, message_html=html)
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert request.url.path.endswith("/sendMessage")
+        assert json.loads(request.content) == {
+            "chat_id": -1001, "text": html, "parse_mode": "HTML",
+            "link_preview_options": {"url": SOURCE_URL, "show_above_text": True},
+            "reply_markup": MAP_MARKUP,
+        }
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 29}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot, prepared = prepare(package, TelegramBotAPI("fake-token", client))
+        assert prepared.photo is None
+        assert await send_native_message(bot, -1001, prepared) == 29
+        receipt = rich_receipt(prepared, state="sent", message_id=29)
+    assert len(requests) == 1
+    assert receipt["source_preview_url"] == SOURCE_URL
+    assert receipt["message_ids"] == [29]
+
+
+@pytest.mark.asyncio
+async def test_long_notice_preserves_text_without_a_synthetic_cover(monkeypatch):
+    monkeypatch.delenv("RELOCANT_MAP_TELEGRAM_APP", raising=False)
+    package, _ = native_package()
+    body = "Подробности " * 400
+    html = f"<b>{TITLE}</b>\n\n{body}"
+    reviewed = hashlib.sha256(html.encode()).hexdigest()
+    package.presentation.native_map.update(
+        layout=NOTICE_LAYOUT, message_html=html, message_html_sha256=reviewed,
+    )
+
+    def handler(request):
+        assert request.url.path.endswith("/sendRichMessage")
+        assert json.loads(request.content)["rich_message"]["html"] == (
+            f"<p><b>{TITLE}</b></p><p>{body}</p>"
+        )
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 30}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot, prepared = prepare(package, TelegramBotAPI("fake-token", client))
+        assert prepared.photo is None and prepared.source_preview_url is None
+        assert await send_native_message(bot, -1001, prepared) == 30
+        assert rich_receipt(prepared, state="sent")["reviewed_html_sha256"] == reviewed
 
 
 @pytest.mark.asyncio

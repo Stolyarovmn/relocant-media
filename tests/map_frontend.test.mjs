@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  addressHits, addressWindowText, buildAddressIndex, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, launchEvent, nextTransition, readIncidents, searchAddresses,
-  streetBounds, unexpired,
+  addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
+  incidentStatus, incidentTimes, launchEvent, nextTransition, pointsAtScale, readIncidents,
+  searchAddresses, streetBounds, unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
 
 const waterId = "event_0123456789abcdef1234";
@@ -140,9 +140,64 @@ test("контур заменяет метку дома, а каждое окн�
   assert.equal(incidentCountdown(event, Date.parse(later.ends_at)), "");
 });
 
-test("одиночная точка из старой выгрузки не обозначает дорожное перекрытие", () => {
+test("одиночная дорожная точка из старой выгрузки остаётся ориентиром без границ", () => {
   const road = incident({ id: roadId, kind: "road", points: [{ lat: 44.81, lon: 20.44 }] });
-  assert.deepEqual(exactMapPoints(addressIndex, road), []);
+  assert.deepEqual(exactMapPoints(addressIndex, road).map(({ lat, lon }) => [lat, lon]), [[44.81, 20.44]]);
+  assert.deepEqual(road.lines, []);
+  assert.deepEqual(road.areas, []);
+});
+
+test("водный участок с собственным окном исчезает отдельно от остального объявления", () => {
+  const geometry = { coordinates: [[44.81, 20.4], [44.81, 20.41]] };
+  const event = incident({
+    starts_at: "2026-11-13T08:00:00+01:00", ends_at: "2026-11-13T15:00:00+01:00",
+    lines: [
+      { ...geometry, label: "Ранний участок", starts_at: "2026-11-13T08:00:00+01:00",
+        ends_at: "2026-11-13T11:00:00+01:00" },
+      { ...geometry, label: "Участок без отдельного окна" },
+    ],
+  });
+  const end = Date.parse("2026-11-13T11:00:00+01:00");
+  assert.equal(nextTransition([event], end - 1), end);
+  assert.match(addressWindowText(event.lines[0].window), /08:00–11:00/);
+  assert.deepEqual(visibleMapLines(event, end - 1), event.lines);
+  assert.deepEqual(visibleMapLines(event, end), event.lines.slice(1));
+  assert.deepEqual(visibleMapLines(event, event.end), []);
+  assert.deepEqual(visibleMapLines(event, event.end, true), event.lines);
+});
+
+test("точки разных слоёв группируются через границу ячеек и разделяются при приближении", () => {
+  const points = [
+    { lat: 12, lon: 42, kind: "water" },
+    { lat: 12, lon: 70, kind: "power" },
+    { lat: 12, lon: 170, kind: "road" },
+  ];
+  const project = (scale) => ([lat, lon]) => ({ x: lon * scale, y: lat * scale });
+  assert.deepEqual(clusterMapPoints(points, project(1), 43), [points.slice(0, 2), points.slice(2)]);
+  assert.deepEqual(clusterMapPoints(points, project(2), 43), points.map((point) => [point]));
+});
+
+test("вблизи контуры и линии убирают перекрывающиеся точки, независимые остаются", () => {
+  const project = ([lat, lon]) => ({ x: (lon - 20) * 100000, y: (45 - lat) * 100000 });
+  const ring = [[44.8, 20.4], [44.8, 20.404], [44.804, 20.404], [44.804, 20.4], [44.8, 20.4]];
+  const hole = [[44.801, 20.401], [44.801, 20.403], [44.803, 20.403],
+    [44.803, 20.401], [44.801, 20.401]];
+  const road = incident({ id: roadId, kind: "road", areas: [
+    { scope: "road", rings: [ring, hole], label: "Контур" },
+  ], lines: [{ coordinates: [[44.81, 20.4], [44.81, 20.41]], label: "Линия" }] });
+  const inside = { lat: 44.8005, lon: 20.4005 };
+  const onLine = { lat: 44.81004, lon: 20.405 };
+  const inHole = { lat: 44.802, lon: 20.402 };
+  const uncovered = { lat: 44.82, lon: 20.415 };
+  assert.equal(road.areas[0].scope, "road");
+  assert.deepEqual(pointsAtScale(
+    [inside, onLine, inHole, uncovered], road.lines, road.areas, 17, project,
+  ), [inHole, uncovered]);
+  const overview = pointsAtScale([inside, uncovered], road.lines, road.areas, 13, project);
+  assert.equal(overview.length, 3);
+  assert.equal(overview.at(-1).label, "Линия");
+  assert.equal(overview.at(-1).lat, 44.81);
+  assert.deepEqual(pointsAtScale([inside], [], road.areas, 13, project), [inside]);
 });
 
 test("непроверенные координаты и небезопасные ссылки не попадают на карту", () => {
@@ -155,4 +210,17 @@ test("непроверенные координаты и небезопасны�
   assert.equal(event.points.length, 1);
   assert.equal(event.lines.length, 0);
   assert.equal(event.officialMap, "");
+});
+
+test("контур дома не скрывает соседний точный адрес или его отдельное окно", () => {
+  const project = ([lat, lon]) => ({ x: (lon - 20) * 100000, y: (45 - lat) * 100000 });
+  const address = { municipality: "Врачар", street: "Жичка", number: "5" };
+  const window = { start: 1, end: 2 };
+  const area = { rings: [[[44.8, 20.4], [44.8, 20.401], [44.801, 20.4], [44.8, 20.4]]],
+    address, window };
+  const matched = { lat: 44.8, lon: 20.4, address, window };
+  const adjacent = { ...matched, lon: 20.39997, address: { ...address, number: "7" } };
+  const later = { ...matched, window: { start: 3, end: 4 } };
+  assert.deepEqual(pointsAtScale([matched, adjacent, later], [], [area], 19, project),
+    [adjacent, later]);
 });
