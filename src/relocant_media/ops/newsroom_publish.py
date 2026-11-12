@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 
+from relocant_media.ops.map_export import MapFeed, read_map_feed, write_map_feed
 from relocant_media.ops.newsroom_export import snapshot
 from relocant_media.ops.newsroom_merge import merge
 
@@ -16,7 +17,33 @@ REPOSITORY = "Stolyarovmn/relocant-media"
 BRANCH = "newsroom-data"
 
 
-def publish(path: Path, token: str) -> None:
+MAP_PATH = "contents/dashboard-data/map.json"
+
+
+def _publish_map(client: httpx.Client, path: Path) -> None:
+    current = client.get(MAP_PATH, params={"ref": BRANCH},
+                         headers={"Accept": "application/vnd.github.object+json"})
+    if current.status_code != 404:
+        current.raise_for_status()
+    if not path.is_file():
+        if current.status_code == 404:
+            write_map_feed(path, MapFeed())
+            return
+        response = client.get(MAP_PATH, params={"ref": BRANCH},
+                              headers={"Accept": "application/vnd.github.raw+json"})
+        response.raise_for_status()
+        write_map_feed(path, read_map_feed(response.content))
+        return
+    feed = read_map_feed(path.read_bytes())
+    content = feed.model_dump_json(exclude_none=True).encode("utf-8")
+    payload = {"message": "Update public Belgrade map", "branch": BRANCH,
+               "content": base64.b64encode(content).decode("ascii")}
+    if current.status_code == 200:
+        payload["sha"] = current.json()["sha"]
+    client.put(MAP_PATH, json=payload).raise_for_status()
+
+
+def publish(path: Path, token: str, *, map_path: Path | None = None) -> None:
     # Reconstruct using exporter output only: this CLI must not upload arbitrary run artifacts.
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("schema_version") != 1 or data.get("mode") != "public_read_only":
@@ -47,17 +74,20 @@ def publish(path: Path, token: str) -> None:
             current.raise_for_status()
         response = client.put("contents/dashboard-data/latest.json", json=payload)
         response.raise_for_status()
+        if map_path is not None:
+            _publish_map(client, map_path)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
+    parser.add_argument("--map-snapshot", type=Path)
     args = parser.parse_args()
     token = os.environ.get("NEWSROOM_GITHUB_TOKEN", "")
     if not token:
         parser.exit(2, "newsroom_publish: credential_not_configured\n")
     try:
-        publish(args.snapshot, token)
+        publish(args.snapshot, token, map_path=args.map_snapshot)
     except Exception as error:
         parser.exit(1, f"newsroom_publish: {type(error).__name__}\n")
     print("newsroom_publish: uploaded")

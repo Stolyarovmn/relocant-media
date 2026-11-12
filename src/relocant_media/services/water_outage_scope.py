@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, time
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup, Tag
 
@@ -49,6 +50,10 @@ _DATE = re.compile(
     r"\b([0-9]{1,2})\.\s*(" + "|".join(_MONTHS) + r")\s+([0-9]{4})\.", re.I,
 )
 _WATER = re.compile(r"без воде|bez vode|снабдевањ\w*\s+водом|snabdevanj\w*\s+vodom", re.I)
+_CLOCK_RANGE = re.compile(
+    r"\b(?:od|од)\s+([0-9]{1,2})[.:]([0-9]{2})\s+(?:do|до)\s+"
+    r"([0-9]{1,2})[.:]([0-9]{2})\b", re.I,
+)
 _MAP_ASSET = re.compile(
     r"/wp-content/uploads/[0-9]{4}/(?:0[1-9]|1[0-2])/"
     r"[a-z0-9_-]*\bmapa(?:[-_][a-z0-9_-]+)?\.(?:webp|png|jpe?g)\Z", re.I,
@@ -82,7 +87,7 @@ def _source_allowed(document: EvidenceDocument) -> bool:
     return False
 
 
-def _single_event_date(document: EvidenceDocument) -> bool:
+def _single_event_date(document: EvidenceDocument) -> date | None:
     matches = list(_DATE.finditer(document.body))
     if not matches and document.source_id == "bvk_planned_works":
         matches = list(_DATE.finditer(document.title))
@@ -94,8 +99,27 @@ def _single_event_date(document: EvidenceDocument) -> bool:
             else:
                 dates.add(date(int(match[6]), _MONTHS[match[5].lower()], int(match[4])))
     except ValueError:
-        return False
-    return len(dates) == 1
+        return None
+    return next(iter(dates)) if len(dates) == 1 else None
+
+
+def water_outage_window(document: EvidenceDocument) -> tuple[datetime, datetime] | None:
+    """Только один явно указанный день и интервал работ из того же объявления."""
+    if not _source_allowed(document) or len(document.body.encode()) > MAX_DOCUMENT_BYTES:
+        return None
+    body = _normalized(document.body)
+    day = _single_event_date(document)
+    intervals = _CLOCK_RANGE.findall(body)
+    if day is None or len(intervals) != 1 or _WATER.search(body) is None:
+        return None
+    try:
+        sh, sm, eh, em = map(int, intervals[0])
+        zone = ZoneInfo("Europe/Belgrade")
+        start = datetime.combine(day, time(sh, sm), tzinfo=zone)
+        end = datetime.combine(day, time(eh, em), tzinfo=zone)
+    except ValueError:
+        return None
+    return (start, end) if start < end else None
 
 
 def _street_name(value: str) -> str | None:

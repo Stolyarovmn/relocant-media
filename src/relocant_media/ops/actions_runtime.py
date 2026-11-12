@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.package import canonical_json
 from relocant_media.ai.quota_diagnostics import safe_quota
+from relocant_media.ops.map_export import export_map_snapshot
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.ops.sqlite_restore import restore
@@ -42,6 +43,7 @@ MAX_BYTES = 256 * 1024 * 1024
 SNAPSHOT_GROWTH_RESERVE = 16 * 1024 * 1024
 PUBLIC_EXPORT_TIMEOUT_SECONDS = 180
 GPT_EXCHANGE_MAX_BYTES = 512 * 1024
+BELGRADE_STREETS = Path("cities/belgrade/map/roads.json.gz")
 MODES = {"preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback"}
 
 
@@ -454,7 +456,8 @@ def private_quota_observation(directory: Path) -> dict[str, Any] | None:
 
 
 def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: Path,
-            folder: str, mode: str, environment: dict[str, str]) -> int:
+            folder: str, mode: str, environment: dict[str, str],
+            map_output: Path | None = None) -> int:
     if mode not in MODES:
         raise ValueError("unsupported runtime mode")
     incoming = environment.get("CLOUD_DISCOVERY_BATCH", "")
@@ -479,6 +482,11 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     database = restored(drive, state["snapshot"], work)
     if mode == "preview":
         export_public(database, output, state["snapshot"]["created_at"], None)
+        if map_output is not None:
+            export_map_snapshot(
+                database, map_output, state["snapshot"]["created_at"],
+                street_index=BELGRADE_STREETS if BELGRADE_STREETS.is_file() else None,
+            )
         return 0
     if (environment.get("ACTIONS_CUTOVER_CONFIRMED") != "true"
             or environment.get("GITHUB_REPOSITORY") != REPO
@@ -641,6 +649,15 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         temporary = output.with_suffix(".tmp")
         shutil.copyfile(provisional, temporary)
         temporary.replace(output)
+    if map_output is not None:
+        try:
+            export_map_snapshot(work / "saved" / "editorial.sqlite3", map_output,
+                                manifest["created_at"],
+                                street_index=BELGRADE_STREETS if BELGRADE_STREETS.is_file()
+                                else None)
+        except Exception as error:
+            print(json.dumps({"map_projection_error_type": type(error).__name__}),
+                  file=sys.stderr)
     return code or int(projection_failed)
 
 
@@ -662,6 +679,7 @@ def main() -> None:
                         default="preview")
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--map-output", type=Path)
     args = parser.parse_args()
     try:
         with httpx.Client(timeout=60, follow_redirects=False) as client:
@@ -674,9 +692,12 @@ def main() -> None:
                 store, blobs, folder = build_storage(client, os.environ)
                 code = execute(store, blobs,
                                work=args.work, output=args.output, mode=args.mode,
-                               folder=folder, environment=dict(os.environ))
+                               folder=folder, environment=dict(os.environ),
+                               map_output=args.map_output)
     except Exception as error:
         args.output.unlink(missing_ok=True)
+        if args.map_output is not None:
+            args.map_output.unlink(missing_ok=True)
         # HTTP exception messages can contain URLs/credentials/private response bodies.
         blocked = {"status": "blocked", "error_type": type(error).__name__}
         for field in ("code", "reason"):

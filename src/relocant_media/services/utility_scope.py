@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from relocant_media.ai.models import EvidenceDocument
 
@@ -147,11 +148,30 @@ def extract_power_addresses(document: EvidenceDocument) -> list[dict[str, str]]:
     в municipality после `, naselje `. Повтор одного адреса в разных интервалах остаётся
     повтором: этот разбор не объединяет отключения и не определяет время публикации.
     """
-    if len(document.body) > MAX_BODY or power_outage_date(document) is None:
+    return [address for _, _, addresses in extract_power_schedule(document)
+            for address in addresses]
+
+
+def extract_power_schedule(
+    document: EvidenceDocument,
+) -> list[tuple[datetime, datetime, list[dict[str, str]]]]:
+    """Привязка точных домов к интервалу их строки, время Белграда."""
+    day = power_outage_date(document)
+    if len(document.body) > MAX_BODY or day is None:
         return []
-    records: list[dict[str, str]] = []
+    midnight = datetime.combine(day, time.min, tzinfo=ZoneInfo("Europe/Belgrade"))
+    schedule = []
+    count = 0
     for line in document.body.splitlines():
-        records.extend(_row_addresses(" ".join(line.split())))
-        if len(records) > MAX_ADDRESSES:
+        line = " ".join(line.split())
+        records = _row_addresses(line)
+        if not records:
+            continue
+        count += len(records)
+        if count > MAX_ADDRESSES:
             return []
-    return records
+        row = _ROW.fullmatch(line)
+        assert row is not None
+        schedule.append((midnight + timedelta(minutes=_minutes(row["start"])),
+                         midnight + timedelta(minutes=_minutes(row["end"])), records))
+    return schedule

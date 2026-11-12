@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from relocant_media.bot.api import PhotoUpload, TelegramBotAPI
+from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.services.rich_delivery import (
     PreparedNativeMessage,
     prepare_native_transport,
@@ -21,6 +22,9 @@ LINE = [["44.8101", "20.4602"], ["44.8111", "20.4622"], ["44.8121", "20.4612"]]
 HTML = '<p>Изменение маршрута</p><figure><img src="tg://photo?id=transport_map"/></figure>'
 SOURCE_URL = "https://transport.example/notice"
 TITLE, BODY = "Изменение маршрута", "Проверьте остановки перед поездкой."
+EVENT_ID = "event_" + hashlib.sha256(SOURCE_URL.encode()).hexdigest()[:20]
+MAP_URL = f"https://stolyarovmn.github.io/relocant-media/map/?event={EVENT_ID}"
+MAP_MARKUP = {"inline_keyboard": [[{"text": "Открыть на карте", "url": MAP_URL}]]}
 
 
 def multipart(request):
@@ -30,7 +34,7 @@ def multipart(request):
         f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
         + request.content)
     parts = list(message.iter_parts())
-    assert len(parts) == 3
+    assert len(parts) == 4
     return {part.get_param("name", header="content-disposition"): part for part in parts}
 
 
@@ -56,7 +60,8 @@ def prepare(package, bot, *, media=None):
 
 
 @pytest.mark.asyncio
-async def test_rich_photo_sends_exact_png_and_rich_json_in_one_multipart_request():
+async def test_rich_photo_sends_exact_png_and_rich_json_in_one_multipart_request(monkeypatch):
+    monkeypatch.delenv("RELOCANT_MAP_TELEGRAM_APP", raising=False)
     requests = []
     package, png = native_package()
 
@@ -64,12 +69,13 @@ async def test_rich_photo_sends_exact_png_and_rich_json_in_one_multipart_request
         requests.append(request)
         assert request.url.path.endswith("/sendRichMessage")
         parts = multipart(request)
-        assert set(parts) == {"chat_id", "rich_message", "transport_map"}
+        assert set(parts) == {"chat_id", "rich_message", "transport_map", "reply_markup"}
         assert parts["chat_id"].get_payload(decode=True) == b"-1001"
         assert json.loads(parts["rich_message"].get_payload(decode=True)) == {
             "html": HTML, "media": [{"id": "transport_map", "media": {
                 "type": "photo", "media": "attach://transport_map"}}],
         }
+        assert json.loads(parts["reply_markup"].get_payload(decode=True)) == MAP_MARKUP
         image = parts["transport_map"]
         assert image.get_filename() == "transport-map.png"
         assert image.get_content_type() == "image/png"
@@ -79,15 +85,24 @@ async def test_rich_photo_sends_exact_png_and_rich_json_in_one_multipart_request
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         bot, prepared = prepare(package, TelegramBotAPI("fake-token", client))
         assert prepared == PreparedNativeMessage(
-            HTML, PhotoUpload("transport-map.png", png), hashlib.sha256(png).hexdigest())
+            HTML, PhotoUpload("transport-map.png", png), hashlib.sha256(png).hexdigest(),
+            MAP_URL,
+        )
         before = rich_receipt(prepared, state="sending")
         message_id = await send_native_message(bot, -1001, prepared)
         receipt = rich_receipt(prepared, state="sent", message_id=message_id)
     assert len(requests) == 1
     assert before["message_ids"] == [] and before["planned_message_count"] == 1
-    assert receipt == {"state": "sent", "message_ids": [314], "planned_message_count": 1,
-                       "image_sha256": hashlib.sha256(png).hexdigest(),
-                       "message_html_sha256": hashlib.sha256(HTML.encode()).hexdigest()}
+    button_digest = hashlib.sha256(
+        json.dumps(MAP_MARKUP, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode(),
+    ).hexdigest()
+    assert before["reply_markup_sha256"] == button_digest
+    assert receipt == {
+        "state": "sent", "message_ids": [314], "planned_message_count": 1,
+        "image_sha256": hashlib.sha256(png).hexdigest(),
+        "message_html_sha256": hashlib.sha256(HTML.encode()).hexdigest(),
+        "reply_markup_sha256": button_digest, "map_url": MAP_URL,
+    }
 
 
 @pytest.mark.asyncio
@@ -110,8 +125,64 @@ async def test_existing_html_only_api_and_receipt_are_unchanged():
     }
 
 
+def test_map_event_id_reuses_source_url_canonicalization():
+    assert map_event_id(SOURCE_URL + "/?utm_medium=telegram#map") == EVENT_ID
+    assert map_event_id(SOURCE_URL + "?part=1") != EVENT_ID
+    assert map_event_url(SOURCE_URL) == MAP_URL
+    main_app = "https://t.me/relocant_media_belgrade_bot"
+    assert map_event_url(SOURCE_URL, telegram_app=main_app) == f"{main_app}?startapp={EVENT_ID}"
+
+
+@pytest.mark.parametrize("telegram_app", [
+    "https://t.me/not_the_relocant_bot/map",
+    "https://t.me/relocant_media_belgrade_bot/map?startapp=other",
+    "https://t.me/relocant_media_belgrade_bot/other",
+])
+def test_invalid_telegram_app_config_uses_the_published_page(telegram_app):
+    assert map_event_url(SOURCE_URL, telegram_app=telegram_app) == MAP_URL
+
+
 @pytest.mark.asyncio
-async def test_unknown_png_delivery_does_not_retry_or_send_separate_media():
+async def test_rich_utility_map_uses_registered_telegram_app_and_preserves_html(monkeypatch):
+    app_url = "https://t.me/relocant_media_belgrade_bot/map"
+    monkeypatch.setenv("RELOCANT_MAP_TELEGRAM_APP", app_url)
+    package, _ = native_package()
+    native = package.presentation.native_map
+    native["point"] = {"mode": "utility_map_review", "source_url": SOURCE_URL}
+    native["message_html"] = "<p>Карта отключения</p>"
+    target_url = f"{app_url}?startapp={EVENT_ID}"
+
+    def handler(request):
+        assert request.url.path.endswith("/sendRichMessage")
+        assert json.loads(request.content) == {
+            "chat_id": -1001, "rich_message": {"html": native["message_html"]},
+            "reply_markup": {"inline_keyboard": [[
+                {"text": "Открыть на карте", "url": target_url},
+            ]]},
+        }
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 18}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot, prepared = prepare(package, TelegramBotAPI("fake-token", client))
+        assert prepared.map_url == target_url
+        assert await send_native_message(bot, -1001, prepared) == 18
+
+
+@pytest.mark.asyncio
+async def test_unapproved_map_button_does_not_call_telegram():
+    def forbidden(request):
+        pytest.fail("Кнопка с неподтверждённым URL не должна попадать в сеть")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as client:
+        with pytest.raises(ValueError, match="map button URL is not approved"):
+            await TelegramBotAPI("fake-token", client).send_rich_message(
+                -1001, "<p>Карта</p>", map_url=MAP_URL + "&redirect=https://example.com",
+            )
+
+
+@pytest.mark.asyncio
+async def test_unknown_png_delivery_does_not_retry_or_send_separate_media(monkeypatch):
+    monkeypatch.delenv("RELOCANT_MAP_TELEGRAM_APP", raising=False)
     requests = []
     package, png = native_package()
 
@@ -126,6 +197,7 @@ async def test_unknown_png_delivery_does_not_retry_or_send_separate_media():
     assert len(requests) == 1 and requests[0].url.path.endswith("/sendRichMessage")
     receipt = rich_receipt(prepared, state="uncertain")
     assert receipt["image_sha256"] == hashlib.sha256(png).hexdigest()
+    assert receipt["map_url"] == MAP_URL
     assert receipt["message_ids"] == [] and receipt["planned_message_count"] == 1
 
 

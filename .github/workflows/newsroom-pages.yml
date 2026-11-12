@@ -8,6 +8,7 @@ on:
       - 'cities/**'
       - 'docs/messenger-discovery.json'
       - 'src/relocant_media/ops/newsroom_export.py'
+      - 'src/relocant_media/ops/pages_assets.py'
       - '.github/workflows/newsroom-pages.yml'
   workflow_dispatch:
   workflow_run:
@@ -38,12 +39,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _site
-          cp web/newsroom/* _site/
+          python -m relocant_media.ops.pages_assets --site _site
           python -m relocant_media.ops.newsroom_export --output _site/data.json
-          if git fetch origin newsroom-data; then
-            if git show FETCH_HEAD:dashboard-data/latest.json > /tmp/newsroom-runtime.json; then
-              python -m relocant_media.ops.newsroom_merge --catalog _site/data.json --runtime /tmp/newsroom-runtime.json
-            fi
+          git fetch origin newsroom-data
+          if git show FETCH_HEAD:dashboard-data/latest.json > /tmp/newsroom-runtime.json; then
+            python -m relocant_media.ops.newsroom_merge --catalog _site/data.json --runtime /tmp/newsroom-runtime.json
+          fi
+          if git cat-file -e FETCH_HEAD:dashboard-data/map.json; then
+            git show FETCH_HEAD:dashboard-data/map.json > _site/map/incidents.json
+          else
+            printf '{"version":1,"incidents":[]}\n' > _site/map/incidents.json
           fi
       - uses: actions/upload-artifact@v4
         with:

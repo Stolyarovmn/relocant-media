@@ -1,12 +1,14 @@
 """Общий транспорт проверенной карты для автоматической и одобренной владельцем доставки."""
 
 import hashlib
+import os
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from relocant_media.ai.package import EditorialPackage
-from relocant_media.bot.api import PhotoUpload, TelegramBotAPI
+from relocant_media.ai.package import EditorialPackage, canonical_json
+from relocant_media.bot.api import PhotoUpload, TelegramBotAPI, map_reply_markup
 from relocant_media.bot.publisher import Publisher
+from relocant_media.domain.map_links import map_event_url
 from relocant_media.services.production_media import PreparedProductionMedia
 from relocant_media.services.transport_map import MAP_MODE
 from relocant_media.services.transport_map_image import render_transport_map
@@ -16,6 +18,7 @@ from relocant_media.services.utility_map import UTILITY_MAP_MODE
 class RichMessageBot(Protocol):
     async def send_rich_message(
         self, chat_id: int | str, html: str, *, photo: PhotoUpload | None = None,
+        map_url: str | None = None,
     ) -> int: ...
 
 
@@ -24,6 +27,7 @@ class PreparedNativeMessage:
     html: str
     photo: PhotoUpload | None = None
     image_sha256: str | None = None
+    map_url: str | None = None
 
 
 def prepare_native_transport(
@@ -66,7 +70,12 @@ def prepare_native_transport(
     references = html.count("tg://photo?id=transport_map")
     if references != (1 if photo is not None else 0):
         raise ValueError("map image and reviewed HTML do not match")
-    return cast(RichMessageBot, bot), PreparedNativeMessage(html, photo, image_sha256)
+    map_url = None
+    if point.get("mode") in (MAP_MODE, UTILITY_MAP_MODE):
+        map_url = map_event_url(
+            point["source_url"], telegram_app=os.environ.get("RELOCANT_MAP_TELEGRAM_APP"),
+        )
+    return cast(RichMessageBot, bot), PreparedNativeMessage(html, photo, image_sha256, map_url)
 
 
 def rich_receipt(
@@ -78,6 +87,10 @@ def rich_receipt(
         "planned_message_count": 1, "message_ids": [message_id] if message_id else []}
     if value.image_sha256 is not None:
         receipt["image_sha256"] = value.image_sha256
+    if value.map_url is not None:
+        receipt["map_url"] = value.map_url
+        reply_markup = canonical_json(map_reply_markup(value.map_url))
+        receipt["reply_markup_sha256"] = hashlib.sha256(reply_markup.encode()).hexdigest()
     return receipt
 
 
@@ -86,7 +99,11 @@ async def send_native_message(
 ) -> int:
     """Одна попытка; неопределённый результат обрабатывает общая долговечная квитанция."""
     value = PreparedNativeMessage(prepared) if isinstance(prepared, str) else prepared
-    if value.photo is None:
+    if value.map_url is not None:
+        message_id = await bot.send_rich_message(
+            target, value.html, photo=value.photo, map_url=value.map_url,
+        )
+    elif value.photo is None:
         message_id = await bot.send_rich_message(target, value.html)
     else:
         message_id = await bot.send_rich_message(target, value.html, photo=value.photo)
