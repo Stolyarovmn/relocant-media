@@ -625,28 +625,34 @@ async def collect_sources(
                  ("cukarica_news", str(sources["cukarica_news"].url)),
                  ("city_beograd_news",
                   "https://www.beograd.rs/lat/servisne-informacije/saobracaj-i-prevoz")]
-        pages.extend(("city_beograd_news", f"https://www.beograd.rs/lat/servisne-informacije/{section}")
-                     for section in UTILITY_SECTIONS)
+        utility_pages = {f"https://www.beograd.rs/lat/servisne-informacije/{section}"
+                         for section in UTILITY_SECTIONS}
+        pages.extend(("city_beograd_news", url) for url in sorted(utility_pages))
         if submissions_only:
             pages = []
         for source_id, url in pages:
             try:
-                page = await client.get(url, follow_redirects=False)
-                page.raise_for_status()
-                parser = (parse_beograd_news_list if source_id == "city_beograd_news"
-                          else parse_cukarica_news_list)
-                links = parser(page.text, sources[source_id])
-                if not links or len(links) > 100:
-                    raise ValueError("unexpected source list")
-                for item in links[:50]:
-                    # Cards expose the date before downloading any full text.
-                    # Up to seven days allows a dated ongoing closure to survive;
-                    # the full-text freshness gate then enforces the 48h news rule.
-                    if (item.published_at is None or item.published_at > now
-                            or item.published_at < now - timedelta(days=7)):
-                        result["discarded_before_article_fetch"] += 1
-                        continue
-                    await full_article(source_id, item.url)
+                utility_page = url in utility_pages
+                async with asyncio.timeout(20 if utility_page else None):
+                    page = await client.get(url, follow_redirects=False)
+                    page.raise_for_status()
+                    parser = (parse_beograd_news_list if source_id == "city_beograd_news"
+                              else parse_cukarica_news_list)
+                    links = parser(page.text, sources[source_id])
+                    if not links or len(links) > 100:
+                        raise ValueError("unexpected source list")
+                    if utility_page:
+                        prefix = f"{urlsplit(url).path}/"
+                        links = [item for item in links
+                                 if urlsplit(item.url).path.startswith(prefix)]
+                    for item in links[:50]:
+                        # Cards expose the date before downloading any full text.
+                        # Up to seven days lets an ongoing dated closure survive.
+                        if (item.published_at is None or item.published_at > now
+                                or item.published_at < now - timedelta(days=7)):
+                            result["discarded_before_article_fetch"] += 1
+                            continue
+                        await full_article(source_id, item.url)
             except Exception:
                 result["failures"] += 1
         if not submissions_only:
