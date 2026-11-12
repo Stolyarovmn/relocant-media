@@ -125,8 +125,6 @@ from relocant_media.services.submission_queue import (
 )
 from relocant_media.services.transport_map import (
     MAP_MODE,
-    is_transport_anchor,
-    matches_transport_notice,
     transport_point,
 )
 from relocant_media.services.transport_map import (
@@ -772,28 +770,21 @@ async def collect_sources(
     transport_source = None
     transport_notices = []
     if not submissions_only:
-        anchors = [document for item in articles
-                   if item.source_id == "city_beograd_news"
-                   and is_transport_anchor(document := EvidenceDocument.model_validate(
-                       item, from_attributes=True,
-                   ))]
-        if anchors:
-            transport_source = load_source_file(SOURCES / f"{TRANSPORT_MAP_SOURCE}.yaml")
-            try:
-                async with asyncio.timeout(40), httpx.AsyncClient(
-                    timeout=12, trust_env=False,
-                ) as transport_client:
-                    fetched_notices = await BgprevozChangesCollector(
-                        transport_source, transport_client,
-                    ).collect(limit=TRANSPORT_MAP_LIMIT)
-                for notice in fetched_notices:
-                    official = EvidenceDocument.model_validate(notice, from_attributes=True)
-                    if (any(matches_transport_notice(anchor, official) for anchor in anchors)
-                            and extract_transport_map(official, notice.source_html or "")):
-                        transport_notices.append(notice)
-            except (TimeoutError, ValueError, httpx.HTTPError) as error:
-                transport_notices = []
-                result["transport_map_source_error"] = type(error).__name__
+        transport_source = load_source_file(SOURCES / f"{TRANSPORT_MAP_SOURCE}.yaml")
+        try:
+            async with asyncio.timeout(40), httpx.AsyncClient(
+                timeout=12, trust_env=False,
+            ) as transport_client:
+                fetched_notices = await BgprevozChangesCollector(
+                    transport_source, transport_client,
+                ).collect(limit=TRANSPORT_MAP_LIMIT)
+            for notice in fetched_notices:
+                official = EvidenceDocument.model_validate(notice, from_attributes=True)
+                if extract_transport_map(official, notice.source_html or ""):
+                    transport_notices.append(notice)
+        except (TimeoutError, ValueError, httpx.HTTPError) as error:
+            transport_notices = []
+            result["transport_map_source_error"] = type(error).__name__
     result["transport_map_notices"] = len(transport_notices)
     with Session(engine) as session:
         if transport_notices:

@@ -150,13 +150,14 @@ jobs:
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           WORKER_MODE: ${{ steps.mode.outputs.value }}
           CLOUD_DISCOVERY_BATCH: ${{ inputs.discovery_batch }}
+          RELOCANT_MAP_TELEGRAM_APP: ${{ vars.RELOCANT_MAP_TELEGRAM_APP }}
           GPT_FALLBACK_BLOB_SHA256: ${{ inputs.fallback_blob_sha256 }}
         run: |
           mkdir -p _site
-          cp web/newsroom/* _site/
           rm -f _site/data.json
           python -m relocant_media.ops.actions_runtime --mode "$WORKER_MODE" \
-            --work "$RUNNER_TEMP/editorial-work" --output _site/data.json
+            --work "$RUNNER_TEMP/editorial-work" --output _site/data.json \
+            --map-output _site/map/incidents.json
       - name: Reconcile interrupted writer from verified checkpoint
         if: steps.mode.outputs.value == 'recovery'
         env:
@@ -199,14 +200,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _site
-          cp web/newsroom/* _site/
+          python -m relocant_media.ops.pages_assets --site _site
           previous="$RUNNER_TEMP/newsroom-previous.json"
           rm -f "$previous"
           python -m relocant_media.ops.newsroom_attempt --output _site/data.json \
             --previous "$previous" --fetch-previous --outcome "${RUNTIME_OUTCOME:-skipped}" \
             --mode "${WORKER_MODE:-not_selected}" --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT"
-          python -m relocant_media.ops.newsroom_publish --snapshot _site/data.json
+          python -m relocant_media.ops.newsroom_publish --snapshot _site/data.json \
+            --map-snapshot _site/map/incidents.json
           echo 'ready=true' >> "$GITHUB_OUTPUT"
       - name: Save public Pages projection only
         if: always() && steps.projection.outputs.ready == 'true'

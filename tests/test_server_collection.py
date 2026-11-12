@@ -6,12 +6,13 @@ import httpx
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from test_transport_map import _map_html, _notice
 
 from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.collectors.news_discovery import NewsDiscoveryFeed, NewsLead
 from relocant_media.collectors.telegram_topics import TopicLead
 from relocant_media.ops import server_cycle
-from relocant_media.storage.models import RawItem
+from relocant_media.storage.models import EditorialRun, RawItem
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
 NOW = datetime(2026, 10, 20, 18, tzinfo=UTC)
@@ -85,6 +86,29 @@ def item(age, *, url=BEOGRAD, body="Самостоятельный первои�
 def rows(engine):
     with Session(engine) as session:
         return [(r.source_id, r.url, r.body) for r in session.scalars(select(RawItem))]
+
+
+@pytest.mark.asyncio
+async def test_road_map_notices_are_collected_without_an_editorial_anchor(collection, monkeypatch):
+    engine, _, _, _, _ = collection
+    document = _notice()
+
+    class MapCollector:
+        def __init__(self, source, client):
+            pass
+
+        async def collect(self, *, limit):
+            assert limit > 0
+            return [CollectedItem(**document.model_dump(), external_id="bgprevoz-1151",
+                                  source_html=_map_html(line=True))]
+
+    monkeypatch.setattr(server_cycle, "BgprevozChangesCollector", MapCollector)
+    result = await server_cycle.collect_sources(engine)
+    assert result["transport_map_notices"] == 1
+    with Session(engine) as session:
+        raw = session.scalar(select(RawItem).where(RawItem.url == document.url))
+        assert raw is not None and raw.published_at is None
+        assert session.get(EditorialRun, raw.id) is None
 
 
 @pytest.mark.asyncio

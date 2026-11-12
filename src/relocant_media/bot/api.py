@@ -8,6 +8,7 @@ import httpx
 
 from relocant_media.bot.formatting import compact_source_link, source_link_entities
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
+from relocant_media.domain.map_links import is_map_event_url
 
 
 class TelegramAPIError(RuntimeError):
@@ -18,6 +19,12 @@ class TelegramAPIError(RuntimeError):
 class PhotoUpload:
     file_name: str
     data: bytes
+
+
+def map_reply_markup(url: str) -> dict[str, object]:
+    if not is_map_event_url(url):
+        raise ValueError("map button URL is not approved")
+    return {"inline_keyboard": [[{"text": "Открыть на карте", "url": url}]]}
 
 
 class TelegramBot(Protocol):
@@ -137,17 +144,22 @@ class TelegramBotAPI:
 
     async def send_rich_message(
         self, chat_id: int | str, html: str, *, photo: PhotoUpload | None = None,
+        map_url: str | None = None,
     ) -> int:
         """Отправить уже проверенный rich HTML один раз, без повторов или fallback."""
         if not html.strip():
             raise ValueError("rich message HTML is required")
+        reply_markup = map_reply_markup(map_url) if map_url is not None else None
         photo_references = html.count("tg://photo?id=transport_map")
         if photo is None:
             if photo_references:
                 raise ValueError("rich message references a missing transport map")
-            result = await self._call("sendRichMessage", {
+            payload: dict[str, object] = {
                 "chat_id": chat_id, "rich_message": {"html": html},
-            })
+            }
+            if reply_markup is not None:
+                payload["reply_markup"] = reply_markup
+            result = await self._call("sendRichMessage", payload)
         else:
             if photo_references != 1:
                 raise ValueError("rich message must reference its transport map exactly once")
@@ -158,10 +170,15 @@ class TelegramBotAPI:
                 "id": "transport_map", "media": {
                     "type": "photo", "media": "attach://transport_map"},
             }]}
+            data = {"chat_id": str(chat_id), "rich_message": json.dumps(
+                rich_message, ensure_ascii=False, separators=(",", ":"))}
+            if reply_markup is not None:
+                data["reply_markup"] = json.dumps(
+                    reply_markup, ensure_ascii=False, separators=(",", ":"),
+                )
             response = await self._client.post(
                 f"{self._base_url}/sendRichMessage",
-                data={"chat_id": str(chat_id), "rich_message": json.dumps(
-                    rich_message, ensure_ascii=False, separators=(",", ":"))},
+                data=data,
                 files={"transport_map": upload},
             )
             result = self._result("sendRichMessage", response)
