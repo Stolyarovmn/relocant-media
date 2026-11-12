@@ -1,6 +1,7 @@
 """Ручной повтор последнего объявления с проверенным оформлением Mini App."""
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ from relocant_media.ai.gemini_process import IsolatedGeminiProvider
 from relocant_media.ai.independent_reviews import reviewed_package
 from relocant_media.ai.package import (
     EditorialPackage,
+    PackageDraft,
     canonical_json,
     context_sha256,
     evaluate_package,
@@ -59,6 +61,7 @@ class Request(BaseModel):
     message_id: Annotated[int, Field(gt=0, le=2_147_483_647)]
     event_id: Annotated[str, Field(pattern=r"^event_[0-9a-f]{20}$")]
     replacement: Replacement | None = None
+    previous_review_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
 
 
 class GPTReviews(BaseModel):
@@ -108,13 +111,45 @@ def _check_public_target(client: httpx.Client, request: Request, *, active: bool
             raise ValueError("map event is absent, finished or has no confirmed geometry")
 
 
-def prepare(session: Session, request: Request) -> EditorialPackage:
+def resolve_previous(
+    request: Request, state: dict[str, Any], scope: dict[str, Any],
+) -> tuple[int, PackageDraft]:
+    """Сопоставить сохранённый черновик с точной квитанцией предыдущей отправки."""
+    previous_request = Request.model_validate(scope["request"])
+    receipt = state.get(_HISTORY, {}).get(str(previous_request.message_id))
+    package = scope["package"]
+    context = hashlib.sha256(canonical_json(package).encode()).hexdigest()
+    native = package["presentation"]["native_map"]
+    html_digest = hashlib.sha256(native["message_html"].encode()).hexdigest()
+    if (scope["version"] != 1 or previous_request.event_id != request.event_id
+            or previous_request.message_id >= request.message_id
+            or not isinstance(receipt, dict) or receipt.get("state") != "sent"
+            or receipt.get("original_id") != previous_request.message_id
+            or receipt.get("event_id") != request.event_id
+            or receipt.get("message_ids") != [request.message_id]
+            or context != scope["context_sha256"] or context != receipt.get("context_sha256")
+            or html_digest != native["message_html_sha256"]
+            or html_digest != receipt.get(
+                "reviewed_html_sha256", receipt.get("message_html_sha256"),
+            )
+            or map_event_id(native["point"]["source_url"]) != request.event_id):
+        raise ValueError("previous review does not match the sent republication")
+    root = receipt.get("canonical_message_id", previous_request.message_id)
+    if type(root) is not int or not 0 < root <= previous_request.message_id:
+        raise ValueError("invalid canonical original of the republication")
+    return root, PackageDraft.model_validate_json(canonical_json(package["outcome"]["draft"]))
+
+
+def prepare(
+    session: Session, request: Request, previous: tuple[int, PackageDraft] | None = None,
+) -> EditorialPackage:
+    original_id = previous[0] if previous is not None else request.message_id
     post, run, raw, source = session.execute(
         select(Post, EditorialRun, RawItem, Source)
         .join(EditorialRun, EditorialRun.post_id == Post.id)
         .join(RawItem, RawItem.id == EditorialRun.raw_item_id)
         .join(Source, Source.id == RawItem.source_id)
-        .where(Post.city == "belgrade", Post.telegram_message_id == request.message_id,
+        .where(Post.city == "belgrade", Post.telegram_message_id == original_id,
                Post.published_at.is_not(None), EditorialRun.delivery_status == "sent"),
     ).one()
     package = EditorialPackage.model_validate_json(canonical_json(run.outcome["_package"]))
@@ -128,7 +163,7 @@ def prepare(session: Session, request: Request) -> EditorialPackage:
             or not source.enabled or post.title != draft.title or post.body != draft.body
             or run.outcome.get("_package_sha256") != _package_sha256(package)
             or not isinstance(receipt, dict) or receipt.get("state") != "sent"
-            or receipt.get("message_ids") != [request.message_id]
+            or receipt.get("message_ids") != [original_id]
             or receipt.get("reviewed_html_sha256", receipt.get("message_html_sha256"))
             != old.get("message_html_sha256")):
         raise ValueError("canonical package and delivered post do not match")
@@ -143,6 +178,8 @@ def prepare(session: Session, request: Request) -> EditorialPackage:
     if native is None or native.get("layout") != NOTICE_LAYOUT:
         raise ValueError("post has no verified new map layout")
     verify_native_map_snapshot(session, native, documents, document_ids)
+    if previous is not None:
+        draft = previous[1]
     if request.replacement is not None:
         before, after = request.replacement.before, request.replacement.after
         if draft.body.count(before) != 1 or before == after:
@@ -165,6 +202,7 @@ async def deliver(
     request: Request, state: dict[str, Any], sha: str,
     commit: Commit,
     send: Callable[[], Awaitable[int]], message: PreparedNativeMessage, context: str,
+    *, canonical_message_id: int | None = None,
 ) -> dict[str, Any]:
     receipts = state.get(_HISTORY, {})
     key = str(request.message_id)
@@ -176,6 +214,8 @@ async def deliver(
         return previous
     intent = {**rich_receipt(message, state="sending"), "original_id": request.message_id,
               "event_id": request.event_id, "context_sha256": context}
+    if canonical_message_id is not None:
+        intent["canonical_message_id"] = canonical_message_id
     claimed, claimed_sha = commit(state, sha, {_HISTORY: {**receipts, key: intent}})
     try:
         message_id = await send()
@@ -192,22 +232,27 @@ async def deliver(
     return sent
 
 
-def _load_package(database: Path, request: Request, client: httpx.Client) -> EditorialPackage:
+def _load_package(
+    database: Path, request: Request, client: httpx.Client,
+    previous: tuple[int, PackageDraft] | None,
+) -> EditorialPackage:
     _check_public_target(client, request, active=True)
     print(json.dumps({"republication": "target_verified"}), flush=True)
     engine = create_engine(f"sqlite:///{database.resolve().as_uri()}?mode=ro&uri=true")
     try:
         with Session(engine) as session:
-            package = prepare(session, request)
+            package = prepare(session, request, previous)
     finally:
         engine.dispose()
     print(json.dumps({"republication": "canonical_package_prepared"}), flush=True)
     return package
 
 
-def review_request(database: Path, request: Request) -> dict[str, Any]:
+def review_request(
+    database: Path, request: Request, previous: tuple[int, PackageDraft] | None = None,
+) -> dict[str, Any]:
     with httpx.Client(timeout=25, trust_env=False, headers={"Cache-Control": "no-cache"}) as client:
-        package = _load_package(database, request, client)
+        package = _load_package(database, request, client, previous)
     return {
         "version": 1,
         "request": request.model_dump(mode="json"),
@@ -231,19 +276,20 @@ def apply(
     database: Path, request: Request, state: dict[str, Any], sha: str,
     commit: Commit, environment: Mapping[str, str],
     gpt: tuple[GPTReviews, dict[str, Any]] | None = None,
+    previous: tuple[int, PackageDraft] | None = None,
 ) -> None:
     from relocant_media.ai.provider import StructuredAIProvider
     from relocant_media.ops.server_cycle import ChannelPublisher, fetch_documents
 
-    previous = state.get(_HISTORY, {}).get(str(request.message_id))
-    if previous is not None:
-        if previous["state"] != "sent" or previous["event_id"] != request.event_id:
+    prior_attempt = state.get(_HISTORY, {}).get(str(request.message_id))
+    if prior_attempt is not None:
+        if prior_attempt["state"] != "sent" or prior_attempt["event_id"] != request.event_id:
             raise ValueError("previous attempt requires reconciliation")
-        message_id = previous["message_ids"][0]
+        message_id = prior_attempt["message_ids"][0]
         print(json.dumps({"republication": "already_sent", "message_id": message_id}), flush=True)
         return
     with httpx.Client(timeout=25, trust_env=False, headers={"Cache-Control": "no-cache"}) as client:
-        package = _load_package(database, request, client)
+        package = _load_package(database, request, client, previous)
         provider: StructuredAIProvider
         if gpt is None:
             provider = IsolatedGeminiProvider(
@@ -286,6 +332,7 @@ def apply(
                 request, state, sha, commit,
                 lambda: send_native_message(transport, APPROVED_CHANNEL_ID, message),
                 message, context_sha256(package),
+                canonical_message_id=previous[0] if previous is not None else None,
             )
             message_id = record["message_ids"][0]
             assert type(message_id) is int

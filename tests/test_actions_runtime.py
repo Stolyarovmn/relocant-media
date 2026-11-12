@@ -381,7 +381,7 @@ def test_map_republish_review_exports_privately_without_a_state_write(
     scope = {"package": {"draft": "private review draft"}}
     monkeypatch.setattr(ssh, "download", drive.download)
     monkeypatch.setattr(ssh, "upload", upload)
-    monkeypatch.setattr(runtime, "map_review_request", lambda database, request: scope)
+    monkeypatch.setattr(runtime, "map_review_request", lambda database, request, previous: scope)
     env = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
            "ACTIONS_CUTOVER_CONFIRMED": "true", "GITHUB_REPOSITORY": runtime.REPO,
            "GITHUB_REF": "refs/heads/main", "EDITORIAL_STORAGE_BACKEND": "ssh",
