@@ -135,13 +135,36 @@ class TelegramBotAPI:
         )
         return self._message_id(self._result("sendPhoto", response))
 
-    async def send_rich_message(self, chat_id: int | str, html: str) -> int:
+    async def send_rich_message(
+        self, chat_id: int | str, html: str, *, photo: PhotoUpload | None = None,
+    ) -> int:
         """Отправить уже проверенный rich HTML один раз, без повторов или fallback."""
         if not html.strip():
             raise ValueError("rich message HTML is required")
-        result = await self._call("sendRichMessage", {
-            "chat_id": chat_id, "rich_message": {"html": html},
-        })
+        photo_references = html.count("tg://photo?id=transport_map")
+        if photo is None:
+            if photo_references:
+                raise ValueError("rich message references a missing transport map")
+            result = await self._call("sendRichMessage", {
+                "chat_id": chat_id, "rich_message": {"html": html},
+            })
+        else:
+            if photo_references != 1:
+                raise ValueError("rich message must reference its transport map exactly once")
+            upload = self._photo(photo)
+            if upload[2] != "image/png":
+                raise ValueError("transport map must be PNG")
+            rich_message = {"html": html, "media": [{
+                "id": "transport_map", "media": {
+                    "type": "photo", "media": "attach://transport_map"},
+            }]}
+            response = await self._client.post(
+                f"{self._base_url}/sendRichMessage",
+                data={"chat_id": str(chat_id), "rich_message": json.dumps(
+                    rich_message, ensure_ascii=False, separators=(",", ":"))},
+                files={"transport_map": upload},
+            )
+            result = self._result("sendRichMessage", response)
         return self._message_id(result)
 
     async def send_media_group(

@@ -222,7 +222,9 @@ class BgprevozChangesCollector:
                 return data.decode(response.encoding or "utf-8"), str(response.url)
         raise ValueError("Bgprevoz redirect limit")
 
-    async def collect(self) -> list[RawItem]:
+    async def collect(self, *, limit: int = MAX_NOTICES) -> list[RawItem]:
+        if not 1 <= limit <= MAX_NOTICES:
+            raise ValueError("Bgprevoz notice limit is out of bounds")
         self.item_failures = []
         list_html, _ = await self._fetch(
             str(self._source.url),
@@ -230,7 +232,7 @@ class BgprevozChangesCollector:
         )
         notice_urls = parse_bgprevoz_change_links(list_html, self._source)
         items: list[RawItem] = []
-        for notice_url in notice_urls:
+        for notice_url in notice_urls[:limit]:
             try:
                 html, final_url = await self._fetch(
                     notice_url,

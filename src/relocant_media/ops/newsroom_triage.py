@@ -39,6 +39,10 @@ def triage_queue(engine: Engine, *, now: datetime) -> dict[str, Any]:
             Source.city == "belgrade", Source.enabled.is_(True),
         ).order_by(RawItem.id)).all()
         for item, source_type in rows:
+            # These undated notices corroborate maps for dated news. Freezing them
+            # as editorial holds would prevent the collector from updating geometry.
+            if source_type == "official_transport_changes" and item.published_at is None:
+                continue
             run = session.get(EditorialRun, item.id)
             if run is not None and _wrong_guide_date_hold(run, source_type, item, now):
                 # The news rule parked this undated guide before guides were recognised.
