@@ -65,6 +65,41 @@ def test_only_explicit_full_settlement_is_eligible() -> None:
     assert scope.extract_water_settlement(document(body=text + " Osim Ulice Broj Jedan.")) is None
 
 
+def test_simple_water_section_keeps_original_segment() -> None:
+    only, = scope.extract_water_outage_scopes(document())
+    assert only.segments == tuple(scope.extract_water_segments(document()))
+    assert only.starts_at.hour == 8 and only.ends_at.hour == 18
+
+
+def test_water_section_lists_independent_whole_settlements_and_houses() -> None:
+    body = "\n\n".join([
+        "BARAJEVO",
+        "U opštini Barajevo, 13. novembra 2026. godine, od 09:00 do 18:00 sati, "
+        "bez vode će ostati potrošači u sledećim naseljima:",
+        "Barajevo (centar)", "Vranić", "Baćevac",
+        "ČUKARICA",
+        "U opštini Čukarica, 13. novembra 2026. godine, od 10:00 do 14:00 sati, "
+        "bez vode će ostati potrošači u celom naselju Sremčica i u ulici Lepa, "
+        "na brojevima 4, 6 i 8.",
+    ])
+    evidence = document(body=body)
+    places = scope.extract_water_settlements(evidence)
+    assert [(item.settlement.name, item.starts_at.hour, item.ends_at.hour) for item in places] == [
+        ("Vranić", 9, 18), ("Baćevac", 9, 18), ("Sremčica", 10, 14),
+    ]
+    first, second = scope.extract_water_outage_scopes(evidence)
+    assert not first.addresses
+    assert [item["number"] for item in second.addresses] == ["4", "6", "8"]
+    assert scope.extract_water_settlement(evidence) is None
+
+
+def test_water_exception_excludes_whole_scope() -> None:
+    text = CITY_BODY.split("potrošači", 1)[0] + (
+        "potrošači u sledećim naseljima:\n\nRipanj\n\nOsim ulice Prve."
+    )
+    assert not scope.extract_water_settlements(document(body=text))
+
+
 def test_real_cyrillic_bvk_segment() -> None:
     body = (
         "Због планираних радова на водоводној мрежи у општини Вождовац, у петак, "

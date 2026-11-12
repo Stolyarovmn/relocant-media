@@ -9,6 +9,7 @@ import httpx
 from relocant_media.bot.formatting import compact_source_link, source_link_entities
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
 from relocant_media.domain.map_links import is_map_event_url
+from relocant_media.domain.source_locations import is_public_https_url
 
 
 class TelegramAPIError(RuntimeError):
@@ -280,6 +281,20 @@ class TelegramBotAPI:
         if not isinstance(message_id, int) or isinstance(message_id, bool):
             raise TelegramAPIError("sendMessage returned an invalid message_id")
         return message_id
+
+    async def send_notice_message(
+        self, chat_id: int | str, html: str, *, source_url: str, map_url: str,
+    ) -> int:
+        if not is_public_https_url(source_url):
+            raise ValueError("notice preview requires a public HTTPS source")
+        result = await self._call("sendMessage", {
+            "chat_id": chat_id,
+            "text": html,
+            "parse_mode": "HTML",
+            "link_preview_options": {"url": source_url, "show_above_text": True},
+            "reply_markup": map_reply_markup(map_url),
+        })
+        return self._message_id(result)
 
     async def delete_message(self, chat_id: int | str, message_id: int) -> None:
         result = await self._call(

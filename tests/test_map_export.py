@@ -17,7 +17,7 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops.map_backfill import parse_targets, plan
-from relocant_media.ops.map_export import _power, export_map_snapshot, read_map_feed
+from relocant_media.ops.map_export import _power, _water, export_map_snapshot, read_map_feed
 from relocant_media.ops.newsroom_publish import MAP_PATH, _publish_map
 from relocant_media.ops.pages_assets import copy_assets
 from relocant_media.services.local_outage_geometry import (
@@ -28,6 +28,7 @@ from relocant_media.services.local_outage_geometry import (
 )
 from relocant_media.services.transport_map import build_transport_map
 from relocant_media.services.utility_scope import extract_power_scopes
+from relocant_media.services.water_outage_scope import extract_water_outage_scopes
 from relocant_media.sources.registry import load_source_file
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem
 
@@ -161,6 +162,46 @@ def test_power_uses_building_shapes_and_resolves_only_existing_numbers_on_the_sa
     assert [area.address.number for area in event.areas] == ["2"]
     assert event.areas[0].ends_at.hour == 11
     assert event.ranges[0].number == "2–6"
+
+
+def test_whole_microdistrict_removes_only_covered_geometry_in_the_same_window():
+    polygon = AreaPolygon(
+        (((44.79, 20.40), (44.79, 20.42), (44.82, 20.42), (44.82, 20.40),
+          (44.79, 20.40)),),
+        "https://www.openstreetmap.org/relation/123",
+    )
+    locations = [
+        AddressLocation("Lepa", number, "Novi Beograd", position, (), "")
+        for number, position in [("4", (44.80, 20.41)), ("6", (44.81, 20.43))]
+    ]
+    index = AreaIndex({
+        address_key(item.street, item.number, item.municipality): item for item in locations
+    }, {("нови београд", "мз ледине"): (polygon,)})
+    power = power_document("\n".join([
+        "Novi Beograd 9.00 - 11.00 Celo mikronaselje Ledine, Lepa: 4, 6, 8,",
+        "Novi Beograd 11.00 - 13.00 Lepa: 4,",
+    ]))
+    water = water_document(body="\n".join([
+        "U opštini Novi Beograd, 13. novembra 2026. godine, od 09:00 do 11:00, "
+        "bez vode će ostati potrošači u celom mikronaselju Ledine i u ulici Lepa, "
+        "brojevi 4, 6 i 8.",
+        "U opštini Novi Beograd, 13. novembra 2026. godine, od 11:00 do 13:00, "
+        "bez vode će ostati potrošači u ulici Lepa, broj 4.",
+    ]))
+    events = (
+        _power(power, extract_power_scopes(power), None, None, index),
+        _water(water, None, None, {}, index, extract_water_outage_scopes(water)),
+    )
+    for event in events:
+        assert [area.rings for area in event.areas] == [polygon.rings]
+        assert [place.name for place in event.settlements] == ["Ledine"]
+        assert {window.starts_at.hour for window in event.windows} == {9, 11}
+        assert {(address.number, address.starts_at.hour) for address in event.addresses} == {
+            ("6", 9), ("8", 9), ("4", 11),
+        }
+        assert {(pin.address.number, pin.address.starts_at.hour) for pin in event.points} == {
+            ("6", 9), ("4", 11),
+        }
 
 
 @pytest.mark.asyncio

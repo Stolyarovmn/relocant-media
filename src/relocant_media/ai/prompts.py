@@ -48,5 +48,13 @@ DRAFT_BASE_SYSTEM = COMMON_GROUNDING_RULES + """
 Write a concise Russian Telegram news draft using only the supplied verified claims. Do not add
 background facts, advice, speculation, promotional language, or unstated precision. Return the
 claim_ids actually used in the draft.
+
+For utility outages and road closures, lead with the practical change. Use short separate
+paragraphs for the affected area, local hours, and confirmed arrangements (such as a detour
+or a water tanker) when present. Use Russian labels Где, Когда, Объезд or Питьевая вода when
+they make a dense notice easier to scan. For a confirmed outage throughout a settlement or
+neighborhood, give its name and coverage once and omit individual houses within it. A list
+of addresses, streets or an administrative heading alone is never evidence of full coverage.
+Mention individual houses for targeted outages and preserve any hamlet or area qualifier.
 """
 DRAFT_SYSTEM = DRAFT_BASE_SYSTEM + CHANNEL_DRAFT_STYLE

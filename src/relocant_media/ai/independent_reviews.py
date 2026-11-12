@@ -27,6 +27,7 @@ from relocant_media.ai.selection import selection_reason
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.freshness import publication_date_context
 from relocant_media.domain.presentation import title_instruction
+from relocant_media.services.native_map import LEGACY_NOTICE_LAYOUT, NOTICE_LAYOUT
 
 
 class _Response(BaseModel):
@@ -134,13 +135,24 @@ def reviewed_package(
             if package.presentation.native_map is not None:
                 native = package.presentation.native_map
                 point = native.get("point", {})
-                map_notice = native.get("layout") == "map_notice_v1"
-                if map_notice:
+                layout = native.get("layout")
+                map_notice = layout in {LEGACY_NOTICE_LAYOUT, NOTICE_LAYOUT}
+                if layout == LEGACY_NOTICE_LAYOUT:
                     instructions += (
                         "Для объявления с кнопкой карты проверь свернутые списки и "
                         "время каждого интервала в message_html по evidence. Все адреса "
                         "должны быть обычным текстом. Верхняя графика категории является "
                         "редакционной иллюстрацией. Встроенной геосхемы нет. "
+                    )
+                if layout == NOTICE_LAYOUT:
+                    instructions += (
+                        "Проверь читаемый сразу текст, время и адресный список в message_html. "
+                        "Предпросмотр относится к точной ссылке первоисточника. "
+                        "При явно подтверждённом отключении на всей территории достаточно её "
+                        "названия. Список улиц, адресов или заголовок общины сами по себе "
+                        "не доказывают полный охват. Сохрани точечные адреса и уточнение хутора, "
+                        "где оно есть. Адреса в списке должны быть обычным текстом. "
+                        "Встроенной геосхемы нет. "
                     )
                 if point.get("mode") == "transport_map_review":
                     instructions += (

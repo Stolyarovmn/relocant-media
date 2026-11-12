@@ -12,6 +12,7 @@ from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.source_locations import extract_source_maps
 from relocant_media.services.native_map import (
+    NOTICE_LAYOUT,
     build_native_map,
     validate_native_map_draft,
     verify_live_native_map,
@@ -100,7 +101,8 @@ def build_presentation(
         profile_sha256=profile.sha256, rubric_id=rubric.id, rubric_name=rubric.name,
         source_map=None if native_map is not None else source_map,
         illustration=plan_illustration(
-            enrichment, source_url=source_url, allow_source_preview=native_map is None),
+            enrichment, source_url=source_url,
+            allow_source_preview=native_map is None or native_map.get("layout") == NOTICE_LAYOUT),
         native_map=native_map,
     )
 
@@ -154,12 +156,14 @@ def verify_stored_presentation(
                     else select_source_map(enrichment, source_url=source_url))
     if presentation.source_map != expected_map:
         raise ValueError("Карта не совпадает с сохранённым источником")
+    native = presentation.native_map
     if presentation.illustration != plan_illustration(
-        enrichment, source_url=source_url, allow_source_preview=presentation.native_map is None,
+        enrichment, source_url=source_url,
+        allow_source_preview=native is None or native.get("layout") == NOTICE_LAYOUT,
     ):
         raise ValueError("План иллюстрации изменился после проверки")
-    if presentation.native_map is not None:
-        verify_native_map_snapshot(session, presentation.native_map, documents, document_ids)
+    if native is not None:
+        verify_native_map_snapshot(session, native, documents, document_ids)
 
 
 def verify_live_map(

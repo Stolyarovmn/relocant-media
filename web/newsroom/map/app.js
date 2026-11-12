@@ -1,8 +1,8 @@
 import {
-  addressHits, addressWindowText, buildAddressIndex, exactMapPoints, incidentCountdown,
+  addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentStatus, incidentTimes, kinds, launchEvent, nextTransition, readIncidents,
-  searchAddresses, streetBounds, unexpired, updateStamp,
-} from "./core.js?v=3";
+  pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
+} from "./core.js?v=4";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -34,6 +34,8 @@ const state = {
   deepPending: initialEvent,
   map: null,
   eventLayer: null,
+  pointLayer: null,
+  mapItems: [],
   addressLayer: null,
   focusNote: "",
   tileStatus: "loading",
@@ -106,7 +108,9 @@ function setupMap() {
     }
   }, 12000);
   state.eventLayer = leaflet.layerGroup().addTo(map);
+  state.pointLayer = leaflet.layerGroup().addTo(map);
   state.addressLayer = leaflet.layerGroup().addTo(map);
+  map.on("zoomend", renderPointClusters);
   map.on("dragstart", () => { state.refocusEvent = ""; });
   new ResizeObserver(() => map.invalidateSize({ pan: false })).observe(mapFrame);
   byId("reset-map").addEventListener("click", () => {
@@ -200,7 +204,7 @@ function eventCard(incident, now) {
       : settlement.name;
     card.append(make("p", "event-scope", `${scope} · ${settlement.municipality} · ${addressWindowText(settlement.window)}`));
   }
-  if (incident.kind === "road" && !incident.lines.length) {
+  if (roadOrientation(incident)) {
     card.append(make("p", "event-scope", "Точные границы участка не подтверждены."));
   }
   if (incident.settlements.length && !incident.areas.some((area) => area.scope === "settlement")) {
@@ -266,60 +270,153 @@ function renderList(now) {
   feedback.hidden = !message;
 }
 
+function roadOrientation(incident) {
+  return incident.kind === "road" && !incident.lines.length && !incident.areas.length;
+}
+
+function bindFeature(layer, group, incident, label, window, fromRegister) {
+  const popup = make("div");
+  popup.append(make("strong", "", incident.title));
+  if (label && label !== incident.title) popup.append(make("p", "", label));
+  if (window) popup.append(make("p", "", addressWindowText(window)));
+  if (roadOrientation(incident)) {
+    popup.append(make("p", "", "Ориентир. Точные границы перекрытия не подтверждены."));
+  }
+  popup.append(link(incident.source, "Первоисточник ↗"));
+  if (fromRegister) {
+    const credit = make("p");
+    credit.append(link("https://data.gov.rs/sr/datasets/adresni-registar/", "Координаты · реестр Сербии ↗"));
+    popup.append(credit);
+  }
+  layer.bindPopup(popup).on("click", () => {
+    state.selected = incident.id;
+    if (incidentStatus(incident, Date.now()) !== "closed") state.previewArchive = "";
+    state.refocusEvent = "";
+    state.focusNote = "";
+    showMapNote();
+    renderList(Date.now());
+  }).addTo(group);
+}
+
+function drawCluster(points, zoom) {
+  const leaflet = globalThis.L;
+  const [first] = points;
+  const location = [first.lat, first.lon];
+  const kindsInCluster = new Set(points.map(({ incident }) => incident.kind));
+  const badge = make("span", "map-cluster-count", String(points.length));
+  badge.setAttribute("aria-hidden", "true");
+  if (kindsInCluster.size === 1) badge.dataset.kind = first.incident.kind;
+  const title = `Метки на карте · ${points.length}`;
+  const size = mobile.matches ? 44 : 38;
+  const icon = leaflet.divIcon({
+    className: "map-cluster", html: badge, iconSize: [size, size],
+  });
+  const marker = leaflet.marker(location, { icon, title, alt: title, riseOnHover: true });
+  marker.on("add", () => marker.getElement()?.setAttribute("aria-label", title));
+
+  const sameLocation = points.every((point) => point.lat === first.lat && point.lon === first.lon);
+  if (zoom < state.map.getMaxZoom() && !sameLocation) {
+    marker.on("click", () => {
+      const next = Math.min(zoom + 2, state.map.getMaxZoom());
+      const bounds = leaflet.latLngBounds(points.map(({ lat, lon }) => [lat, lon]));
+      if (state.map.getBoundsZoom(bounds, false, [70, 70]) > zoom) {
+        state.map.fitBounds(bounds, { padding: [35, 35], maxZoom: next, animate });
+      } else {
+        state.map.setView(location, next, { animate });
+      }
+    });
+  } else {
+    const popup = make("div", "map-cluster-popup");
+    popup.append(make("strong", "", title));
+    const incidents = new Map(points.map(({ incident }) => [incident.id, incident]));
+    const list = make("ul");
+    for (const incident of incidents.values()) {
+      const row = make("li");
+      const button = make("button", "", incident.title);
+      button.type = "button";
+      button.addEventListener("click", () => openEvent(incident));
+      row.append(button);
+      list.append(row);
+    }
+    popup.append(list);
+    marker.bindPopup(popup);
+  }
+  marker.addTo(state.pointLayer);
+}
+
+function roadLineWeight(zoom, selected) {
+  return Math.max(7, 7 + (zoom - 13) * 2) + (selected ? 3 : 0);
+}
+
+function renderPointClusters() {
+  if (!state.map) return;
+  const leaflet = globalThis.L;
+  const zoom = state.map.getZoom();
+  const project = (coordinates) => state.map.project(coordinates, zoom);
+  state.pointLayer.clearLayers();
+  const markers = state.mapItems.flatMap(({ incident, lines, areas, points, roadPaths, archived, now }) => {
+    for (const path of roadPaths) {
+      path.setStyle({ weight: roadLineWeight(zoom, incident.id === state.selected) });
+    }
+    return pointsAtScale(points, lines, areas, zoom, project)
+      .map((point) => ({ ...point, incident, archived, now }));
+  });
+  for (const group of clusterMapPoints(markers, project, mobile.matches ? 49 : 43)) {
+    if (group.length > 1) {
+      drawCluster(group, zoom);
+      continue;
+    }
+    const [point] = group;
+    const { lat, lon, label, address, window, fromRegister, incident, archived, now } = point;
+    const selected = incident.id === state.selected;
+    const expired = !unexpired(window || address?.window, now);
+    bindFeature(leaflet.circleMarker([lat, lon], {
+      radius: selected ? 8 : 6, color: "#fffef9", weight: selected ? 3 : 2,
+      fillColor: kinds[incident.kind].color, fillOpacity: archived || expired ? .58 : .96,
+      className: "outage-point",
+    }), state.pointLayer, incident, label, window || address?.window, fromRegister);
+  }
+}
+
 function renderPoints(now) {
   if (!state.map) return;
   const leaflet = globalThis.L;
   state.eventLayer.clearLayers();
-  for (const incident of visibleIncidents(now)) {
+  state.mapItems = visibleIncidents(now).map((incident) => {
+    const includeExpired = showsArchived(incident);
+    const lines = visibleMapLines(incident, now, includeExpired);
+    const areas = incident.areas.filter((area) => unexpired(area.window, now, includeExpired));
+    const points = exactMapPoints(state.index, incident, now, includeExpired);
     const color = kinds[incident.kind].color;
     const selected = incident.id === state.selected;
     const archived = incidentStatus(incident, now) === "closed";
-    const handle = (layer, label, window = null, fromRegister = false) => {
-      const popup = make("div");
-      popup.append(make("strong", "", incident.title));
-      if (label && label !== incident.title) popup.append(make("p", "", label));
-      if (window) popup.append(make("p", "", addressWindowText(window)));
-      popup.append(link(incident.source, "Первоисточник ↗"));
-      if (fromRegister) {
-        const credit = make("p");
-        credit.append(link("https://data.gov.rs/sr/datasets/adresni-registar/", "Координаты · реестр Сербии ↗"));
-        popup.append(credit);
-      }
-      layer.bindPopup(popup).on("click", () => {
-        state.selected = incident.id;
-        if (incidentStatus(incident, Date.now()) !== "closed") state.previewArchive = "";
-        state.refocusEvent = "";
-        state.focusNote = "";
-        showMapNote();
-        renderList(Date.now());
-      }).addTo(state.eventLayer);
-    };
-    for (const { coordinates, label } of incident.lines) {
-      handle(leaflet.polyline(coordinates, {
-        color, opacity: archived ? .48 : .94, weight: selected ? 8 : 5, lineCap: "round",
-        dashArray: incident.kind === "road" ? "11 7" : null,
-      }), label);
+    const road = incident.kind === "road";
+    const roadPaths = [];
+    for (const { coordinates, label, window } of lines) {
+      const expired = archived || !unexpired(window, now);
+      const style = road
+        ? { opacity: expired ? .30 : selected ? .64 : .48, weight: roadLineWeight(state.map.getZoom(), selected) }
+        : { opacity: expired ? .48 : .94, weight: selected ? 8 : 5 };
+      const path = leaflet.polyline(coordinates, {
+        color, ...style, lineCap: "round", lineJoin: "round",
+        className: road ? "outage-road" : "outage-line",
+      });
+      bindFeature(path, state.eventLayer, incident, label, window);
+      if (road) roadPaths.push(path);
     }
-    for (const area of incident.areas) {
-      if (!unexpired(area.window, now, showsArchived(incident))) continue;
-      const expired = !unexpired(area.window, now);
-      handle(leaflet.polygon(area.rings, {
+    for (const area of areas) {
+      const expired = archived || !unexpired(area.window, now);
+      const fill = road ? selected ? .51 : .42 : area.scope === "settlement" ? .24 : selected ? .68 : .49;
+      bindFeature(leaflet.polygon(area.rings, {
         color, fillColor: color, weight: selected ? 2.8 : 1.8,
-        opacity: expired ? .50 : .92,
-        fillOpacity: expired ? .12 : area.scope === "settlement" ? .24 : selected ? .68 : .49,
-        className: `outage-${area.scope}`,
-      }), area.label, area.window);
+        opacity: expired ? .50 : road ? .60 : .92,
+        fillOpacity: expired ? .12 : fill,
+        className: road ? "outage-road" : `outage-${area.scope}`,
+      }), state.eventLayer, incident, area.label, area.window);
     }
-    for (const { lat, lon, label, address, fromRegister } of exactMapPoints(
-      state.index, incident, now, showsArchived(incident),
-    )) {
-      const expired = !unexpired(address?.window, now);
-      handle(leaflet.circleMarker([lat, lon], {
-        radius: selected ? 8 : 6, color: "#fffef9", weight: selected ? 3 : 2,
-        fillColor: color, fillOpacity: archived || expired ? .58 : .96,
-      }), label, address?.window, fromRegister);
-    }
-  }
+    return { incident, lines, areas, points, roadPaths, archived, now };
+  });
+  renderPointClusters();
 }
 
 function renderAddress() {
@@ -356,7 +453,7 @@ function focusIncident(incident) {
   const includeExpired = showsArchived(incident);
   const locations = exactMapPoints(state.index, incident, now, includeExpired)
     .map(({ lat, lon }) => [lat, lon]);
-  for (const line of incident.lines) {
+  for (const line of visibleMapLines(incident, now, includeExpired)) {
     for (const point of line.coordinates) locations.push(point);
   }
   for (const area of incident.areas) {
@@ -385,15 +482,17 @@ function focusIncident(incident) {
     showMapNote();
     return false;
   }
-  state.focusNote = "";
+  state.focusNote = roadOrientation(incident)
+    ? "Показан ориентир. Точные границы перекрытия не подтверждены." : "";
   showMapNote();
   return true;
 }
 
 function openEvent(incident, { fromCard = false } = {}) {
+  const now = Date.now();
   state.deepPending = "";
   state.selected = incident.id;
-  state.previewArchive = incidentStatus(incident, Date.now()) === "closed" ? incident.id : "";
+  state.previewArchive = incidentStatus(incident, now) === "closed" ? incident.id : "";
   state.refocusEvent = !state.index && (incident.addresses.length || incident.segments.length)
     ? incident.id : "";
   enabled.add(incident.kind);
@@ -401,8 +500,10 @@ function openEvent(incident, { fromCard = false } = {}) {
     button.setAttribute("aria-pressed", String(enabled.has(button.dataset.kind)));
   }
   render();
-  if (fromCard && mobile.matches && (incident.lines.length || incident.areas.length
-      || exactMapPoints(state.index, incident, Date.now(), showsArchived(incident)).length
+  const includeExpired = showsArchived(incident);
+  if (fromCard && mobile.matches && (visibleMapLines(incident, now, includeExpired).length
+      || incident.areas.some((area) => unexpired(area.window, now, includeExpired))
+      || exactMapPoints(state.index, incident, now, includeExpired).length
       || streetBounds(state.index, incident))) {
     showAnnouncements(false);
     announcementToggle.focus({ preventScroll: true });
@@ -639,7 +740,10 @@ selectedPreview.addEventListener("click", () => {
   showAnnouncements(true);
   eventList.querySelector('[data-selected="true"] button')?.focus();
 });
-mobile.addEventListener("change", () => showAnnouncements(!mobile.matches));
+mobile.addEventListener("change", () => {
+  showAnnouncements(!mobile.matches);
+  renderPointClusters();
+});
 showAnnouncements(!mobile.matches);
 byId("refresh").addEventListener("click", () => {
   deepAttempts = 0;

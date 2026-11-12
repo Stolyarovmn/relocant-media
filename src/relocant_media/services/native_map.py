@@ -1,13 +1,15 @@
 """Карта из неизменного первоисточника и точный HTML, входящий в два редакционных ревью."""
 
 import hashlib
+import re
 from datetime import datetime
-from html import escape
+from html import escape, unescape
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
+from relocant_media.bot.formatting import _utf16_units
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.source_locations import is_public_https_url
@@ -32,12 +34,20 @@ from relocant_media.services.utility_map import (
     utility_map_fragment,
 )
 from relocant_media.services.utility_scope import extract_power_scopes
-from relocant_media.services.water_outage_scope import extract_water_settlement, water_outage_window
+from relocant_media.services.water_outage_scope import (
+    extract_water_outage_scopes,
+    extract_water_settlement,
+    water_outage_window,
+)
 from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import RawItem, Source
 
-NOTICE_LAYOUT = "map_notice_v1"
+LEGACY_NOTICE_LAYOUT = "map_notice_v1"
+NOTICE_LAYOUT = "map_notice_v2"
 NOTICE_COVER = "tg://photo?id=notice_cover"
+NOTICE_TEXT_LIMIT = 4096
+_NOTICE_LABEL = re.compile(r"^(Где|Когда|Что изменится|Объезд|Питьевая вода|Рубрика):")
+_TIME_RANGE = re.compile(r"\b\d{1,2}:\d{2}[ \t]*[–—-][ \t]*\d{1,2}:\d{2}\b")
 
 
 def _digest(text: str) -> str:
@@ -69,14 +79,19 @@ def _snapshot(session: Session, raw_id: int, document: EvidenceDocument) -> RawI
     return snapshot
 
 
-def _notice_layout(document: EvidenceDocument, point: dict[str, Any]) -> dict[str, Any]:
+def _notice_layout(
+    document: EvidenceDocument, point: dict[str, Any], *, layout: str = NOTICE_LAYOUT,
+) -> dict[str, Any]:
+    legacy = layout == LEGACY_NOTICE_LAYOUT
     windows: dict[tuple[datetime, datetime], list[str]] = {}
+    areas: dict[tuple[datetime, datetime], list[str]] = {}
     if point["mode"] == MAP_MODE:
         kind = "road"
-    elif power := extract_power_scopes(document):
+    elif power := extract_power_scopes(document, include_whole_areas=not legacy):
         kind = "power"
         for scope in power:
-            items = windows.setdefault((scope.starts_at, scope.ends_at), [])
+            period = (scope.starts_at, scope.ends_at)
+            items = windows.setdefault(period, [])
             streets: dict[tuple[str, str], list[str]] = {}
             for item in scope.addresses:
                 numbers = streets.setdefault((item["street"], item["municipality"]), [])
@@ -86,24 +101,47 @@ def _notice_layout(document: EvidenceDocument, point: dict[str, Any]) -> dict[st
             if scope.settlement is not None:
                 place = scope.settlement
                 label = f"{place.name}, {place.parent}" if place.parent else f"{place.name} целиком"
-                items.append(f"{label} · {place.municipality}")
+                destination = items if legacy else areas.setdefault(period, [])
+                destination.append(f"{label} · {place.municipality}")
     else:
         kind = "water"
-        if period := water_outage_window(document):
-            items = windows.setdefault(period, [])
-            items.extend(
+        scopes = () if legacy else extract_water_outage_scopes(document)
+        if scopes:
+            for water_scope in scopes:
+                period = (water_scope.starts_at, water_scope.ends_at)
+                items = windows.setdefault(period, [])
+                items.extend(
+                    f'{segment["street"]} от {segment["start"]} до {segment["end"]} · '
+                    f'{segment["municipality"]}' for segment in water_scope.segments
+                )
+                items.extend(
+                    f'{item["street"]}, {item["number"]} · {item["municipality"]}'
+                    for item in water_scope.addresses
+                )
+                for place in water_scope.settlements:
+                    label = (f"{place.name}, {place.parent}" if place.parent else
+                             f"{place.name} целиком")
+                    areas.setdefault(period, []).append(f"{label} · {place.municipality}")
+        elif legacy_period := water_outage_window(document):
+            items = windows[legacy_period] = [
                 f'{segment["street"]} от {segment["start"]} до {segment["end"]} · '
                 f'{segment["municipality"]}' for segment in point["segments"]
-            )
-            if settlement := extract_water_settlement(document):
-                items.append(f"{settlement[1]} целиком · {settlement[0]}")
+            ]
+            if legacy:
+                if settlement := extract_water_settlement(document):
+                    items.append(f"{settlement[1]} целиком · {settlement[0]}")
     return {
-        "layout": NOTICE_LAYOUT,
-        "cover_kind": kind,
-        "cover_sha256": hashlib.sha256(render_notice_banner(kind)).hexdigest(),
-        "schedule": [{"when": f"{start:%d.%m.%Y} · {start:%H:%M}–{end:%H:%M}",
-                      "items": list(dict.fromkeys(items))}
-                     for (start, end), items in sorted(windows.items())],
+        "layout": layout,
+        **({"cover_kind": kind,
+            "cover_sha256": hashlib.sha256(render_notice_banner(kind)).hexdigest()}
+           if legacy else {}),
+        "schedule": [
+            {"when": f"{start:%d.%m.%Y} · {start:%H:%M}–{end:%H:%M}",
+             "items": list(dict.fromkeys(windows.get((start, end), ()))),
+             **({} if legacy else
+                {"areas": list(dict.fromkeys(areas.get((start, end), ())))})}
+            for start, end in sorted(windows.keys() | areas.keys())
+        ],
     }
 
 
@@ -191,7 +229,9 @@ def native_message_html(native_map: dict[str, Any], draft: RussianDraft) -> str:
     if not isinstance(source_url, str) or not is_public_https_url(source_url):
         raise ValueError("native map source URL is unsafe")
     if native_map.get("layout") == NOTICE_LAYOUT:
-        return _notice_message_html(native_map, draft)
+        return _source_preview_notice_html(native_map, draft)
+    if native_map.get("layout") == LEGACY_NOTICE_LAYOUT:
+        return _legacy_notice_message_html(native_map, draft)
     paragraphs = [draft.title, *draft.body.split("\n\n")]
     text = "".join("<p>" + escape(part).replace("\n", "<br/>") + "</p>" for part in paragraphs)
     if point.get("mode") == MAP_MODE:
@@ -214,7 +254,7 @@ def _paragraphs(value: str) -> str:
     return "".join(result)
 
 
-def _notice_message_html(native: dict[str, Any], draft: RussianDraft) -> str:
+def _legacy_notice_message_html(native: dict[str, Any], draft: RussianDraft) -> str:
     point = native["point"]
     parts = [f'<figure><img src="{NOTICE_COVER}"/></figure>', f"<h2>{escape(draft.title)}</h2>"]
     if point["mode"] == UTILITY_MAP_MODE:
@@ -246,6 +286,67 @@ def _notice_message_html(native: dict[str, Any], draft: RussianDraft) -> str:
         parts.append(_paragraphs(draft.body))
     parts.append(f'<p><a href="{escape(point["source_url"], quote=True)}">Источник</a></p>')
     return "".join(parts)
+
+
+def _notice_item(item: str) -> str:
+    return escape(item).replace(" целиком · ", " <u>целиком</u> · ")
+
+
+def _notice_text_size(html: str) -> int:
+    return _utf16_units(unescape(re.sub(r"<[^>]+>", "", html)))
+
+
+def _source_preview_notice_html(native: dict[str, Any], draft: RussianDraft) -> str:
+    body, separator, rubric = draft.body.rpartition("\n\nРубрика: ")
+    parts = [f"<b>{escape(draft.title)}</b>"]
+    for part in escape(body if separator else draft.body).split("\n\n"):
+        if part.startswith("«") and part.endswith("»"):
+            parts.append(f"<blockquote>{part}</blockquote>")
+        else:
+            lines = "\n".join(_NOTICE_LABEL.sub(r"<b>\1</b>:", line) for line in part.split("\n"))
+            parts.append(_TIME_RANGE.sub(r"<code>\g<0></code>", lines))
+    source = f'<a href="{escape(native["point"]["source_url"], quote=True)}">Источник</a>'
+    footer = [f"<b>Рубрика</b>: {escape(rubric)}", source] if separator else [source]
+    sections = native["schedule"]
+    areas = [
+        f'<code>{escape(section["when"])}</code>\n'
+        + "\n".join(f"• {_notice_item(item)}" for item in section["areas"])
+        for section in sections if section["areas"]
+    ]
+    if areas:
+        parts.append("<b>Зоны отключения</b> · местное время\n" + "\n".join(areas))
+    items = [
+        [f'<b>{escape(section["when"])}</b>',
+         *(f"• {escape(item)}" for item in section["items"])]
+        for section in sections if section["items"]
+    ]
+    if items:
+        heading = "<b>Адреса и время работ</b> · местное время"
+        overflow = "Полный список адресов — в источнике."
+        reserved = _notice_text_size(
+            "\n\n".join([*parts, heading, overflow, *footer]),
+        )
+        budget = NOTICE_TEXT_LIMIT - reserved if reserved <= NOTICE_TEXT_LIMIT else 12_000
+        rows = []
+        for interval, *addresses in items:
+            budget -= _notice_text_size(interval) + 2
+            if budget < _notice_text_size(addresses[0]) + 1:
+                rows.append(overflow)
+                break
+            rows.append(interval)
+            for address in addresses:
+                budget -= _notice_text_size(address) + 1
+                if budget < 0:
+                    rows.append(overflow)
+                    break
+                rows.append(address)
+            if budget < 0:
+                break
+        if rows == [overflow]:
+            parts.append(overflow)
+        else:
+            parts.append("<blockquote expandable>" + "\n".join([heading, *rows]) + "</blockquote>")
+    return "\n\n".join([*parts, *footer])
 
 
 def _transport_fragment(point: dict[str, Any]) -> str:
@@ -318,9 +419,11 @@ def validate_native_map_draft(
     if point["document_sha256"] != digest:
         raise ValueError("native map does not match evidence document")
     if "layout" in native:
-        if (point.get("mode") not in {MAP_MODE, UTILITY_MAP_MODE}
+        layout = native["layout"]
+        if (layout not in {LEGACY_NOTICE_LAYOUT, NOTICE_LAYOUT}
+                or point.get("mode") not in {MAP_MODE, UTILITY_MAP_MODE}
                 or any(native.get(key) != value
-                       for key, value in _notice_layout(document, point).items())):
+                       for key, value in _notice_layout(document, point, layout=layout).items())):
             raise ValueError("notice layout does not match evidence document")
 
 

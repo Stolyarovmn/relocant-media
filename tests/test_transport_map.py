@@ -112,9 +112,8 @@ def test_transport_map_is_bound_to_snapshot_and_reviewed_html(line):
         assert native["point"]["source_url"] == ARTICLE
         assert native["point"]["notice_url"] == NOTICE
         assert ("image_sha256" in native["point"]) == line
-        assert native["message_html"].startswith(
-            '<figure><img src="tg://photo?id=notice_cover"/></figure><h2>'
-        )
+        assert native["message_html"].startswith("<b>В Сремчице изменились маршруты</b>\n\n")
+        assert "tg://photo?id=notice_cover" not in native["message_html"]
         assert "<tg-map" not in native["message_html"]
         assert "id=transport_map" not in native["message_html"]
         assert f'href="{ARTICLE}">Источник' in native["message_html"]

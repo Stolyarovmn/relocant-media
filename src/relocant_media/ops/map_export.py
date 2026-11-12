@@ -42,8 +42,13 @@ from relocant_media.services.utility_scope import (
     extract_power_scopes,
     house_in_range,
     is_explicit_house,
+    settlement_matches_context,
 )
-from relocant_media.services.water_outage_scope import extract_water_settlement, water_outage_window
+from relocant_media.services.water_outage_scope import (
+    WaterScope,
+    extract_water_outage_scopes,
+    water_outage_window,
+)
 from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -145,6 +150,16 @@ class Area(Window):
 class Line(PublicModel):
     coordinates: Annotated[tuple[Coordinate, ...], Field(min_length=2, max_length=1000)]
     label: Label
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def ordered_if_timed(self) -> Line:
+        if self.starts_at is not None and self.ends_at is not None:
+            Window(starts_at=self.starts_at, ends_at=self.ends_at)
+        elif self.starts_at is not None or self.ends_at is not None:
+            raise ValueError("map line requires both ends of its window")
+        return self
 
 
 class Incident(PublicModel):
@@ -223,12 +238,14 @@ def _coords(latitude: object, longitude: object) -> Coordinate | None:
     return (lat, lon) if 44.2 <= lat <= 45.2 and 19.8 <= lon <= 21.1 else None
 
 
-def _line(values: list[list[str]], label: str) -> Line | None:
+def _line(values: list[list[str]], label: str, window: Window | None = None) -> Line | None:
     coords = [_coords(*value) if isinstance(value, list) and len(value) == 2 else None
               for value in values]
     if None in coords or len(set(coords)) < 2:
         return None
-    return Line(coordinates=tuple(pair for pair in coords if pair is not None), label=label)
+    return Line(coordinates=tuple(pair for pair in coords if pair is not None), label=label,
+                starts_at=window.starts_at if window else None,
+                ends_at=window.ends_at if window else None)
 
 
 def _incident(
@@ -263,6 +280,24 @@ def _settlement(
     return entry, [_area(polygon, window, scope.name) for polygon in polygons]
 
 
+def _covered_by_settlement(
+    address: Address, position: Coordinate | None, settlements: list[Settlement],
+    index: AreaIndex | None,
+) -> bool:
+    municipality = address.municipality.split(",", 1)[0]
+    for place in settlements:
+        if (address.starts_at != place.starts_at or address.ends_at != place.ends_at
+                or geography_name(municipality) != geography_name(place.municipality)):
+            continue
+        scope = SettlementScope(place.municipality, place.name, place.parent)
+        if settlement_matches_context(scope, address.municipality):
+            return True
+        if (index is not None and position is not None
+                and index.settlement_contains(place.name, place.municipality, position)):
+            return True
+    return False
+
+
 def _power(
     document: EvidenceDocument, schedule: list[PowerScope], point: dict[str, Any] | None,
     title: str | None, index: AreaIndex | None,
@@ -282,8 +317,9 @@ def _power(
         window = Window(starts_at=scope.starts_at, ends_at=scope.ends_at)
         if scope.settlement is not None:
             entry, polygons = _settlement(scope.settlement, window, index)
-            settlements.append(entry)
-            areas.extend(polygons)
+            if entry not in settlements:
+                settlements.append(entry)
+                areas.extend(polygons)
         for value in scope.addresses:
             number = value["number"]
             street, municipality = value["street"], value["municipality"]
@@ -306,12 +342,17 @@ def _power(
                 key = (*_key(address), scope.starts_at.isoformat(), scope.ends_at.isoformat())
                 addresses.setdefault(key, address)
     pins: list[Pin] = []
-    houses = tuple(addresses.values())[:_MAX_HOUSES]
-    for address in houses:
+    houses: list[Address] = []
+    for address in addresses.values():
+        if len(houses) >= _MAX_HOUSES:
+            break
         label = f"{address.street}, {address.number}"
         location = (index.address(address.street, address.number, address.municipality)
                     if index is not None else None)
         position = location.point if location is not None else geocoded.get(_key(address))
+        if _covered_by_settlement(address, position, settlements, index):
+            continue
+        houses.append(address)
         if location is not None and location.buildings and len(areas) < _MAX_AREAS:
             areas.extend(_area(polygon, address, label, address) for polygon in location.buildings)
         elif position is not None:
@@ -320,7 +361,7 @@ def _power(
                             else None))
     return _incident(
         document, "power", title or "Плановые отключения света", windows,
-        addresses=houses, points=tuple(pins), areas=tuple(areas[:_MAX_AREAS]),
+        addresses=tuple(houses), points=tuple(pins), areas=tuple(areas[:_MAX_AREAS]),
         ranges=tuple(sorted(ranges, key=lambda item: (item.starts_at, item.municipality,
                                                       item.street, item.number))),
         settlements=tuple(settlements[:120]),
@@ -329,41 +370,79 @@ def _power(
 
 def _water(
     document: EvidenceDocument, point: dict[str, Any] | None, title: str | None,
-    streets: StreetIndex, index: AreaIndex | None, settlement: tuple[str, str] | None,
+    streets: StreetIndex, index: AreaIndex | None, scopes: tuple[WaterScope, ...],
 ) -> Incident:
     period = water_outage_window(document)
-    windows = (Window(starts_at=period[0], ends_at=period[1]),) if period else ()
-    segments = tuple(Segment.model_validate(value) for value in point["segments"]) if point else ()
+    periods = {(scope.starts_at, scope.ends_at) for scope in scopes}
+    if period is not None:
+        periods.add(period)
+    windows = tuple(Window(starts_at=start, ends_at=end) for start, end in sorted(periods))
     geography = {Segment.model_validate(value["segment"]): value
                  for value in (point["geography"]["lines"] if point else ())}
-    lines = []
-    addresses: set[Address] = set()
+    segment_windows: dict[tuple[Segment, Window | None], None] = {}
+    addresses: dict[Address, Coordinate | None] = {}
     areas: list[Area] = []
-    settlements: tuple[Settlement, ...] = ()
-    if settlement is not None and windows:
-        entry, polygons = _settlement(SettlementScope(*settlement), windows[0], index)
-        settlements = (entry,)
-        areas.extend(polygons)
-    for segment in segments:
+    settlements: list[Settlement] = []
+    for scope in scopes:
+        window = Window(starts_at=scope.starts_at, ends_at=scope.ends_at)
+        for place in scope.settlements:
+            place_entry, polygons = _settlement(place, window, index)
+            if place_entry not in settlements:
+                settlements.append(place_entry)
+                areas.extend(polygons)
+        for segment_entry in scope.segments:
+            segment_windows[(Segment.model_validate(segment_entry), window)] = None
+        for address_entry in scope.addresses:
+            address = Address(
+                starts_at=window.starts_at, ends_at=window.ends_at,
+                municipality=address_entry["municipality"], street=address_entry["street"],
+                number=address_entry["number"],
+            )
+            addresses[address] = None
+    if not segment_windows and point is not None:
+        fallback_window = Window(starts_at=period[0], ends_at=period[1]) if period else None
+        segment_windows.update({(Segment.model_validate(entry), fallback_window): None
+                                for entry in point["segments"]})
+    lines: list[Line] = []
+    segments = tuple(dict.fromkeys(segment for segment, _ in segment_windows))[:3]
+    for segment, line_window in segment_windows:
         found = geography.get(segment) or local_street_line(segment.model_dump(), streets)
-        if found is not None and (line := _line(found["coordinates"], segment.street)) is not None:
+        if found is not None and len(lines) < 3 and (
+            line := _line(found["coordinates"], segment.street, line_window)
+        ) is not None:
             lines.append(line)
-            if index is not None and windows:
-                for location in index.street(segment.street, segment.municipality):
-                    if not within_outage_segment(location.point, line.coordinates):
+            if index is not None and line_window is not None:
+                for street_location in index.street(segment.street, segment.municipality):
+                    if not within_outage_segment(street_location.point, line.coordinates):
                         continue
-                    address = Address(**windows[0].model_dump(), municipality=segment.municipality,
-                                      street=segment.street, number=location.number)
-                    addresses.add(address)
-                    label = f"{address.street}, {address.number}"
-                    areas.extend(_area(polygon, windows[0], label, address)
-                                 for polygon in location.buildings)
+                    address = Address(**line_window.model_dump(),
+                                      municipality=segment.municipality, street=segment.street,
+                                      number=street_location.number)
+                    addresses.setdefault(address, street_location.point)
+    pins: list[Pin] = []
+    houses: list[Address] = []
+    for address, segment_position in sorted(addresses.items(), key=lambda item: _key(item[0])):
+        if len(houses) >= _MAX_HOUSES:
+            break
+        location = (index.address(address.street, address.number, address.municipality)
+                    if index is not None else None)
+        position = location.point if location is not None else segment_position
+        if _covered_by_settlement(address, position, settlements, index):
+            continue
+        houses.append(address)
+        label = f"{address.street}, {address.number}"
+        if location is not None and location.buildings:
+            areas.extend(_area(polygon, address, label, address) for polygon in location.buildings)
+        elif segment_position is None and position is not None:
+            pins.append(Pin(lat=position[0], lon=position[1], label=label, address=address,
+                            coordinate_source="rgz" if location and location.osm_url is None
+                            else None))
     fallback_title = f"Отключение воды · {segments[0].street}" if segments else document.title
     return _incident(
         document, "water", title or fallback_title, windows, segments=segments,
         lines=tuple(lines), source_map_url=point["official_map_url"] if point else None,
-        addresses=tuple(sorted(addresses, key=_key))[:_MAX_HOUSES], areas=tuple(areas[:_MAX_AREAS]),
-        settlements=settlements,
+        addresses=tuple(houses), points=tuple(pins), areas=tuple(areas[:_MAX_AREAS]),
+        settlements=tuple(settlements[:120]),
     )
 
 
@@ -478,11 +557,11 @@ def export_map(
             html, geography = _source_html(session, item)
             point = build_utility_point(document, html, geography)
             schedule = extract_power_scopes(document)
-            settlement = extract_water_settlement(document)
+            water_scopes = extract_water_outage_scopes(document)
             if schedule:
                 incident = _power(document, schedule, point, title, areas)
-            elif settlement is not None or (point and point["mode"] == UTILITY_MAP_MODE):
-                incident = _water(document, point, title, streets or {}, areas, settlement)
+            elif water_scopes or (point and point["mode"] == UTILITY_MAP_MODE):
+                incident = _water(document, point, title, streets or {}, areas, water_scopes)
             elif title and run is not None and post is not None:
                 incident = _published_road(session, document, run, post, streets or {})
             else:

@@ -26,10 +26,10 @@ from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.map_links import map_event_id
 from relocant_media.ops.map_export import read_map_feed
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
+from relocant_media.services.editorial_products import build_presentation
 from relocant_media.services.native_map import (
     NOTICE_LAYOUT,
     bind_native_map_draft,
-    build_native_map,
     verify_native_map_snapshot,
 )
 from relocant_media.services.owner_review import _package_sha256
@@ -129,12 +129,17 @@ def prepare(session: Session, request: Request) -> EditorialPackage:
             or run.outcome.get("_package_sha256") != _package_sha256(package)
             or not isinstance(receipt, dict) or receipt.get("state") != "sent"
             or receipt.get("message_ids") != [request.message_id]
-            or receipt.get("message_html_sha256") != old.get("message_html_sha256")):
+            or receipt.get("reviewed_html_sha256", receipt.get("message_html_sha256"))
+            != old.get("message_html_sha256")):
         raise ValueError("canonical package and delivered post do not match")
     profile = load_city_profile(package.city)
     documents = tuple(package.event.documents)
     document_ids = [item.raw_item_id for item in documents]
-    native = build_native_map(session, document_ids, documents, source_url=raw.url, profile=profile)
+    presentation = build_presentation(
+        session, raw.id, documents, document_ids=document_ids, profile=profile,
+        rubric_id=package.presentation.rubric_id, source_url=raw.url,
+    )
+    native = presentation.native_map
     if native is None or native.get("layout") != NOTICE_LAYOUT:
         raise ValueError("post has no verified new map layout")
     verify_native_map_snapshot(session, native, documents, document_ids)
@@ -143,9 +148,7 @@ def prepare(session: Session, request: Request) -> EditorialPackage:
         if draft.body.count(before) != 1 or before == after:
             raise ValueError("the correction does not match the canonical text exactly once")
         draft = draft.model_copy(update={"body": draft.body.replace(before, after, 1)})
-    presentation = bind_native_map_draft(
-        package.presentation.model_copy(update={"native_map": native}), draft,
-    )
+    presentation = bind_native_map_draft(presentation, draft)
     placeholders = tuple(
         review.model_copy(update={"verdict": "hold"}) for review in package.reviews
     )
@@ -276,8 +279,8 @@ def apply(
             bot = TelegramBotAPI(environment["TELEGRAM_BOT_TOKEN"], client)
             prepared = prepare_native_transport(package, ChannelPublisher(bot), None,
                                                 editorial_text=text)
-            if prepared is None or not prepared[1].map_url or not prepared[1].photo:
-                raise ValueError("republication requires a cover and a map link")
+            if prepared is None or not prepared[1].map_url:
+                raise ValueError("republication requires a map link")
             transport, message = prepared
             record = await deliver(
                 request, state, sha, commit,
