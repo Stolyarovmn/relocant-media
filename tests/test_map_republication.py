@@ -32,10 +32,11 @@ async def test_republication_persists_intent_before_send_and_cannot_repeat(uncer
     messages = []
     state = {"status": "ready", "snapshot": {"id": "existing"}}
 
-    def write(payload, sha):
+    def commit(current, sha, updates):
+        payload = {**current, **updates}
         writes.append((deepcopy(payload), sha))
         assert payload["status"] == "ready" and payload["snapshot"] == state["snapshot"]
-        return "claim" if len(writes) == 1 else "final"
+        return payload, "claim" if len(writes) == 1 else "final"
 
     async def send():
         assert writes[-1][0]["map_republications"]["97"]["state"] == "sending"
@@ -46,13 +47,13 @@ async def test_republication_persists_intent_before_send_and_cannot_repeat(uncer
 
     if uncertain:
         with pytest.raises(RuntimeError, match="uncertain"):
-            await deliver(REQUEST, state, "initial", write, send, MESSAGE, "context")
+            await deliver(REQUEST, state, "initial", commit, send, MESSAGE, "context")
         with pytest.raises(ValueError, match="reconciliation"):
-            await deliver(REQUEST, writes[-1][0], "final", write, send, MESSAGE, "context")
+            await deliver(REQUEST, writes[-1][0], "final", commit, send, MESSAGE, "context")
         assert writes[-1][0]["map_republications"]["97"]["state"] == "uncertain"
     else:
-        sent = await deliver(REQUEST, state, "initial", write, send, MESSAGE, "context")
-        repeated = await deliver(REQUEST, writes[-1][0], "final", write, send, MESSAGE, "context")
+        sent = await deliver(REQUEST, state, "initial", commit, send, MESSAGE, "context")
+        repeated = await deliver(REQUEST, writes[-1][0], "final", commit, send, MESSAGE, "context")
         assert sent == repeated and sent["message_ids"] == [100]
     assert messages == [100]
     assert [sha for _, sha in writes] == ["initial", "claim"]

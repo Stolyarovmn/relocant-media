@@ -136,9 +136,12 @@ def prepare(session: Session, request: Request) -> EditorialPackage:
     })
 
 
+Commit = Callable[[dict[str, Any], str, dict[str, Any]], tuple[dict[str, Any], str]]
+
+
 async def deliver(
     request: Request, state: dict[str, Any], sha: str,
-    write: Callable[[dict[str, Any], str], str],
+    commit: Commit,
     send: Callable[[], Awaitable[int]], message: PreparedNativeMessage, context: str,
 ) -> dict[str, Any]:
     receipts = state.get(_HISTORY, {})
@@ -151,24 +154,25 @@ async def deliver(
         return previous
     intent = {**rich_receipt(message, state="sending"), "original_id": request.message_id,
               "event_id": request.event_id, "context_sha256": context}
-    claimed = {**state, _HISTORY: {**receipts, key: intent}}
-    claimed_sha = write(claimed, sha)
+    claimed, claimed_sha = commit(state, sha, {_HISTORY: {**receipts, key: intent}})
     try:
         message_id = await send()
         if type(message_id) is not int or message_id <= request.message_id:
             raise ValueError("Telegram did not confirm a new message ID")
     except Exception:
         uncertain = {**intent, "state": "uncertain"}
-        write({**claimed, _HISTORY: {**receipts, key: uncertain}}, claimed_sha)
+        commit(claimed, claimed_sha, {_HISTORY: {**receipts, key: uncertain}})
         raise RuntimeError("publication outcome is uncertain; no automatic retry") from None
+    print(json.dumps({"republication": "telegram_confirmed", "message_id": message_id}),
+          flush=True)
     sent = {**intent, **rich_receipt(message, state="sent", message_id=message_id)}
-    write({**claimed, _HISTORY: {**receipts, key: sent}}, claimed_sha)
+    commit(claimed, claimed_sha, {_HISTORY: {**receipts, key: sent}})
     return sent
 
 
 def apply(
     database: Path, request: Request, state: dict[str, Any], sha: str,
-    write: Callable[[dict[str, Any], str], str], environment: Mapping[str, str],
+    commit: Commit, environment: Mapping[str, str],
 ) -> None:
     from relocant_media.ops.server_cycle import ChannelPublisher, fetch_documents
 
@@ -217,7 +221,7 @@ def apply(
                 raise ValueError("republication requires a cover and a map link")
             transport, message = prepared
             record = await deliver(
-                request, state, sha, write,
+                request, state, sha, commit,
                 lambda: send_native_message(transport, APPROVED_CHANNEL_ID, message),
                 message, context_sha256(package),
             )

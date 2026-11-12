@@ -38,7 +38,7 @@ from relocant_media.ops.map_republication import apply as apply_map_republicatio
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.ops.sqlite_restore import restore
-from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
+from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient, _state_digest
 from relocant_media.services.cloud_discovery import batch_receipt, ingest_batch, parse_batch
 
 REPO = "Stolyarovmn/relocant-media"
@@ -464,6 +464,33 @@ def private_quota_observation(directory: Path) -> dict[str, Any] | None:
             if entries else None)
 
 
+def _busy_state(state: dict[str, Any], environment: Mapping[str, str]) -> dict[str, Any]:
+    return {**state, "status": "busy", "attempt": uuid.uuid4().hex,
+            "run_id": environment.get("GITHUB_RUN_ID"),
+            "run_attempt": environment.get("GITHUB_RUN_ATTEMPT"),
+            "started_at": datetime.now(UTC).isoformat()}
+
+
+def _commit_republication(
+    store: CanonicalStore, drive: SnapshotStore, state: dict[str, Any], sha: str,
+    updates: dict[str, Any], environment: Mapping[str, str], work: Path,
+) -> tuple[dict[str, Any], str]:
+    busy = _busy_state(state, environment)
+    attempt = busy["attempt"]
+    ready = {"intake_state": {}, "last_exit_code": 0, **busy, **updates,
+             "status": "ready", "generation": attempt}
+    # Both pointer transitions reuse the verified immutable SQLite snapshot.
+    # Prepare recovery before claiming so a checkpoint upload failure cannot leave it busy.
+    if isinstance(drive, SSHStateClient):
+        checkpoint_id = drive.checkpoint(
+            ready, _state_digest(busy), work / f"republication-{attempt}.json",
+        )
+        print(json.dumps({"recovery_checkpoint_sha256": checkpoint_id}),
+              file=sys.stderr, flush=True)
+    busy_sha = store.write(busy, sha)
+    return ready, store.write(ready, busy_sha)
+
+
 def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: Path,
             folder: str, mode: str, environment: dict[str, str],
             map_output: Path | None = None) -> int:
@@ -525,7 +552,11 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
                 or environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
                 or environment.get("EDITORIAL_SEND_ENABLED") != "true"):
             raise ValueError("map republication requires an explicit hosted editorial request")
-        apply_map_republication(database, repost, state, sha, store.write, environment)
+        def commit(current: dict[str, Any], digest: str,
+                   updates: dict[str, Any]) -> tuple[dict[str, Any], str]:
+            return _commit_republication(store, drive, current, digest, updates, environment, work)
+
+        apply_map_republication(database, repost, state, sha, commit, environment)
         return 0
     if mode == "fallback-preview":
         return _export_gpt_request(drive, database, work)
@@ -535,11 +566,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     # Readback/restore and all validation precede the claim; all side effects follow it.
     identifier(folder)
     require_snapshot_capacity(database)
-    attempt = uuid.uuid4().hex
-    busy = {**state, "status": "busy", "attempt": attempt,
-            "run_id": environment.get("GITHUB_RUN_ID"),
-            "run_attempt": environment.get("GITHUB_RUN_ATTEMPT"),
-            "started_at": datetime.now(UTC).isoformat()}
+    busy = _busy_state(state, environment)
+    attempt = busy["attempt"]
     busy_sha = store.write(busy, sha)
     directory = database.parent
     intake_state = directory / "intake-batch-state.json"
