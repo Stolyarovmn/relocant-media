@@ -304,7 +304,9 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                 source = session.get(Source, document.source_id)
                 if source is None or public_article_url(document.url, source.url) is None:
                     continue
-                place = resolve_saved_event_place(session, document, ids, profile=profile)
+                place = resolve_saved_event_place(
+                    session, document, ids, profile=profile, legacy_published=attested is None,
+                )
                 if place is None:
                     continue
                 if attested is not None:

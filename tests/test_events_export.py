@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from test_editorial_package import bind_context, event_payload, parse
 from test_event_place import PROFILE, document, html
+from test_event_place_adapters import _source
 
 from relocant_media.ai.models import RussianDraft
 from relocant_media.ai.package import canonical_json, draft_sha256
@@ -18,6 +19,7 @@ from relocant_media.ops.events_export import export_events, export_events_snapsh
 from relocant_media.ops.newsroom_publish import EVENTS_PATH, _publish_events
 from relocant_media.ops.pages_assets import copy_assets
 from relocant_media.services.event_place import resolve_saved_event_place
+from relocant_media.services.event_place_adapters import _DOB_INTERVIEW_2026
 from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source, Submission
 
@@ -148,6 +150,29 @@ def test_feed_only_exposes_allowlisted_published_fields_and_keeps_archive_id(ses
     assert "PRIVATE_INTAKE" not in first.model_dump_json()
     assert "reviews" not in first.model_dump_json() and "raw_item_id" not in first.model_dump_json()
     assert not session.dirty and not session.new and not session.deleted
+
+
+@pytest.mark.parametrize("verified_time", [True, False])
+def test_legacy_concert_requires_grounded_published_time_without_saved_html(session, verified_time):
+    article = _source(_DOB_INTERVIEW_2026)
+    body = (
+        "Publika će 16. novembra od 20 časova u Domu omladine Beograda "
+        "imati priliku da doživi El Sonido de la Vida."
+    )
+    if not verified_time:
+        body = body.replace("20 časova", "18 časova")
+    article = article.model_copy(update={"body": body})
+    item, _, _, _ = seed(session, doc=article, attested=False)
+    session.delete(session.get(RawItemMediaSnapshot, item.id))
+    session.commit()
+
+    assert resolve_saved_event_place(session, article, [item.id], profile=PROFILE) is None
+    feed = export_events(session, observed_at=NOW)
+    if verified_time:
+        assert len(feed.events) == 1 and feed.events[0].starts_at.hour == 20
+        assert feed.events[0].schedule_source_url
+    else:
+        assert feed.events == ()
 
 
 @pytest.mark.parametrize(
