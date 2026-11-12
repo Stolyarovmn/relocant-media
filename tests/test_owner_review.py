@@ -28,6 +28,7 @@ from relocant_media.services.editorial import (
 from relocant_media.services.owner_review import (
     OWNER_REVIEW_KIND,
     deliver_owner_approved,
+    process_owner_actions,
     queue_owner_reviews,
     record_owner_callback,
     record_owner_reply,
@@ -144,13 +145,14 @@ def engine(tmp_path, monkeypatch):
     engine.dispose()
 
 
-def _store_reviewed_politics(engine) -> int:
+def _store_reviewed_politics(engine, *, precision: str = "unknown") -> int:
     with Session(engine) as session:
         _, _, raw_id = prepare_service(session)
         item = session.get(RawItem, raw_id)
         source = session.get(Source, item.source_id)
         assert item is not None and source is not None
         item.published_at = NOW
+        item.published_at_precision = precision
         session.commit()
         payload = package_payload()
         payload.update(
@@ -160,6 +162,7 @@ def _store_reviewed_politics(engine) -> int:
         )
         payload["outcome"]["ranking"]["category"] = "politics"
         payload["evidence"]["published_at"] = NOW.isoformat()
+        payload["evidence"]["published_at_precision"] = precision
         payload["event"] = {
             "event_key": event_key(_candidate(item)),
             "editorial_rule_version": "belgrade-editorial-v2",
@@ -334,7 +337,8 @@ async def test_fresh_low_risk_hold_is_reviewed_and_offered_to_the_owner(engine):
     assert queued == {"status": "ready", "queued": 1, "uncertain": 0}
     send = next(payload for method, payload in bot.calls if method == "sendMessage")
     assert _button_labels(send) == [
-        "✅ В редакцию", "📝 В черновик", "✏️ Доработать", "⏭ Пропустить", "❌ Отклонить",
+        "✅ В редакцию", "📝 В черновик", "✏️ Доработать без комментария",
+        "⏭ Пропустить", "❌ Отклонить",
     ]
 
 
@@ -382,7 +386,8 @@ async def test_owner_queue_has_publish_reject_buttons_and_is_idempotent(engine):
     assert len(sends) == 1
     sent = sends[0]
     assert _button_labels(sent) == [
-        "✅ В редакцию", "📝 В черновик", "✏️ Доработать", "⏭ Пропустить", "❌ Отклонить",
+        "✅ В редакцию", "📝 В черновик", "✏️ Доработать без комментария",
+        "⏭ Пропустить", "❌ Отклонить",
     ]
     assert "Источник" in sent["text"]
     assert "https://www.beograd.rs/example.html" not in sent["text"]
@@ -565,8 +570,9 @@ def test_owner_revision_discards_old_reviews_and_creates_new_exact_version(engin
 
 
 @pytest.mark.asyncio
-async def test_owner_publish_is_separate_at_most_once_path(engine):
-    raw_id = _store_reviewed_politics(engine)
+@pytest.mark.parametrize("precision", ["unknown", "day", "instant"])
+async def test_owner_publish_is_separate_at_most_once_path(engine, precision):
+    raw_id = _store_reviewed_politics(engine, precision=precision)
     publisher = Publisher()
     with Session(engine) as session:
         review = _owner_review_row(session, raw_id)
@@ -609,6 +615,60 @@ async def test_owner_publish_is_separate_at_most_once_path(engine):
                 enabled=True,
             )
         assert len(publisher.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra", "source_changed", "result_status", "notice"),
+    [
+        ({}, False, "published", "Опубликовано"),
+        ({}, True, "publish_blocked", "первоисточник изменился"),
+        ({"publish_claimed_at": NOW.isoformat()}, False, "publish_blocked", None),
+        ({"publish_block_reason": "delivery_guard"}, False, "publish_blocked", None),
+    ],
+)
+async def test_recovers_only_exact_unsent_precision_block(
+    engine, extra, source_changed, result_status, notice,
+):
+    raw_id = _store_reviewed_politics(engine, precision="day")
+    with Session(engine) as session:
+        review = _owner_review_row(session, raw_id)
+        review_id = review.id
+        review.created_at = NOW
+        review.status = "publish_blocked"
+        review.payload = {
+            **review.payload, "owner_decision": "publish", "decided_at": NOW.isoformat(),
+            "publish_error_type": "DeliveryBlockedError", "blocked_at": NOW.isoformat(), **extra,
+        }
+        session.commit()
+
+    def live(package):
+        documents = _live(package)
+        if source_changed:
+            return (documents[0].model_copy(update={"body": "Изменённый текст источника."}),)
+        return documents
+
+    publisher = Publisher()
+    bot = ReviewBot()
+    for _ in range(2):
+        await process_owner_actions(
+            engine, bot, owner_user_id=OWNER, owner_chat_id=OWNER_CHAT, provider=None,
+            live_document_fetcher=live, publisher=publisher, publish_enabled=True,
+        )
+    with Session(engine) as session:
+        review = session.get(Submission, review_id)
+        assert review.status == result_status
+        assert ("publish_recovered_at" in review.payload) == (result_status == "published")
+        if source_changed:
+            assert review.payload["publish_block_reason"] == "source_changed"
+    assert len(publisher.calls) == (1 if result_status == "published" else 0)
+    if notice:
+        [(method, payload)] = bot.calls
+        assert method == "sendMessage"
+        assert notice in payload["text"]
+        assert payload["reply_parameters"]["message_id"] == 501
+    else:
+        assert bot.calls == []
 
 
 @pytest.mark.asyncio

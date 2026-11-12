@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import Session
 
@@ -91,8 +91,13 @@ _DECISIONS = {
     ),
     "skip": ("skipped", "Пропущено. Эта версия больше не придёт."),
     "reject": ("rejected", "Отклонено."),
-    "revise": ("revision_requested", "Доработка на усмотрение редакции запущена."),
+    "revise": ("revision_requested", "Доработка без комментария принята."),
 }
+_COMMENT_ACCEPTED = "Комментарий принят. Новая версия придёт на согласование."
+
+
+class OwnerSourceChangedError(DeliveryBlockedError):
+    """The live evidence no longer matches the exact version the owner approved."""
 
 
 class TelegramCaller(Protocol):
@@ -189,10 +194,14 @@ def record_owner_callback(
     if review is None:
         return OwnerUpdateResult(True, False, "Эта версия ревью не найдена.")
     if review.status != "pending":
+        answer = "Эта версия уже обработана. Используй последнее сообщение ревью."
+        if (review.status == "revision_requested" and match.group(1) == "revise"
+                and review.payload.get("owner_comment") != DEFAULT_REVISION_COMMENT):
+            answer = _COMMENT_ACCEPTED
         return OwnerUpdateResult(
             True,
             False,
-            "Эта версия уже обработана. Используй последнее сообщение ревью.",
+            answer,
             owner_chat_id,
             message_id,
         )
@@ -257,7 +266,7 @@ def record_owner_reply(
         "owner_comment": body.strip(),
         "revision_requested_at": _now_iso(),
     }
-    return OwnerUpdateResult(True, True, None, owner_chat_id, reply_id)
+    return OwnerUpdateResult(True, True, _COMMENT_ACCEPTED, owner_chat_id, reply_id)
 
 
 def _validated_pending_package(
@@ -481,8 +490,9 @@ async def queue_owner_reviews(
                         {"text": "✅ В редакцию", "callback_data": f"or:publish:{review_id}"},
                         {"text": "📝 В черновик", "callback_data": f"or:draft:{review_id}"},
                     ],
+                    [{"text": "✏️ Доработать без комментария",
+                      "callback_data": f"or:revise:{review_id}"}],
                     [
-                        {"text": "✏️ Доработать", "callback_data": f"or:revise:{review_id}"},
                         {"text": "⏭ Пропустить", "callback_data": f"or:skip:{review_id}"},
                         {"text": "❌ Отклонить", "callback_data": f"or:reject:{review_id}"},
                     ],
@@ -730,6 +740,7 @@ def _expected_live_documents(package: EditorialPackage) -> tuple[EvidenceDocumen
             title=document.title,
             body=document.body,
             published_at=document.published_at,
+            published_at_precision=document.published_at_precision,
         )
         for document in package.event.documents
     )
@@ -740,7 +751,7 @@ def _assert_live_documents(
     live_documents: tuple[EvidenceDocument, ...],
 ) -> None:
     if live_documents != _expected_live_documents(package):
-        raise DeliveryBlockedError("live source changed before owner-approved delivery")
+        raise OwnerSourceChangedError("live source changed before owner-approved delivery")
 
 
 def _prepared_media(
@@ -955,18 +966,47 @@ async def deliver_owner_approved(
     return DeliveryResult("sent", delivered_text, message_id)
 
 
-async def _send_notice(bot: TelegramCaller, chat_id: int, text: str) -> None:
+async def _send_notice(
+    bot: TelegramCaller, chat_id: int, text: str, *, reply_to: int | None = None,
+) -> bool:
+    payload: dict[str, object] = {
+        "chat_id": chat_id,
+        "text": text,
+        "link_preview_options": {"is_disabled": True},
+    }
+    if reply_to is not None:
+        payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
     try:
-        await bot._call(
-            "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": text,
-                "link_preview_options": {"is_disabled": True},
-            },
-        )
+        await bot._call("sendMessage", payload)
     except Exception:
-        return
+        return False
+    return True
+
+
+def _legacy_precision_block(
+    session: Session, review: Submission, run: EditorialRun, post: Post,
+    package: EditorialPackage,
+) -> bool:
+    """A prior worker dropped precision before its first source comparison."""
+    payload = review.payload
+    assert package.event is not None
+    return (
+        review.status == "publish_blocked"
+        and payload.get("owner_decision") == "publish"
+        and payload.get("publish_error_type") == "DeliveryBlockedError"
+        and bool(payload.get("blocked_at"))
+        and not any(key in payload for key in (
+            "publish_block_reason", "publish_claimed_at", "publish_recovered_at",
+            "telegram_channel_message_id",
+        ))
+        and payload.get("draft_sha256") == draft_sha256(package.outcome.draft)
+        and any(document.published_at_precision != "unknown"
+                for document in package.event.documents)
+        and not any(key in run.outcome for key in ("_rich_delivery", "_media_delivery"))
+        and post.telegram_message_id is None
+        and post.published_at is None
+        and all(row.id <= review.id for row in _review_rows(session, run.raw_item_id))
+    )
 
 
 def _mark_stale(session: Session, review: Submission) -> None:
@@ -1017,7 +1057,14 @@ async def process_owner_actions(
                 .where(
                     Submission.kind == OWNER_REVIEW_KIND,
                     Submission.telegram_user_id == owner_user_id,
-                    Submission.status.in_(("revision_requested", "rejected", "approved")),
+                    or_(
+                        Submission.status.in_(("revision_requested", "rejected", "approved")),
+                        and_(
+                            Submission.status == "publish_blocked",
+                            Submission.created_at >= datetime.now(UTC) - timedelta(hours=24),
+                            Submission.payload["publish_block_reason"].as_string().is_(None),
+                        ),
+                    ),
                 )
                 .order_by(Submission.id)
             )
@@ -1031,13 +1078,18 @@ async def process_owner_actions(
             if type(raw_item_id) is not int:
                 _mark_stale(session, review)
                 continue
+            recovering = review.status == "publish_blocked"
             try:
                 run, post, _, _, package = _validated_pending_package(session, raw_item_id)
             except (DeliveryBlockedError, ValueError):
-                _mark_stale(session, review)
+                if not recovering:
+                    _mark_stale(session, review)
                 continue
             if review.payload.get("package_sha256") != _package_sha256(package):
-                _mark_stale(session, review)
+                if not recovering:
+                    _mark_stale(session, review)
+                continue
+            if recovering and not _legacy_precision_block(session, review, run, post, package):
                 continue
             if review.status == "rejected":
                 _reject_owner_review(session, review, run, post, package)
@@ -1080,12 +1132,13 @@ async def process_owner_actions(
                         owner_chat_id,
                         "Комментарий не удалось безопасно применить к подтверждённым фактам. "
                         "Черновик будет прислан на ревью ещё раз без неподтверждённых изменений.",
+                        reply_to=review.telegram_message_id,
                     )
                     stats["blocked"] += 1
                 else:
                     stats["revised"] += 1
                 continue
-            if review.status != "approved":
+            if review.status != "approved" and not recovering:
                 continue
             if not publish_enabled:
                 stats["deferred"] += 1
@@ -1096,7 +1149,12 @@ async def process_owner_actions(
                 stats["deferred"] += 1
                 continue
             try:
-                await deliver_owner_approved(
+                if recovering:
+                    _assert_live_documents(package, live)
+                    review.status = "approved"
+                    review.payload = {**review.payload, "publish_recovered_at": _now_iso()}
+                    session.commit()
+                delivery = await deliver_owner_approved(
                     session,
                     review,
                     publisher,
@@ -1107,20 +1165,29 @@ async def process_owner_actions(
             except DeliveryBlockedError as error:
                 session.rollback()
                 current = session.get(Submission, review_id)
+                changed = isinstance(error, OwnerSourceChangedError)
                 if current is not None:
                     current.status = "publish_blocked"
                     current.payload = {
                         **current.payload,
                         "publish_error_type": type(error).__name__,
+                        "publish_block_reason": "source_changed" if changed else "delivery_guard",
                         "blocked_at": _now_iso(),
                     }
                     session.commit()
                 await _send_notice(
                     bot,
                     owner_chat_id,
-                    "Публикация заблокирована защитной проверкой. Автоматического обхода нет.",
+                    "Публикация остановлена: первоисточник изменился после согласования."
+                    if changed else "Публикация остановлена на проверке согласованной версии.",
+                    reply_to=review.telegram_message_id,
                 )
                 stats["blocked"] += 1
             else:
                 stats["published"] += 1
+                await _send_notice(
+                    bot, owner_chat_id,
+                    f"Опубликовано: https://t.me/eduvbelgrad/{delivery.message_id}",
+                    reply_to=review.telegram_message_id,
+                )
     return stats

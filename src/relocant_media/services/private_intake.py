@@ -14,6 +14,7 @@ from relocant_media.bot.intake import handle_private_message
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.owner_review import (
     OwnerUpdateResult,
+    _send_notice,
     record_owner_callback,
     record_owner_reply,
 )
@@ -96,7 +97,7 @@ async def _ack_owner_action(
     bot: TelegramBotAPI,
     callback: object,
     result: OwnerUpdateResult,
-) -> None:
+) -> bool:
     """Best-effort UI acknowledgement after the durable decision has committed."""
     if isinstance(callback, dict):
         callback_id = callback.get("id")
@@ -123,6 +124,11 @@ async def _ack_owner_action(
             )
         except Exception:
             pass
+        if result.accepted and result.answer_text:
+            return await _send_notice(
+                bot, result.clear_chat_id, result.answer_text, reply_to=result.clear_message_id,
+            )
+    return False
 
 
 async def receive_private_tips(
@@ -221,6 +227,7 @@ async def _store_updates(
 ) -> dict[str, Any]:
     received = 0
     owner_actions = 0
+    telegram_sends = 0
     parents: dict[int, bool] = {}
     for update in sorted(updates, key=lambda value: value["update_id"]):
         uid = update.get("update_id")
@@ -311,12 +318,12 @@ async def _store_updates(
                 if receipt_kind == "owner_review":
                     owner_actions += int(accepted)
         if owner_result is not None and owner_result.handled:
-            await _ack_owner_action(bot, callback, owner_result)
+            telegram_sends += int(await _ack_owner_action(bot, callback, owner_result))
     return {
         "status": "ready",
         "received": received,
         "inspected": len(updates),
         "owner_actions": owner_actions,
         "owner_action_required": False,
-        "telegram_sends": 0,
+        "telegram_sends": telegram_sends,
     }
