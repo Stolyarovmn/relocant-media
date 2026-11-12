@@ -5,7 +5,7 @@ on:
       mode:
         description: Read-only preview or canonical worker (requires completed cutover)
         type: choice
-        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish]
+        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish, map-republish-review]
         default: preview
       discovery_batch:
         description: 'Discovery only: JSON {"version":1,"city":"belgrade","urls":["https://..."]}'
@@ -21,7 +21,7 @@ on:
         type: string
         required: false
       fallback_blob_sha256:
-        description: SHA256 of the private reviewed GPT result (fallback only)
+        description: SHA256 of the private GPT result (fallback or map-republish)
         type: string
         required: false
       map_targets:
@@ -29,7 +29,7 @@ on:
         type: string
         required: false
       map_republication:
-        description: Explicit latest message and map event JSON for map-republish
+        description: Latest message and map event JSON for republication or review export
         type: string
         required: false
   schedule:

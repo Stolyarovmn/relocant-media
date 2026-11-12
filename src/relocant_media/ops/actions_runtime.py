@@ -33,8 +33,10 @@ from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ops.map_backfill import apply as apply_map_buttons
 from relocant_media.ops.map_backfill import parse_targets as parse_map_button_targets
 from relocant_media.ops.map_export import export_map_snapshot
+from relocant_media.ops.map_republication import GPTReviews as MapGPTReviews
 from relocant_media.ops.map_republication import Request as MapRepublicationRequest
 from relocant_media.ops.map_republication import apply as apply_map_republication
+from relocant_media.ops.map_republication import review_request as map_review_request
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.ops.sqlite_restore import restore
@@ -52,7 +54,7 @@ BELGRADE_STREETS = Path("cities/belgrade/map/roads.json.gz")
 BELGRADE_AREAS = Path("cities/belgrade/map/outage-areas.json.gz")
 MODES = {
     "preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback",
-    "map-backfill", "map-republish",
+    "map-backfill", "map-republish", "map-republish-review",
 }
 
 
@@ -86,6 +88,17 @@ def _prepare_gpt_input(storage: SnapshotStore, digest: str, path: Path) -> None:
     path.write_text(canonical_json({"request": request, "result": result}), encoding="utf-8")
 
 
+def _upload_gpt_request(storage: SnapshotStore, request: dict[str, Any], path: Path) -> str:
+    content = canonical_json(request).encode()
+    if len(content) > GPT_EXCHANGE_MAX_BYTES:
+        raise ValueError("GPT request exceeds private exchange bound")
+    path.write_bytes(content)
+    digest = storage.upload(path, "gpt-fallback-request")
+    if digest != hashlib.sha256(content).hexdigest():
+        raise ValueError("GPT request storage receipt differs")
+    return digest
+
+
 def _export_gpt_request(storage: SnapshotStore, database: Path, work: Path) -> int:
     from relocant_media.services.gpt_fallback import build_request
 
@@ -98,14 +111,7 @@ def _export_gpt_request(storage: SnapshotStore, database: Path, work: Path) -> i
     if request is None:
         print(json.dumps({"gpt_fallback": "no_pending_candidates"}))
         return 0
-    content = canonical_json(request).encode()
-    if len(content) > GPT_EXCHANGE_MAX_BYTES:
-        raise ValueError("GPT request exceeds private exchange bound")
-    path = work / "gpt-request.json"
-    path.write_bytes(content)
-    digest = storage.upload(path, "gpt-fallback-request")
-    if digest != hashlib.sha256(content).hexdigest():
-        raise ValueError("GPT request storage receipt differs")
+    digest = _upload_gpt_request(storage, request, work / "gpt-request.json")
     print(json.dumps({"gpt_fallback_request_sha256": digest,
                       "candidate_count": len(request["candidates"])}))
     return 0
@@ -501,23 +507,24 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if incoming and mode != "discovery":
         raise ValueError("discovery input requires discovery mode")
     gpt_input = environment.get("GPT_FALLBACK_BLOB_SHA256", "")
-    if gpt_input and mode != "fallback":
-        raise ValueError("GPT result input requires fallback mode")
+    if gpt_input and mode not in {"fallback", "map-republish"}:
+        raise ValueError("GPT result input requires fallback or map-republish mode")
     map_input = environment.get("MAP_BACKFILL_TARGETS", "")
     if map_input and mode != "map-backfill":
         raise ValueError("map button targets require map-backfill mode")
     targets = parse_map_button_targets(map_input) if mode == "map-backfill" else {}
     repost_input = environment.get("MAP_REPUBLICATION_REQUEST", "")
-    if repost_input and mode != "map-republish":
-        raise ValueError("map republication request requires map-republish mode")
+    map_repost_modes = {"map-republish", "map-republish-review"}
+    if repost_input and mode not in map_repost_modes:
+        raise ValueError("map republication request requires a republication mode")
     repost = (MapRepublicationRequest.model_validate_json(repost_input)
-              if mode == "map-republish" else None)
-    if mode in {"fallback-preview", "fallback"}:
+              if mode in map_repost_modes else None)
+    if mode in {"fallback-preview", "fallback", "map-republish-review"} or gpt_input:
         if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
                 or environment.get("EDITORIAL_STORAGE_BACKEND") != "ssh"
                 or not isinstance(drive, SSHStateClient)):
             raise ValueError("GPT exchange requires a manual SSH-backed Actions run")
-        if mode == "fallback":
+        if gpt_input or mode == "fallback":
             _gpt_digest(gpt_input)
     state, sha = store.read()
     validate_ready(state)
@@ -549,14 +556,25 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         return 0
     if repost is not None:
         if (environment.get("GITHUB_ACTIONS") != "true"
-                or environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
-                or environment.get("EDITORIAL_SEND_ENABLED") != "true"):
+                or environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"):
             raise ValueError("map republication requires an explicit hosted editorial request")
+        if mode == "map-republish-review":
+            request = map_review_request(database, repost)
+            digest = _upload_gpt_request(drive, request, work / "map-review-request.json")
+            print(json.dumps({"map_republication_review_sha256": digest}), flush=True)
+            return 0
+        if environment.get("EDITORIAL_SEND_ENABLED") != "true":
+            raise ValueError("map republication requires enabled editorial delivery")
+        gpt = None
+        if gpt_input:
+            reviews = MapGPTReviews.model_validate(_gpt_blob(drive, gpt_input))
+            gpt = reviews, _gpt_blob(drive, reviews.request_sha256)
+
         def commit(current: dict[str, Any], digest: str,
                    updates: dict[str, Any]) -> tuple[dict[str, Any], str]:
             return _commit_republication(store, drive, current, digest, updates, environment, work)
 
-        apply_map_republication(database, repost, state, sha, commit, environment)
+        apply_map_republication(database, repost, state, sha, commit, environment, gpt)
         return 0
     if mode == "fallback-preview":
         return _export_gpt_request(drive, database, work)

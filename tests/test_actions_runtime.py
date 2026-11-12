@@ -365,6 +365,38 @@ def test_map_republish_requires_explicit_hosted_dispatch(context, tmp_path, monk
     assert calls[0][1].message_id == 97 and calls[0][1].event_id == event
 
 
+def test_map_republish_review_exports_privately_without_a_state_write(
+    context, tmp_path, monkeypatch, capsys,
+):
+    store, drive = context
+    ssh = runtime.SSHStateClient(None)
+    blobs = {}
+
+    def upload(path, folder):
+        content = path.read_bytes()
+        sha = hashlib.sha256(content).hexdigest()
+        blobs[sha] = json.loads(content)
+        return sha
+
+    scope = {"package": {"draft": "private review draft"}}
+    monkeypatch.setattr(ssh, "download", drive.download)
+    monkeypatch.setattr(ssh, "upload", upload)
+    monkeypatch.setattr(runtime, "map_review_request", lambda database, request: scope)
+    env = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
+           "ACTIONS_CUTOVER_CONFIRMED": "true", "GITHUB_REPOSITORY": runtime.REPO,
+           "GITHUB_REF": "refs/heads/main", "EDITORIAL_STORAGE_BACKEND": "ssh",
+           "MAP_REPUBLICATION_REQUEST": json.dumps(
+               {"message_id": 97, "event_id": "event_" + "a" * 20},
+           )}
+    assert runtime.execute(store, ssh, work=tmp_path / "review", folder="",
+                           output=tmp_path / "output.json", mode="map-republish-review",
+                           environment=env) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert set(output) == {"map_republication_review_sha256"}
+    assert blobs[output["map_republication_review_sha256"]] == scope
+    assert store.sha == "initial"
+
+
 def test_stale_bootstrap_is_rejected(state):
     with pytest.raises(ValueError, match='fresh final snapshot'):
         runtime.bootstrap_record(state['snapshot'], now=datetime.now(UTC) + timedelta(days=1))
