@@ -75,6 +75,19 @@ def test_missing_card_date_cannot_borrow_date_from_neighboring_card() -> None:
     assert [item.slug for item in candidates] == ["promena-trase-linije-br-708"]
 
 
+def test_official_empty_grid_is_distinct_from_unrecognized_news_cards() -> None:
+    page = """
+    <main id="main-wrapper">
+      <select name="tip_vesti"></select><input id="pretraga" />
+      <div id="vesti"><div class="grid grid-cols-12">{rows}</div></div>
+    </main>
+    """
+    assert parse_bgprevoz_news_list(page.format(rows="\n  "), _source()) == ()
+    malformed = page.format(rows="<article>Карточка без даты</article>")
+    with pytest.raises(ValueError, match="dated news cards not found"):
+        parse_bgprevoz_news_list(malformed, _source())
+
+
 def test_future_card_date_is_not_accepted() -> None:
     future = (datetime.now(BELGRADE_TZ) + timedelta(days=2)).strftime("%d-%m-%Y")
     candidates = parse_bgprevoz_news_list(
