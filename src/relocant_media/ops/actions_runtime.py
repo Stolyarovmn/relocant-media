@@ -36,6 +36,7 @@ from relocant_media.ops.map_export import export_map_snapshot
 from relocant_media.ops.map_republication import GPTReviews as MapGPTReviews
 from relocant_media.ops.map_republication import Request as MapRepublicationRequest
 from relocant_media.ops.map_republication import apply as apply_map_republication
+from relocant_media.ops.map_republication import resolve_previous as resolve_map_republication
 from relocant_media.ops.map_republication import review_request as map_review_request
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
@@ -519,7 +520,9 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         raise ValueError("map republication request requires a republication mode")
     repost = (MapRepublicationRequest.model_validate_json(repost_input)
               if mode in map_repost_modes else None)
-    if mode in {"fallback-preview", "fallback", "map-republish-review"} or gpt_input:
+    previous_digest = repost.previous_review_sha256 if repost is not None else None
+    if (mode in {"fallback-preview", "fallback", "map-republish-review"} or gpt_input
+            or previous_digest):
         if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
                 or environment.get("EDITORIAL_STORAGE_BACKEND") != "ssh"
                 or not isinstance(drive, SSHStateClient)):
@@ -558,8 +561,10 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         if (environment.get("GITHUB_ACTIONS") != "true"
                 or environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"):
             raise ValueError("map republication requires an explicit hosted editorial request")
+        previous = (resolve_map_republication(repost, state, _gpt_blob(drive, previous_digest))
+                    if previous_digest else None)
         if mode == "map-republish-review":
-            request = map_review_request(database, repost)
+            request = map_review_request(database, repost, previous)
             digest = _upload_gpt_request(drive, request, work / "map-review-request.json")
             print(json.dumps({"map_republication_review_sha256": digest}), flush=True)
             return 0
@@ -574,7 +579,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
                    updates: dict[str, Any]) -> tuple[dict[str, Any], str]:
             return _commit_republication(store, drive, current, digest, updates, environment, work)
 
-        apply_map_republication(database, repost, state, sha, commit, environment, gpt)
+        apply_map_republication(database, repost, state, sha, commit, environment, gpt, previous)
         return 0
     if mode == "fallback-preview":
         return _export_gpt_request(drive, database, work)

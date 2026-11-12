@@ -1,9 +1,17 @@
+import hashlib
 from copy import deepcopy
 
 import pytest
 from pydantic import ValidationError
 
-from relocant_media.ops.map_republication import Request, deliver, latest_message_id
+from relocant_media.ai.package import canonical_json
+from relocant_media.domain.map_links import map_event_id
+from relocant_media.ops.map_republication import (
+    Request,
+    deliver,
+    latest_message_id,
+    resolve_previous,
+)
 from relocant_media.services.rich_delivery import PreparedNativeMessage
 
 REQUEST = Request(message_id=97, event_id="event_4c8ef6e8ee1b07e6f721")
@@ -23,6 +31,31 @@ def test_public_target_requires_real_channel_posts():
         latest_message_id("<html>Пустая лента</html>")
     with pytest.raises(ValidationError):
         Request.model_validate({"message_id": "97", "event_id": REQUEST.event_id})
+
+
+def test_previous_publication_reuses_only_a_draft_bound_to_the_sent_receipt():
+    source = "https://www.beograd.rs/lat/servisne-informacije/elektricna-energija/a116619/notice.html"
+    event = map_event_id(source)
+    html_digest = hashlib.sha256(MESSAGE.html.encode()).hexdigest()
+    draft = {"title": "Отключение света", "body": "Хутор Белаћевићи.", "claim_ids": ["place"]}
+    package = {"outcome": {"draft": draft}, "presentation": {"native_map": {
+        "point": {"source_url": source}, "message_html": MESSAGE.html,
+        "message_html_sha256": html_digest,
+    }}}
+    context = hashlib.sha256(canonical_json(package).encode()).hexdigest()
+    scope = {"version": 1, "package": package, "context_sha256": context,
+             "request": {"message_id": 97, "event_id": event}}
+    receipt = {"state": "sent", "original_id": 97, "message_ids": [98], "event_id": event,
+               "context_sha256": context, "message_html_sha256": html_digest}
+    state = {"map_republications": {"97": receipt}}
+    request = Request(message_id=98, event_id=event, previous_review_sha256="0" * 64)
+    original, selected = resolve_previous(request, state, scope)
+    assert original == 97 and selected.model_dump(mode="json") == draft
+
+    for change in ({"message_ids": [99]}, {"state": "sending"}, {"context_sha256": "0" * 64},
+                   {"message_html_sha256": "0" * 64}, {"event_id": REQUEST.event_id}):
+        with pytest.raises(ValueError, match="sent republication"):
+            resolve_previous(request, {"map_republications": {"97": receipt | change}}, scope)
 
 
 @pytest.mark.parametrize("uncertain", [False, True])
