@@ -3,7 +3,12 @@ from datetime import UTC, date, datetime
 import pytest
 
 from relocant_media.ai.models import EvidenceDocument
-from relocant_media.services.utility_scope import extract_power_addresses, power_outage_date
+from relocant_media.services.utility_scope import (
+    extract_power_addresses,
+    extract_power_scopes,
+    house_in_range,
+    power_outage_date,
+)
 
 URL = ("https://www.beograd.rs/lat/servisne-informacije/elektricna-energija/"
        "a116619/Planirana-iskljucenja-na-elektro-mrezi.html")
@@ -54,6 +59,24 @@ def test_settlement_context_is_explicit_and_resets_at_new_row():
         address("Novi Beograd, naselje NOVI BEOGRAD", "PETA", "61Đ"),
         address("Čukarica", "ŠESTA", "1"),
     ]
+
+
+def test_range_and_hamlet_keep_their_own_window_without_expanding_settlement():
+    power = document("\n".join([
+        "Čukarica 8.30 - 14.00 Naselje ŽARKOVO: PRVA: 2-8, 11, BB,",
+        "Lazarevac 9.00 - 13.00 Naselje Junkovac (zaseok Belaćevići)",
+    ]))
+    street, hamlet = extract_power_scopes(power)
+    assert street.settlement is None
+    assert [row["number"] for row in street.addresses] == ["2-8", "11", "BB"]
+    assert hamlet.settlement.name == "Belaćevići" and hamlet.settlement.parent == "Junkovac"
+    assert hamlet.starts_at.hour == 9 and hamlet.ends_at.hour == 13
+    assert house_in_range("4", "2–8")
+    assert house_in_range("8Б", "8A–8B")
+    assert not house_in_range("5", "2–8")
+    assert not house_in_range("8C", "8A–8B")
+    assert not house_in_range("4", "2–9")
+    assert not house_in_range("25A", "25–25")
 
 
 def test_cyrillic_names_and_numbered_streets_are_preserved():

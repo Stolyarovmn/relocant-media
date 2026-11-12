@@ -24,7 +24,7 @@ class PhotoUpload:
 def map_reply_markup(url: str) -> dict[str, object]:
     if not is_map_event_url(url):
         raise ValueError("map button URL is not approved")
-    return {"inline_keyboard": [[{"text": "Открыть на карте", "url": url}]]}
+    return {"inline_keyboard": [[{"text": "Посмотреть на карте", "url": url}]]}
 
 
 class TelegramBot(Protocol):
@@ -150,10 +150,11 @@ class TelegramBotAPI:
         if not html.strip():
             raise ValueError("rich message HTML is required")
         reply_markup = map_reply_markup(map_url) if map_url is not None else None
-        photo_references = html.count("tg://photo?id=transport_map")
+        references = [media_id for media_id in ("transport_map", "notice_cover")
+                      for _ in range(html.count(f"tg://photo?id={media_id}"))]
         if photo is None:
-            if photo_references:
-                raise ValueError("rich message references a missing transport map")
+            if references:
+                raise ValueError("rich message references a missing photo")
             payload: dict[str, object] = {
                 "chat_id": chat_id, "rich_message": {"html": html},
             }
@@ -161,15 +162,18 @@ class TelegramBotAPI:
                 payload["reply_markup"] = reply_markup
             result = await self._call("sendRichMessage", payload)
         else:
-            if photo_references != 1:
-                raise ValueError("rich message must reference its transport map exactly once")
+            if len(references) != 1:
+                raise ValueError("rich message must reference its photo exactly once")
+            media_id = references[0]
             upload = self._photo(photo)
-            if upload[2] != "image/png":
+            if media_id == "transport_map" and upload[2] != "image/png":
                 raise ValueError("transport map must be PNG")
-            rich_message = {"html": html, "media": [{
-                "id": "transport_map", "media": {
-                    "type": "photo", "media": "attach://transport_map"},
+            rich_message: dict[str, object] = {"html": html, "media": [{
+                "id": media_id, "media": {
+                    "type": "photo", "media": f"attach://{media_id}"},
             }]}
+            if media_id == "notice_cover":
+                rich_message["skip_entity_detection"] = True
             data = {"chat_id": str(chat_id), "rich_message": json.dumps(
                 rich_message, ensure_ascii=False, separators=(",", ":"))}
             if reply_markup is not None:
@@ -179,7 +183,7 @@ class TelegramBotAPI:
             response = await self._client.post(
                 f"{self._base_url}/sendRichMessage",
                 data=data,
-                files={"transport_map": upload},
+                files={media_id: upload},
             )
             result = self._result("sendRichMessage", response)
         return self._message_id(result)

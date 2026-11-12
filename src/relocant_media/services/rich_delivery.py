@@ -3,12 +3,15 @@
 import hashlib
 import os
 from dataclasses import dataclass
+from html import escape
 from typing import Protocol, cast
 
 from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.bot.api import PhotoUpload, TelegramBotAPI, map_reply_markup
 from relocant_media.bot.publisher import Publisher
 from relocant_media.domain.map_links import map_event_url
+from relocant_media.services.native_map import NOTICE_COVER, NOTICE_LAYOUT
+from relocant_media.services.notice_banner import render_notice_banner
 from relocant_media.services.production_media import PreparedProductionMedia
 from relocant_media.services.transport_map import MAP_MODE
 from relocant_media.services.transport_map_image import render_transport_map
@@ -37,7 +40,8 @@ def prepare_native_transport(
     native = package.presentation.native_map if package.presentation is not None else None
     if native is None:
         return None
-    if media is not None:
+    notice_layout = native.get("layout") == NOTICE_LAYOUT
+    if media is not None and not notice_layout:
         raise ValueError("native map and attached media require a combined review")
     expected_text = (f"{package.outcome.draft.title}\n\n{package.outcome.draft.body}"
                      f"\n\nИсточник: {native['point']['source_url']}")
@@ -48,6 +52,20 @@ def prepare_native_transport(
         raise ValueError("production publisher does not support reviewed native map")
     html = native["message_html"]
     point = native["point"]
+    if notice_layout:
+        notice_photo, notice_sha256 = _notice_photo(native, media, editorial_text)
+        if html.count(NOTICE_COVER) != 1 or "<tg-map" in html:
+            raise ValueError("reviewed notice needs one cover and no inline map")
+        if media is not None and media.caption != editorial_text:
+            credits = media.caption.removeprefix(editorial_text).strip().splitlines()
+            html += "".join(f"<p>{escape(credit)}</p>" for credit in credits)
+        notice_url = map_event_url(
+            point["source_url"], telegram_app=os.environ.get("RELOCANT_MAP_TELEGRAM_APP"),
+        )
+        return cast(RichMessageBot, bot), PreparedNativeMessage(
+            html, notice_photo, notice_sha256, notice_url,
+        )
+
     geometry = point.get("transport_geometry")
     line = geometry.get("line") if point.get("mode") == MAP_MODE else None
     filename = "transport-map.png"
@@ -76,6 +94,31 @@ def prepare_native_transport(
             point["source_url"], telegram_app=os.environ.get("RELOCANT_MAP_TELEGRAM_APP"),
         )
     return cast(RichMessageBot, bot), PreparedNativeMessage(html, photo, image_sha256, map_url)
+
+
+def _notice_photo(
+    native: dict[str, object], media: PreparedProductionMedia | None, editorial_text: str,
+) -> tuple[PhotoUpload, str]:
+    if media is not None:
+        if (len(media.uploads) != 1 or len(media.release.assets) != 1
+                or not (media.caption == editorial_text
+                        or media.caption.startswith(editorial_text + "\n\n"))):
+            raise ValueError("the reviewed notice requires exactly one bound cover and its credits")
+        photo = media.uploads[0]
+        digest = hashlib.sha256(photo.data).hexdigest()
+        if digest != media.release.assets[0].sha256:
+            raise ValueError("notice cover differs from reviewed media")
+    else:
+        kind = native.get("cover_kind")
+        if not isinstance(kind, str) or kind not in {"water", "power", "road"}:
+            raise ValueError("unknown notice cover category")
+        content = render_notice_banner(kind)
+        digest = hashlib.sha256(content).hexdigest()
+        if native.get("cover_sha256") != digest:
+            raise ValueError("notice banner does not match reviewed bytes")
+        photo = PhotoUpload("notice-cover.png", content)
+    TelegramBotAPI._photo(photo)
+    return photo, digest
 
 
 def rich_receipt(

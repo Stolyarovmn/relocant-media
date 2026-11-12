@@ -1,7 +1,8 @@
 import {
-  addressHits, addressWindowText, buildAddressIndex, exactMapPoints, incidentStatus,
-  incidentTimes, kinds, launchEvent, readIncidents, searchAddresses, streetBounds, updateStamp,
-} from "./core.js";
+  addressHits, addressWindowText, buildAddressIndex, exactMapPoints, incidentCountdown,
+  incidentStatus, incidentTimes, kinds, launchEvent, nextTransition, readIncidents,
+  searchAddresses, streetBounds, unexpired, updateStamp,
+} from "./core.js?v=3";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -24,6 +25,7 @@ const enabled = new Set(Object.keys(kinds));
 const state = {
   incidents: [],
   selected: "",
+  previewArchive: "",
   refocusEvent: "",
   address: null,
   index: null,
@@ -129,7 +131,11 @@ function showMapNote() {
 
 function visibleIncidents(now) {
   return state.incidents.filter((incident) => enabled.has(incident.kind)
-    && (archive.checked || incidentStatus(incident, now) !== "closed"));
+    && (showsArchived(incident) || incidentStatus(incident, now) !== "closed"));
+}
+
+function showsArchived(incident) {
+  return archive.checked || state.previewArchive === incident.id;
 }
 
 function orderedIncidents(now) {
@@ -170,6 +176,9 @@ function eventCard(incident, now) {
   });
   heading.append(title);
   card.append(meta, heading);
+  const countdown = make("p", "event-countdown", incidentCountdown(incident, now));
+  countdown.hidden = !countdown.textContent;
+  card.append(countdown);
 
   const times = incidentTimes(incident);
   if (times.length === 1) card.append(make("p", "event-when", times[0]));
@@ -186,25 +195,52 @@ function eventCard(incident, now) {
     const district = segment.municipality ? ` · ${segment.municipality}` : "";
     card.append(make("p", "event-scope", `${segment.street}${extent}${district}`));
   }
+  for (const settlement of incident.settlements) {
+    const scope = settlement.parent ? `${settlement.name} · часть ${settlement.parent}`
+      : settlement.name;
+    card.append(make("p", "event-scope", `${scope} · ${settlement.municipality} · ${addressWindowText(settlement.window)}`));
+  }
+  if (incident.kind === "road" && !incident.lines.length) {
+    card.append(make("p", "event-scope", "Точные границы участка не подтверждены."));
+  }
+  if (incident.settlements.length && !incident.areas.some((area) => area.scope === "settlement")) {
+    card.append(make("p", "event-scope", "Граница указанной территории не подтверждена."));
+  }
   if (incident.addresses.length) {
     const matches = new Set(addressHits(incident, state.address));
     const addresses = make("details", "event-scope");
     addresses.open = Boolean(matches.size || state.selected === incident.id);
-    addresses.append(make("summary", "", `Адреса в объявлении · ${incident.addresses.length}`));
+    const caption = incident.kind === "water" ? "Дома на участке"
+      : incident.ranges.length ? "Дома из списка и диапазонов" : "Адреса в объявлении";
+    addresses.append(make("summary", "", `${caption} · ${incident.addresses.length}`));
     const list = make("ul");
     for (const address of incident.addresses) {
       const district = address.municipality ? ` · ${address.municipality}` : "";
       const time = addressWindowText(address.window);
       const row = make("li", matches.has(address) ? "event-address-hit" : "",
         `${addressLabel(address)}${district}${time ? ` · ${time}` : ""}`);
+      if (!unexpired(address.window, now)) row.dataset.expired = "true";
       list.append(row);
     }
     addresses.append(list);
     card.append(addresses);
   }
+  if (incident.ranges.length) {
+    const ranges = make("details", "event-scope");
+    ranges.append(make("summary", "", `Диапазоны в источнике · ${incident.ranges.length}`));
+    const list = make("ul");
+    for (const range of incident.ranges) {
+      list.append(make("li", "", `${addressLabel(range)} · ${range.municipality} · ${addressWindowText(range.window)}`));
+    }
+    ranges.append(list);
+    card.append(ranges);
+  }
   const links = make("div", "event-links");
   links.append(link(incident.source, "Первоисточник ↗"));
-  if (incident.officialMap) links.append(link(incident.officialMap, "Официальная карта ↗"));
+  if (incident.officialMap && incident.officialMap !== incident.source) {
+    links.append(link(incident.officialMap,
+      incident.kind === "road" ? "Схема секретариата ↗" : "Официальная карта ↗"));
+  }
   card.append(links);
   return card;
 }
@@ -220,6 +256,7 @@ function renderList(now) {
     selectedPreview.dataset.kind = selected.kind;
     byId("selected-title").textContent = selected.title;
   }
+  byId("selected-countdown").textContent = selected ? incidentCountdown(selected, now) : "";
   const message = state.loadFailed
     ? state.loaded ? "Обновление недоступно. Показана сохранённая версия." : "Список объявлений не загрузился."
     : state.deepPending && state.loaded ? "Объявление из ссылки пока отсутствует в выгрузке."
@@ -237,13 +274,20 @@ function renderPoints(now) {
     const color = kinds[incident.kind].color;
     const selected = incident.id === state.selected;
     const archived = incidentStatus(incident, now) === "closed";
-    const handle = (layer, label) => {
+    const handle = (layer, label, window = null, fromRegister = false) => {
       const popup = make("div");
       popup.append(make("strong", "", incident.title));
       if (label && label !== incident.title) popup.append(make("p", "", label));
+      if (window) popup.append(make("p", "", addressWindowText(window)));
       popup.append(link(incident.source, "Первоисточник ↗"));
+      if (fromRegister) {
+        const credit = make("p");
+        credit.append(link("https://data.gov.rs/sr/datasets/adresni-registar/", "Координаты · реестр Сербии ↗"));
+        popup.append(credit);
+      }
       layer.bindPopup(popup).on("click", () => {
         state.selected = incident.id;
+        if (incidentStatus(incident, Date.now()) !== "closed") state.previewArchive = "";
         state.refocusEvent = "";
         state.focusNote = "";
         showMapNote();
@@ -252,14 +296,28 @@ function renderPoints(now) {
     };
     for (const { coordinates, label } of incident.lines) {
       handle(leaflet.polyline(coordinates, {
-        color, opacity: archived ? .65 : .92, weight: selected ? 8 : 5, lineCap: "round",
+        color, opacity: archived ? .48 : .94, weight: selected ? 8 : 5, lineCap: "round",
+        dashArray: incident.kind === "road" ? "11 7" : null,
       }), label);
     }
-    for (const { lat, lon, label } of exactMapPoints(state.index, incident)) {
+    for (const area of incident.areas) {
+      if (!unexpired(area.window, now, showsArchived(incident))) continue;
+      const expired = !unexpired(area.window, now);
+      handle(leaflet.polygon(area.rings, {
+        color, fillColor: color, weight: selected ? 2.8 : 1.8,
+        opacity: expired ? .50 : .92,
+        fillOpacity: expired ? .12 : area.scope === "settlement" ? .24 : selected ? .68 : .49,
+        className: `outage-${area.scope}`,
+      }), area.label, area.window);
+    }
+    for (const { lat, lon, label, address, fromRegister } of exactMapPoints(
+      state.index, incident, now, showsArchived(incident),
+    )) {
+      const expired = !unexpired(address?.window, now);
       handle(leaflet.circleMarker([lat, lon], {
         radius: selected ? 8 : 6, color: "#fffef9", weight: selected ? 3 : 2,
-        fillColor: color, fillOpacity: archived ? .67 : .97,
-      }), label);
+        fillColor: color, fillOpacity: archived || expired ? .58 : .96,
+      }), label, address?.window, fromRegister);
     }
   }
 }
@@ -273,7 +331,7 @@ function renderAddress() {
   byId("picked-label").textContent = addressLabel(value);
   const now = Date.now();
   const matches = state.incidents.filter((event) => incidentStatus(event, now) !== "closed"
-    && addressHits(event, value).length);
+    && addressHits(event, value).some((address) => unexpired(address.window, now)));
   byId("picked-match").textContent = matches.length
     ? `Точных совпадений в актуальных объявлениях: ${matches.length}`
     : "В актуальных объявлениях точного совпадения пока нет.";
@@ -294,9 +352,15 @@ function render() {
 function focusIncident(incident) {
   if (!state.map) return false;
   state.map.closePopup();
-  const locations = exactMapPoints(state.index, incident).map(({ lat, lon }) => [lat, lon]);
+  const now = Date.now();
+  const includeExpired = showsArchived(incident);
+  const locations = exactMapPoints(state.index, incident, now, includeExpired)
+    .map(({ lat, lon }) => [lat, lon]);
   for (const line of incident.lines) {
     for (const point of line.coordinates) locations.push(point);
+  }
+  for (const area of incident.areas) {
+    if (unexpired(area.window, now, includeExpired)) locations.push(...area.rings[0]);
   }
   const padding = mobile.matches
     ? { paddingTopLeft: [24, 108], paddingBottomRight: [25, 28] }
@@ -306,7 +370,7 @@ function focusIncident(incident) {
   } else if (locations.length > 1) {
     state.map.fitBounds(locations, { ...padding, maxZoom: 17, animate });
   } else {
-    const bounds = streetBounds(state.index, incident);
+    const bounds = incident.kind === "water" ? streetBounds(state.index, incident) : null;
     if (bounds) {
       state.map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]],
         { ...padding, maxZoom: 16, animate });
@@ -314,7 +378,8 @@ function focusIncident(incident) {
       showMapNote();
       return true;
     }
-    state.focusNote = incident.officialMap
+    state.focusNote = incident.kind === "road" ? "Точные границы перекрытия не подтверждены."
+      : incident.officialMap
       ? "Схема участка доступна по ссылке «Официальная карта»."
       : "Геометрия участка недоступна. Подробности в объявлении.";
     showMapNote();
@@ -328,16 +393,17 @@ function focusIncident(incident) {
 function openEvent(incident, { fromCard = false } = {}) {
   state.deepPending = "";
   state.selected = incident.id;
+  state.previewArchive = incidentStatus(incident, Date.now()) === "closed" ? incident.id : "";
   state.refocusEvent = !state.index && (incident.addresses.length || incident.segments.length)
     ? incident.id : "";
   enabled.add(incident.kind);
   for (const button of layerButtons) {
     button.setAttribute("aria-pressed", String(enabled.has(button.dataset.kind)));
   }
-  if (incidentStatus(incident, Date.now()) === "closed") archive.checked = true;
   render();
-  if (fromCard && mobile.matches && (incident.lines.length
-      || exactMapPoints(state.index, incident).length || streetBounds(state.index, incident))) {
+  if (fromCard && mobile.matches && (incident.lines.length || incident.areas.length
+      || exactMapPoints(state.index, incident, Date.now(), showsArchived(incident)).length
+      || streetBounds(state.index, incident))) {
     showAnnouncements(false);
     announcementToggle.focus({ preventScroll: true });
   } else if (fromCard) {
@@ -353,7 +419,32 @@ function showAnnouncements(open) {
 }
 
 let refreshTimer;
+let clockTimer;
 let deepAttempts = 0;
+function updateCountdowns(now) {
+  for (const card of eventList.children) {
+    const incident = state.incidents.find((entry) => entry.id === card.dataset.id);
+    const countdown = card.querySelector(".event-countdown");
+    countdown.textContent = incidentCountdown(incident, now);
+    countdown.hidden = !countdown.textContent;
+  }
+  const selected = state.incidents.find((entry) => entry.id === state.selected);
+  byId("selected-countdown").textContent = selected ? incidentCountdown(selected, now) : "";
+}
+
+function scheduleClock() {
+  clearTimeout(clockTimer);
+  const now = Date.now();
+  const boundary = nextTransition(state.incidents, now);
+  const nextMinute = 60_000 - now % 60_000;
+  clockTimer = setTimeout(() => {
+    const current = Date.now();
+    if (current >= boundary) render();
+    else updateCountdowns(current);
+    scheduleClock();
+  }, Math.min(nextMinute, boundary - now + 10));
+}
+
 async function loadEvents() {
   const refresh = byId("refresh");
   if (refresh.disabled) return;
@@ -375,6 +466,7 @@ async function loadEvents() {
         refreshTimer = setTimeout(loadEvents, deepAttempts === 1 ? 7000 : 18000);
       }
     }
+    scheduleClock();
   } catch {
     state.loadFailed = true;
     byId("sync-stamp").textContent = "Повторить загрузку";
@@ -531,7 +623,17 @@ for (const button of layerButtons) {
     render();
   });
 }
-archive.addEventListener("change", render);
+archive.addEventListener("change", () => {
+  if (!archive.checked) state.previewArchive = "";
+  render();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearTimeout(clockTimer);
+  else {
+    render();
+    scheduleClock();
+  }
+});
 announcementToggle.addEventListener("click", () => showAnnouncements(announcementBody.hidden));
 selectedPreview.addEventListener("click", () => {
   showAnnouncements(true);

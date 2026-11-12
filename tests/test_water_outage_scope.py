@@ -58,6 +58,13 @@ def test_real_city_segment_preserves_source_names_and_case() -> None:
     }]
 
 
+def test_only_explicit_full_settlement_is_eligible() -> None:
+    text = CITY_BODY.split("potrošači", 1)[0] + "potrošači u celom naselju Ripanj."
+    assert scope.extract_water_settlement(document(body=text)) == ("Voždovac", "Ripanj")
+    assert scope.extract_water_settlement(document(body=text.replace("celom ", ""))) is None
+    assert scope.extract_water_settlement(document(body=text + " Osim Ulice Broj Jedan.")) is None
+
+
 def test_real_cyrillic_bvk_segment() -> None:
     body = (
         "Због планираних радова на водоводној мрежи у општини Вождовац, у петак, "

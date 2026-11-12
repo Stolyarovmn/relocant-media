@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  addressHits, addressWindowText, buildAddressIndex, exactMapPoints, incidentStatus,
-  incidentTimes, launchEvent, readIncidents, searchAddresses, streetBounds,
+  addressHits, addressWindowText, buildAddressIndex, exactMapPoints, incidentCountdown,
+  incidentStatus, incidentTimes, launchEvent, nextTransition, readIncidents, searchAddresses,
+  streetBounds, unexpired,
 } from "../web/newsroom/map/core.js";
 
 const waterId = "event_0123456789abcdef1234";
@@ -112,6 +113,36 @@ test("архивный снимок дороги скрыт из действу�
     starts_at: "2026-11-13T00:00:00+01:00", ends_at: "2026-11-16T00:00:00+01:00" });
   assert.equal(event.archived, true);
   assert.equal(incidentStatus(event, Date.parse("2026-11-14T12:00:00Z")), "closed");
+});
+
+test("контур заменяет метку дома, а каждое окно заканчивается самостоятельно", () => {
+  const address = { street: "Vojvode Šupljikca", number: "42", municipality: "Vračar",
+    starts_at: "2026-11-13T08:00:00+01:00", ends_at: "2026-11-13T10:00:00+01:00" };
+  const later = { ...address, number: "42A", ends_at: "2026-11-13T11:00:00+01:00" };
+  const ring = [[44.7982, 20.48625], [44.7983, 20.48625], [44.7983, 20.48635],
+    [44.7982, 20.48625]];
+  const event = incident({ id: powerId, kind: "power", addresses: [address, later],
+    areas: [{ scope: "building", label: "Дом 42", rings: [ring], address,
+      starts_at: address.starts_at, ends_at: address.ends_at },
+    { scope: "settlement", rings: [[...ring.slice(0, 3), [44.79, 20.48]]] }],
+    windows: [address, later],
+  });
+  const now = Date.parse("2026-11-13T09:20:00+01:00");
+  const boundary = Date.parse(address.ends_at);
+  assert.equal(event.areas.length, 1);
+  assert.equal(nextTransition([event], now), boundary);
+  assert.match(incidentCountdown(event, now), /ближайшего окончания · 40 мин/);
+  assert.equal(unexpired(event.areas[0].window, boundary), false);
+  assert.equal(unexpired(event.areas[0].window, boundary, true), true);
+  assert.deepEqual(exactMapPoints(addressIndex, event, now).map(p => p.address.number), ["42A"]);
+  assert.deepEqual(exactMapPoints(addressIndex, event, boundary).map(p => p.address.number), ["42A"]);
+  assert.match(incidentCountdown(event, boundary), /До окончания · 1 ч/);
+  assert.equal(incidentCountdown(event, Date.parse(later.ends_at)), "");
+});
+
+test("одиночная точка из старой выгрузки не обозначает дорожное перекрытие", () => {
+  const road = incident({ id: roadId, kind: "road", points: [{ lat: 44.81, lon: 20.44 }] });
+  assert.deepEqual(exactMapPoints(addressIndex, road), []);
 });
 
 test("непроверенные координаты и небезопасные ссылки не попадают на карту", () => {

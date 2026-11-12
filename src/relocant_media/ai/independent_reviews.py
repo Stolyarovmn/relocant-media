@@ -132,15 +132,27 @@ def reviewed_package(
                 "а не разрешение на повторное использование фотографии. "
             )
             if package.presentation.native_map is not None:
-                point = package.presentation.native_map.get("point", {})
+                native = package.presentation.native_map
+                point = native.get("point", {})
+                map_notice = native.get("layout") == "map_notice_v1"
+                if map_notice:
+                    instructions += (
+                        "Для объявления с кнопкой карты проверь свернутые списки и "
+                        "время каждого интервала в message_html по evidence. Все адреса "
+                        "должны быть обычным текстом. Верхняя графика категории является "
+                        "редакционной иллюстрацией. Встроенной геосхемы нет. "
+                    )
                 if point.get("mode") == "transport_map_review":
                     instructions += (
                         "Для карты работ сопоставь notice_url профильного секретариата с "
                         "датами, местом, номерами и направлениями в тексте. Проверь "
-                        "transport_geometry и подпись в message_html. Схема показывает "
-                        "только участок, опубликованный секретариатом. При расхождении "
-                        "фактов или геометрии не одобряй. "
+                        "transport_geometry. При расхождении фактов или геометрии не одобряй. "
                     )
+                    if not map_notice:
+                        instructions += (
+                            "Проверь подпись в message_html и соответствие встроенной схемы "
+                            "участку, опубликованному секретариатом. "
+                        )
                 elif point.get("mode") == "utility_map_review":
                     instructions += (
                         "Для карты отключения проверь дату, время, муниципалитет, точные "

@@ -30,7 +30,12 @@ from relocant_media.services.editorial_products import (
     validate_presentation,
     verify_stored_presentation,
 )
-from relocant_media.services.native_map import bind_native_map_draft, verify_live_native_map
+from relocant_media.services.native_map import (
+    NOTICE_COVER,
+    bind_native_map_draft,
+    native_message_html,
+    verify_live_native_map,
+)
 from relocant_media.services.rich_delivery import prepare_native_transport
 from relocant_media.services.utility_map import build_utility_point, utility_map_fragment
 from relocant_media.sources.registry import load_source_file
@@ -119,7 +124,9 @@ def test_water_segment_png_and_review_are_bound_to_immutable_snapshot():
         native = presentation.native_map
         assert native is not None
         assert "Рубрика: Что меняется в городе" in native["message_html"]
-        assert 'tg://photo?id=transport_map' in native["message_html"]
+        assert NOTICE_COVER in native["message_html"]
+        assert "<tg-map" not in native["message_html"]
+        assert "Kruševačke" in native["message_html"]
         validate_presentation(presentation, profile, (document,), draft, rubric_id="city_changes")
         verify_stored_presentation(session, 1, (document,), document_ids=[1],
                                    presentation=presentation)
@@ -133,8 +140,49 @@ def test_water_segment_png_and_review_are_bound_to_immutable_snapshot():
             package, SimpleNamespace(bot=bot), None,
             editorial_text=f"{draft.title}\n\n{draft.body}\n\nИсточник: {live.url}",
         )
-        assert prepared.photo.file_name == "outage-map.png"
-        assert prepared.image_sha256 == native["point"]["image_sha256"]
+        assert prepared.photo.file_name == "notice-cover.png"
+        assert prepared.image_sha256 == native["cover_sha256"]
+    engine.dispose()
+
+
+def test_notice_collapses_plain_power_addresses_with_their_source_intervals():
+    evidence = power_document("\n".join([
+        "Vračar 9.00 - 11.00 VOJVODE ŠUPLJIKCA: 42, 44-48, BB,",
+        "Zvezdara 13.00 - 15.00 BRANKA KRSMANOVIĆA: 2,",
+        "Lazarevac 09.00 - 13.00 Naselje JUNKOVAC (zaseok BELAĆEVIĆI)",
+    ]))
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source(evidence.source_id))
+        item = RawItem(**evidence.model_dump(), external_id="116619",
+                       source_html="<article><p>Извещение</p></article>")
+        capture_collected_batch(session, [item])
+        session.commit()
+        profile = load_city_profile("belgrade")
+        presentation = build_presentation(session, 1, (evidence,), document_ids=[1],
+                                          profile=profile, rubric_id="city_changes")
+        draft = present_draft(RussianDraft(title="Отключения света",
+                                           body="Проверенный текст.\n\n«Дословная цитата»",
+                                           claim_ids=("period",)), presentation)
+        presentation = bind_native_map_draft(presentation, draft)
+        native = presentation.native_map
+        assert native["cover_kind"] == "power"
+        html = native["message_html"]
+        assert html.index("<details>") < html.index("VOJVODE ŠUPLJIKCA, 42, 44-48, BB")
+        assert "<li>BRANKA KRSMANOVIĆA, 2 · Zvezdara</li>" in html
+        assert "<code>13.11.2026 · 13:00–15:00</code>" in html
+        assert "BELAĆEVIĆI, JUNKOVAC" in html
+        assert "<blockquote><p>«Дословная цитата»</p></blockquote>" in html
+        assert html.count("<a ") == 1 and "openstreetmap.org" not in html
+        assert "<tg-map" not in html and "<details open" not in html
+        fake = {**native, "schedule": [{"when": "10:00", "items": ["Выдуманный дом"]}]}
+        fake["message_html"] = native_message_html(fake, draft)
+        tampered = bind_native_map_draft(
+            presentation.model_copy(update={"native_map": fake}), draft,
+        )
+        with pytest.raises(ValueError, match="layout does not match evidence"):
+            validate_presentation(tampered, profile, (evidence,), draft, rubric_id="city_changes")
     engine.dispose()
 
 

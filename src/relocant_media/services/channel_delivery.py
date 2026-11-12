@@ -127,14 +127,17 @@ async def deliver_reviewed(
             run.outcome = {**run.outcome,
                            "_rich_delivery": rich_receipt(rich_message, state="sending")}
         if prepared_media is not None:
-            candidate_bot = getattr(publisher, "bot", None)
-            if (
-                candidate_bot is None
-                or not callable(getattr(candidate_bot, "send_photo", None))
-                or not callable(getattr(candidate_bot, "send_media_group", None))
-            ):
-                raise DeliveryBlockedError("production publisher does not support reviewed media")
-            media_bot = cast(MediaBot, candidate_bot)
+            if rich_message is None:
+                candidate_bot = getattr(publisher, "bot", None)
+                if (
+                    candidate_bot is None
+                    or not callable(getattr(candidate_bot, "send_photo", None))
+                    or not callable(getattr(candidate_bot, "send_media_group", None))
+                ):
+                    raise DeliveryBlockedError(
+                        "production publisher does not support reviewed media",
+                    )
+                media_bot = cast(MediaBot, candidate_bot)
             run.outcome = {
                 **run.outcome,
                 "_media_delivery": _media_receipt(prepared_media, state="sending"),
@@ -154,6 +157,8 @@ async def deliver_reviewed(
         if rich_message is not None:
             assert rich_bot is not None
             message_id = await send_native_message(rich_bot, target_channel_id, rich_message)
+            if prepared_media is not None:
+                message_ids = [message_id]
         elif prepared_media is None:
             message_id = await publisher.publish(preview.text)
             if type(message_id) is not int or message_id <= 0:

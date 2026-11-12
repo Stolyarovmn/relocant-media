@@ -256,6 +256,7 @@ jobs:
     needs: cycle
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pages: write
       id-token: write
     concurrency:
@@ -265,7 +266,16 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Skip a superseded Pages build
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          actual=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$actual" = "$EXPECTED_SHA" ]; then echo 'deploy=true' >> "$GITHUB_OUTPUT"; fi
       - uses: actions/deploy-pages@v4
         id: deployment
+        if: steps.current.outputs.deploy == 'true'
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}

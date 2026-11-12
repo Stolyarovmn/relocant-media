@@ -1,7 +1,7 @@
 export const kinds = {
-  water: { label: "Вода", color: "#175a86" },
-  power: { label: "Свет", color: "#815600" },
-  road: { label: "Дороги", color: "#9e422f" },
+  water: { label: "Вода", color: "#00669f" },
+  power: { label: "Свет", color: "#6937b2" },
+  road: { label: "Дороги", color: "#bc2444" },
 };
 
 const eventId = /^event_[a-f0-9]{20}$/;
@@ -80,6 +80,24 @@ function readWindow(window) {
   return start !== null && end !== null && start < end ? { start, end } : null;
 }
 
+function readAddress(item) {
+  const street = textValue(item?.street);
+  const number = textValue(item?.number);
+  return street && number ? { street, number, municipality: textValue(item.municipality),
+    window: readWindow(item) } : null;
+}
+
+function readArea(item) {
+  if (!item || !["building", "settlement"].includes(item.scope)) return null;
+  const validRing = (ring) => Array.isArray(ring) && ring.length >= 4 && ring.length <= 1000
+    && ring.every((pair) => Array.isArray(pair) && pair.length === 2 && coords(...pair))
+    && ring[0][0] === ring.at(-1)[0] && ring[0][1] === ring.at(-1)[1];
+  if (!Array.isArray(item.rings) || !item.rings.length || item.rings.length > 16
+      || !item.rings.every(validRing)) return null;
+  return { scope: item.scope, rings: item.rings, label: textValue(item.label),
+    window: readWindow(item), address: readAddress(item.address) };
+}
+
 export function readIncidents(document) {
   if (document?.version !== 1 || !Array.isArray(document.incidents)) {
     throw new Error("Не удалось прочитать список объявлений");
@@ -107,19 +125,19 @@ export function readIncidents(document) {
       windows: array(record.windows).map(readWindow).filter(Boolean)
         .sort((a, b) => a.start - b.start),
       points: array(record.points).flatMap((point) => coords(point?.lat, point?.lon)
-        ? [{ lat: point.lat, lon: point.lon, label: textValue(point.label) }] : []),
+        ? [{ lat: point.lat, lon: point.lon, label: textValue(point.label),
+          address: readAddress(point.address), fromRegister: point.coordinate_source === "rgz" }] : []),
       lines: array(record.lines).flatMap((line) => Array.isArray(line?.coordinates)
         && line.coordinates.length >= 2
         && line.coordinates.every((pair) => Array.isArray(pair) && coords(pair[0], pair[1]))
         ? [{ coordinates: line.coordinates.map(([lat, lon]) => [lat, lon]),
           label: textValue(line.label) }] : []),
-      addresses: array(record.addresses).flatMap((item) => {
-        const street = textValue(item?.street);
-        const number = textValue(item?.number);
-        if (!street || !number) return [];
-        return [{ street, number, municipality: textValue(item.municipality),
-          window: readWindow(item) }];
-      }),
+      areas: array(record.areas).map(readArea).filter(Boolean),
+      addresses: array(record.addresses).map(readAddress).filter(Boolean),
+      ranges: array(record.ranges).map(readAddress).filter(Boolean),
+      settlements: array(record.settlements).flatMap((item) => textValue(item?.name)
+        ? [{ name: textValue(item.name), municipality: textValue(item.municipality),
+          parent: textValue(item.parent), window: readWindow(item) }] : []),
       segments: array(record.segments).flatMap((item) => {
         const street = textValue(item?.street);
         if (!street) return [];
@@ -143,6 +161,47 @@ export function incidentStatus(incident, now) {
   if (incident.start !== null && now < incident.start) return "planned";
   if (incident.start !== null && incident.end !== null) return "active";
   return "unknown";
+}
+
+export function unexpired(window, now, archive = false) {
+  return archive || !window || now < window.end;
+}
+
+export function nextTransition(incidents, now) {
+  let closest = Infinity;
+  const consider = (value) => {
+    if (value !== null && value > now && value < closest) closest = value;
+  };
+  for (const incident of incidents) {
+    if (incident.archived) continue;
+    consider(incident.start);
+    consider(incident.end);
+    for (const window of incident.windows) {
+      consider(window.start);
+      consider(window.end);
+    }
+  }
+  return closest;
+}
+
+export function incidentCountdown(incident, now) {
+  if (incident.archived || incidentStatus(incident, now) === "closed") return "";
+  const windows = incident.windows.length ? incident.windows : [{ start: incident.start, end: incident.end }];
+  const active = windows.filter(({ start, end }) => start !== null && end !== null
+    && start <= now && end > now);
+  const future = windows.filter(({ start }) => start !== null && start > now);
+  const target = active.length ? Math.min(...active.map(({ end }) => end))
+    : future.length ? Math.min(...future.map(({ start }) => start)) : incident.end;
+  if (target === null || target <= now) return "";
+  const minutes = Math.floor((target - now) / 60000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor(minutes / 60) % 24;
+  const rest = minutes % 60;
+  const duration = [days ? `${days} д` : "", hours ? `${hours} ч` : "",
+    !days && rest ? `${rest} мин` : ""].filter(Boolean).join(" ") || "меньше минуты";
+  const label = future.length && !active.length ? "До начала"
+    : active.length + future.length > 1 ? "До ближайшего окончания" : "До окончания";
+  return `${label} · ${duration}`;
 }
 
 function span(start, end) {
@@ -288,17 +347,37 @@ export function searchAddresses(index, query, exactNumber = false) {
 
 export function addressHits(incident, selected) {
   const key = selected && addressKey(selected);
-  return key ? incident.addresses.filter((address) => addressKey(address) === key) : [];
+  if (!key) return [];
+  const matches = new Set(incident.addresses.filter((address) => addressKey(address) === key));
+  const near = (lat, lon) => Math.abs(lat - selected.lat) < .00012
+    && Math.abs(lon - selected.lon) < .00016;
+  const scoped = (address) => address && addressKey({ ...address,
+    municipality: address.municipality.split(/,\s*naselje\s+/i)[0] }) === key;
+  const confirmed = [...incident.points.filter((point) => near(point.lat, point.lon)),
+    ...incident.areas.filter((area) => area.rings[0].some(([lat, lon]) => near(lat, lon)))];
+  for (const { address } of confirmed) {
+    if (!scoped(address)) continue;
+    for (const entry of incident.addresses) {
+      if (addressKey(entry) === addressKey(address)) matches.add(entry);
+    }
+  }
+  return [...matches];
 }
 
-export function exactMapPoints(index, incident) {
-  const points = [...incident.points];
-  if (!index) return points;
+export function exactMapPoints(index, incident, now = -Infinity, archive = false) {
+  if (incident.kind === "road") return [];
+  const points = incident.points.filter((point) => unexpired(point.address?.window, now, archive));
+  if (!index || incident.kind !== "power") return points;
+  const covered = new Set([...points, ...incident.areas]
+    .filter(({ address }) => address).map(({ address }) => addressKey(address)));
   for (const item of incident.addresses) {
-    const match = index.exact.get(addressKey(item));
+    const key = addressKey(item);
+    if (!unexpired(item.window, now, archive) || covered.has(key)) continue;
+    const match = index.exact.get(key);
     if (!match || points.some(({ lat, lon }) => Math.abs(lat - match.lat) < .000005
       && Math.abs(lon - match.lon) < .000005)) continue;
-    points.push({ lat: match.lat, lon: match.lon, label: `${item.street}, ${item.number}` });
+    points.push({ lat: match.lat, lon: match.lon, label: `${item.street}, ${item.number}`,
+      address: item });
   }
   return points;
 }
