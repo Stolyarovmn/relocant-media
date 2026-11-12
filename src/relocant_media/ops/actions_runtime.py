@@ -33,6 +33,8 @@ from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ops.map_backfill import apply as apply_map_buttons
 from relocant_media.ops.map_backfill import parse_targets as parse_map_button_targets
 from relocant_media.ops.map_export import export_map_snapshot
+from relocant_media.ops.map_republication import Request as MapRepublicationRequest
+from relocant_media.ops.map_republication import apply as apply_map_republication
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.ops.sqlite_restore import restore
@@ -50,7 +52,7 @@ BELGRADE_STREETS = Path("cities/belgrade/map/roads.json.gz")
 BELGRADE_AREAS = Path("cities/belgrade/map/outage-areas.json.gz")
 MODES = {
     "preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback",
-    "map-backfill",
+    "map-backfill", "map-republish",
 }
 
 
@@ -478,6 +480,11 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if map_input and mode != "map-backfill":
         raise ValueError("map button targets require map-backfill mode")
     targets = parse_map_button_targets(map_input) if mode == "map-backfill" else {}
+    repost_input = environment.get("MAP_REPUBLICATION_REQUEST", "")
+    if repost_input and mode != "map-republish":
+        raise ValueError("map republication request requires map-republish mode")
+    repost = (MapRepublicationRequest.model_validate_json(repost_input)
+              if mode == "map-republish" else None)
     if mode in {"fallback-preview", "fallback"}:
         if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
                 or environment.get("EDITORIAL_STORAGE_BACKEND") != "ssh"
@@ -512,6 +519,13 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             database, targets, environment.get("RELOCANT_MAP_TELEGRAM_APP", ""),
             environment.get("TELEGRAM_BOT_TOKEN", ""),
         ))
+        return 0
+    if repost is not None:
+        if (environment.get("GITHUB_ACTIONS") != "true"
+                or environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+                or environment.get("EDITORIAL_SEND_ENABLED") != "true"):
+            raise ValueError("map republication requires an explicit hosted editorial request")
+        apply_map_republication(database, repost, state, sha, store.write, environment)
         return 0
     if mode == "fallback-preview":
         return _export_gpt_request(drive, database, work)

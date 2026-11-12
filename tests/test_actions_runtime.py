@@ -346,6 +346,25 @@ def test_map_backfill_is_manual_and_does_not_claim_state(context, tmp_path, monk
     assert len(calls) == 1
 
 
+def test_map_republish_requires_explicit_hosted_dispatch(context, tmp_path, monkeypatch):
+    calls = []
+    event = "event_" + "a" * 20
+    env = {
+        "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "ACTIONS_CUTOVER_CONFIRMED": "true", "GITHUB_REPOSITORY": runtime.REPO,
+        "GITHUB_REF": "refs/heads/main", "EDITORIAL_SEND_ENABLED": "true",
+        "MAP_REPUBLICATION_REQUEST": json.dumps({"message_id": 97, "event_id": event}),
+    }
+    monkeypatch.setattr(runtime, "apply_map_republication", lambda *args: calls.append(args))
+    options = {"output": tmp_path / "public.json", "folder": "", "mode": "map-republish"}
+    with pytest.raises(ValueError, match="explicit hosted"):
+        runtime.execute(*context, work=tmp_path / "blocked",
+                        environment={**env, "GITHUB_EVENT_NAME": "schedule"}, **options)
+    assert not calls
+    assert runtime.execute(*context, work=tmp_path / "allowed", environment=env, **options) == 0
+    assert calls[0][1].message_id == 97 and calls[0][1].event_id == event
+
+
 def test_stale_bootstrap_is_rejected(state):
     with pytest.raises(ValueError, match='fresh final snapshot'):
         runtime.bootstrap_record(state['snapshot'], now=datetime.now(UTC) + timedelta(days=1))
