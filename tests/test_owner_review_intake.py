@@ -13,8 +13,9 @@ OWNER_CHAT = 9001
 
 
 class OwnerBot:
-    def __init__(self, updates):
+    def __init__(self, updates, *, callback_expired=False):
         self.updates = updates
+        self.callback_expired = callback_expired
         self.calls = []
 
     async def _call(self, method, params):
@@ -28,9 +29,13 @@ class OwnerBot:
         if method == "getUpdates":
             return self.updates
         if method == "answerCallbackQuery":
+            if self.callback_expired:
+                raise RuntimeError("Callback already expired")
             return True
         if method == "editMessageReplyMarkup":
             return True
+        if method == "sendMessage":
+            return {"message_id": 802}
         raise AssertionError(method)
 
 
@@ -70,7 +75,7 @@ async def test_owner_publish_callback_is_consumed_before_normal_intake(engine):
             "message": {"message_id": 501, "chat": {"id": OWNER_CHAT}},
         },
     }
-    bot = OwnerBot([update])
+    bot = OwnerBot([update], callback_expired=True)
     result = await receive_private_tips(
         engine,
         bot,
@@ -81,8 +86,12 @@ async def test_owner_publish_callback_is_consumed_before_normal_intake(engine):
     )
     assert result["received"] == 1 and result["owner_actions"] == 1
     assert [name for name, _ in bot.calls] == [
-        "getWebhookInfo", "getUpdates", "answerCallbackQuery", "editMessageReplyMarkup"
+        "getWebhookInfo", "getUpdates", "answerCallbackQuery", "editMessageReplyMarkup",
+        "sendMessage",
     ]
+    assert result["telegram_sends"] == 1
+    assert "Согласовано" in bot.calls[-1][1]["text"]
+    assert bot.calls[-1][1]["reply_parameters"]["message_id"] == 501
     with Session(engine) as session:
         assert session.get(Submission, review_id).status == "approved"
         receipt = session.get(TelegramUpdateReceipt, 101)
@@ -105,7 +114,16 @@ async def test_owner_reply_becomes_revision_not_news_tip(engine):
             "reply_to_message": {"message_id": 501},
         },
     }
-    bot = OwnerBot([update])
+    callback = {
+        "update_id": 103,
+        "callback_query": {
+            "id": "callback-after-reply",
+            "from": {"id": OWNER, "is_bot": False},
+            "data": f"or:revise:{review_id}",
+            "message": {"message_id": 501, "chat": {"id": OWNER_CHAT}},
+        },
+    }
+    bot = OwnerBot([callback, update])
     result = await receive_private_tips(
         engine,
         bot,
@@ -115,8 +133,14 @@ async def test_owner_reply_becomes_revision_not_news_tip(engine):
         owner_chat_id=OWNER_CHAT,
     )
     assert result["received"] == 1 and result["owner_actions"] == 1
+    assert result["telegram_sends"] == 1
     assert [name for name, _ in bot.calls[:4]] == [
         "getWebhookInfo", "getMe", "getChatMember", "getUpdates"
+    ]
+    assert [payload["text"] for name, payload in bot.calls
+            if name == "sendMessage" or name == "answerCallbackQuery"] == [
+        "Комментарий принят. Новая версия придёт на согласование.",
+        "Комментарий принят. Новая версия придёт на согласование.",
     ]
     with Session(engine) as session:
         stored = session.get(Submission, review_id)
