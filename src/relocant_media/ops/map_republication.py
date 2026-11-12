@@ -3,9 +3,9 @@
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
 from bs4 import BeautifulSoup
@@ -59,6 +59,25 @@ class Request(BaseModel):
     message_id: Annotated[int, Field(gt=0, le=2_147_483_647)]
     event_id: Annotated[str, Field(pattern=r"^event_[0-9a-f]{20}$")]
     replacement: Replacement | None = None
+
+
+class GPTReviews(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    version: Literal[1]
+    request_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    facts: dict[str, Any]
+    utility: dict[str, Any]
+
+    def generate_json(
+        self, *, task: str, system_instruction: str, prompt: str,
+        response_schema: dict[str, Any],
+    ) -> str:
+        if task == "independent_facts":
+            return canonical_json(self.facts)
+        if task == "independent_utility":
+            return canonical_json(self.utility)
+        raise ValueError("unsupported GPT review role")
 
 
 def latest_message_id(html: str) -> int:
@@ -170,10 +189,47 @@ async def deliver(
     return sent
 
 
+def _load_package(database: Path, request: Request, client: httpx.Client) -> EditorialPackage:
+    _check_public_target(client, request, active=True)
+    print(json.dumps({"republication": "target_verified"}), flush=True)
+    engine = create_engine(f"sqlite:///{database.resolve().as_uri()}?mode=ro&uri=true")
+    try:
+        with Session(engine) as session:
+            package = prepare(session, request)
+    finally:
+        engine.dispose()
+    print(json.dumps({"republication": "canonical_package_prepared"}), flush=True)
+    return package
+
+
+def review_request(database: Path, request: Request) -> dict[str, Any]:
+    with httpx.Client(timeout=25, trust_env=False, headers={"Cache-Control": "no-cache"}) as client:
+        package = _load_package(database, request, client)
+    return {
+        "version": 1,
+        "request": request.model_dump(mode="json"),
+        "context_sha256": context_sha256(package),
+        "created_at": datetime.now(UTC).isoformat(),
+        "package": package.model_dump(mode="json", exclude={"reviews"}),
+    }
+
+
+def validate_gpt_scope(scope: dict[str, Any], request: Request,
+                       package: EditorialPackage, *, now: datetime) -> None:
+    created = datetime.fromisoformat(scope["created_at"])
+    if (scope["version"] != 1 or scope["request"] != request.model_dump(mode="json")
+            or created.tzinfo is None or not now - timedelta(hours=4) <= created <= now
+            or scope["context_sha256"] != context_sha256(package)
+            or scope["package"] != package.model_dump(mode="json", exclude={"reviews"})):
+        raise ValueError("GPT reviews do not match the current republication")
+
+
 def apply(
     database: Path, request: Request, state: dict[str, Any], sha: str,
     commit: Commit, environment: Mapping[str, str],
+    gpt: tuple[GPTReviews, dict[str, Any]] | None = None,
 ) -> None:
+    from relocant_media.ai.provider import StructuredAIProvider
     from relocant_media.ops.server_cycle import ChannelPublisher, fetch_documents
 
     previous = state.get(_HISTORY, {}).get(str(request.message_id))
@@ -184,20 +240,22 @@ def apply(
         print(json.dumps({"republication": "already_sent", "message_id": message_id}), flush=True)
         return
     with httpx.Client(timeout=25, trust_env=False, headers={"Cache-Control": "no-cache"}) as client:
-        _check_public_target(client, request, active=True)
-        print(json.dumps({"republication": "target_verified"}), flush=True)
-        engine = create_engine(f"sqlite:///{database.resolve().as_uri()}?mode=ro&uri=true")
-        try:
-            with Session(engine) as session:
-                package = prepare(session, request)
-        finally:
-            engine.dispose()
-        print(json.dumps({"republication": "canonical_package_prepared"}), flush=True)
-        provider = IsolatedGeminiProvider(
-            environment["GEMINI_API_KEY"], model=environment.get("GEMINI_MODEL") or
-            "gemini-3.5-flash-lite", timeout_seconds=55,
-        )
+        package = _load_package(database, request, client)
+        provider: StructuredAIProvider
+        if gpt is None:
+            provider = IsolatedGeminiProvider(
+                environment["GEMINI_API_KEY"], model=environment.get("GEMINI_MODEL") or
+                "gemini-3.5-flash-lite", timeout_seconds=55,
+            )
+        else:
+            provider, scope = gpt
+            validate_gpt_scope(scope, request, package, now=datetime.now(UTC))
         package = reviewed_package(package, provider, lambda: fetch_documents(package))
+        if gpt is not None:
+            package = package.model_copy(update={"reviews": tuple(
+                review.model_copy(update={"reviewer_id": f"subscription-gpt-{review.role}"})
+                for review in package.reviews
+            )})
         evaluate_package(package)
         if not all(review.verdict == "approve" and review.score >= 75
                    and not review.flags and review.live_source_checked
@@ -208,7 +266,8 @@ def apply(
             }), flush=True)
             raise ValueError("independent reviews did not approve the republished package")
         _check_public_target(client, request, active=True)
-        print(json.dumps({"republication": "independent_reviews_passed"}), flush=True)
+        print(json.dumps({"republication": "independent_reviews_passed",
+                          "provider": "gpt" if gpt else "gemini"}), flush=True)
     draft = package.outcome.draft
     text = f"{draft.title}\n\n{draft.body}\n\nИсточник: {package.evidence.url}"
 

@@ -284,8 +284,9 @@ def test_selected_utility_hold_gets_map_and_two_reviews_before_owner_decision(en
         assert package.presentation.native_map["point"]["mode"] == "utility_map_review"
         assert "Kruševačke" in package.presentation.native_map["message_html"]
         assert "Рубрика: Что меняется в городе" in session.get(Post, run.post_id).body
+        from relocant_media.ai.package import context_sha256
         from relocant_media.domain.map_links import map_event_id
-        from relocant_media.ops.map_republication import Request, prepare
+        from relocant_media.ops.map_republication import Request, prepare, validate_gpt_scope
 
         post = session.get(Post, run.post_id)
         post.telegram_message_id = 97
@@ -296,9 +297,19 @@ def test_selected_utility_hold_gets_map_and_two_reviews_before_owner_decision(en
             "message_html_sha256": package.presentation.native_map["message_html_sha256"],
         }}
         session.flush()
-        candidate = prepare(session, Request(message_id=97, event_id=map_event_id(document.url)))
+        request = Request(message_id=97, event_id=map_event_id(document.url))
+        candidate = prepare(session, request)
         assert candidate.outcome.draft == package.outcome.draft
         assert all(review.verdict == "hold" for review in candidate.reviews)
+        scope = {"version": 1, "created_at": NOW.isoformat(),
+                 "request": request.model_dump(mode="json"),
+                 "context_sha256": context_sha256(candidate),
+                 "package": candidate.model_dump(mode="json", exclude={"reviews"})}
+        validate_gpt_scope(scope, request, candidate, now=NOW)
+        with pytest.raises(ValueError, match="current republication"):
+            validate_gpt_scope(scope, request, candidate, now=NOW + timedelta(hours=5))
+        with pytest.raises(ValueError, match="current republication"):
+            validate_gpt_scope({**scope, "package": {}}, request, candidate, now=NOW)
 
 
 def _undecided_event_hold(
