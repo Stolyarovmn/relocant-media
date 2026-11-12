@@ -2,6 +2,7 @@
 import ipaddress
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit
@@ -200,6 +201,25 @@ class VenueFeedCollector:
         extraction = self._source.extraction
         return bool(extraction.article_lead_selectors or extraction.page_text)
 
+    async def _collect_article(self, url: str, entry: RawItem | None) -> RawItem:
+        use_feed = bool(entry and entry.body and not self._needs_page())
+        keep_html = self._source.ownership == "official" and "events" in self._source.categories
+        if use_feed and not keep_html:
+            assert entry is not None
+            return entry
+        try:
+            html = await self._fetch(url)
+        except (ValueError, httpx.HTTPError):
+            if use_feed:
+                assert entry is not None
+                return entry
+            raise
+        article = entry if use_feed else _article(
+            html, url, self._source, entry.published_at if entry else None,
+        )
+        assert article is not None
+        return replace(article, source_html=html) if keep_html else article
+
     async def collect(self) -> list[RawItem]:
         self.item_failures = []
         now = datetime.now(UTC)
@@ -208,11 +228,7 @@ class VenueFeedCollector:
         items = []
         for entry in entries[:20]:
             try:
-                use_feed = bool(entry.body and not self._needs_page())
-                item = entry if use_feed else _article(
-                    await self._fetch(entry.url), entry.url, self._source, entry.published_at
-                )
-                items.append(item)
+                items.append(await self._collect_article(entry.url, entry))
             except (ValueError, httpx.HTTPError) as error:
                 self.item_failures.append(
                     {
@@ -228,7 +244,4 @@ class VenueFeedCollector:
     async def collect_url(self, url: str) -> RawItem:
         _allowed(url, self._source)
         entry = next((item for item in await self._entries() if item.url == url), None)
-        if entry is not None and entry.body and not self._needs_page():
-            return entry
-        html = await self._fetch(url)
-        return _article(html, url, self._source, entry.published_at if entry else None)
+        return await self._collect_article(url, entry)

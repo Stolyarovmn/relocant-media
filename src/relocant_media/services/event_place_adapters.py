@@ -24,6 +24,14 @@ _DOB_ROOMS = {
     "dob//velika sala": "Dom omladine Beograda · Velika sala",
     "dob//klub": "Dom omladine Beograda · Klub DOB",
 }
+_DOB_INTERVIEW_2026 = (
+    "https://domomladine.org/karlos-sances-flamenko-gitarista-u-susret-koncertu-u-"
+    "domu-omladine-flamenko-svoju-snagu-crpi-iz-iskrenosti-i-emocija/"
+)
+_DOB_PROGRAM_2026 = (
+    "https://domomladine.org/koncerti/svetski-dan-flamenka-u-domu-omladine-beograda-"
+    "el-sonido-de-la-vida-zvuk-zivota/"
+)
 _MONTHS = (
     ("januar", "januara"), ("februar", "februara"), ("mart", "marta"),
     ("april", "aprila"), ("maj", "maja"), ("jun", "juna"), ("jul", "jula"),
@@ -160,6 +168,12 @@ def _dob_facts(document: EvidenceDocument, soup: BeautifulSoup) -> dict[str, Any
     venue = _DOB_ROOMS.get(room.casefold())
     if venue is None or len(name) > 260:
         return None
+    return _dob_schedule_facts(name, venue, start, basis, schedule_url)
+
+
+def _dob_schedule_facts(
+    name: str, venue: str, start: datetime, basis: str, schedule_url: str,
+) -> dict[str, Any]:
     # Адрес подтверждён контактами DOB, точка совпадает с домом 22 в индексе OSM.
     return {
         "event_name": name,
@@ -172,6 +186,18 @@ def _dob_facts(document: EvidenceDocument, soup: BeautifulSoup) -> dict[str, Any
         "coordinate_source_url": _DOB_OSM,
         "venue_source_url": _DOB_CONTACT,
     }
+
+
+def verified_legacy_event_schedule(document: EvidenceDocument) -> dict[str, Any] | None:
+    """Сверенная карточка программы для опубликованного до сохранения HTML интервью."""
+    name = "El Sonido de la Vida"
+    if (document.source_id != "venue_youth_centre" or document.url != _DOB_INTERVIEW_2026
+            or name.casefold() not in document.body.casefold()):
+        return None
+    return _dob_schedule_facts(
+        name, _DOB_ROOMS["dob//amerikana"], datetime(2026, 11, 16, 20),
+        "source_dob_linked_concert", _DOB_PROGRAM_2026,
+    )
 
 
 def extract_event_adapter(

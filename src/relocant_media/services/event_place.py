@@ -18,6 +18,10 @@ from relocant_media.ai.models import EvidenceDocument
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.map_links import map_event_id
 from relocant_media.domain.source_locations import is_public_https_url
+from relocant_media.services.event_place_adapters import (
+    extract_event_adapter,
+    verified_legacy_event_schedule,
+)
 from relocant_media.services.exhibition_map_point import (
     MAX_HTML_BYTES,
     _coordinate,
@@ -221,11 +225,19 @@ def resolve_event_place(
         return None
     facts = _json_ld_facts(document, source_html, profile)
     if facts is None:
-        from relocant_media.services.event_place_adapters import extract_event_adapter
-
         facts = extract_event_adapter(document, source_html, profile=profile)
     if facts is None:
         return None
+    return _verified_place(document, facts, profile, html_sha256=_sha(source_html))
+
+
+def _verified_place(
+    document: EvidenceDocument,
+    facts: dict[str, Any],
+    profile: CityEditorialProfile,
+    *,
+    html_sha256: str | None,
+) -> dict[str, Any] | None:
     start = event_time(facts.get("starts_at"), profile.timezone)
     raw_end = facts.get("ends_at")
     end = event_time(raw_end, profile.timezone) if raw_end is not None else None
@@ -246,7 +258,7 @@ def resolve_event_place(
         "ends_at": end.isoformat() if end else None,
         "expires_at": expires.isoformat(),
         "timezone": profile.timezone,
-        "source_html_sha256": _sha(source_html),
+        "source_html_sha256": html_sha256,
         "document_sha256": _sha(document.model_dump_json()),
     }
 
@@ -257,6 +269,7 @@ def resolve_saved_event_place(
     document_ids: list[int],
     *,
     profile: CityEditorialProfile,
+    legacy_published: bool = False,
 ) -> dict[str, Any] | None:
     """Только точный официальный источник и валидный сохранённый HTML того же документа."""
     for raw_id in document_ids:
@@ -272,13 +285,20 @@ def resolve_saved_event_place(
             or raw.url != document.url
             or not _same_public_host(document.url, source.url)
             or raw.source_id != document.source_id
-            or snapshot is None
-            or snapshot.source_page != document.url
-            or snapshot.source_html is None
-            or not _valid_snapshot(snapshot)
             or EvidenceDocument.model_validate(raw, from_attributes=True)
             != _base_document(document)
         ):
+            continue
+        if snapshot is None:
+            if legacy_published and profile.city_id == "belgrade":
+                facts = verified_legacy_event_schedule(document)
+                if facts is not None:
+                    return _verified_place(
+                        _base_document(document), facts, profile, html_sha256=None,
+                    )
+            continue
+        if (snapshot.source_page != document.url or snapshot.source_html is None
+                or not _valid_snapshot(snapshot)):
             continue
         return resolve_event_place(document, snapshot.source_html, profile=profile)
     return None

@@ -67,6 +67,7 @@ async def test_cross_host_redirect_not_requested(source: SourceConfig) -> None:
 
 @pytest.mark.asyncio
 async def test_full_article_and_stable_feed_date(source: SourceConfig) -> None:
+    source = source.model_copy(update={"ownership": "official", "categories": ("events",)})
     date = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
     article = "<h1>Full title</h1><article>" + "Verified full announcement. " * 12 + "</article>"
 
@@ -82,6 +83,7 @@ async def test_full_article_and_stable_feed_date(source: SourceConfig) -> None:
     assert live.title == "Full title"
     assert live.published_at == date
     assert "Verified full announcement" in live.body
+    assert live.source_html == article
 
 
 @pytest.mark.asyncio
