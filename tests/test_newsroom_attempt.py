@@ -90,7 +90,7 @@ def test_runtime_workflow_observes_failures_without_broadening_execution_rights(
     observation = next(step for step in steps if step.get("id") == "projection")
     assert observation["if"] == (
         "always() && steps.mode.outputs.value != 'recovery' && "
-        "steps.mode.outputs.value != 'fallback-preview' && inputs.mode != 'map-backfill'"
+        "steps.mode.outputs.value != 'fallback-preview' && !startsWith(inputs.mode, 'map-')"
     )
     # A recovery dispatch verifies the checkpoint without running the publisher.
     assert runtime["if"] == "steps.mode.outputs.value != 'recovery'"

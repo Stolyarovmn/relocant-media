@@ -103,14 +103,14 @@ def test_manual_operations_have_separate_workflow_queues_and_shared_state_lock()
     data = workflow()
     assert data["concurrency"] == {
         "group": "${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' "
-                 "|| inputs.mode == 'map-backfill' && 'editorial-map-backfill' "
+                 "|| startsWith(inputs.mode, 'map-') && 'editorial-map-operations' "
                  "|| 'canonical-editorial-writer' }}",
         "cancel-in-progress": "false",
     }
     assert data["jobs"]["cycle"]["concurrency"]["group"] == "canonical-editorial-state"
     assert "inputs.mode != 'fallback-preview'" in _chain()["if"]
     assert "inputs.mode != 'fallback'" in _chain()["if"]
-    assert "inputs.mode != 'map-backfill'" in _chain()["if"]
+    assert "!startsWith(inputs.mode, 'map-')" in _chain()["if"]
 
 
 def test_published_correction_is_manual_main_only_and_shares_state_lock():

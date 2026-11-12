@@ -5,7 +5,7 @@ on:
       mode:
         description: Read-only preview or canonical worker (requires completed cutover)
         type: choice
-        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill]
+        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish]
         default: preview
       discovery_batch:
         description: 'Discovery only: JSON {"version":1,"city":"belgrade","urls":["https://..."]}'
@@ -28,6 +28,10 @@ on:
         description: Existing post and event pairs for map-backfill
         type: string
         required: false
+      map_republication:
+        description: Explicit latest message and map event JSON for map-republish
+        type: string
+        required: false
   schedule:
     # Scheduled runs are best effort; each worker has an independent backup slot.
     - cron: '17 * * * *'
@@ -39,7 +43,7 @@ permissions:
 concurrency:
   # Keep manually requested edits and subscription runs out of the automatic queue.
   # All modes use the same state lock below.
-  group: ${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || inputs.mode == 'map-backfill' && 'editorial-map-backfill' || 'canonical-editorial-writer' }}
+  group: ${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || startsWith(inputs.mode, 'map-') && 'editorial-map-operations' || 'canonical-editorial-writer' }}
   cancel-in-progress: false
 jobs:
   cycle:
@@ -156,6 +160,7 @@ jobs:
           CLOUD_DISCOVERY_BATCH: ${{ inputs.discovery_batch }}
           RELOCANT_MAP_TELEGRAM_APP: ${{ vars.RELOCANT_MAP_TELEGRAM_APP }}
           MAP_BACKFILL_TARGETS: ${{ inputs.map_targets }}
+          MAP_REPUBLICATION_REQUEST: ${{ inputs.map_republication }}
           GPT_FALLBACK_BLOB_SHA256: ${{ inputs.fallback_blob_sha256 }}
         run: |
           mkdir -p _site
@@ -196,7 +201,7 @@ jobs:
       - name: Publish only sanitized projection
         if: >-
           always() && steps.mode.outputs.value != 'recovery' &&
-          steps.mode.outputs.value != 'fallback-preview' && inputs.mode != 'map-backfill'
+          steps.mode.outputs.value != 'fallback-preview' && !startsWith(inputs.mode, 'map-')
         id: projection
         env:
           NEWSROOM_GITHUB_TOKEN: ${{ github.token }}
@@ -235,7 +240,7 @@ jobs:
       (needs.cycle.result == 'success' || needs.cycle.result == 'failure') &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true' &&
       inputs.mode != 'preview' && inputs.mode != 'recovery' &&
-      inputs.mode != 'fallback-preview' && inputs.mode != 'fallback' && inputs.mode != 'map-backfill'
+      inputs.mode != 'fallback-preview' && inputs.mode != 'fallback' && !startsWith(inputs.mode, 'map-')
     needs: cycle
     runs-on: ubuntu-latest
     permissions:
