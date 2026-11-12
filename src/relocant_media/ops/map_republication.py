@@ -15,7 +15,12 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.gemini_process import IsolatedGeminiProvider
 from relocant_media.ai.independent_reviews import reviewed_package
-from relocant_media.ai.package import EditorialPackage, context_sha256, evaluate_package
+from relocant_media.ai.package import (
+    EditorialPackage,
+    canonical_json,
+    context_sha256,
+    evaluate_package,
+)
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.map_links import map_event_id
@@ -93,7 +98,7 @@ def prepare(session: Session, request: Request) -> EditorialPackage:
         .where(Post.city == "belgrade", Post.telegram_message_id == request.message_id,
                Post.published_at.is_not(None), EditorialRun.delivery_status == "sent"),
     ).one()
-    package = EditorialPackage.model_validate(run.outcome["_package"])
+    package = EditorialPackage.model_validate_json(canonical_json(run.outcome["_package"]))
     old = package.presentation.native_map if package.presentation else None
     receipt = run.outcome.get("_rich_delivery")
     draft = package.outcome.draft

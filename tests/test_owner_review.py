@@ -284,6 +284,21 @@ def test_selected_utility_hold_gets_map_and_two_reviews_before_owner_decision(en
         assert package.presentation.native_map["point"]["mode"] == "utility_map_review"
         assert "Kruševačke" in package.presentation.native_map["message_html"]
         assert "Рубрика: Что меняется в городе" in session.get(Post, run.post_id).body
+        from relocant_media.domain.map_links import map_event_id
+        from relocant_media.ops.map_republication import Request, prepare
+
+        post = session.get(Post, run.post_id)
+        post.telegram_message_id = 97
+        post.published_at = NOW
+        run.delivery_status = "sent"
+        run.outcome = {**run.outcome, "_rich_delivery": {
+            "state": "sent", "message_ids": [97],
+            "message_html_sha256": package.presentation.native_map["message_html_sha256"],
+        }}
+        session.flush()
+        candidate = prepare(session, Request(message_id=97, event_id=map_event_id(document.url)))
+        assert candidate.outcome.draft == package.outcome.draft
+        assert all(review.verdict == "hold" for review in candidate.reviews)
 
 
 def _undecided_event_hold(
