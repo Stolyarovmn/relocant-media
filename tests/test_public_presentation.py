@@ -1,9 +1,14 @@
+import json
+
+import httpx
 import pytest
 from test_independent_reviews import Provider, documents, package
 from test_pin_policy import Bot, forward, policy
 
 from relocant_media.ai.package import draft_sha256
 from relocant_media.ai.review_repair import review_with_repairs
+from relocant_media.bot.api import TelegramBotAPI
+from relocant_media.bot.formatting import editorial_caption
 from relocant_media.domain.presentation import (
     TEST_PREFIX,
     presentation_title,
@@ -46,6 +51,50 @@ async def test_public_transport_preserves_exact_text_and_blocks_legacy(monkeypat
     with pytest.raises(ValueError):
         await publisher.publish(TEST_PREFIX + " " + text)
     assert len(bot.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_regular_channel_news_uses_editorial_format_and_source_preview(monkeypatch):
+    monkeypatch.setenv("EDITORIAL_CHANNEL_MODE", "public")
+    source = "https://www.beograd.rs/vest?x=1&y=2"
+    text = ("Новости & события\n\nКороткое описание.\n\n"
+            "Когда: 10:00–12:30\nВход: свободный\n\n«Точная цитата»\n\n"
+            f"Рубрика: Куда сходить\n\nИсточник: {source}")
+
+    def handler(request):
+        assert request.url.path.endswith("/sendMessage")
+        data = json.loads(request.content)
+        assert data == {
+            "chat_id": -1003967014133,
+            "text": ("<b>Новости &amp; события</b>\n\nКороткое описание.\n\n"
+                     "<b>Когда</b>: <code>10:00–12:30</code>\n<b>Вход</b>: свободный"
+                     "\n\n<blockquote>«Точная цитата»</blockquote>\n\n"
+                     "<b>Рубрика</b>: Куда сходить\n\n"
+                     '<a href="https://www.beograd.rs/vest?x=1&amp;y=2">Источник</a>'),
+            "parse_mode": "HTML",
+            "link_preview_options": {"url": source, "show_above_text": True},
+        }
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 44}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        publisher = ChannelPublisher(TelegramBotAPI("fake", client))
+        assert await publisher.publish(text) == 44
+
+
+def test_reviewed_photo_caption_preserves_text_and_formats_utf16_entities():
+    source = "https://www.beograd.rs/vest"
+    caption = f"🎭 Выставка\n\nКогда: 10:00–12:30\n\nИсточник: {source}\n\nФото: музей"
+    visible, entities = editorial_caption(caption)
+    assert visible == "🎭 Выставка\n\nКогда: 10:00–12:30\n\nИсточник\n\nФото: музей"
+    encoded = visible.encode("utf-16-le")
+    fragments = [
+        (e["type"], encoded[2 * e["offset"]:2 * (e["offset"] + e["length"])].decode("utf-16-le"))
+        for e in entities
+    ]
+    assert fragments == [
+        ("text_link", "Источник"), ("bold", "🎭 Выставка"), ("bold", "Когда"),
+        ("code", "10:00–12:30"),
+    ]
 
 
 def test_default_and_invalid_modes_fail_closed(monkeypatch):

@@ -28,6 +28,12 @@ from relocant_media.ai.public_cache import PublicPreparationCache
 from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.bot.api import TelegramBotAPI
+from relocant_media.bot.formatting import (
+    TELEGRAM_TEXT_LIMIT,
+    editorial_message_html,
+    formatted_text_units,
+    rich_editorial_html,
+)
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.collectors.beograd_article import (
     UTILITY_SECTIONS,
@@ -1014,6 +1020,13 @@ class ChannelPublisher:
     async def publish(self, text: str) -> int:
         if not valid_title_presentation(text.split("\n", 1)[0]):
             raise ValueError("title presentation does not match channel mode")
+        if formatted := editorial_message_html(text):
+            html, source_url = formatted
+            if formatted_text_units(html) <= TELEGRAM_TEXT_LIMIT:
+                return await self.bot.send_notice_message(
+                    APPROVED_CHANNEL_ID, html, source_url=source_url,
+                )
+            return await self.bot.send_rich_message(APPROVED_CHANNEL_ID, rich_editorial_html(html))
         return await self.bot.send_message(APPROVED_CHANNEL_ID, text)
 
 

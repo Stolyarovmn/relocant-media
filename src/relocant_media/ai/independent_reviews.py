@@ -132,6 +132,13 @@ def reviewed_package(
                 "проверку координат. source_preview означает предпросмотр исходной страницы, "
                 "а не разрешение на повторное использование фотографии. "
             )
+            if package.presentation.event_place is not None:
+                instructions += (
+                    "Проверь карточку афиши event_place по официальному объявлению: "
+                    "имя события, площадку, адрес, координаты, дату и время начала и окончания. "
+                    "expires_at при неизвестном конце — срок видимости в афише, а не время "
+                    "окончания. Расхождение площадки или расписания требует hold или reject. "
+                )
             if package.presentation.native_map is not None:
                 native = package.presentation.native_map
                 point = native.get("point", {})

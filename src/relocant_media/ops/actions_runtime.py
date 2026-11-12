@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.package import canonical_json
 from relocant_media.ai.quota_diagnostics import safe_quota
+from relocant_media.ops.events_export import export_events_snapshot
 from relocant_media.ops.map_backfill import apply as apply_map_buttons
 from relocant_media.ops.map_backfill import parse_targets as parse_map_button_targets
 from relocant_media.ops.map_export import export_map_snapshot
@@ -543,6 +544,12 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
                 street_index=BELGRADE_STREETS if BELGRADE_STREETS.is_file() else None,
                 area_index=BELGRADE_AREAS if BELGRADE_AREAS.is_file() else None,
             )
+            try:
+                export_events_snapshot(database, map_output.parent / "events.json",
+                                       state["snapshot"]["created_at"])
+            except Exception as error:
+                print(json.dumps({"events_projection_error_type": type(error).__name__}),
+                      file=sys.stderr)
         return 0
     if (environment.get("ACTIONS_CUTOVER_CONFIRMED") != "true"
             or environment.get("GITHUB_REPOSITORY") != REPO
@@ -745,6 +752,12 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         except Exception as error:
             print(json.dumps({"map_projection_error_type": type(error).__name__}),
                   file=sys.stderr)
+        try:
+            export_events_snapshot(work / "saved" / "editorial.sqlite3",
+                                   map_output.parent / "events.json", manifest["created_at"])
+        except Exception as error:
+            print(json.dumps({"events_projection_error_type": type(error).__name__}),
+                  file=sys.stderr)
     return code or int(projection_failed)
 
 
@@ -785,6 +798,7 @@ def main() -> None:
         args.output.unlink(missing_ok=True)
         if args.map_output is not None:
             args.map_output.unlink(missing_ok=True)
+            (args.map_output.parent / "events.json").unlink(missing_ok=True)
         # HTTP exception messages can contain URLs/credentials/private response bodies.
         blocked = {"status": "blocked", "error_type": type(error).__name__}
         for field in ("code", "reason"):

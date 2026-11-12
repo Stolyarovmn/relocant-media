@@ -59,6 +59,25 @@ export function launchEvent(search, telegramParam) {
     .find((value) => typeof value === "string" && eventId.test(value)) || "";
 }
 
+export function launchMap(search, telegramParam) {
+  const params = new URLSearchParams(search);
+  const browserEvent = params.get("event");
+  if (params.get("mode") === "places") {
+    return { mode: "places", id: eventId.test(browserEvent) ? browserEvent : "" };
+  }
+  if (!eventId.test(browserEvent)) {
+    for (const value of [params.get("tgWebAppStartParam"), telegramParam]) {
+      if (typeof value !== "string") continue;
+      if (eventId.test(value)) break;
+      if (value === "places") return { mode: "places", id: "" };
+      if (value.startsWith("places_") && eventId.test(value.slice(7))) {
+        return { mode: "places", id: value.slice(7) };
+      }
+    }
+  }
+  return { mode: "incidents", id: launchEvent(search, telegramParam) };
+}
+
 function parseTime(value) {
   if (typeof value !== "string" || !timestamp.test(value)) return null;
   const result = Date.parse(value);
@@ -78,6 +97,56 @@ function readWindow(window) {
   const start = parseTime(window?.starts_at);
   const end = parseTime(window?.ends_at);
   return start !== null && end !== null && start < end ? { start, end } : null;
+}
+
+export function readPlaces(document) {
+  if (document?.version !== 1 || !Array.isArray(document.events)) {
+    throw new Error("Не удалось прочитать афишу");
+  }
+  const seen = new Set();
+  return document.events.flatMap((item) => {
+    if (typeof item?.id !== "string" || !eventId.test(item.id) || seen.has(item.id)
+        || item.kind !== "event" || item.timezone !== "Europe/Belgrade") return [];
+    const title = textValue(item.title);
+    const source = safeLink(item.source_url);
+    const schedule = safeLink(item.schedule_source_url);
+    const post = safeLink(item.post_url);
+    const venue = textValue(item.venue?.name);
+    const address = textValue(item.venue?.address);
+    const lat = item.venue?.latitude;
+    const lon = item.venue?.longitude;
+    const start = parseTime(item.starts_at);
+    const end = parseTime(item.ends_at);
+    const expires = parseTime(item.expires_at);
+    if (!title || !source || !venue || !coords(lat, lon) || start === null
+        || expires === null || expires <= start
+        || (item.ends_at != null && (end === null || end <= start || end > expires))) return [];
+    seen.add(item.id);
+    return [{ id: item.id, title, source, schedule: schedule === source ? "" : schedule,
+      post, venue, address, lat, lon,
+      archived: item.archived === true, start, end, expires }];
+  });
+}
+
+export function placeStatus(place, now) {
+  if (place.archived || now >= place.expires || (place.end !== null && now >= place.end)) return "closed";
+  return now < place.start ? "planned" : "active";
+}
+
+export function placeCountdown(place, now) {
+  const status = placeStatus(place, now);
+  if (status === "closed") return place.end === null ? "Прошедшая дата" : "Завершилось";
+  if (status === "active" && place.end === null) return "Началось";
+  return incidentCountdown({ ...place, windows: [] }, now);
+}
+
+export function straightLineDistance(origin, destination) {
+  const rad = Math.PI / 180;
+  const lat = (destination.lat - origin.lat) * rad;
+  const lon = (destination.lon - origin.lon) * rad;
+  const chord = Math.sin(lat / 2) ** 2
+    + Math.cos(origin.lat * rad) * Math.cos(destination.lat * rad) * Math.sin(lon / 2) ** 2;
+  return 12_742_000 * Math.asin(Math.min(1, Math.sqrt(chord)));
 }
 
 function readAddress(item) {

@@ -3,8 +3,9 @@ import { test } from "node:test";
 
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, launchEvent, nextTransition, pointsAtScale, readIncidents,
-  searchAddresses, streetBounds, unexpired, visibleMapLines,
+  incidentStatus, incidentTimes, launchEvent, launchMap, nextTransition, placeCountdown, placeStatus,
+  pointsAtScale, readIncidents, readPlaces, searchAddresses, straightLineDistance, streetBounds,
+  unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
 
 const waterId = "event_0123456789abcdef1234";
@@ -34,6 +35,51 @@ test("открытие объявления по ссылке браузера �
   assert.equal(launchEvent(`?tgWebAppStartParam=${roadId}`, waterId), roadId);
   assert.equal(launchEvent("?event=unknown", powerId), powerId);
   assert.equal(launchEvent("?tgWebAppStartParam=javascript%3Aalert%281%29", ""), "");
+});
+
+test("ссылка на афишу отделена от существующих ссылок городских работ", () => {
+  const places = { mode: "places", id: waterId };
+  assert.deepEqual(launchMap(`?mode=places&event=${waterId}`), places);
+  assert.deepEqual(launchMap(`?tgWebAppStartParam=places_${waterId}`), places);
+  assert.deepEqual(launchMap("", `places_${waterId}`), places);
+  assert.deepEqual(launchMap("", "places"), { mode: "places", id: "" });
+  assert.deepEqual(launchMap(`?event=${waterId}`, "places"), { mode: "incidents", id: waterId });
+  assert.deepEqual(launchMap("", waterId), { mode: "incidents", id: waterId });
+  assert.deepEqual(launchMap("", "places_bad"), { mode: "incidents", id: "" });
+});
+
+test("отсчёт афиши использует только подтверждённое время, технический срок скрыт", () => {
+  const sample = { id: waterId, kind: "event", title: "Концерт", timezone: "Europe/Belgrade",
+    source_url: "https://www.beograd.rs/", starts_at: "2026-11-13T19:00:00+01:00",
+    ends_at: "2026-11-13T21:00:00+01:00", expires_at: "2026-11-13T21:00:00+01:00",
+    venue: { name: "Площадка", address: "Теразие", latitude: 44.816, longitude: 20.459 } };
+  const schedule = "https://www.beograd.rs/koncert";
+  const [known, unknown] = readPlaces({ version: 1, events: [
+    { ...sample, schedule_source_url: schedule },
+    { ...sample, id: roadId, ends_at: null, expires_at: "2026-11-14T00:00:00+01:00" },
+    { ...sample, id: powerId, ends_at: "неизвестно" },
+    { ...sample, id: powerId, venue: { ...sample.venue, latitude: 99 } },
+  ] });
+  assert.equal(known.schedule, schedule);
+  assert.equal(unknown.schedule, "");
+  for (const url of [sample.source_url, "javascript:alert(1)"]) {
+    assert.equal(readPlaces({ version: 1, events: [{ ...sample, schedule_source_url: url }] })[0].schedule, "");
+  }
+  const now = (time) => Date.parse(`2026-11-13T${time}+01:00`);
+  assert.equal(placeCountdown(known, now("18:00")), "До начала · 1 ч");
+  assert.equal(placeCountdown(known, now("20:00")), "До окончания · 1 ч");
+  assert.equal(placeCountdown(known, now("21:00")), "Завершилось");
+  assert.equal(placeStatus(unknown, now("23:59")), "active");
+  assert.equal(placeCountdown(unknown, now("23:59")), "Началось");
+  assert.equal(placeCountdown(unknown, unknown.expires), "Прошедшая дата");
+  assert.equal(placeStatus({ ...known, archived: true }, now("20:00")), "closed");
+});
+
+test("расстояние по прямой считается по двум координатам", () => {
+  const origin = { lat: 44.816, lon: 20.459 };
+  assert.equal(straightLineDistance(origin, origin), 0);
+  assert.ok(Math.abs(straightLineDistance(origin, { lat: 44.817, lon: 20.459 }) - 111.2) < 1);
+  assert.ok(Math.abs(straightLineDistance(origin, { lat: 44.816, lon: 20.46 }) - 78.9) < 1);
 });
 
 test("поиск сербских улиц латиницей и кириллицей с точным номером дома", () => {

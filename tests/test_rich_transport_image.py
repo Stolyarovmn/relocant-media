@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from email import policy
 from email.parser import BytesParser
 from types import SimpleNamespace
@@ -239,6 +240,32 @@ async def test_notice_uses_native_source_preview_visible_text_and_one_map_button
     assert len(requests) == 1
     assert receipt["source_preview_url"] == SOURCE_URL
     assert receipt["message_ids"] == [29]
+
+
+@pytest.mark.asyncio
+async def test_event_post_opens_the_matching_event_in_places_mode(monkeypatch):
+    app = "https://t.me/relocant_media_belgrade_bot"
+    monkeypatch.setenv("RELOCANT_MAP_TELEGRAM_APP", app)
+    package, _ = native_package()
+    package.presentation.native_map = None
+    package.presentation.event_place = {
+        "source_url": SOURCE_URL,
+        "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+    }
+    expected = f"{app}?startapp=places_{EVENT_ID}"
+
+    def handler(request):
+        data = json.loads(request.content)
+        assert request.url.path.endswith("/sendMessage")
+        assert data["reply_markup"]["inline_keyboard"][0][0]["url"] == expected
+        assert data["link_preview_options"] == {"url": SOURCE_URL, "show_above_text": True}
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 31}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot, prepared = prepare(package, TelegramBotAPI("fake-token", client))
+        assert prepared.map_url == expected
+        assert await send_native_message(bot, -1001, prepared) == 31
+    assert map_event_url(SOURCE_URL, places=True).endswith(f"?mode=places&event={EVENT_ID}")
 
 
 @pytest.mark.asyncio

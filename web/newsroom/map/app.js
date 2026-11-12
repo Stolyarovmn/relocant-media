@@ -1,8 +1,9 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, kinds, launchEvent, nextTransition, readIncidents,
+  incidentStatus, incidentTimes, kinds, launchMap, nextTransition, readIncidents,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=4";
+} from "./core.js?v=5";
+import { setupPlaces } from "./places.js?v=5";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -16,7 +17,7 @@ const announcementBody = byId("announcement-body");
 const announcementToggle = byId("toggle-announcements");
 const selectedPreview = byId("selected-preview");
 const telegram = globalThis.Telegram?.WebApp;
-const initialEvent = launchEvent(location.search, telegram?.initDataUnsafe?.start_param);
+const initialRoute = launchMap(location.search, telegram?.initDataUnsafe?.start_param);
 const center = [44.8186, 20.4609];
 const region = [[44.22, 19.65], [45.23, 21.35]];
 const mobile = matchMedia("(max-width: 740px)");
@@ -31,7 +32,10 @@ const state = {
   index: null,
   loaded: false,
   loadFailed: false,
-  deepPending: initialEvent,
+  deepPending: initialRoute.mode === "incidents" ? initialRoute.id : "",
+  mode: "",
+  stamp: "",
+  loading: false,
   map: null,
   eventLayer: null,
   pointLayer: null,
@@ -349,7 +353,7 @@ function roadLineWeight(zoom, selected) {
 }
 
 function renderPointClusters() {
-  if (!state.map) return;
+  if (!state.map || state.mode !== "incidents") return;
   const leaflet = globalThis.L;
   const zoom = state.map.getZoom();
   const project = (coordinates) => state.map.project(coordinates, zoom);
@@ -379,7 +383,7 @@ function renderPointClusters() {
 }
 
 function renderPoints(now) {
-  if (!state.map) return;
+  if (!state.map || state.mode !== "incidents") return;
   const leaflet = globalThis.L;
   state.eventLayer.clearLayers();
   state.mapItems = visibleIncidents(now).map((incident) => {
@@ -440,6 +444,7 @@ function renderAddress() {
 }
 
 function render() {
+  if (state.mode !== "incidents") return;
   const now = Date.now();
   renderAddress();
   renderList(now);
@@ -460,7 +465,7 @@ function focusIncident(incident) {
     if (unexpired(area.window, now, includeExpired)) locations.push(...area.rings[0]);
   }
   const padding = mobile.matches
-    ? { paddingTopLeft: [24, 108], paddingBottomRight: [25, 28] }
+    ? { paddingTopLeft: [24, 155], paddingBottomRight: [25, 28] }
     : { padding: [30, 30] };
   if (locations.length === 1) {
     state.map.setView(locations[0], 17, { animate });
@@ -535,6 +540,7 @@ function updateCountdowns(now) {
 
 function scheduleClock() {
   clearTimeout(clockTimer);
+  if (state.mode !== "incidents" || document.hidden) return;
   const now = Date.now();
   const boundary = nextTransition(state.incidents, now);
   const nextMinute = 60_000 - now % 60_000;
@@ -547,17 +553,17 @@ function scheduleClock() {
 }
 
 async function loadEvents() {
-  const refresh = byId("refresh");
-  if (refresh.disabled) return;
+  if (state.loading) return;
   clearTimeout(refreshTimer);
-  refresh.disabled = true;
+  state.loading = true;
+  if (state.mode === "incidents") syncFeed(state);
   try {
     const data = await readJSON("./incidents.json", { cache: "no-cache" });
     state.incidents = readIncidents(data);
     state.loaded = true;
     state.loadFailed = false;
-    const stamp = updateStamp(data.generated_at);
-    byId("sync-stamp").textContent = stamp ? `${stamp} · Белград` : "Обновлено";
+    state.stamp = updateStamp(data.generated_at);
+    if (state.mode !== "incidents") return;
     const pending = state.incidents.find((event) => event.id === state.deepPending);
     if (pending) openEvent(pending);
     else {
@@ -570,10 +576,10 @@ async function loadEvents() {
     scheduleClock();
   } catch {
     state.loadFailed = true;
-    byId("sync-stamp").textContent = "Повторить загрузку";
-    renderList(Date.now());
+    if (state.mode === "incidents") renderList(Date.now());
   } finally {
-    refresh.disabled = false;
+    state.loading = false;
+    if (state.mode === "incidents") syncFeed(state);
   }
 }
 
@@ -599,7 +605,7 @@ function loadAddressIndex() {
     renderPoints(Date.now());
     const event = state.incidents.find((incident) => incident.id === state.refocusEvent);
     state.refocusEvent = "";
-    if (event && !state.address) focusIncident(event);
+    if (state.mode === "incidents" && event && !state.address) focusIncident(event);
     return state.index;
   }).catch(() => {
     addressRequest = null;
@@ -730,7 +736,7 @@ archive.addEventListener("change", () => {
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) clearTimeout(clockTimer);
-  else {
+  else if (state.mode === "incidents") {
     render();
     scheduleClock();
   }
@@ -746,11 +752,68 @@ mobile.addEventListener("change", () => {
 });
 showAnnouncements(!mobile.matches);
 byId("refresh").addEventListener("click", () => {
+  if (state.mode === "places") {
+    places.refresh();
+    return;
+  }
   deepAttempts = 0;
   void loadEvents();
 });
 
+function syncFeed(feed) {
+  byId("refresh").disabled = feed.loading;
+  byId("sync-stamp").textContent = feed.failed || feed.loadFailed ? "Повторить загрузку"
+    : feed.stamp ? `${feed.stamp} · Белград`
+      : feed.loaded ? "Обновлено" : "Загрузка";
+}
+
+const views = new Map();
+function showMode(mode, id = "") {
+  if (mode === state.mode) return;
+  if (state.map && state.mode) {
+    views.set(state.mode, { center: state.map.getCenter(), zoom: state.map.getZoom() });
+    state.map.closePopup();
+  }
+  state.mode = mode;
+  const exploring = mode === "places";
+  document.body.dataset.mode = mode;
+  byId("show-incidents").setAttribute("aria-pressed", String(!exploring));
+  byId("show-places").setAttribute("aria-pressed", String(exploring));
+  byId("incident-controls").hidden = exploring;
+  byId("places-controls").hidden = !exploring;
+  byId("announcements").hidden = exploring;
+  byId("places").hidden = !exploring;
+  const skip = document.querySelector(".skip-link");
+  skip.href = exploring ? "#places" : "#announcements";
+  skip.textContent = exploring ? "К списку событий" : "К списку объявлений";
+  byId("refresh").setAttribute("aria-label", exploring ? "Обновить события" : "Обновить объявления");
+  state.focusNote = "";
+  showMapNote();
+  state.map?.invalidateSize({ pan: false });
+  const view = views.get(mode);
+  state.map?.setView(view?.center ?? center, view?.zoom ?? 12, { animate: false });
+  if (exploring) {
+    clearTimeout(clockTimer);
+    clearTimeout(refreshTimer);
+    state.eventLayer?.clearLayers();
+    state.pointLayer?.clearLayers();
+    state.addressLayer?.clearLayers();
+    places.enter(id);
+  } else {
+    places.leave();
+    const pending = state.incidents.find((incident) => incident.id === state.deepPending);
+    if (pending) openEvent(pending);
+    else render();
+    syncFeed(state);
+    scheduleClock();
+    if (!state.loaded || state.deepPending) void loadEvents();
+    void loadAddressIndex();
+  }
+}
+
 setupMap();
+const places = setupPlaces({ map: state.map, mobile, animate, telegram, byId, make, link, readJSON, onSync: syncFeed });
+byId("show-incidents").addEventListener("click", () => showMode("incidents"));
+byId("show-places").addEventListener("click", () => showMode("places"));
 telegram?.ready?.();
-void loadEvents();
-void loadAddressIndex();
+showMode(initialRoute.mode, initialRoute.id);

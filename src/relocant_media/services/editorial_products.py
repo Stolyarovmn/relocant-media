@@ -8,9 +8,10 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
-from relocant_media.domain.city_profile import CityEditorialProfile
+from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.source_locations import extract_source_maps
+from relocant_media.services.event_place import resolve_event_place, resolve_saved_event_place
 from relocant_media.services.native_map import (
     NOTICE_LAYOUT,
     build_native_map,
@@ -93,17 +94,22 @@ def build_presentation(
     if source_url not in {document.url for document in documents}:
         raise ValueError("Первичный источник отсутствует в документах")
     # Несколько адресов не превращаем в одну произвольно выбранную точку.
-    source_map = select_source_map(enrichment, source_url=source_url)
-    native_map = build_native_map(
+    document = next(doc for doc in documents if doc.url == source_url)
+    event_place = (resolve_saved_event_place(session, document, document_ids, profile=profile)
+                   if "events" in rubric.categories and profile.city_id == "belgrade" else None)
+    native_map = (build_native_map(
         session, document_ids, documents, source_url=source_url, profile=profile,
-    )
+    ) if event_place is None else None)
+    source_map = (select_source_map(enrichment, source_url=source_url)
+                  if native_map is None and event_place is None else None)
     return EditorialPresentation(
         profile_sha256=profile.sha256, rubric_id=rubric.id, rubric_name=rubric.name,
-        source_map=None if native_map is not None else source_map,
+        source_map=source_map,
         illustration=plan_illustration(
             enrichment, source_url=source_url,
             allow_source_preview=native_map is None or native_map.get("layout") == NOTICE_LAYOUT),
         native_map=native_map,
+        event_place=event_place,
     )
 
 
@@ -141,6 +147,13 @@ def validate_presentation(
         raise ValueError("Вложение требует отдельного проверенного media release")
     if presentation.illustration.get("source_url") != _primary_url(documents):
         raise ValueError("Иллюстрация не соответствует первичному источнику")
+    if presentation.event_place is not None:
+        place = presentation.event_place
+        if (profile.city_id != "belgrade" or "events" not in rubric.categories
+                or presentation.source_map is not None or presentation.native_map is not None
+                or place.get("timezone") != profile.timezone
+                or place.get("source_url") != _primary_url(documents)):
+            raise ValueError("Площадка афиши не соответствует городу и первоисточнику")
     validate_native_map_draft(presentation, draft, documents, profile=profile)
 
 
@@ -152,7 +165,8 @@ def verify_stored_presentation(
     enrichment = build_source_enrichment(session, raw_id, document_ids=document_ids)
     validate_against_documents(enrichment, documents)
     source_url = _primary_url(documents)
-    expected_map = (None if presentation.native_map is not None
+    place = presentation.event_place
+    expected_map = (None if presentation.native_map is not None or place is not None
                     else select_source_map(enrichment, source_url=source_url))
     if presentation.source_map != expected_map:
         raise ValueError("Карта не совпадает с сохранённым источником")
@@ -164,6 +178,11 @@ def verify_stored_presentation(
         raise ValueError("План иллюстрации изменился после проверки")
     if native is not None:
         verify_native_map_snapshot(session, native, documents, document_ids)
+    if place is not None:
+        document = next(doc for doc in documents if doc.url == source_url)
+        profile = load_city_profile("belgrade")
+        if resolve_saved_event_place(session, document, document_ids, profile=profile) != place:
+            raise ValueError("Площадка афиши изменилась после проверки")
 
 
 def verify_live_map(
@@ -173,6 +192,16 @@ def verify_live_map(
     """Изменение ссылки при неизменном тексте тоже требует нового пакета и ревью."""
     if presentation is not None and presentation.native_map is not None:
         verify_live_native_map(presentation.native_map, document, source_html)
+    if presentation is not None and (place := presentation.event_place) is not None:
+        if place["source_url"] == document.url:
+            actual = resolve_event_place(
+                document, source_html or "", profile=load_city_profile("belgrade"),
+            )
+            if actual is None or any(
+                actual.get(key) != value for key, value in place.items()
+                if key not in {"source_html_sha256", "document_sha256"}
+            ):
+                raise ValueError("Площадка или расписание изменились в живом источнике")
     if presentation is None or presentation.source_map is None:
         return
     expected = presentation.source_map

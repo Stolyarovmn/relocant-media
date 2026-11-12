@@ -49,7 +49,7 @@ def session(monkeypatch, tmp_path):
     engine.dispose()
 
 
-def payload(session, *, city="belgrade", map_enabled=True, country_value=None):
+def payload(session, *, city="belgrade", map_enabled=True, country_value=None, timed=False):
     profile = load_city_profile("belgrade")
     locality, country, latitude, longitude = "Belgrade", "RS", "44.8101", "20.4602"
     if city == "lisbon":
@@ -80,6 +80,9 @@ def payload(session, *, city="belgrade", map_enabled=True, country_value=None):
              "address": {"addressLocality": locality,
                          "addressCountry": country if country_value is None else country_value},
              "geo": {"@type": "GeoCoordinates", "latitude": latitude, "longitude": longitude}}}
+    if timed:
+        event["startDate"] = datetime.strptime(date, "%d.%m.%Y").replace(hour=12).isoformat()
+        event["location"]["address"]["streetAddress"] = "Knez Mihailova 1"
     html = f"<article><p>{escape(body)}</p></article>"
     if map_enabled:
         html += '<script type="application/ld+json">' + json.dumps(event) + '</script>'
@@ -163,11 +166,29 @@ def test_legacy_presentation_omits_none_without_changing_hash(session):
     data, _, _, _ = payload(session, map_enabled=False)
     original = copy.deepcopy(data["presentation"])
     assert "native_map" not in original
+    assert "event_place" not in original
     value = EditorialPresentation.model_validate(original)
     assert value.native_map is None
     assert value.model_dump(mode="json") == original
     assert hashlib.sha256(canonical_json(original).encode()).hexdigest() == hashlib.sha256(
         canonical_json(value.model_dump(mode="json")).encode()).hexdigest()
+
+
+def test_event_presentation_binds_afisha_to_saved_and_live_source(session):
+    data, profile, document, html = payload(session, timed=True)
+    package = parse(data)
+    presentation = package.presentation
+    assert presentation.native_map is None
+    assert presentation.illustration["preview_url"] == document.url
+    assert presentation.event_place["venue"]["name"] == "Галерея А"
+    assert presentation.event_place["ends_at"] is None
+    docs = tuple(package.event.documents)
+    validate_presentation(presentation, profile, docs, package.outcome.draft, rubric_id="weekend")
+    verify_stored_presentation(session, package.raw_item_id, docs,
+                              document_ids=[package.raw_item_id], presentation=presentation)
+    verify_live_map(presentation, document, html + "<footer>Обновление</footer>")
+    with pytest.raises(ValueError, match="расписание изменились"):
+        verify_live_map(presentation, document, html.replace("T12:00:00", "T13:00:00"))
 
 
 def test_source_coordinate_and_full_html_tampering_block_import(session):
@@ -228,6 +249,31 @@ async def test_full_reviewed_package_uses_rich_api_and_durable_single_receipt(se
         "state": "sent", "message_html_sha256": expected["message_html_sha256"],
         "planned_message_count": 1, "message_ids": [313],
     }
+
+
+@pytest.mark.asyncio
+async def test_afisha_button_uses_the_reviewed_event_id_after_the_delivery_claim(session):
+    data, _, document, _ = payload(session, timed=True)
+    run = import_package(session, parse(data))
+    requests = []
+    place = data["presentation"]["event_place"]
+
+    def handler(request):
+        assert session.get(EditorialRun, run.raw_item_id).delivery_status == "sending"
+        assert request.url.path.endswith("/sendMessage")
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 314}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        publisher = SimpleNamespace(bot=TelegramBotAPI("fake-token", client))
+        result = await deliver_reviewed(session, run.raw_item_id, publisher,
+                                        target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
+    assert result.message_id == 314 and len(requests) == 1
+    sent = requests[0]
+    assert sent["link_preview_options"]["url"] == document.url
+    button = sent["reply_markup"]["inline_keyboard"][0][0]
+    assert button["url"].endswith(f"?mode=places&event={place['id']}")
+    assert run.outcome["_rich_delivery"]["message_ids"] == [314]
 
 
 @pytest.mark.asyncio

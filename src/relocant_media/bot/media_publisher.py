@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Protocol
 
 from relocant_media.bot.api import PhotoUpload
-from relocant_media.bot.formatting import compact_source_link
+from relocant_media.bot.formatting import compact_source_link, editorial_caption
 from relocant_media.bot.publisher import ProductionTargetBlockedError
 
 
@@ -30,11 +30,13 @@ async def publish_media(
     target_id: int | str,
     caption: str,
     photos: Sequence[Path | PhotoUpload],
+    *,
+    formatted: bool = False,
 ) -> list[int]:
     """Send already reviewed bytes while preserving compact source-link entities."""
     if not caption.strip():
         raise ValueError("media publication requires a caption")
-    visible, entities = compact_source_link(caption)
+    visible, entities = editorial_caption(caption) if formatted else compact_source_link(caption)
     if len(visible.encode("utf-16-le")) // 2 > 1024:
         raise ValueError("photo caption exceeds 1024 UTF-16 code units")
     if not 1 <= len(photos) <= 10:
