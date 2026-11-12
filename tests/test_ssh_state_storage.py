@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from relocant_media.ops import ssh_state_storage as storage
+from relocant_media.ops.actions_runtime import _commit_republication
+from relocant_media.ops.ssh_state_client import SSHStateClient
 
 
 @pytest.fixture
@@ -83,6 +85,28 @@ def test_only_matching_busy_attempt_can_commit_and_retry_old_sha_conflicts(conte
     assert backend.read_state() == {'state': ready, 'sha': result['sha']}
     with pytest.raises(storage.StorageError):
         backend.write_state(result['sha'], state)
+
+
+def test_republication_receipts_commit_through_ssh_storage(context, tmp_path, monkeypatch):
+    backend, state, _ = context
+    digest = initialize(context)
+    client = SSHStateClient(None)
+    monkeypatch.setattr(client, 'exchange', lambda payload, body=b'': request(
+        backend, payload, body,
+    ))
+    env = {'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
+    for phase in ('sending', 'sent'):
+        history = {'97': {'state': phase}}
+        state, digest = _commit_republication(
+            client, client, state, digest, {'map_republications': history}, env, tmp_path,
+        )
+        assert backend.read_state() == {'state': state, 'sha': digest}
+        assert state['status'] == 'ready' and state['generation'] == state['attempt']
+        assert state['map_republications'] == history
+        assert state['snapshot'] == context[1]['snapshot']
+        assert state['intake_state'] == context[1]['intake_state']
+        envelope = json.loads((tmp_path / f"republication-{state['attempt']}.json").read_text())
+        assert envelope['state'] == state
 
 
 @pytest.mark.parametrize('field,value', [('server_writers_fenced', False),
