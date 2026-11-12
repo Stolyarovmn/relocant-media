@@ -167,6 +167,11 @@ def parse_bgprevoz_news_list(
         if len(candidates) > MAX_ITEMS:
             raise ValueError("unexpected Bgprevoz news item count")
     if not candidates:
+        grid = soup.select_one("#main-wrapper #vesti > .grid.grid-cols-12")
+        if (grid is not None and grid.find() is None and not grid.get_text(strip=True)
+                and soup.select_one("#main-wrapper #pretraga") is not None
+                and soup.select_one('#main-wrapper select[name="tip_vesti"]') is not None):
+            return ()
         raise ValueError("Bgprevoz dated news cards not found")
     return tuple(candidates)
 

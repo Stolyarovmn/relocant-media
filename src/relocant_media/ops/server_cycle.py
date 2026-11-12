@@ -32,6 +32,7 @@ from relocant_media.collectors.beograd_article import (
     parse_beograd_article,
 )
 from relocant_media.collectors.beograd_news import parse_beograd_news_list
+from relocant_media.collectors.bgprevoz_changes import BgprevozChangesCollector
 from relocant_media.collectors.cukarica_news import (
     CukaricaNewsCollector,
     parse_cukarica_article,
@@ -119,6 +120,19 @@ from relocant_media.services.submission_queue import (
     priority_raw_ids,
     tip_urls,
 )
+from relocant_media.services.transport_map import (
+    MAP_MODE,
+    is_transport_anchor,
+    matches_transport_notice,
+    transport_point,
+)
+from relocant_media.services.transport_map import (
+    MAX_NOTICES as TRANSPORT_MAP_LIMIT,
+)
+from relocant_media.services.transport_map import (
+    SOURCE_ID as TRANSPORT_MAP_SOURCE,
+)
+from relocant_media.services.transport_map_source import extract_transport_map
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
@@ -360,6 +374,17 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
                 title=item.title, body=item.body, published_at=item.published_at,
                     published_at_precision=item.published_at_precision))
             verify_live_map(package.presentation, documents[-1], response.text)
+    native = package.presentation.native_map if package.presentation else None
+    point = native.get("point", {}) if native else {}
+    if point.get("mode") == MAP_MODE:
+        primary = next((doc for doc in documents if doc.url == point["source_url"]), None)
+        if primary is None:
+            raise ValueError("transport map primary document is missing")
+        config = load_source_file(SOURCES / f"{TRANSPORT_MAP_SOURCE}.yaml")
+        notice = _run_sync(fetch_venue(config, point["notice_url"]))
+        notice_document = EvidenceDocument.model_validate(notice, from_attributes=True)
+        if transport_point(primary, notice_document, notice.source_html or "") != point:
+            raise ValueError("official transport map changed in live source")
     return tuple(documents)
 
 
@@ -668,9 +693,38 @@ async def collect_sources(
                 result["news_failures"] += 1
                 news_errors.append({"source_id": feed.source_id,
                                     "error_type": type(error).__name__})
+    transport_source = None
+    transport_notices = []
+    if not submissions_only:
+        anchors = [document for item in articles
+                   if item.source_id == "city_beograd_news"
+                   and is_transport_anchor(document := EvidenceDocument.model_validate(
+                       item, from_attributes=True,
+                   ))]
+        if anchors:
+            transport_source = load_source_file(SOURCES / f"{TRANSPORT_MAP_SOURCE}.yaml")
+            try:
+                async with asyncio.timeout(40), httpx.AsyncClient(
+                    timeout=12, trust_env=False,
+                ) as transport_client:
+                    fetched_notices = await BgprevozChangesCollector(
+                        transport_source, transport_client,
+                    ).collect(limit=TRANSPORT_MAP_LIMIT)
+                for notice in fetched_notices:
+                    official = EvidenceDocument.model_validate(notice, from_attributes=True)
+                    if (any(matches_transport_notice(anchor, official) for anchor in anchors)
+                            and extract_transport_map(official, notice.source_html or "")):
+                        transport_notices.append(notice)
+            except (TimeoutError, ValueError, httpx.HTTPError) as error:
+                transport_notices = []
+                result["transport_map_source_error"] = type(error).__name__
+    result["transport_map_notices"] = len(transport_notices)
     with Session(engine) as session:
+        if transport_notices:
+            assert transport_source is not None
+            sync_source(session, "belgrade", transport_source)
         written, changes = capture_collected_batch(
-            session, [*articles, *review_holds, *metadata_holds])
+            session, [*articles, *review_holds, *metadata_holds, *transport_notices])
         for submission_id, payload in tips:
             urls = submission_links[submission_id]
             urls.extend(url for url in tip_urls(payload)

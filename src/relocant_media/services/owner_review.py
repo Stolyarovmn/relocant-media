@@ -60,6 +60,7 @@ from relocant_media.services.production_media import (
     prepare_production_media,
 )
 from relocant_media.services.rich_delivery import (
+    PreparedNativeMessage,
     RichMessageBot,
     prepare_native_transport,
     rich_receipt,
@@ -797,7 +798,7 @@ async def deliver_owner_approved(
     prepared_media: PreparedProductionMedia | None = None
     media_bot: MediaBot | None = None
     rich_bot: RichMessageBot | None = None
-    rich_html: str | None = None
+    rich_message: PreparedNativeMessage | None = None
     try:
         run, post, item, source, package = _validated_pending_package(session, raw_item_id)
         if review.payload.get("package_sha256") != _package_sha256(package):
@@ -854,9 +855,9 @@ async def deliver_owner_approved(
         except ValueError as error:
             raise DeliveryBlockedError(str(error)) from error
         if native is not None:
-            rich_bot, rich_html = native
+            rich_bot, rich_message = native
             run.outcome = {**run.outcome,
-                           "_rich_delivery": rich_receipt(rich_html, state="sending")}
+                           "_rich_delivery": rich_receipt(rich_message, state="sending")}
         if prepared_media is not None:
             media_bot = _media_bot(publisher)
             run.outcome = {
@@ -883,9 +884,9 @@ async def deliver_owner_approved(
         raise
     message_ids: list[int] | None = None
     try:
-        if rich_html is not None:
+        if rich_message is not None:
             assert rich_bot is not None
-            message_id = await send_native_message(rich_bot, target_channel_id, rich_html)
+            message_id = await send_native_message(rich_bot, target_channel_id, rich_message)
         elif prepared_media is None:
             message_id = await publisher.publish(text)
             if type(message_id) is not int or message_id <= 0:
@@ -909,9 +910,9 @@ async def deliver_owner_approved(
         current = session.get(EditorialRun, raw_item_id, populate_existing=True)
         if current is not None:
             current.delivery_status = "uncertain"
-            if rich_html is not None:
+            if rich_message is not None:
                 current.outcome = {**current.outcome,
-                                   "_rich_delivery": rich_receipt(rich_html, state="uncertain")}
+                                   "_rich_delivery": rich_receipt(rich_message, state="uncertain")}
             if prepared_media is not None:
                 current.outcome = {
                     **current.outcome,
@@ -930,9 +931,9 @@ async def deliver_owner_approved(
     current_post.published_at = datetime.now(UTC)
     current_run.delivery_status = "sent"
     current_run.staging_message_id = None
-    if rich_html is not None:
+    if rich_message is not None:
         current_run.outcome = {**current_run.outcome, "_rich_delivery": rich_receipt(
-            rich_html, state="sent", message_id=message_id)}
+            rich_message, state="sent", message_id=message_id)}
     if prepared_media is not None:
         assert message_ids is not None
         current_run.outcome = {
