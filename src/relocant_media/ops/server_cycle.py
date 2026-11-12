@@ -1023,10 +1023,14 @@ class ChannelPublisher:
         if formatted := editorial_message_html(text):
             html, source_url = formatted
             if formatted_text_units(html) <= TELEGRAM_TEXT_LIMIT:
-                return await self.bot.send_notice_message(
-                    APPROVED_CHANNEL_ID, html, source_url=source_url,
+                if callable(getattr(self.bot, "send_notice_message", None)):
+                    return await self.bot.send_notice_message(
+                        APPROVED_CHANNEL_ID, html, source_url=source_url,
+                    )
+            elif callable(getattr(self.bot, "send_rich_message", None)):
+                return await self.bot.send_rich_message(
+                    APPROVED_CHANNEL_ID, rich_editorial_html(html),
                 )
-            return await self.bot.send_rich_message(APPROVED_CHANNEL_ID, rich_editorial_html(html))
         return await self.bot.send_message(APPROVED_CHANNEL_ID, text)
 
 
