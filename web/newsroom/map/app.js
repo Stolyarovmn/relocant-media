@@ -11,6 +11,9 @@ const feedback = byId("feedback");
 const archive = byId("archive");
 const mapFrame = byId("map").parentElement;
 const layerButtons = [...byId("layer-filter").querySelectorAll("button")];
+const announcementBody = byId("announcement-body");
+const announcementToggle = byId("toggle-announcements");
+const selectedPreview = byId("selected-preview");
 const telegram = globalThis.Telegram?.WebApp;
 const initialEvent = launchEvent(location.search, telegram?.initDataUnsafe?.start_param);
 const center = [44.8186, 20.4609];
@@ -21,6 +24,7 @@ const enabled = new Set(Object.keys(kinds));
 const state = {
   incidents: [],
   selected: "",
+  refocusEvent: "",
   address: null,
   index: null,
   loaded: false,
@@ -101,7 +105,10 @@ function setupMap() {
   }, 12000);
   state.eventLayer = leaflet.layerGroup().addTo(map);
   state.addressLayer = leaflet.layerGroup().addTo(map);
+  map.on("dragstart", () => { state.refocusEvent = ""; });
+  new ResizeObserver(() => map.invalidateSize({ pan: false })).observe(mapFrame);
   byId("reset-map").addEventListener("click", () => {
+    state.refocusEvent = "";
     map.setView(center, 12, { animate });
     state.focusNote = "";
     showMapNote();
@@ -207,6 +214,12 @@ function renderList(now) {
   const count = byId("event-count");
   count.textContent = state.loaded ? String(items.length) : "";
   eventList.replaceChildren(...items.map((item) => eventCard(item, now)));
+  const selected = items.find((item) => item.id === state.selected);
+  selectedPreview.hidden = !selected;
+  if (selected) {
+    selectedPreview.dataset.kind = selected.kind;
+    byId("selected-title").textContent = selected.title;
+  }
   const message = state.loadFailed
     ? state.loaded ? "Обновление недоступно. Показана сохранённая версия." : "Список объявлений не загрузился."
     : state.deepPending && state.loaded ? "Объявление из ссылки пока отсутствует в выгрузке."
@@ -231,6 +244,7 @@ function renderPoints(now) {
       popup.append(link(incident.source, "Первоисточник ↗"));
       layer.bindPopup(popup).on("click", () => {
         state.selected = incident.id;
+        state.refocusEvent = "";
         state.focusNote = "";
         showMapNote();
         renderList(Date.now());
@@ -284,15 +298,18 @@ function focusIncident(incident) {
   for (const line of incident.lines) {
     for (const point of line.coordinates) locations.push(point);
   }
+  const padding = mobile.matches
+    ? { paddingTopLeft: [24, 108], paddingBottomRight: [25, 28] }
+    : { padding: [30, 30] };
   if (locations.length === 1) {
     state.map.setView(locations[0], 17, { animate });
   } else if (locations.length > 1) {
-    state.map.fitBounds(locations, { padding: [30, 30], maxZoom: 17, animate });
+    state.map.fitBounds(locations, { ...padding, maxZoom: 17, animate });
   } else {
     const bounds = streetBounds(state.index, incident);
     if (bounds) {
       state.map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]],
-        { padding: [30, 30], maxZoom: 16, animate });
+        { ...padding, maxZoom: 16, animate });
       state.focusNote = "Показана улица. Границы участка указаны в объявлении.";
       showMapNote();
       return true;
@@ -311,18 +328,28 @@ function focusIncident(incident) {
 function openEvent(incident, { fromCard = false } = {}) {
   state.deepPending = "";
   state.selected = incident.id;
+  state.refocusEvent = !state.index && (incident.addresses.length || incident.segments.length)
+    ? incident.id : "";
   enabled.add(incident.kind);
   for (const button of layerButtons) {
     button.setAttribute("aria-pressed", String(enabled.has(button.dataset.kind)));
   }
   if (incidentStatus(incident, Date.now()) === "closed") archive.checked = true;
   render();
-  const focused = focusIncident(incident);
-  if (fromCard && mobile.matches && focused) {
-    mapFrame.scrollIntoView({ behavior: animate ? "smooth" : "auto", block: "nearest" });
+  if (fromCard && mobile.matches && (incident.lines.length
+      || exactMapPoints(state.index, incident).length || streetBounds(state.index, incident))) {
+    showAnnouncements(false);
+    announcementToggle.focus({ preventScroll: true });
   } else if (fromCard) {
     eventList.querySelector('[data-selected="true"] button')?.focus({ preventScroll: true });
   }
+  focusIncident(incident);
+}
+
+function showAnnouncements(open) {
+  announcementToggle.setAttribute("aria-expanded", String(open));
+  announcementBody.hidden = !open;
+  state.map?.invalidateSize({ pan: false });
 }
 
 let refreshTimer;
@@ -377,8 +404,9 @@ function loadAddressIndex() {
   addressRequest ??= readAddresses().then((data) => {
     state.index = buildAddressIndex(data);
     renderPoints(Date.now());
-    const event = state.incidents.find((incident) => incident.id === state.selected);
-    if (event && !state.address && state.focusNote) focusIncident(event);
+    const event = state.incidents.find((incident) => incident.id === state.refocusEvent);
+    state.refocusEvent = "";
+    if (event && !state.address) focusIncident(event);
     return state.index;
   }).catch(() => {
     addressRequest = null;
@@ -400,6 +428,7 @@ function searchMessage(message) {
 
 function chooseAddress(value) {
   state.address = value;
+  state.refocusEvent = "";
   state.deepPending = "";
   state.focusNote = "";
   input.value = addressLabel(value);
@@ -409,7 +438,6 @@ function chooseAddress(value) {
   state.map?.setView([value.lat, value.lon], 17, { animate });
   if (mobile.matches) {
     input.blur();
-    mapFrame.scrollIntoView({ behavior: animate ? "smooth" : "auto", block: "nearest" });
   } else {
     input.focus();
   }
@@ -492,6 +520,7 @@ for (const button of layerButtons) {
     if (enabled.delete(kind)) {
       if (state.incidents.find((event) => event.id === state.selected)?.kind === kind) {
         state.selected = "";
+        state.refocusEvent = "";
         state.focusNote = "";
         showMapNote();
       }
@@ -503,6 +532,13 @@ for (const button of layerButtons) {
   });
 }
 archive.addEventListener("change", render);
+announcementToggle.addEventListener("click", () => showAnnouncements(announcementBody.hidden));
+selectedPreview.addEventListener("click", () => {
+  showAnnouncements(true);
+  eventList.querySelector('[data-selected="true"] button')?.focus();
+});
+mobile.addEventListener("change", () => showAnnouncements(!mobile.matches));
+showAnnouncements(!mobile.matches);
 byId("refresh").addEventListener("click", () => {
   deepAttempts = 0;
   void loadEvents();

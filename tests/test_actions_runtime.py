@@ -318,6 +318,34 @@ def test_preview_keeps_observation_timestamp_and_does_not_claim(context, tmp_pat
     assert store.sha == 'initial'
 
 
+def test_map_backfill_is_manual_and_does_not_claim_state(context, tmp_path, monkeypatch):
+    store, _ = context
+    calls = []
+    event = 'event_' + 'a' * 20
+
+    async def edit(database, targets, telegram_app, token):
+        assert database.is_file()
+        calls.append((targets, telegram_app, token))
+
+    monkeypatch.setattr(runtime, 'apply_map_buttons', edit)
+    monkeypatch.setattr(runtime, 'run_child', lambda *a: pytest.fail('worker must not run'))
+    env = {
+        'ACTIONS_CUTOVER_CONFIRMED': 'true', 'GITHUB_REPOSITORY': runtime.REPO,
+        'GITHUB_REF': 'refs/heads/main', 'EDITORIAL_SEND_ENABLED': 'true',
+        'GITHUB_EVENT_NAME': 'workflow_dispatch', 'MAP_BACKFILL_TARGETS': f'96:{event}',
+        'RELOCANT_MAP_TELEGRAM_APP': 'https://t.me/relocant_media_belgrade_bot',
+        'TELEGRAM_BOT_TOKEN': 'fixture-token',
+    }
+    options = {'output': tmp_path / 'public.json', 'folder': '', 'mode': 'map-backfill'}
+    assert runtime.execute(*context, work=tmp_path / 'allowed', environment=env, **options) == 0
+    assert calls == [({96: event}, env['RELOCANT_MAP_TELEGRAM_APP'], 'fixture-token')]
+    assert store.sha == 'initial'
+    with pytest.raises(ValueError, match='manual editorial delivery'):
+        runtime.execute(*context, work=tmp_path / 'blocked',
+                        environment={**env, 'GITHUB_EVENT_NAME': 'schedule'}, **options)
+    assert len(calls) == 1
+
+
 def test_stale_bootstrap_is_rejected(state):
     with pytest.raises(ValueError, match='fresh final snapshot'):
         runtime.bootstrap_record(state['snapshot'], now=datetime.now(UTC) + timedelta(days=1))

@@ -184,6 +184,28 @@ class TelegramBotAPI:
             result = self._result("sendRichMessage", response)
         return self._message_id(result)
 
+    async def edit_map_button(self, chat_id: int, message_id: int, url: str) -> bool:
+        """Изменить только клавиатуру существующего поста и сверить ответ Telegram."""
+        markup = map_reply_markup(url)
+        try:
+            result = await self._call("editMessageReplyMarkup", {
+                "chat_id": chat_id, "message_id": message_id, "reply_markup": markup,
+            })
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 400:
+                body = error.response.json()
+                description = body.get("description") if isinstance(body, dict) else None
+                if isinstance(description, str) and description.startswith(
+                    "Bad Request: message is not modified"
+                ):
+                    return False
+            raise
+        if (not isinstance(result, dict) or self._message_id(result) != message_id
+                or not isinstance(result.get("chat"), dict) or result["chat"].get("id") != chat_id
+                or result.get("reply_markup") != markup):
+            raise TelegramAPIError("edited map button receipt does not match the requested post")
+        return True
+
     async def send_media_group(
         self,
         chat_id: int | str,
