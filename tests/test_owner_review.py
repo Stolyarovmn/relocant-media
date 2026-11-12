@@ -1,18 +1,30 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from test_editorial_integration import prepare_service
 from test_editorial_package import bind_context, package_payload, parse
+from test_editorial_pipeline import FakeProvider, _claims, _ranking, _verification
+from test_water_outage_scope import CITY_BODY, CITY_URL
 
-from relocant_media.ai.models import EvidenceDocument, RussianDraft
+from relocant_media.ai.models import EvidenceDocument, RussianDraft, SelectionBrief
 from relocant_media.ai.package import EditorialPackage, canonical_json, draft_sha256
+from relocant_media.ai.pipeline import EditorialPipeline
+from relocant_media.collectors.base import RawItem as CollectedItem
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import event_key
+from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
-from relocant_media.services.editorial import DeliveryBlockedError, _candidate, _snapshot_member
+from relocant_media.services.editorial import (
+    DeliveryBlockedError,
+    EditorialService,
+    _candidate,
+    _snapshot_member,
+)
 from relocant_media.services.owner_review import (
     OWNER_REVIEW_KIND,
     deliver_owner_approved,
@@ -27,6 +39,7 @@ from relocant_media.services.owner_review_prepare import (
     prepare_owner_decision_holds,
 )
 from relocant_media.services.package_import import import_package
+from relocant_media.sources.registry import load_source_file
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
@@ -213,6 +226,61 @@ def test_high_risk_policy_hold_gets_two_reviews_but_stays_human_review(engine):
         assert post.status == "human_review"
         assert {review.role for review in package.reviews} == {"facts", "utility"}
         assert all(review.verdict == "approve" for review in package.reviews)
+
+
+def test_selected_utility_hold_gets_map_and_two_reviews_before_owner_decision(engine):
+    source = load_source_file(Path("cities/belgrade/sources/city_beograd_news.yaml"))
+    source = source.model_copy(update={"policy": source.policy.model_copy(
+        update={"auto_publish": False},
+    )})
+    body = CITY_BODY.replace("13. novembra 2026.", "23. oktobra 2026.")
+    document = EvidenceDocument(source_id=source.id, url=CITY_URL, title="Planirani radovi",
+                                body=body, published_at=NOW)
+    profile = load_city_profile("belgrade")
+    citation = {"source_id": source.id, "url": document.url, "quote": body}
+    selection = SelectionBrief(
+        policy_version=profile.policy_version, profile_sha256=profile.sha256,
+        audience="Жители Вождоваца", benefit="Успеть запастись водой",
+        novelty="Вода пропадёт на конкретной улице", why_now="Работы пройдут 23 октября",
+        rubric_id="city_changes", locality="city", value_kind="action",
+        evidence_refs=[citation],
+    )
+    claims = _claims().model_dump()
+    claims["claims"][0]["citations"] = [citation]
+    claims["claims"][0]["text"] = "Voda će nestati u Ulici kralja Bodina."
+    provider = FakeProvider({
+        "rank": _ranking().model_copy(update={"selection": selection}),
+        "claims": type(_claims()).model_validate(claims),
+        "verify": _verification(),
+        "draft": RussianDraft(
+            title="На улице Краля Бодина отключат воду",
+            body="23 октября воду отключат с 8:30 до 18:00 между Видской и Крушевацкой.",
+            claim_ids=("c1",),
+        ),
+    })
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        capture_collected_batch(session, [
+            CollectedItem(**document.model_dump(), external_id="water-outage",
+                          source_html=f"<article><p>{body}</p></article>"),
+        ])
+        session.commit()
+        raw_id = session.scalar(select(RawItem.id))
+        service = EditorialService(session, EditorialPipeline(provider, city_profile=profile))
+        assert service.prepare(raw_id).outcome["status"] == "human_review"
+
+    reviewer = ReviewProvider()
+    assert prepare_owner_decision_holds(engine, reviewer, _live, now=NOW) == {
+        "prepared": 1, "blocked": 0,
+    }
+    assert reviewer.calls == ["independent_facts", "independent_utility"]
+    with Session(engine) as session:
+        run = session.get(EditorialRun, raw_id)
+        package = _stored_package(run)
+        assert run.outcome["status"] == "human_review"
+        assert package.presentation.native_map["point"]["mode"] == "utility_map_review"
+        assert "Kruševačke" in package.presentation.native_map["message_html"]
+        assert "Рубрика: Что меняется в городе" in session.get(Post, run.post_id).body
 
 
 def _undecided_event_hold(

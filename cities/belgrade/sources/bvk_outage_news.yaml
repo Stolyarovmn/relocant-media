@@ -1,0 +1,19 @@
+id: bvk_outage_news
+name: JKP Beogradski vodovod i kanalizacija — датированные объявления
+publisher: JKP Beogradski vodovod i kanalizacija
+ownership: official
+url: https://www.bvk.rs/
+language: sr-Cyrl
+source_type: official_utility_service_info
+trust: 1.0
+check_every: 30m
+categories: [utilities, water]
+extraction:
+  strategy: bvk_outage_news
+  status: active
+policy:
+  high_risk: false
+  auto_publish: false
+verification:
+  checked_at: 2026-11-12
+  note: Uses the public WordPress publication timestamp and the exact canonical outage article.

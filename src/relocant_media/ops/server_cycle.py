@@ -7,6 +7,7 @@ import os
 import time
 from collections.abc import Coroutine, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,9 @@ from relocant_media.ai.public_cache import PublicPreparationCache
 from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ai.review_repair import review_with_repairs
 from relocant_media.bot.api import TelegramBotAPI
+from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.collectors.beograd_article import (
+    UTILITY_SECTIONS,
     BelgradeArticleCollector,
     parse_beograd_article,
 )
@@ -133,7 +136,11 @@ from relocant_media.services.transport_map import (
     SOURCE_ID as TRANSPORT_MAP_SOURCE,
 )
 from relocant_media.services.transport_map_source import extract_transport_map
+from relocant_media.services.utility_geography import resolve_power_points, resolve_utility_geometry
+from relocant_media.services.utility_map import BVK_NEWS_SOURCE, utility_scope
+from relocant_media.services.water_outage_scope import extract_official_water_map
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
+from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -341,8 +348,9 @@ def _run_sync[T](coroutine: Coroutine[Any, Any, T]) -> T:
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     documents = []
-    # Venues, verified media and evergreen guides are re-read through their own collectors.
-    venues = {**venue_sources(), **media_sources(), **guide_sources()}
+    # Each source is re-read through the same parser used at intake.
+    venues = {**venue_sources(), **media_sources(), **guide_sources(),
+              BVK_NEWS_SOURCE: load_source_file(SOURCES / f"{BVK_NEWS_SOURCE}.yaml")}
     async def fetch_venue(source: SourceConfig, url: str) -> Any:
         async with httpx.AsyncClient(timeout=25, trust_env=False) as venue_client:
             collector = build_collector(source, venue_client)
@@ -388,6 +396,53 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     return tuple(documents)
 
 
+async def _enrich_utility_maps(
+    engine: Engine, client: httpx.AsyncClient, articles: list[CollectedRawItem],
+) -> int:
+    attempted: set[str] = set()
+    deadline = asyncio.get_running_loop().time() + 30
+    for index, item in enumerate(articles):
+        if item.source_html is None or item.source_id not in {"city_beograd_news", BVK_NEWS_SOURCE}:
+            continue
+        document = EvidenceDocument.model_validate(item, from_attributes=True)
+        addresses, segments = utility_scope(document)
+        if not (addresses or segments) or extract_official_water_map(document, item.source_html):
+            continue
+        category = "water" if segments else "power"
+        with Session(engine) as session:
+            stored = session.scalar(select(RawItem).where(
+                RawItem.source_id == item.source_id, RawItem.external_id == item.external_id,
+            ))
+            if stored is not None and all(
+                getattr(stored, field) == getattr(item, field)
+                for field in ("url", "title", "body", "published_at", "published_at_precision")
+            ):
+                snapshot = session.get(RawItemMediaSnapshot, stored.id)
+                if snapshot is not None and "utility_geography" in snapshot.manifest:
+                    articles[index] = replace(
+                        item, utility_geography=snapshot.manifest["utility_geography"],
+                    )
+                    continue
+                if session.get(EditorialRun, stored.id) is not None:
+                    continue
+        remaining = deadline - asyncio.get_running_loop().time()
+        if category in attempted or remaining <= 0:
+            continue
+        attempted.add(category)
+        try:
+            async with asyncio.timeout(min(remaining, 15)):
+                points = await resolve_power_points(client, addresses) if addresses else []
+                if points is None or segments:
+                    geography = await resolve_utility_geometry(client, addresses, segments)
+                else:
+                    geography = {"points": points, "lines": []}
+        except TimeoutError:
+            continue
+        if geography["points"] or geography["lines"]:
+            articles[index] = replace(item, utility_geography=geography)
+    return len(attempted)
+
+
 async def collect_sources(
     engine: Engine, *, output: Path | None = None, submissions_only: bool = False,
 ) -> dict[str, Any]:
@@ -404,7 +459,7 @@ async def collect_sources(
     discovery_venues = discovery_venue_sources()
     news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
-               for key in ("city_beograd_news", "cukarica_news")}
+               for key in ("city_beograd_news", "cukarica_news", BVK_NEWS_SOURCE)}
     sources.update(runtime_venues)
     sources.update(media)
     sources.update(guides)
@@ -463,6 +518,7 @@ async def collect_sources(
         collectors: dict[str, Any] = {
             "city_beograd_news": BelgradeArticleCollector(sources["city_beograd_news"], client),
             "cukarica_news": CukaricaNewsCollector(sources["cukarica_news"], client),
+            BVK_NEWS_SOURCE: build_collector(sources[BVK_NEWS_SOURCE], client),
         }
 
         collectors.update({
@@ -569,6 +625,8 @@ async def collect_sources(
                  ("cukarica_news", str(sources["cukarica_news"].url)),
                  ("city_beograd_news",
                   "https://www.beograd.rs/lat/servisne-informacije/saobracaj-i-prevoz")]
+        pages.extend(("city_beograd_news", f"https://www.beograd.rs/lat/servisne-informacije/{section}")
+                     for section in UTILITY_SECTIONS)
         if submissions_only:
             pages = []
         for source_id, url in pages:
@@ -591,6 +649,17 @@ async def collect_sources(
                     await full_article(source_id, item.url)
             except Exception:
                 result["failures"] += 1
+        if not submissions_only:
+            try:
+                async with asyncio.timeout(20):
+                    for item in await collectors[BVK_NEWS_SOURCE].collect():
+                        if freshness_decision(
+                            item.title, item.body, item.published_at, now,
+                            published_at_precision=item.published_at_precision,
+                        ).action == "keep":
+                            register_official(item)
+            except (TimeoutError, ValueError, httpx.HTTPError) as error:
+                result["bvk_outage_source_error"] = type(error).__name__
         for source_id in (() if submissions_only else runtime_venues):
             collector = collectors[source_id]
             try:
@@ -693,6 +762,7 @@ async def collect_sources(
                 result["news_failures"] += 1
                 news_errors.append({"source_id": feed.source_id,
                                     "error_type": type(error).__name__})
+        result["utility_map_requests"] = await _enrich_utility_maps(engine, client, articles)
     transport_source = None
     transport_notices = []
     if not submissions_only:
