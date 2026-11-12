@@ -5,6 +5,7 @@ No automatic bootstrap, lock expiry, send retries, schema creation, or fallback 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import hashlib
 import json
@@ -29,6 +30,8 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.package import canonical_json
 from relocant_media.ai.quota_diagnostics import safe_quota
+from relocant_media.ops.map_backfill import apply as apply_map_buttons
+from relocant_media.ops.map_backfill import parse_targets as parse_map_button_targets
 from relocant_media.ops.map_export import export_map_snapshot
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
@@ -44,7 +47,10 @@ SNAPSHOT_GROWTH_RESERVE = 16 * 1024 * 1024
 PUBLIC_EXPORT_TIMEOUT_SECONDS = 180
 GPT_EXCHANGE_MAX_BYTES = 512 * 1024
 BELGRADE_STREETS = Path("cities/belgrade/map/roads.json.gz")
-MODES = {"preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback"}
+MODES = {
+    "preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback",
+    "map-backfill",
+}
 
 
 def _gpt_digest(value: object) -> str:
@@ -467,6 +473,10 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     gpt_input = environment.get("GPT_FALLBACK_BLOB_SHA256", "")
     if gpt_input and mode != "fallback":
         raise ValueError("GPT result input requires fallback mode")
+    map_input = environment.get("MAP_BACKFILL_TARGETS", "")
+    if map_input and mode != "map-backfill":
+        raise ValueError("map button targets require map-backfill mode")
+    targets = parse_map_button_targets(map_input) if mode == "map-backfill" else {}
     if mode in {"fallback-preview", "fallback"}:
         if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
                 or environment.get("EDITORIAL_STORAGE_BACKEND") != "ssh"
@@ -492,6 +502,15 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             or environment.get("GITHUB_REPOSITORY") != REPO
             or environment.get("GITHUB_REF") != "refs/heads/main"):
         raise ValueError("main-only confirmed cutover required")
+    if mode == "map-backfill":
+        if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+                or environment.get("EDITORIAL_SEND_ENABLED") != "true"):
+            raise ValueError("manual editorial delivery must be enabled for map button updates")
+        asyncio.run(apply_map_buttons(
+            database, targets, environment.get("RELOCANT_MAP_TELEGRAM_APP", ""),
+            environment.get("TELEGRAM_BOT_TOKEN", ""),
+        ))
+        return 0
     if mode == "fallback-preview":
         return _export_gpt_request(drive, database, work)
     fallback_file = work / "gpt-fallback-input.json"

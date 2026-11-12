@@ -12,9 +12,11 @@ from test_transport_map import _article, _map_html, _notice
 from test_utility_scope import document as power_document
 from test_water_outage_scope import document as water_document
 
+from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI, map_reply_markup
 from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
+from relocant_media.ops.map_backfill import parse_targets, plan
 from relocant_media.ops.map_export import export_map_snapshot, read_map_feed
 from relocant_media.ops.newsroom_publish import MAP_PATH, _publish_map
 from relocant_media.ops.pages_assets import copy_assets
@@ -53,14 +55,17 @@ def test_map_exports_three_layers_and_archived_button_target(tmp_path):
         native = build_transport_map(session, article)
         assert anchor is not None and native is not None
         post = Post(city="belgrade", category="transport", title="Работы в Сремчице",
-                    body="Частные черновые сведения для теста", status="published",
+                    body="Частные черновые сведения для теста", status="human_review",
                     confidence=1, telegram_message_id=123, published_at=NOW)
         session.add(post)
         session.flush()
         session.add(EditorialRun(
             raw_item_id=anchor.id, post_id=post.id, delivery_status="sent",
             evidence={"private": "Текст предложки"},
-            outcome={"_package": {"presentation": {"native_map": native}}},
+            outcome={
+                "_package": {"presentation": {"native_map": native}},
+                "_rich_delivery": {"state": "sent", "message_ids": [123]},
+            },
         ))
         session.commit()
     engine.dispose()
@@ -87,6 +92,16 @@ def test_map_exports_three_layers_and_archived_button_target(tmp_path):
     assert road.ends_on.isoformat() == "2026-12-05"
     assert road.lines[0].coordinates[0] == (44.650515, 20.404065)
     assert len(feed.incidents) == 3
+    with Session(engine) as session:
+        targets = parse_targets(f"123:{road.id}")
+        app = "https://t.me/relocant_media_belgrade_bot"
+        assert plan(session, targets, feed, app) == {123: f"{app}?startapp={road.id}"}
+        with pytest.raises(ValueError, match="must match"):
+            plan(session, {123: by_kind["water"].id}, feed, app)
+        with pytest.raises(ValueError, match="missing from snapshot"):
+            plan(session, {**targets, 124: road.id}, feed, app)
+        with pytest.raises(ValueError, match="repeated"):
+            parse_targets(f"123:{road.id},123:{road.id}")
 
     # Настоящие узлы и связность в рабочем индексе, здесь минимальный граф фикстуры.
     road_data = {"version": 1, "municipalities": {"Voždovac": [
@@ -118,6 +133,34 @@ def test_map_exports_three_layers_and_archived_button_target(tmp_path):
 def test_public_map_schema_rejects_unexpected_private_fields():
     with pytest.raises(ValidationError, match="Extra inputs"):
         read_map_feed(b'{"version":1,"incidents":[],"bot_token":"test"}')
+
+
+@pytest.mark.asyncio
+async def test_map_button_repair_updates_only_markup_and_handles_idempotent_retry():
+    url = map_event_url(_article().url, telegram_app="https://t.me/relocant_media_belgrade_bot")
+    markup = map_reply_markup(url)
+    receipt = {"message_id": 96, "chat": {"id": -1001}, "reply_markup": markup}
+    replies = iter([
+        httpx.Response(200, json={"ok": True, "result": receipt}),
+        httpx.Response(400, json={
+            "ok": False, "description": "Bad Request: message is not modified",
+        }),
+        httpx.Response(200, json={"ok": True, "result": {**receipt, "message_id": 97}}),
+    ])
+
+    def handler(request):
+        assert request.url.path.endswith("/editMessageReplyMarkup")
+        assert json.loads(request.content) == {
+            "chat_id": -1001, "message_id": 96, "reply_markup": markup,
+        }
+        return next(replies)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot = TelegramBotAPI("test-token", client)
+        assert await bot.edit_map_button(-1001, 96, url)
+        assert not await bot.edit_map_button(-1001, 96, url)
+        with pytest.raises(TelegramAPIError, match="does not match"):
+            await bot.edit_map_button(-1001, 96, url)
 
 
 def test_failed_runtime_keeps_last_map_and_does_not_replace_it(tmp_path):
