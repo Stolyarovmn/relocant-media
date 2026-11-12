@@ -25,7 +25,7 @@ on:
         type: string
         required: false
       map_targets:
-        description: Existing post and map event pairs, e.g. 96:event_… (map-backfill only)
+        description: Existing post and event pairs for map-backfill
         type: string
         required: false
   schedule:
@@ -37,8 +37,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  # The automatic chain can replace a pending automatic run. Keep subscription
-  # requests out of that queue; both paths still use the same state lock below.
+  # Keep manually requested edits and subscription runs out of the automatic queue.
+  # All modes use the same state lock below.
   group: ${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || inputs.mode == 'map-backfill' && 'editorial-map-backfill' || 'canonical-editorial-writer' }}
   cancel-in-progress: false
 jobs:
