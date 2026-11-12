@@ -8,6 +8,9 @@ from relocant_media.ai.package import EditorialPackage
 from relocant_media.bot.api import PhotoUpload, TelegramBotAPI
 from relocant_media.bot.publisher import Publisher
 from relocant_media.services.production_media import PreparedProductionMedia
+from relocant_media.services.transport_map import MAP_MODE
+from relocant_media.services.transport_map_image import render_transport_map
+from relocant_media.services.utility_map import UTILITY_MAP_MODE
 
 
 class RichMessageBot(Protocol):
@@ -42,27 +45,27 @@ def prepare_native_transport(
     html = native["message_html"]
     point = native["point"]
     geometry = point.get("transport_geometry")
-    line = geometry.get("line") if isinstance(geometry, dict) else None
+    line = geometry.get("line") if point.get("mode") == MAP_MODE else None
+    filename = "transport-map.png"
+    if point.get("mode") == UTILITY_MAP_MODE and point.get("image_sha256") is not None:
+        line = point["geography"]["lines"][0]["coordinates"]
+        filename = "outage-map.png"
     photo = None
     image_sha256 = None
     if line:
-        if point.get("mode") != "transport_map_review":
-            raise ValueError("transport geometry requires a reviewed transport map")
-        from relocant_media.services.transport_map_image import render_transport_map
-
         content = render_transport_map(line)
         image_sha256 = hashlib.sha256(content).hexdigest()
         if point.get("image_sha256") != image_sha256:
-            raise ValueError("transport map image does not match reviewed bytes")
-        photo = PhotoUpload("transport-map.png", content)
+            raise ValueError("map image does not match reviewed bytes")
+        photo = PhotoUpload(filename, content)
         # Все локальные ошибки вложения должны возникнуть до долговечной отметки sending.
         if TelegramBotAPI._photo(photo)[2] != "image/png":
-            raise ValueError("transport map must be PNG")
+            raise ValueError("map image must be PNG")
     elif point.get("image_sha256") is not None:
-        raise ValueError("reviewed transport image requires a nonempty source line")
+        raise ValueError("reviewed map image requires a nonempty source line")
     references = html.count("tg://photo?id=transport_map")
     if references != (1 if photo is not None else 0):
-        raise ValueError("transport map image and reviewed HTML do not match")
+        raise ValueError("map image and reviewed HTML do not match")
     return cast(RichMessageBot, bot), PreparedNativeMessage(html, photo, image_sha256)
 
 

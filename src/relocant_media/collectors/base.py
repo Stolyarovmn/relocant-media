@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +22,7 @@ class RawItem:
     approved_image_hosts: tuple[str, ...] = ()
     # A day timestamp is a scheduling boundary, never an observed publication clock.
     published_at_precision: str = "unknown"
+    utility_geography: dict[str, Any] | None = None
 
 
 class Collector(Protocol):

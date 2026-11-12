@@ -19,16 +19,25 @@ from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, Publica
 from relocant_media.ai.package import EditorialPackage, canonical_json, evaluate_package
 from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.ai.review_repair import review_with_repairs
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import evidence_freshness
 from relocant_media.domain.originality import copies_source_text
 from relocant_media.domain.policy import OWNER_DECISION_REASONS, primary_evidence_kind
+from relocant_media.domain.presentation import presentation_title
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
     _candidate,
+    _document,
     _event_items,
     _snapshot_member,
 )
+from relocant_media.services.editorial_products import (
+    build_presentation,
+    present_draft,
+    verify_stored_presentation,
+)
+from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -140,6 +149,22 @@ def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
             "reason": "owner_review_candidate",
         }
     )
+    presentation = None
+    selection = outcome.ranking.selection
+    if selection is not None:
+        profile = load_city_profile(source.city)
+        presentation = build_presentation(
+            session, item.id, tuple(_document(member) for member, _ in members),
+            document_ids=[member.id for member, _ in members], profile=profile,
+            rubric_id=selection.rubric_id, source_url=next(
+                (member.url for member, policy in members
+                 if policy.ownership.strip().casefold() == "official"), item.url,
+            ),
+        )
+        draft = outcome.draft.model_copy(update={"title": presentation_title(outcome.draft.title)})
+        draft = present_draft(draft, presentation)
+        presentation = bind_native_map_draft(presentation, draft)
+        normalized = normalized.model_copy(update={"draft": draft})
     placeholders = [
         {
             "reviewer_id": f"pending-{role}",
@@ -173,6 +198,8 @@ def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
         "outcome": normalized.model_dump(mode="json"),
         "reviews": placeholders,
     }
+    if presentation is not None:
+        payload["presentation"] = presentation.model_dump(mode="json")
     return EditorialPackage.model_validate_json(json.dumps(payload))
 
 
@@ -197,6 +224,11 @@ def _persist_reviewed_package(
         or package_snapshots != current_snapshots
     ):
         raise DeliveryBlockedError("evidence changed during independent review")
+    if package.presentation is not None:
+        verify_stored_presentation(
+            session, item.id, tuple(package.event.documents),
+            document_ids=[member.id for member, _ in members], presentation=package.presentation,
+        )
     metadata = {
         key: value for key, value in run.outcome.items() if key.startswith("_")
     }

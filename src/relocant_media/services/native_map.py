@@ -23,6 +23,12 @@ from relocant_media.services.transport_map import (
     build_transport_map,
     verify_transport_map_snapshot,
 )
+from relocant_media.services.utility_map import (
+    UTILITY_MAP_MODE,
+    build_utility_point,
+    utility_document_sha256,
+    utility_map_fragment,
+)
 from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import RawItem, Source
 
@@ -38,7 +44,8 @@ def _point(native: dict[str, Any]) -> dict[str, Any]:
         not isinstance(point.get(key), str) for key in required
     ):
         raise ValueError("native map point is missing or malformed")
-    if point.get("mode") != MAP_MODE and not isinstance(point.get("source_html_sha256"), str):
+    if (point.get("mode") not in {MAP_MODE, UTILITY_MAP_MODE}
+            and not isinstance(point.get("source_html_sha256"), str)):
         raise ValueError("native map source HTML digest is missing")
     return point
 
@@ -74,6 +81,12 @@ def build_native_map(
         assert snapshot.source_html is not None
         if snapshot.source_html_bytes > MAX_HTML_BYTES:
             return None
+        if profile.city_id == "belgrade":
+            utility = build_utility_point(
+                document, snapshot.source_html, snapshot.manifest.get("utility_geography"),
+            )
+            if utility is not None:
+                return {"source_raw_item_id": raw_id, "point": utility}
         events = [event for event, _, _ in _events(snapshot.source_html)
                   if event.get("url") == source_url]
         if len(events) != 1:
@@ -133,7 +146,12 @@ def native_message_html(native_map: dict[str, Any], draft: RussianDraft) -> str:
         raise ValueError("native map source URL is unsafe")
     paragraphs = [draft.title, *draft.body.split("\n\n")]
     text = "".join("<p>" + escape(part).replace("\n", "<br/>") + "</p>" for part in paragraphs)
-    fragment = _transport_fragment(point) if point.get("mode") == MAP_MODE else _map_fragment(point)
+    if point.get("mode") == MAP_MODE:
+        fragment = _transport_fragment(point)
+    elif point.get("mode") == UTILITY_MAP_MODE:
+        fragment = utility_map_fragment(point)
+    else:
+        fragment = _map_fragment(point)
     return (text + fragment
             + f'<p><a href="{escape(source_url, quote=True)}">Источник</a></p>')
 
@@ -186,9 +204,9 @@ def validate_native_map_draft(
     point = _point(native)
     if point["source_url"] != presentation.illustration.get("source_url"):
         raise ValueError("native map must use the exact primary source")
-    if point.get("mode") == MAP_MODE:
+    if point.get("mode") in {MAP_MODE, UTILITY_MAP_MODE}:
         if profile.city_id != "belgrade":
-            raise ValueError("transport map locality does not match reviewed city profile")
+            raise ValueError("native map locality does not match reviewed city profile")
     else:
         parameters = point["parameters"]
         if parameters.get("primary_source_url") != point["source_url"]:
@@ -201,9 +219,11 @@ def validate_native_map_draft(
             raise ValueError("native map locality does not match reviewed city profile")
     document = next((doc for doc in documents if doc.url == point["source_url"]
                      and doc.source_id == point["source_id"]), None)
-    if document is None or point["document_sha256"] != _digest(
-        EvidenceDocument.model_validate(document.model_dump()).model_dump_json()
-    ):
+    if document is None:
+        raise ValueError("native map evidence document is missing")
+    digest = (utility_document_sha256(document) if point.get("mode") == UTILITY_MAP_MODE else
+              _digest(EvidenceDocument.model_validate(document.model_dump()).model_dump_json()))
+    if point["document_sha256"] != digest:
         raise ValueError("native map does not match evidence document")
 
 
@@ -223,6 +243,12 @@ def verify_native_map_snapshot(
         raise ValueError("native map source is not in reviewed event")
     snapshot = _snapshot(session, raw_id, document)
     assert snapshot.source_html is not None
+    if point.get("mode") == UTILITY_MAP_MODE:
+        if build_utility_point(
+            document, snapshot.source_html, snapshot.manifest.get("utility_geography"),
+        ) != point:
+            raise ValueError("utility map differs from the exact source snapshot")
+        return
     validate_exhibition_map_review(point, document, snapshot.source_html)
 
 
@@ -231,6 +257,10 @@ def verify_live_native_map(
 ) -> None:
     point = _point(native)
     if point["source_url"] != document.url or point.get("mode") == MAP_MODE:
+        return
+    if point.get("mode") == UTILITY_MAP_MODE:
+        if build_utility_point(document, html or "", point.get("geography")) != point:
+            raise ValueError("utility map changed in live source")
         return
     actual = build_exhibition_map_review(document, html or "", **point["parameters"])
     # Динамический HTML допускается только при неизменной геометрии, названии и JSON-LD.

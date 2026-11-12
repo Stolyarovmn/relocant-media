@@ -5,7 +5,7 @@ from relocant_media.sources.registry import load_source_registry
 
 def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    assert len(sources) == 33
+    assert len(sources) == 34
     assert len({source.id for source in sources}) == len(sources)
 
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")
@@ -67,6 +67,7 @@ def test_utility_sources_keep_shadow_policy_while_bvk_and_eds_are_structured() -
     utility_sources = [s for s in sources if s.source_type == "official_utility_service_info"]
 
     assert {source.id for source in utility_sources} == {
+        "bvk_outage_news",
         "bvk_planned_works",
         "eds_belgrade_outages_today",
         "eds_belgrade_outages_tomorrow",
@@ -74,8 +75,10 @@ def test_utility_sources_keep_shadow_policy_while_bvk_and_eds_are_structured() -
         "eds_belgrade_outages_day3",
     }
     bvk = next(source for source in utility_sources if source.id == "bvk_planned_works")
-    eds = [source for source in utility_sources if source.id != "bvk_planned_works"]
+    bvk_news = next(source for source in utility_sources if source.id == "bvk_outage_news")
+    eds = [source for source in utility_sources if source.id.startswith("eds_")]
     assert bvk.extraction.strategy == "bvk_planned_works"
+    assert bvk_news.extraction.strategy == "bvk_outage_news"
     assert all(source.extraction.strategy == "eds_belgrade_outages" for source in eds)
     assert all(source.ownership == "official" for source in utility_sources)
     assert all(source.trust == 1.0 for source in utility_sources)

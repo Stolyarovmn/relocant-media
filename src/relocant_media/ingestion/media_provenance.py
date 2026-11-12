@@ -33,6 +33,8 @@ def build_media_provenance(item: RawItem) -> tuple[str | None, dict[str, Any] | 
         "generated_media_used": False,
         "publication_permitted": False,
     }
+    if item.utility_geography is not None:
+        base["utility_geography"] = item.utility_geography
 
     if len(encoded) > MAX_SOURCE_HTML_BYTES:
         return None, {

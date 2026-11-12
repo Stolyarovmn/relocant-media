@@ -6,6 +6,7 @@ from relocant_media.collectors.beograd_news import BelgradeNewsListCollector
 from relocant_media.collectors.bgprevoz_changes import BgprevozChangesCollector
 from relocant_media.collectors.bgprevoz_news import BgprevozNewsCollector
 from relocant_media.collectors.bitefartcafe_events import BitefArtCafeEventsCollector
+from relocant_media.collectors.bvk_outage_news import BvkOutageNewsCollector
 from relocant_media.collectors.bvk_planned_works import BvkPlannedWorksCollector
 from relocant_media.collectors.cukarica_news import CukaricaNewsCollector
 from relocant_media.collectors.eds_belgrade_outages import EdsBelgradeOutagesCollector
@@ -40,6 +41,8 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return PageSnapshotCollector(source, client)
     if strategy == "bvk_planned_works":
         return BvkPlannedWorksCollector(source, client)
+    if strategy == "bvk_outage_news":
+        return BvkOutageNewsCollector(source, client)
     if strategy == "eds_belgrade_outages":
         return EdsBelgradeOutagesCollector(source, client)
     if strategy == "srbijavoz_news":

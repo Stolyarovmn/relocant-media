@@ -10,8 +10,10 @@ from bs4 import BeautifulSoup, Tag
 from relocant_media.collectors.base import RawItem
 from relocant_media.sources.registry import SourceConfig
 
+UTILITY_SECTIONS = ("vodovod-i-kanalizacija", "elektricna-energija")
 ARTICLE_ID_RE = re.compile(
-    r"/lat/(?:beoinfo-vesti|servisne-informacije/(?:saobracaj-i-prevoz|zdravstvo))/"
+    r"/lat/(?:beoinfo-vesti|servisne-informacije/"
+    r"(?:saobracaj-i-prevoz|zdravstvo|vodovod-i-kanalizacija|elektricna-energija))/"
     r"a(?P<article_id>\d+)/[^/?#]+\.html"
 )
 DATE_RE = re.compile(r"\b(?P<day>\d{2})\.(?P<month>\d{2})\.(?P<year>\d{4})\.")
@@ -66,15 +68,20 @@ def _article_root(h1: Tag, soup: BeautifulSoup) -> Tag | BeautifulSoup:
     return soup
 
 
-def _paragraphs_after_heading(root: Tag | BeautifulSoup, h1: Tag) -> list[str]:
+def _paragraphs_after_heading(
+    root: Tag | BeautifulSoup, h1: Tag, *, include_lists: bool = False,
+) -> list[str]:
     paragraphs: list[str] = []
-    following = {id(paragraph) for paragraph in h1.find_all_next("p")}
-    for paragraph in root.find_all("p"):
+    tags = ["p", "li"] if include_lists else ["p"]
+    following = {id(paragraph) for paragraph in h1.find_all_next(tags)}
+    for paragraph in root.find_all(tags):
         if not isinstance(paragraph, Tag):
             continue
         if id(paragraph) not in following:
             continue
         if paragraph.find_parent(["footer", "nav", "aside", "form"]) is not None:
+            continue
+        if include_lists and paragraph.find_parent("li") is not None:
             continue
         text = " ".join(paragraph.stripped_strings)
         if text:
@@ -97,7 +104,9 @@ def parse_beograd_article(html: str, source: SourceConfig, url: str) -> RawItem:
         raise ArticleExtractionError("article title is empty")
 
     root = _article_root(h1, soup)
-    body_parts = _paragraphs_after_heading(root, h1)
+    include_lists = any(f"/servisne-informacije/{section}/" in urlsplit(url).path
+                        for section in UTILITY_SECTIONS)
+    body_parts = _paragraphs_after_heading(root, h1, include_lists=include_lists)
     if not body_parts:
         raise ArticleExtractionError("article body paragraphs not found")
 
