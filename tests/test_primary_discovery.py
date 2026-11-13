@@ -49,7 +49,7 @@ def test_a_link_to_a_verified_media_article_resolves_to_its_source_but_a_homepag
     media = {s.id: s for s in load_source_registry(Path("cities/belgrade/sources"))
              if s.source_type == "news_media"}
     assert set(media) == {"media_rts", "media_n1_srbija", "media_balkan_insight",
-                          "media_nova", "media_danas"}
+                          "media_nova", "media_danas", "media_aero_telegraf"}
 
     article = "https://n1info.rs/vesti/neka-vest-o-beogradu/"
     assert source_for_url(article, media) == "media_n1_srbija"
@@ -64,3 +64,15 @@ def test_a_link_to_a_verified_media_article_resolves_to_its_source_but_a_homepag
     assert source_for_url("http://n1info.rs/vesti/neka-vest/", media) is None
     assert source_for_url("https://user@n1info.rs/vesti/neka-vest/", media) is None
     assert source_for_url("https://n1info.rs.evil.example/vesti/neka-vest/", media) is None
+
+def test_russian_air_serbia_pointer_matches_dated_serbian_report_only():
+    from relocant_media.collectors.base import RawItem
+    from relocant_media.services.primary_discovery import _matches_article
+
+    report = RawItem(
+        "media_aero_telegraf", "4432678", "https://aero.telegraf.rs/avio-kompanije/4432678-a",
+        "Air Serbia obustavlja letove za Guangdžou posle 27. novembra", "Содержание", None,
+    )
+    lead = "Air Serbia отменяет рейсы в китайский город Гуанчжоу с 27 ноября."
+    assert _matches_article(lead, report)
+    assert not _matches_article(lead.replace("Гуанчжоу", "Подгорицу"), report)

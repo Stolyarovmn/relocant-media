@@ -315,3 +315,23 @@ async def test_article_publication_date_reasons_are_specific_without_feed_fallba
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ValueError, match=expected):
             await VenueFeedCollector(source, client).collect_url('https://museum.example/event/')
+
+@pytest.mark.asyncio
+async def test_kolarac_image_only_lecture_is_not_ingested(source: SourceConfig) -> None:
+    source = source.model_copy(update={"id": "venue_kolarac"})
+    date = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    index = feed(date).replace("/event/", "/predavanja/69965/")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        content = index if request.url.path == "/feed/" else (
+            '<h1>16. 11. 2026. у 19.30 Мала сала</h1>'
+            '<div class="entry-content"><img src="/poster.jpg">ДЕТАЉНИЈЕ</div>'
+        )
+        return httpx.Response(200, text=content)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = VenueFeedCollector(source, client)
+        assert await collector.collect() == []
+        assert collector.item_failures[0]["error_type"] == "PosterOnlyEvidence"
+        with pytest.raises(ValueError, match="poster"):
+            await collector.collect_url("https://museum.example/predavanja/69965/")

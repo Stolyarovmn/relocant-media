@@ -294,7 +294,7 @@ def media_sources() -> dict[str, SourceConfig]:
     return {
         source.id: source
         for source in load_source_registry(SOURCES)
-        if source.extraction.strategy == "venue_feed"
+        if source.extraction.strategy in {"venue_feed", "aero_telegraf"}
         and source.extraction.status == "active"
         and source.source_type == "news_media"
         and source.ownership == "media"
@@ -727,11 +727,26 @@ async def collect_sources(
             except Exception:
                 result["failures"] += 1
         runtime_channels = () if submissions_only else runtime_channels_for_city("belgrade")
-        for channel in runtime_channels:
+
+        async def fetch_channel(channel: str) -> tuple[list[Any], dict[str, Any]]:
             observation: dict[str, Any] = {"channel": channel, "status": "not_checked"}
+            try:
+                async with asyncio.timeout(20):
+                    leads = await collect_topics(channel, client, now=now, observation=observation)
+            except Exception as error:
+                result["channel_failures"] += 1
+                channel_errors.append({"channel": channel, "error_type": type(error).__name__})
+                return [], observation
+            return leads, observation
+
+        fetched_channels = []
+        for offset in range(0, len(runtime_channels), 6):
+            fetched_channels.extend(await asyncio.gather(*(
+                fetch_channel(channel) for channel in runtime_channels[offset:offset + 6]
+            )))
+        for channel, (leads, observation) in zip(runtime_channels, fetched_channels, strict=True):
             channel_coverage.append(observation)
             try:
-                leads = await collect_topics(channel, client, now=now, observation=observation)
                 attention_leads.extend(leads)
                 for lead in leads[:20]:
                     result["channel_leads"] += 1

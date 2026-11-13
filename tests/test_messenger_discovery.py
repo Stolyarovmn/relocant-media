@@ -60,7 +60,10 @@ def test_messenger_registry_is_discovery_only_and_fail_closed() -> None:
 
         verification = source["verification"]
         assert verification["status"] == "verified_current"
-        assert verification["verified_on"] == payload["observed_on"]
+        if "user_mb_folder" in source["selection_basis"]:
+            assert verification["verified_on"] == "2026-11-14"
+        else:
+            assert verification["verified_on"] == payload["observed_on"]
         assert verification["verification_urls"]
         for url in verification["verification_urls"]:
             _assert_https(url)
@@ -80,6 +83,10 @@ def test_only_explicitly_supported_messenger_sources_are_runtime_collected() -> 
     assert set(runtime) == {
         "telegram_serbialive_beograd",
         "telegram_moj_beograd",
+        "telegram_newsserbia",
+        "telegram_ikonamitakikonami",
+        "telegram_zarko_tusic",
+        "telegram_serbiyamoivz",
     }
     assert runtime["telegram_serbialive_beograd"]["url"] == (
         "https://t.me/s/serbialive_beograd"
@@ -87,7 +94,7 @@ def test_only_explicitly_supported_messenger_sources_are_runtime_collected() -> 
     assert runtime["telegram_moj_beograd"]["url"] == (
         "https://t.me/s/ylcutcTMU01kNWVk"
     )
-    assert all(source["scope"] == ["belgrade"] for source in runtime.values())
+    assert all("belgrade" in source["scope"] for source in runtime.values())
     assert "serbialive_beograd" in default_channels_for_city("belgrade")
     assert "ylcutcTMU01kNWVk" in default_channels_for_city("belgrade")
     assert default_channels_for_city("novi_sad") == ()

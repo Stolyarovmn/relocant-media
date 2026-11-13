@@ -1,5 +1,6 @@
 import httpx
 
+from relocant_media.collectors.aero_telegraf import AeroTelegrafCollector
 from relocant_media.collectors.base import Collector
 from relocant_media.collectors.beoelektrane_network_works import BeoelektraneNetworkWorksCollector
 from relocant_media.collectors.beograd_news import BelgradeNewsListCollector
@@ -31,6 +32,8 @@ class UnsupportedCollectorStrategyError(ValueError):
 
 def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collector:
     strategy = source.extraction.strategy
+    if strategy == "aero_telegraf":
+        return AeroTelegrafCollector(source, client)
     if strategy == "beograd_news_list":
         return BelgradeNewsListCollector(source, client)
     if strategy == "cukarica_news":

@@ -19,6 +19,10 @@ MAX_BYTES = 2_000_000
 MAX_ITEM_ERROR_MESSAGE = 200
 
 
+class PosterOnlyEvidence(ValueError):
+    """Официальная карточка содержит афишу, но без текстовых сведений."""
+
+
 def _item_error_message(error: BaseException) -> str:
     """Return bounded single-line diagnostics without page content or response bodies."""
     return " ".join(str(error).split())[:MAX_ITEM_ERROR_MESSAGE]
@@ -166,6 +170,10 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
     if not title:
         raise ValueError("venue article title missing")
     if len(body) < 120:
+        if (source.id == "venue_kolarac" and urlsplit(url).path.startswith("/predavanja/")
+                and body.casefold() in {"", "детаљније", "detaljnije"}
+                and soup.select_one(".entry-content img[src]")):
+            raise PosterOnlyEvidence("official lecture poster has no textual event evidence")
         raise ValueError("venue article body shorter than 120 characters")
     if published is None:
         raise ValueError("venue article publication date missing")
@@ -247,7 +255,13 @@ class VenueFeedCollector:
                     }
                 )
         if self.item_failures and not items:
-            raise ValueError("all fresh venue articles failed extraction")
+            # Kolarac publishes some lecture entries as image-only posters with a
+            # generic «Детаљније». An empty text-only batch is valid and keeps
+            # diagnostics; these entries never become publication evidence.
+            posters_only = all(row["error_type"] == "PosterOnlyEvidence"
+                               for row in self.item_failures)
+            if not posters_only:
+                raise ValueError("all fresh venue articles failed extraction")
         return items
 
     async def collect_url(self, url: str) -> RawItem:
