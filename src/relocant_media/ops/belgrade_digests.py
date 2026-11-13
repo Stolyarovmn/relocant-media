@@ -21,7 +21,8 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.bot.formatting import formatted_text_units
-from relocant_media.collectors.beograd_article import parse_beograd_article
+from relocant_media.collectors.beograd_article import BelgradeArticleCollector
+from relocant_media.collectors.factory import build_collector
 from relocant_media.collectors.rhmz_forecast import (
     FORECAST_URL,
     WARNING_URL,
@@ -30,22 +31,31 @@ from relocant_media.collectors.rhmz_forecast import (
     parse_warning,
 )
 from relocant_media.domain.city_profile import load_city_profile
-from relocant_media.domain.map_links import map_digest_url
+from relocant_media.domain.map_links import map_digest_url, map_event_url
 from relocant_media.domain.topic_tags import strip_draft_tags
+from relocant_media.ops.events_export import export_events
 from relocant_media.ops.map_export import (
     Address,
     Incident,
     PrintedRange,
     Segment,
     Settlement,
+    _road,
+    _water,
     export_map,
 )
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
+from relocant_media.services.event_place import resolve_event_place
 from relocant_media.services.local_street_geometry import load_street_index
 from relocant_media.services.road_scope import resolve_road_segments
 from relocant_media.services.transport_map import SOURCE_ID, _signature
-from relocant_media.services.transport_map_source import _notice_id
-from relocant_media.services.water_outage_scope import reported_water_places, water_outage_window
+from relocant_media.services.transport_map_source import _notice_id, extract_transport_map
+from relocant_media.services.utility_scope import extract_power_scopes
+from relocant_media.services.water_outage_scope import (
+    extract_water_outage_scopes,
+    reported_water_places,
+    water_outage_window,
+)
 from relocant_media.sources.registry import load_source_file
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -57,7 +67,7 @@ _MONTHS = ("января февраля марта апреля мая июня 
            .split())
 _PRIORITY = {"transport": 0, "utilities": 1, "immigration": 2, "city": 3, "events": 5}
 _LABELS = {"road": "🚧 Перекрытия", "route": "🚋 Транспорт", "weather": "🌦 Погода",
-           "water": "💧 Вода", "power": "⚡ Свет"}
+           "water": "💧 Вода", "power": "⚡ Свет", "event": "🎭 Событие"}
 _TITLE = {"morning": "Белград сегодня", "evening": "Главное за день",
           "reminder": "Напоминание на завтра"}
 _EMOJI = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u200D\uFE0F\u20E3]+")
@@ -97,6 +107,11 @@ class Entry:
     source_url: str = ""
     reminder: bool = False
     original: int | None = None
+    source_id: str = ""
+    evidence_sha: str = ""
+    place: bool = False
+    scheduled_start: datetime | None = None
+    scheduled_end: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -131,11 +146,16 @@ def due_slot(now: datetime) -> Slot | None:
     return None
 
 
-def _short(value: str) -> str:
+def _clip_text(value: str, limit: int) -> str:
     text = " ".join(value.split())
-    if len(text) <= 230:
+    if len(text) <= limit:
         return text
-    return text[:227].rsplit(" ", 1)[0] + "…"
+    cut = text[:limit - 1]
+    return (cut.rsplit(" ", 1)[0] if " " in cut else cut) + "…"
+
+
+def _short(value: str) -> str:
+    return _clip_text(value, 230)
 
 
 def _recap_text(value: str) -> str:
@@ -145,6 +165,10 @@ def _recap_text(value: str) -> str:
 def _day(value: date, *, year: int | None = None) -> str:
     label = f"{value.day} {_MONTHS[value.month - 1]}"
     return f"{label} {value.year} года" if year is not None and value.year != year else label
+
+
+def _evidence_sha(document: EvidenceDocument) -> str:
+    return hashlib.sha256((document.title + "\n" + document.body).encode()).hexdigest()
 
 
 def _incidents(session: Session, now: datetime) -> list[Entry]:
@@ -178,8 +202,18 @@ def _incidents(session: Session, now: datetime) -> list[Entry]:
                                   or notice.addresses or notice.segments
                                   or notice.reported_scope) else ""
             starts_on = notice.starts_at.astimezone(now.tzinfo).date()
-            result.append(Entry(_LABELS[notice.kind], text, notice.source_url, map_id=map_id,
-                                starts_on=starts_on))
+            url = (notice.source_map_url or notice.source_url
+                   if notice.kind == "road" else notice.source_url)
+            raw = session.scalar(select(RawItem).join(Source).where(
+                RawItem.url == url, Source.city == _CITY, Source.ownership == "official",
+                Source.enabled.is_(True),
+            ).order_by(RawItem.ingested_at.desc(), RawItem.id.desc()).limit(1))
+            raw_document = (EvidenceDocument.model_validate(raw, from_attributes=True)
+                            if raw else None)
+            result.append(Entry(_LABELS[notice.kind], text, url, map_id=map_id,
+                                starts_on=starts_on, source_url=notice.source_url,
+                                source_id=raw_document.source_id if raw_document else "",
+                                evidence_sha=_evidence_sha(raw_document) if raw_document else ""))
     return result
 
 
@@ -295,6 +329,8 @@ def evening_entries(session: Session, now: datetime) -> list[Entry]:
     seen = set()
     entries = []
     for post, source_url in sorted(posts, key=lambda row: _PRIORITY.get(row[0].category, 4)):
+        if post.body.lstrip().startswith("Реклама\n") or post.title.startswith("Реклама"):
+            continue
         title = _short(_recap_text(post.title))
         key = re.sub(r"[^\w]+", " ", title.casefold()).strip()
         if not key or key in seen:
@@ -313,9 +349,29 @@ def _tomorrow_entries(session: Session, now: datetime) -> list[Entry]:
     tomorrow = now.date() + timedelta(days=1)
     tomorrow_start = datetime.combine(tomorrow, time.min, now.tzinfo)
     entries = {entry.url: entry for entry in _incidents(session, tomorrow_start)
-               if entry.starts_on == tomorrow and entry.label == _LABELS["water"]}
+               if entry.starts_on == tomorrow}
+    # Preserve a separately requested announcement if the normal scan is unusually busy.
     for source in _policy().official_reminder_sources.get(tomorrow, ()):
-        entries.setdefault(source, Entry(_LABELS["water"], "", source, starts_on=tomorrow))
+        candidate = entries.pop(source, None)
+        entries = {source: candidate or Entry(_LABELS["water"], "", source, starts_on=tomorrow,
+                                              source_id="city_beograd_news"), **entries}
+    for event in export_events(session, observed_at=now).events:
+        if (event.archived or event.sponsored
+                or event.starts_at.astimezone(now.tzinfo).date() != tomorrow):
+            continue
+        raw = session.scalar(select(RawItem).join(Source).where(
+            RawItem.url == event.source_url, Source.city == _CITY, Source.ownership == "official",
+            Source.enabled.is_(True),
+        ).order_by(RawItem.ingested_at.desc(), RawItem.id.desc()).limit(1))
+        if raw is not None:
+            document = EvidenceDocument.model_validate(raw, from_attributes=True)
+            entries.setdefault(raw.url, Entry(
+                _LABELS["event"], event.title, raw.url, map_id=event.id,
+                starts_on=tomorrow, source_id=raw.source_id,
+                evidence_sha=_evidence_sha(document), place=True,
+                original=int(event.post_url.rsplit("/", 1)[-1]),
+                scheduled_start=event.starts_at, scheduled_end=event.ends_at,
+            ))
     return list(entries.values())
 
 
@@ -329,43 +385,84 @@ def _original_post(session: Session, url: str) -> int | None:
 
 
 async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | None:
-    # The initial release is informational; publish tomorrow only with a live matching source.
-    if not re.fullmatch(
-        r"https://(?:www\.)?beograd\.rs/(?:lat|cir)/(?:beoinfo-vesti|"
-        r"servisne-informacije/vodovod-i-kanalizacija)/a[1-9][0-9]*/[^/?#]+\.html",
-        entry.url,
-    ):
+    # The registry selects the parser. URL identity is checked again after the network call.
+    if entry.starts_on is None or not re.fullmatch(r"[a-z0-9_]+", entry.source_id):
         return None
-    source_id = ("city_beograd_news" if "/beoinfo-vesti/" in entry.url else "city_beograd")
-    config = load_source_file(Path(f"cities/belgrade/sources/{source_id}.yaml"))
+    registry = Path(f"cities/belgrade/sources/{entry.source_id}.yaml")
+    if not registry.is_file():
+        return None
+    config = load_source_file(registry)
+    if config.ownership != "official" or config.extraction.status != "active":
+        return None
+    zone = ZoneInfo("Europe/Belgrade")
+    day_start = datetime.combine(entry.starts_on, time.min, zone)
+    next_day = day_start + timedelta(days=1)
     try:
-        response = await client.get(entry.url)
-        html = response.raise_for_status().text
-        if len(response.content) > 2_000_000:
+        async with asyncio.timeout(14):
+            collector = (BelgradeArticleCollector(config, client)
+                         if entry.source_id in {"city_beograd_news", "city_beograd"}
+                         else build_collector(config, client))
+            exact = getattr(collector, "collect_url", None)
+            if not callable(exact):
+                return None
+            live = await exact(entry.url)
+    except (TimeoutError, httpx.HTTPError, ValueError):
+        return None
+    if live.url != entry.url or live.source_id != entry.source_id:
+        return None
+    document = EvidenceDocument.model_validate(live, from_attributes=True)
+    same = _evidence_sha(document) == entry.evidence_sha
+    # If address or timing changed, an old map button could open stale boundaries.
+    # Hold these for the revision loop unless the announcement is the explicitly
+    # configured water source and supplies its full current scope.
+    text = entry.text
+    if entry.place:
+        place = resolve_event_place(document, live.source_html or "",
+                                    profile=load_city_profile(_CITY))
+        if place is None or not same:
             return None
-        document = EvidenceDocument.model_validate(
-            parse_beograd_article(html, config, entry.url), from_attributes=True,
-        )
-    except (httpx.HTTPError, ValueError):
+        starts = datetime.fromisoformat(place["starts_at"]).astimezone(zone)
+        end = datetime.fromisoformat(place["ends_at"]) if place["ends_at"] else None
+        if starts.date() != entry.starts_on or (starts, end) != (
+            entry.scheduled_start, entry.scheduled_end,
+        ):
+            return None
+        text = f"{entry.text} · {starts:%H:%M}, {place['venue']['name']}."
+    elif entry.label == _LABELS["water"]:
+        period = water_outage_window(document)
+        scopes = extract_water_outage_scopes(document)
+        if period is None and not scopes:
+            return None
+        notice = _water(document, None, None, {}, None, scopes)
+        if notice.starts_at is None or notice.starts_at.astimezone(zone).date() != entry.starts_on:
+            return None
+        reported = reported_water_places(document)
+        if reported is not None and period is not None:
+            starts, ends = period
+            text = (f"{reported[0]} — {starts:%H:%M}–{ends:%H:%M}. "
+                    f"Посёлки: {', '.join(reported[1])}.")
+        elif same:
+            text = _incident_text(notice, day_start, next_day) or text
+        else:
+            return None
+    elif entry.label == _LABELS["power"]:
+        schedule = extract_power_scopes(document)
+        if (not same or not schedule
+                or min(row.starts_at for row in schedule).date() != entry.starts_on):
+            return None
+    elif entry.label == _LABELS["road"]:
+        geometry = extract_transport_map(document, live.source_html or "")
+        restriction = _road(document, document, geometry, None, {})
+        if not same or restriction is None or restriction.starts_on != entry.starts_on:
+            return None
+    else:
         return None
-    if entry.label != _LABELS["water"] or entry.starts_on is None:
-        return None
-    period = water_outage_window(document)
-    if period is None or period[0].date() != entry.starts_on:
-        return None
-    starts, ends = period
-    reported = reported_water_places(document)
-    text = (f"{reported[0]} — {starts:%H:%M}–{ends:%H:%M}. "
-            f"Районы: {', '.join(reported[1])}." if reported else entry.text)
-    same_window = f"{starts:%H:%M}–{ends:%H:%M}" in entry.text
-    if reported is None and not same_window:
-        return None
-    return Entry(entry.label, text, entry.url, map_id=entry.map_id if same_window else "",
-                 starts_on=entry.starts_on, reminder=True)
+    return replace(entry, text=_short(text), map_id=entry.map_id if same else "", reminder=True)
 
 
 def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) -> Digest | None:
-    if len(entries) < 2 and not any(entry.reminder for entry in entries):
+    if not entries or (len(entries) < 2 and slot.kind != "morning"
+                       and not any(entry.reminder for entry in entries)):
         return None
     reminder_only = bool(entries) and all(entry.reminder for entry in entries)
     title = _TITLE["reminder"] if reminder_only else _TITLE[slot.kind]
@@ -383,11 +480,18 @@ def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) ->
         text = f" — {escape(entry.text)}" if entry.text else ""
         original = (f' · <a href="{_CHANNEL}/{entry.original}">Первый пост</a>'
                     if entry.original else "")
+        location = ""
+        if entry.place and entry.map_id:
+            url = map_event_url(entry.url, telegram_app=telegram_app, places=True)
+            location = f' · <a href="{escape(url, quote=True)}">На карте</a>'
         lines.append(f'<b>{escape(label)}</b>{text} '
-                     f'<a href="{escape(entry.url, quote=True)}">{entry.link_text}</a>{original}')
-    tag = "#Коммуналка" if reminder_only else "#Сводка"
+                     f'<a href="{escape(entry.url, quote=True)}">{entry.link_text}</a>'
+                     f'{original}{location}')
+    tag = ("#Коммуналка" if reminder_only and all(
+        item.label in {_LABELS["water"], _LABELS["power"]} for item in entries
+    ) else "#Сводка")
     return Digest("\n\n".join([*lines, tag]), map_digest_url(
-        tuple(dict.fromkeys(item.map_id for item in entries[:4] if item.map_id)),
+        tuple(dict.fromkeys(item.map_id for item in entries[:4] if item.map_id and not item.place)),
         telegram_app=telegram_app,
     ))
 
@@ -466,16 +570,27 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
                     else evening_entries(session, now) if slot.kind == "evening" else []
                 )
                 candidates = _tomorrow_entries(session, now) if slot.kind != "morning" else []
-                originals = {entry.url: _original_post(session, entry.url) for entry in candidates}
+                originals = {entry.url: entry.original or _original_post(
+                    session, entry.source_url or entry.url,
+                ) for entry in candidates}
         finally:
             engine.dispose()
         reply_to = None
-        candidates = [entry for entry in candidates if entry.label == _LABELS["water"]]
-        confirmed = [entry for entry in await asyncio.gather(
-            *(_confirm_reminder(client, candidate) for candidate in candidates[:4]),
-        ) if entry is not None]
-        if candidates and not confirmed and (len(entries) < 2 or now < slot.expires
-                                              - timedelta(minutes=15)):
+        confirmed: list[Entry] = []
+        for offset in range(0, min(12, len(candidates)), 4):
+            confirmed.extend(entry for entry in await asyncio.gather(*(
+                _confirm_reminder(client, candidate) for candidate in candidates[offset:offset + 4]
+            )) if entry is not None)
+            if len(confirmed) >= 4:
+                break
+        confirmed = confirmed[:4]
+        priority_url = next(iter(_policy().official_reminder_sources.get(
+            now.date() + timedelta(days=1), (),
+        )), None)
+        priority_missing = bool(priority_url and all(row.url != priority_url for row in confirmed))
+        if (priority_missing or candidates and not confirmed) and (
+            len(entries) < 2 or now < slot.expires - timedelta(minutes=15)
+        ):
             return {"state": "reminder_source_unconfirmed", "items": len(candidates)}
         if confirmed:
             confirmed = [replace(item, original=originals[item.url]) for item in confirmed]
@@ -492,8 +607,11 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
                 photo, credit = cover
                 caption = digest.html + "\n\n" + credit
                 if formatted_text_units(caption) > 1024:
-                    compact = [replace(item, text="") if item.link_text == "Подробнее" else item
-                               for item in entries]
+                    compact = [
+                        replace(item, text="" if item.link_text == "Подробнее" else
+                                _clip_text(item.text, 125))
+                        for item in entries
+                    ]
                     shortened = render(slot, compact, environment.get("RELOCANT_MAP_TELEGRAM_APP"))
                     if shortened is not None:
                         caption = shortened.html + "\n\n" + credit

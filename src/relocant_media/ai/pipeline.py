@@ -158,6 +158,7 @@ class EditorialPipeline:
         evergreen: bool = False,
         recent_publications: list[dict[str, str]] | None = None,
         now: datetime | None = None,
+        source_update: bool = False,
     ) -> EditorialOutcome:
         if not documents:
             raise ValueError("at least one evidence document is required")
@@ -299,6 +300,13 @@ class EditorialPipeline:
             ],
         }
         style = writing_instruction(ranking.category, evergreen=evergreen)
+        if source_update:
+            style += (
+                "\nЭто подтверждённая новая версия источника ранее опубликованной новости. "
+                "Вынеси изменение в заголовок, в начале текста дай актуальные дату, часы или "
+                "границы. Форму «было → стало» используй только для фактов, подтверждённых "
+                "текстом текущего источника. Не додумывай прежние условия."
+            )
         draft = self._ask_draft(draft_payload, style)
         if draft_language_reason(draft.title, draft.body) is not None:
             draft = self._ask_draft(

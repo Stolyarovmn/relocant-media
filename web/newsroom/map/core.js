@@ -116,9 +116,10 @@ export function readPlaces(document) {
     throw new Error("Не удалось прочитать афишу");
   }
   const seen = new Set();
-  return document.events.flatMap((item) => {
+  return [...document.events, ...array(document.sponsored_places)].flatMap((item) => {
     if (typeof item?.id !== "string" || !eventId.test(item.id) || seen.has(item.id)
-        || item.kind !== "event" || item.timezone !== "Europe/Belgrade") return [];
+        || !["event", "sponsored_place"].includes(item.kind)
+        || item.timezone !== "Europe/Belgrade") return [];
     const title = textValue(item.title);
     const source = safeLink(item.source_url);
     const schedule = safeLink(item.schedule_source_url);
@@ -134,8 +135,10 @@ export function readPlaces(document) {
         || expires === null || expires <= start
         || (item.ends_at != null && (end === null || end <= start || end > expires))) return [];
     seen.add(item.id);
+    const paidPlace = item.kind === "sponsored_place";
+    if (paidPlace && (!post || end !== null)) return [];
     return [{ id: item.id, title, source, schedule: schedule === source ? "" : schedule,
-      post, venue, address, lat, lon, sponsored: item.sponsored === true,
+      post, venue, address, lat, lon, paidPlace, sponsored: paidPlace || item.sponsored === true,
       archived: item.archived === true, start, end, expires }];
   });
 }
@@ -146,6 +149,7 @@ export function placeStatus(place, now) {
 }
 
 export function placeCountdown(place, now) {
+  if (place.paidPlace) return "";
   const status = placeStatus(place, now);
   if (status === "closed") return place.end === null ? "Прошедшая дата" : "Завершилось";
   if (status === "active" && place.end === null) return "Началось";

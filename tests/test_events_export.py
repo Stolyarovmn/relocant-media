@@ -357,3 +357,26 @@ def test_public_schema_rejects_extra_fields_and_missing_timezone():
         read_events_feed(json.dumps({"version": 1, "events": [], "private": "SECRET"}).encode())
     with pytest.raises(ValueError):
         read_events_feed(b'{"version":1,"events":[],"generated_at":"2026-11-13T10:00:00"}')
+
+def test_cafe_appears_only_inside_approved_paid_map_campaign():
+    from relocant_media.ops.events_export import _sponsored_places
+
+    row = {
+        "channel_message_id": 112, "starts_at": "2026-11-14T07:00:00+01:00",
+        "ends_at": "2026-11-17T20:00:00+01:00", "paid": True,
+        "owner_approved": True, "map_featured": True,
+        "place": {
+            "title": "Кафе", "source_url": "https://example.org/cafe",
+            "venue": {"name": "Кафе", "address": "Белград, 12",
+                      "latitude": 44.81, "longitude": 20.46},
+        },
+    }
+    now = datetime(2026, 11, 15, 8, tzinfo=UTC)
+    zone = "Europe/Belgrade"
+    unpaid = {"advertisements": [{**row, "paid": False}]}
+    assert not _sponsored_places(unpaid, "belgrade", zone, now)
+    cards = _sponsored_places({"advertisements": [row]}, "belgrade", zone, now)
+    assert len(cards) == 1 and cards[0].kind == "sponsored_place"
+    assert cards[0].post_url == "https://t.me/eduvbelgrad/112"
+    end = datetime.fromisoformat(row["ends_at"])
+    assert not _sponsored_places({"advertisements": [row]}, "belgrade", zone, end)
