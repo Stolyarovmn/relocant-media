@@ -206,7 +206,8 @@ reviewer IDs — локальные свидетельства доверенн�
 аутентификация. Не обещать, что сам JSON доказывает организационную независимость.
 
 Выбрав рубрику, взять её точный план из `presentation_by_rubric`, применить
-`present_draft`, затем `bind_native_map_draft`. После этого заморозить пакет и
+`present_draft` с `category=outcome.ranking.category`, затем `bind_native_map_draft`.
+После этого заморозить пакет и
 только тогда дать его обеим независимым ролям. Не сочинять отсутствующее
 оформление и не подставлять план другой рубрики.
 
@@ -246,7 +247,7 @@ selection, event, presentation и значения по умолчанию. Не
 | `ai/selection.py:selection_reason`, `ai/audience_policy.py` | Те же основания отбора, политика аудитории и требования к стилю. |
 | `ai/package.py:EditorialPackage`, `draft_sha256`, `context_sha256`, `evaluate_package` | Строгая схема, канонические хеши и повторная проверка допуска без AI API. |
 | `ai/independent_reviews.py` | Переиспользовать требования к ролям, схему их ответов и детерминированный расчёт utility. Вызов `reviewed_package` требует явно внедрённого provider; существующий Gemini/provider не является подписочным ChatGPT и автоматически сюда не подключается. |
-| `services/editorial_products.py`, `services/native_map.py` | Построить оформление из сохранённого снимка, применить `present_draft`, затем `bind_native_map_draft`; весь HTML карты должен попасть в контекст до двух ревью. |
+| `services/editorial_products.py`, `services/native_map.py` | Построить оформление из сохранённого снимка, применить `present_draft` с категорией из ранжирования, затем `bind_native_map_draft`. Весь HTML карты должен попасть в контекст до двух ревью. |
 | `ops/server_cycle.py:fetch_documents`, `services/editorial_products.py:verify_live_map` | Штатная проверка живых источников и карты; браузерные проверки подписочных ролей не заменяют последующую сверку раннера. |
 | `services/source_enrichment.py:build_media_preparation_packet` | После импорта подготовить существующий план обложки без автоматического разрешения прав, скачивания или media approvals. |
 | `services/package_import.py:import_package` | Только на стороне Actions: сверка документов/политик, дедупликация, импорт и сохранение точного SHA без сброса квитанций. |
@@ -281,7 +282,8 @@ mode=fallback-preview; из завершённого run получи тольк
 Секретариата по общественному транспорту на bgprevoz.rs. При расхождении отложи
 пакет до обновления исходного набора доказательств и двух новых проверок.
 Подготовь selection/русский draft; возьми presentation выбранной
-рубрики из presentation_by_rubric, примени present_draft и bind_native_map_draft.
+рубрики из presentation_by_rubric, примени present_draft с категорией из ранжирования,
+затем bind_native_map_draft.
 Кодом актуального main вычисли точные hashes. Два отдельных независимых контекста
 facts и utility проверяют один замороженный пакет: каждый сам открывает источники,
 не видит результатов другого и не сочиняет аттестации. Любая правка требует двух

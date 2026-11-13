@@ -283,7 +283,7 @@ def test_selected_utility_hold_gets_map_and_two_reviews_before_owner_decision(en
         assert run.outcome["status"] == "human_review"
         assert package.presentation.native_map["point"]["mode"] == "utility_map_review"
         assert "Kruševačke" in package.presentation.native_map["message_html"]
-        assert "Рубрика: Что меняется в городе" in session.get(Post, run.post_id).body
+        assert "#Коммуналка" in session.get(Post, run.post_id).body
         from relocant_media.ai.package import context_sha256
         from relocant_media.domain.map_links import map_event_id
         from relocant_media.ops.map_republication import Request, prepare, validate_gpt_scope

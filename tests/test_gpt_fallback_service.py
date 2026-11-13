@@ -116,7 +116,10 @@ def package_for_request(request: dict) -> EditorialPackage:
     presentation = EditorialPresentation.model_validate_json(
         json.dumps(candidate["presentation_by_rubric"]["city_changes"])
     )
-    draft = present_draft(parse(payload).outcome.draft, presentation)
+    original = parse(payload)
+    draft = present_draft(
+        original.outcome.draft, presentation, category=original.outcome.ranking.category,
+    )
     payload["outcome"]["draft"] = draft.model_dump(mode="json")
     payload["presentation"] = bind_native_map_draft(presentation, draft).model_dump(mode="json")
     for review in payload["reviews"]:

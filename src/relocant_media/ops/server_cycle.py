@@ -952,7 +952,7 @@ def prepare_reviewed(
             profile=profile, rubric_id=outcome.ranking.selection.rubric_id,
             source_url=next((item.url for item, policy in members
                              if policy.ownership.strip().casefold() == "official"), raw.url))
-    draft = present_draft(draft, presentation)
+    draft = present_draft(draft, presentation, category=outcome.ranking.category)
     from relocant_media.services.native_map import bind_native_map_draft
 
     presentation = bind_native_map_draft(presentation, draft)

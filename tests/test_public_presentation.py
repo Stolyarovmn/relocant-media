@@ -59,7 +59,7 @@ async def test_regular_channel_news_uses_editorial_format_and_source_preview(mon
     source = "https://www.beograd.rs/vest?x=1&y=2"
     text = ("Новости & события\n\nКороткое описание.\n\n"
             "Когда: 10:00–12:30\nВход: свободный\n\n«Точная цитата»\n\n"
-            f"Рубрика: Куда сходить\n\nИсточник: {source}")
+            f"#События #Досуг\n\nИсточник: {source}")
 
     def handler(request):
         assert request.url.path.endswith("/sendMessage")
@@ -69,7 +69,7 @@ async def test_regular_channel_news_uses_editorial_format_and_source_preview(mon
             "text": ("<b>Новости &amp; события</b>\n\nКороткое описание.\n\n"
                      "<b>Когда</b>: <code>10:00–12:30</code>\n<b>Вход</b>: свободный"
                      "\n\n<blockquote>«Точная цитата»</blockquote>\n\n"
-                     "<b>Рубрика</b>: Куда сходить\n\n"
+                     "#События #Досуг\n\n"
                      '<a href="https://www.beograd.rs/vest?x=1&amp;y=2">Источник</a>'),
             "parse_mode": "HTML",
             "link_preview_options": {"url": source, "show_above_text": True},
@@ -83,9 +83,11 @@ async def test_regular_channel_news_uses_editorial_format_and_source_preview(mon
 
 def test_reviewed_photo_caption_preserves_text_and_formats_utf16_entities():
     source = "https://www.beograd.rs/vest"
-    caption = f"🎭 Выставка\n\nКогда: 10:00–12:30\n\nИсточник: {source}\n\nФото: музей"
+    caption = (f"🎭 Выставка\n\nКогда: 10:00–12:30\n\n#События #Досуг\n\n"
+               f"Источник: {source}\n\nФото: музей")
     visible, entities = editorial_caption(caption)
-    assert visible == "🎭 Выставка\n\nКогда: 10:00–12:30\n\nИсточник\n\nФото: музей"
+    assert visible == ("🎭 Выставка\n\nКогда: 10:00–12:30\n\n#События #Досуг\n\n"
+                       "Источник\n\nФото: музей")
     encoded = visible.encode("utf-16-le")
     fragments = [
         (e["type"], encoded[2 * e["offset"]:2 * (e["offset"] + e["length"])].decode("utf-16-le"))
@@ -93,7 +95,7 @@ def test_reviewed_photo_caption_preserves_text_and_formats_utf16_entities():
     ]
     assert fragments == [
         ("text_link", "Источник"), ("bold", "🎭 Выставка"), ("bold", "Когда"),
-        ("code", "10:00–12:30"),
+        ("code", "10:00–12:30"), ("hashtag", "#События"), ("hashtag", "#Досуг"),
     ]
 
 

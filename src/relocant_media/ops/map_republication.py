@@ -28,7 +28,7 @@ from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.map_links import map_event_id
 from relocant_media.ops.map_export import read_map_feed
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
-from relocant_media.services.editorial_products import build_presentation
+from relocant_media.services.editorial_products import build_presentation, present_draft
 from relocant_media.services.native_map import (
     NOTICE_LAYOUT,
     bind_native_map_draft,
@@ -185,6 +185,9 @@ def prepare(
         if draft.body.count(before) != 1 or before == after:
             raise ValueError("the correction does not match the canonical text exactly once")
         draft = draft.model_copy(update={"body": draft.body.replace(before, after, 1)})
+    draft = PackageDraft.model_validate(
+        present_draft(draft, presentation, category=package.outcome.ranking.category).model_dump()
+    )
     presentation = bind_native_map_draft(presentation, draft)
     placeholders = tuple(
         review.model_copy(update={"verdict": "hold"}) for review in package.reviews

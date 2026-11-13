@@ -611,7 +611,9 @@ def revise_package(
         from relocant_media.services.editorial_products import present_draft
         from relocant_media.services.native_map import bind_native_map_draft
 
-        draft = PackageDraft.model_validate(present_draft(draft, presentation).model_dump())
+        draft = PackageDraft.model_validate(present_draft(
+            draft, presentation, category=package.outcome.ranking.category,
+        ).model_dump())
         presentation = bind_native_map_draft(presentation, draft)
     original = package.outcome.draft
     if (original.title.split(), original.body.split()) == (draft.title.split(), draft.body.split()):

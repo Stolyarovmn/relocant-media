@@ -162,7 +162,7 @@ def _build_package(session: Session, raw_item_id: int) -> EditorialPackage:
             ),
         )
         draft = outcome.draft.model_copy(update={"title": presentation_title(outcome.draft.title)})
-        draft = present_draft(draft, presentation)
+        draft = present_draft(draft, presentation, category=outcome.ranking.category)
         presentation = bind_native_map_draft(presentation, draft)
         normalized = normalized.model_copy(update={"draft": draft})
     placeholders = [

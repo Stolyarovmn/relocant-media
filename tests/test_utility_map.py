@@ -117,17 +117,22 @@ def test_water_segment_png_and_review_are_bound_to_immutable_snapshot():
         profile = load_city_profile("belgrade")
         presentation = build_presentation(session, 1, (document,), document_ids=[1],
                                           profile=profile, rubric_id="city_changes")
-        draft = present_draft(RussianDraft(title="Отключение воды в Вождоваце",
-                                           body="Воды не будет с 8:30 до 18:00.",
-                                           claim_ids=("period",)), presentation)
+        draft = present_draft(
+            RussianDraft(title="Отключение воды в Вождоваце",
+                         body="Воды не будет с 8:30 до 18:00.", claim_ids=("period",)),
+            presentation, category="utilities",
+        )
         presentation = bind_native_map_draft(presentation, draft)
         native = presentation.native_map
         assert native is not None
-        assert "<b>Рубрика</b>: Что меняется в городе" in native["message_html"]
+        assert "#Коммуналка\n\n<a " in native["message_html"]
         assert NOTICE_COVER not in native["message_html"]
         assert "<tg-map" not in native["message_html"]
         assert "Kruševačke" in native["message_html"]
-        validate_presentation(presentation, profile, (document,), draft, rubric_id="city_changes")
+        validate_presentation(
+            presentation, profile, (document,), draft,
+            rubric_id="city_changes", category="utilities",
+        )
         verify_stored_presentation(session, 1, (document,), document_ids=[1],
                                    presentation=presentation)
         verify_live_native_map(native, live, html)
@@ -164,10 +169,13 @@ def test_notice_collapses_plain_power_addresses_with_their_source_intervals():
         profile = load_city_profile("belgrade")
         presentation = build_presentation(session, 1, (evidence,), document_ids=[1],
                                           profile=profile, rubric_id="city_changes")
-        draft = present_draft(RussianDraft(title="Отключения света",
-                                           body="Проверенный текст.\n\nГде: Белград.\n"
-                                                "Когда: 09:00–13:00.\n\n«Дословная цитата»",
-                                           claim_ids=("period",)), presentation)
+        draft = present_draft(
+            RussianDraft(title="Отключения света",
+                         body="Проверенный текст.\n\nГде: Белград.\n"
+                              "Когда: 09:00–13:00.\n\n«Дословная цитата»",
+                         claim_ids=("period",)),
+            presentation, category="utilities",
+        )
         presentation = bind_native_map_draft(presentation, draft)
         native = presentation.native_map
         html = native["message_html"]
@@ -182,6 +190,7 @@ def test_notice_collapses_plain_power_addresses_with_their_source_intervals():
         assert "PETRA LUBARDE" not in html
         assert "TOŠIN BUNAR, 42 · Novi Beograd" in html
         assert "<blockquote>«Дословная цитата»</blockquote>" in html
+        assert html.index("#Коммуналка") > collapsed
         assert html.count("<a ") == 1 and "openstreetmap.org" not in html
         assert "<tg-map" not in html and "Подробности объявления" not in html
         fake = {**native, "schedule": [{"when": "10:00", "items": ["Выдуманный дом"], "areas": []}]}
@@ -190,7 +199,10 @@ def test_notice_collapses_plain_power_addresses_with_their_source_intervals():
             presentation.model_copy(update={"native_map": fake}), draft,
         )
         with pytest.raises(ValueError, match="layout does not match evidence"):
-            validate_presentation(tampered, profile, (evidence,), draft, rubric_id="city_changes")
+            validate_presentation(
+                tampered, profile, (evidence,), draft,
+                rubric_id="city_changes", category="utilities",
+            )
     engine.dispose()
 
 

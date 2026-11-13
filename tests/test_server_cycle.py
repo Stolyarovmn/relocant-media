@@ -174,7 +174,7 @@ def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch, 
         assert package.event.editorial_rule_version == "belgrade-editorial-v2"
         assert package.outcome.draft.title.startswith("[тестовый запуск]")
         assert package.presentation.rubric_id == "city_changes"
-        assert "Рубрика: Что меняется в городе" in package.outcome.draft.body
+        assert package.outcome.draft.body.endswith("#Транспорт")
         assert (package.outcome.ranking.selection.profile_sha256
                 == load_city_profile("belgrade").sha256)
         digest = context_sha256(package)

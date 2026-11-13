@@ -118,6 +118,7 @@ def test_duplicate_created_by_repair_is_rejected_before_package_import(
         repaired = present_draft(
             package.outcome.draft.model_copy(update={"body": previous_body}),
             package.presentation,
+            category=package.outcome.ranking.category,
         )
         package = package.model_copy(update={
             "outcome": package.outcome.model_copy(update={"draft": repaired}),

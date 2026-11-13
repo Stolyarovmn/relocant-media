@@ -41,10 +41,14 @@ def test_maps_and_rubrics_are_bound_before_review_and_rechecked_from_snapshot(se
     assert presentation.source_map is not None
     draft = RussianDraft(title="Городское событие", body="Место указано в источнике.",
                          claim_ids=("c1",))
-    rendered = present_draft(draft, presentation)
-    assert present_draft(rendered, presentation) == rendered
+    rendered = present_draft(draft, presentation, category="events")
+    assert present_draft(rendered, presentation, category="events") == rendered
+    assert rendered.body.endswith("#События #Досуг")
+    assert "Рубрика:" not in rendered.body
     assert "Карта из источника: https://www.google.com/maps/" in rendered.body
-    validate_presentation(presentation, profile, (doc,), rendered, rubric_id="weekend")
+    validate_presentation(
+        presentation, profile, (doc,), rendered, rubric_id="weekend", category="events",
+    )
     verify_stored_presentation(session, raw_id, (doc,), document_ids=[raw_id],
                               presentation=presentation)
     html = session.get(RawItemMediaSnapshot, raw_id).source_html
@@ -62,7 +66,9 @@ def test_maps_and_rubrics_are_bound_before_review_and_rechecked_from_snapshot(se
         verify_stored_presentation(session, raw_id, (doc,), document_ids=[raw_id],
                                   presentation=altered)
     with pytest.raises(ValueError, match="Оформление"):
-        validate_presentation(presentation, profile, (doc,), draft, rubric_id="weekend")
+        validate_presentation(
+            presentation, profile, (doc,), draft, rubric_id="weekend", category="events",
+        )
 
 
 def test_rubric_calendar_is_reproducible_and_uses_city_day_and_actual_publications():
