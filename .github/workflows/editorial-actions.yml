@@ -5,7 +5,7 @@ on:
       mode:
         description: Read-only preview or canonical worker (requires completed cutover)
         type: choice
-        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish, map-republish-review]
+        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish, map-republish-review, digest]
         default: preview
       discovery_batch:
         description: 'Discovery only: JSON {"version":1,"city":"belgrade","urls":["https://..."]}'
@@ -38,6 +38,8 @@ on:
     - cron: '47 * * * *'
     - cron: '2,7,12,22,27,32,37,42,52,57 * * * *'
     - cron: '9,29,49 * * * *'
+    - cron: '30 7,20 13-27 11 *'
+      timezone: Europe/Belgrade
 permissions:
   contents: read
 concurrency:
@@ -60,6 +62,7 @@ jobs:
       actions: read
     outputs:
       projection: ${{ steps.projection.outputs.ready }}
+      worker_mode: ${{ steps.mode.outputs.value }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,6 +80,8 @@ jobs:
         run: |
           if [ "$EVENT_NAME" = workflow_dispatch ]; then
             echo "value=$REQUESTED_MODE" >> "$GITHUB_OUTPUT"
+          elif [ "$CRON" = '30 7,20 13-27 11 *' ]; then
+            echo 'value=digest' >> "$GITHUB_OUTPUT"
           elif [ "$CRON" = '17 * * * *' ] || [ "$CRON" = '47 * * * *' ]; then
             echo 'value=editorial' >> "$GITHUB_OUTPUT"
           else
@@ -240,6 +245,7 @@ jobs:
       (needs.cycle.result == 'success' || needs.cycle.result == 'failure') &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true' &&
       inputs.mode != 'preview' && inputs.mode != 'recovery' &&
+      inputs.mode != 'digest' && needs.cycle.outputs.worker_mode != 'digest' &&
       inputs.mode != 'fallback-preview' && inputs.mode != 'fallback' && !startsWith(inputs.mode, 'map-')
     needs: cycle
     runs-on: ubuntu-latest

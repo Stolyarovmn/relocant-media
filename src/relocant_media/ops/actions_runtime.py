@@ -30,6 +30,8 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.package import canonical_json
 from relocant_media.ai.quota_diagnostics import safe_quota
+from relocant_media.ops.belgrade_digests import due_slot as due_digest_slot
+from relocant_media.ops.belgrade_digests import run as run_digest
 from relocant_media.ops.events_export import export_events_snapshot
 from relocant_media.ops.map_backfill import apply as apply_map_buttons
 from relocant_media.ops.map_backfill import parse_targets as parse_map_button_targets
@@ -56,7 +58,7 @@ BELGRADE_STREETS = Path("cities/belgrade/map/roads.json.gz")
 BELGRADE_AREAS = Path("cities/belgrade/map/outage-areas.json.gz")
 MODES = {
     "preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback",
-    "map-backfill", "map-republish", "map-republish-review",
+    "map-backfill", "map-republish", "map-republish-review", "digest",
 }
 
 
@@ -534,6 +536,13 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     validate_ready(state)
     if mode == "auto":
         mode = "editorial" if editorial_due(state, datetime.now(UTC)) else "intake"
+    slot = (due_digest_slot(datetime.now(UTC)) if mode in {"digest", "editorial", "intake"}
+            and environment.get("GITHUB_ACTIONS") == "true"
+            and environment.get("EDITORIAL_SEND_ENABLED") == "true"
+            and environment.get("EDITORIAL_CHANNEL_MODE") == "public"
+            and isinstance(drive, SSHStateClient) else None)
+    if mode == "digest" and slot is None:
+        return 0
     work.mkdir(parents=True, exist_ok=False, mode=0o700)
     database = restored(drive, state["snapshot"], work)
     if mode == "preview":
@@ -590,6 +599,19 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         return 0
     if mode == "fallback-preview":
         return _export_gpt_request(drive, database, work)
+    if slot is not None:
+        def commit_digest(current: dict[str, Any], digest: str,
+                          updates: dict[str, Any]) -> tuple[dict[str, Any], str]:
+            return _commit_republication(store, drive, current, digest, updates, environment, work)
+
+        result = asyncio.run(run_digest(database, slot, state, sha, commit_digest, environment))
+        print(json.dumps({"digest": slot.key, "status": result["state"],
+                          "message_id": result.get("message_id")}), flush=True)
+        if result["state"] in {"sent", "uncertain"}:
+            state, sha = store.read()
+            validate_ready(state)
+    if mode == "digest":
+        return 0
     fallback_file = work / "gpt-fallback-input.json"
     if mode == "fallback":
         _prepare_gpt_input(drive, gpt_input, fallback_file)

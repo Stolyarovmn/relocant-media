@@ -35,7 +35,11 @@ def test_redundant_schedules_route_editorial_and_intake_without_slot_overlap(tmp
     editorial = [cron for cron, value in routed.items() if value == "value=editorial"]
     intake = [cron for cron, value in routed.items() if value == "value=intake"]
     assert editorial == ["17 * * * *", "47 * * * *"]
-    assert len(intake) == 2 and len(schedules) == 4
+    assert len(intake) == 2 and len(schedules) == 5
+    assert routed["30 7,20 13-27 11 *"] == "value=digest"
+    assert {"cron": "30 7,20 13-27 11 *", "timezone": "Europe/Belgrade"} in (
+        workflow()["on"]["schedule"]
+    )
     editorial_minutes = {17, 47}
     intake_minutes = []
     for cron in intake:
