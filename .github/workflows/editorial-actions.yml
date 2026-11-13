@@ -38,8 +38,8 @@ on:
     - cron: '47 * * * *'
     - cron: '2,7,12,22,27,32,37,42,52,57 * * * *'
     - cron: '9,29,49 * * * *'
-    - cron: '30 7,20 13-27 11 *'
-      timezone: Europe/Belgrade
+    # During the November pilot Belgrade is UTC+1; the worker checks the local date.
+    - cron: '30 6,19 13-27 11 *'
 permissions:
   contents: read
 concurrency:
@@ -80,7 +80,7 @@ jobs:
         run: |
           if [ "$EVENT_NAME" = workflow_dispatch ]; then
             echo "value=$REQUESTED_MODE" >> "$GITHUB_OUTPUT"
-          elif [ "$CRON" = '30 7,20 13-27 11 *' ]; then
+          elif [ "$CRON" = '30 6,19 13-27 11 *' ]; then
             echo 'value=digest' >> "$GITHUB_OUTPUT"
           elif [ "$CRON" = '17 * * * *' ] || [ "$CRON" = '47 * * * *' ]; then
             echo 'value=editorial' >> "$GITHUB_OUTPUT"
