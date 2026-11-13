@@ -10,6 +10,7 @@ from relocant_media.ai.models import RussianDraft
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.freshness import freshness_decision
 from relocant_media.domain.publication_time import publication_interval
+from relocant_media.domain.topic_tags import is_topic_footer, topic_tag_spans, topic_tags
 from relocant_media.services.editorial_products import (
     build_presentation,
     present_draft,
@@ -33,21 +34,53 @@ def test_installed_runtime_loads_city_config_from_application_directory(tmp_path
     assert load_city_profile("belgrade").city_name == "Белград"
 
 
+def test_belgrade_categories_have_one_public_hashtag():
+    profile = load_city_profile("belgrade")
+    categories = {category for rubric in profile.rubrics for category in rubric.categories}
+    tags = {category: topic_tags(category, presentation_version=4) for category in categories}
+    assert {category for category, tag in tags.items() if tag == "#Город"} == {
+        "accusations", "city",
+    }
+    assert tags["events"] == "#События"
+    assert tags["culture"] == "#Культура"
+    assert tags["transport"] == "#Транспорт"
+    assert tags["utilities"] == "#Коммуналка"
+    assert topic_tags("unknown", presentation_version=4) == "#Город"
+    for tag in tags.values():
+        assert is_topic_footer(tag)
+        assert topic_tag_spans(tag) == ((0, len(tag)),)
+
+
 def test_maps_and_rubrics_are_bound_before_review_and_rechecked_from_snapshot(session):
     raw_id, doc = _record(session, "belgrade", "Knez Mihailova 6", "Serbia")
     profile = load_city_profile("belgrade")
     presentation = build_presentation(session, raw_id, (doc,), document_ids=[raw_id],
                                       profile=profile, rubric_id="weekend")
     assert presentation.source_map is not None
-    draft = RussianDraft(title="Городское событие", body="Место указано в источнике.",
-                         claim_ids=("c1",))
+    draft = RussianDraft(
+        title="Городское событие #Белград",
+        body=("Название акции — «#МойГород». Билет #13.\n"
+              "Подробности: https://example.org/афиша/#вход.\n\n"
+              "#События #Досуг\n#Афиша2026 #event@belgrade"),
+        claim_ids=("c1",),
+    )
     rendered = present_draft(draft, presentation, category="events")
+    assert presentation.version == 4
     assert present_draft(rendered, presentation, category="events") == rendered
-    assert rendered.body.endswith("#События")
+    assert rendered.title == "Городское событие Белград"
+    assert rendered.body == (
+        "Название акции — «МойГород». Билет #13.\n"
+        "Подробности: https://example.org/афиша/#вход.\n\n"
+        f"Карта из источника: {presentation.source_map['url']}\n\n#События"
+    )
     historical = presentation.model_copy(update={"version": 2})
     assert present_draft(rendered, historical, category="events").body.endswith("#События #Досуг")
-    assert "Рубрика:" not in rendered.body
-    assert "Карта из источника: https://www.google.com/maps/" in rendered.body
+    version_three = presentation.model_copy(update={"version": 3})
+    assert present_draft(draft, version_three, category="events").title == draft.title
+    assert present_draft(draft, version_three, category="events").body.endswith(
+        f"#Афиша2026 #event@belgrade\n\nКарта из источника: {presentation.source_map['url']}"
+        "\n\n#События"
+    )
     validate_presentation(
         presentation, profile, (doc,), rendered, rubric_id="weekend", category="events",
     )

@@ -339,11 +339,13 @@ def test_rank_uses_machine_categories_while_reasons_stay_russian():
     server_cycle.ServerAI(Provider()).generate_json(task="rank", system_instruction="Ранжируй",
         prompt="публичный источник", response_schema=original)
     assert "category — машинный идентификатор" in calls[0]["system_instruction"]
-    assert "events" in calls[0]["response_schema"]["properties"]["category"]["enum"]
-    assert "medicine" in calls[0]["response_schema"]["properties"]["category"]["enum"]
+    actual = set(calls[0]["response_schema"]["properties"]["category"]["enum"])
+    profile = server_cycle.load_city_profile("belgrade")
+    assert actual == {category for rubric in profile.rubrics for category in rubric.categories}
+    assert {"events", "culture", "sport", "medicine"} <= actual
     assert "enum" not in original["properties"]["category"]
     # Macro-economic and central-bank news must not be forced into the high-risk "banking".
-    assert "economy" in calls[0]["response_schema"]["properties"]["category"]["enum"]
+    assert "economy" in actual
     assert "economy" in calls[0]["system_instruction"]
 
 

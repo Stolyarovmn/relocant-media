@@ -189,12 +189,14 @@ class ServerAI:
                   "и обычные скидки/пакеты проживания за городское событие. ")
         policy += title_instruction()
         if task == "rank":
-            categories = ["transport", "events", "city", "utilities", "schools", "medicine",
-                          "health", "immigration", "law", "tax", "banking", "politics",
-                          "crime", "accusations", "real_estate", "jobs", "economy"]
+            profile = load_city_profile("belgrade")
+            categories = sorted({category for rubric in profile.rubrics
+                                 for category in rubric.categories})
             policy += ("category — машинный идентификатор на английском из разрешённого списка. "
-                       "Культурные анонсы и афиша относятся к events; движение транспорта — "
-                       "к transport. Не переводить category на русский и не маскировать "
+                       "Анонсы для посетителей относятся к events, новости культурной жизни "
+                       "без анонса — к culture, спортивные новости — к sport. Перекрытия и "
+                       "движение транспорта относятся к transport, отключения воды и света — "
+                       "к utilities. Не переводить category на русский и не маскировать "
                        "медицинские, правовые, политические и иные рискованные темы как events. "
                        "banking — только банковские услуги и регулирование для клиентов; "
                        "новости центрального банка, резервов, цен и курсов — economy. ")
