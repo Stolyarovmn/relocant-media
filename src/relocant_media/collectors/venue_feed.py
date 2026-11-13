@@ -151,6 +151,15 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
                 body = article.get_text(" ", strip=True)
                 break
     body = BeautifulSoup(body, "html.parser").get_text(" ", strip=True)
+    if len(body) < 120 and source.id == "venue_kolarac" and urlsplit(url).path.startswith(
+        "/koncerti/",
+    ):
+        # Short official concert cards can put the full schedule only in the heading.
+        # A "Подробнее" stub without concert details still fails the normal check.
+        if (re.search(r"\b\d{1,2}\.\s*\d{1,2}\.\s*20\d{2}\.\s*у\s+\d{1,2}\b", title)
+                and re.search(r"\b(?:Програм|Улазнице)\s*:", body, re.IGNORECASE)
+                and title not in body):
+            body = f"{title}\n\n{body}"
     if lead_text and lead_text not in body:
         body = lead_text + " " + body
     published = _rts_publication(soup) if source.id == "media_rts" else published or fallback

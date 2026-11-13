@@ -109,7 +109,7 @@ def parse_cukarica_article(html: str, source: SourceConfig, url: str) -> RawItem
     except ValueError as exc:
         raise CukaricaExtractionError("invalid article publication date") from exc
     return RawItem(source.id, article_id, canonical, _text(headings[0]),
-                   "\n\n".join(parts), published)
+                   "\n\n".join(parts), published, source_html=html)
 
 
 class CukaricaNewsCollector:

@@ -10,7 +10,7 @@ from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup, Tag
 
 from relocant_media.ai.models import EvidenceDocument
-from relocant_media.domain.city_profile import CityEditorialProfile
+from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, CityEditorialProfile
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.exhibition_map_point import MAX_HTML_BYTES
 
@@ -31,6 +31,24 @@ _DOB_INTERVIEW_2026 = (
 _DOB_PROGRAM_2026 = (
     "https://domomladine.org/koncerti/svetski-dan-flamenka-u-domu-omladine-beograda-"
     "el-sonido-de-la-vida-zvuk-zivota/"
+)
+_CUKARICA_POST_2026 = (
+    "https://www.cukarica.rs/vest/707-muzicko-poetski-kabare-da-to-su-bili-dani-"
+    "na-sceni-kulturnog-centra-cukarica/"
+)
+_CUKARICA_PROGRAM = "https://www.kccukarica.rs/srl/program/dramski-program/vecernja-scena/"
+CUKARICA_STAGE = re.compile(
+    r'на великој сцени културног центра\s*[„"«]?чукарица[“"»]?', re.IGNORECASE,
+)
+_CUKARICA_DATE = re.compile(
+    r"(?<!\d)(?P<day>\d{1,2})\.\s+(?P<month>[а-я]+)"
+    r"(?:\s+(?P<year>20\d{2})\.?(?:\s+године)?)?,?\s+"
+    r"(?:са почетком )?у\s+(?P<hour>\d{1,2})(?:[:.](?P<minute>\d{2})|\s+часова)\b",
+    re.IGNORECASE,
+)
+_CYRILLIC_MONTHS = (
+    "јануара", "фебруара", "марта", "априла", "маја", "јуна",
+    "јула", "августа", "септембра", "октобра", "новембра", "децембра",
 )
 _MONTHS = (
     ("januar", "januara"), ("februar", "februara"), ("mart", "marta"),
@@ -188,8 +206,54 @@ def _dob_schedule_facts(
     }
 
 
+def cukarica_stage_start(text: str, *, corroborated_year: int | None = None) -> datetime | None:
+    """Время одного события на большой сцене из утверждённого сербского текста."""
+    text = " ".join(text.casefold().split())
+    if not CUKARICA_STAGE.search(text) or re.search(r"отказан|одложен|премештен", text):
+        return None
+    dates = list(_CUKARICA_DATE.finditer(text))
+    if len(dates) != 1:
+        return None
+    match = dates[0]
+    try:
+        return datetime(
+            int(match["year"] or corroborated_year or 0),
+            _CYRILLIC_MONTHS.index(match["month"]) + 1, int(match["day"]),
+            int(match["hour"]), int(match["minute"] or 0),
+        )
+    except ValueError:
+        return None
+
+
+def _cukarica_facts(document: EvidenceDocument) -> dict[str, Any] | None:
+    name_match = re.search(r"[„«](.+?)[“»]", document.title)
+    if not name_match or len(name_match[1]) > 260:
+        return None
+    name = name_match[1]
+    confirmed = document.url == _CUKARICA_POST_2026 and name.casefold() == "да, то су били дани"
+    start = cukarica_stage_start(document.body, corroborated_year=2026 if confirmed else None)
+    if start is None or (confirmed and start != datetime(2026, 11, 24, 20)):
+        return None
+    return {
+        "event_name": name,
+        "venue": {
+            "name": "Kulturni centar Čukarica · Velika scena",
+            "address": "Turgenjevljeva 5, Beograd",
+            "latitude": 44.7832396, "longitude": 20.4175165,
+        },
+        "starts_at": start.isoformat(),
+        "ends_at": None,
+        "time_basis": "source_cukarica_main_stage",
+        "schedule_source_url": _CUKARICA_PROGRAM if confirmed else document.url,
+        "coordinate_source_url": "https://www.openstreetmap.org/node/2567920976",
+        "venue_source_url": "https://www.kccukarica.rs/srl/kontakt/",
+    }
+
+
 def verified_legacy_event_schedule(document: EvidenceDocument) -> dict[str, Any] | None:
-    """Сверенная карточка программы для опубликованного до сохранения HTML интервью."""
+    """Сверенные карточки программы для публикаций до сохранения HTML."""
+    if document.source_id == "cukarica_news" and document.url == _CUKARICA_POST_2026:
+        return _cukarica_facts(document)
     name = "El Sonido de la Vida"
     if (document.source_id != "venue_youth_centre" or document.url != _DOB_INTERVIEW_2026
             or name.casefold() not in document.body.casefold()):
@@ -204,9 +268,25 @@ def extract_event_adapter(
     document: EvidenceDocument, source_html: str, *, profile: CityEditorialProfile,
 ) -> dict[str, Any] | None:
     """Выделяет только явно датированное событие с подтверждённой площадкой."""
-    if (profile.city_id != "belgrade" or document.source_id != "venue_youth_centre"
-            or not _dob_url(document.url) or not isinstance(source_html, str)
+    if (profile.city_id != "belgrade" or not isinstance(source_html, str)
             or len(source_html.encode()) > MAX_HTML_BYTES):
+        return None
+    if document.source_id == "cukarica_news":
+        from relocant_media.collectors.cukarica_news import (
+            CukaricaExtractionError,
+            parse_cukarica_article,
+        )
+        from relocant_media.sources.registry import load_source_file
+
+        try:
+            source = load_source_file(DEFAULT_CITIES_ROOT / "belgrade/sources/cukarica_news.yaml")
+            item = parse_cukarica_article(source_html, source, document.url)
+        except CukaricaExtractionError:
+            return None
+        if (item.url, item.title, item.body) == (document.url, document.title, document.body):
+            return _cukarica_facts(document)
+        return None
+    if document.source_id != "venue_youth_centre" or not _dob_url(document.url):
         return None
     soup = BeautifulSoup(source_html, "html.parser")
     canonical = _tag(soup, 'head link[rel="canonical"][href]')

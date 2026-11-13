@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler
 class EditorialPresentation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    version: int = Field(default=1, ge=1, le=2)
+    version: int = Field(default=1, ge=1, le=3)
     profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     rubric_id: str
     rubric_name: str

@@ -43,7 +43,9 @@ def test_maps_and_rubrics_are_bound_before_review_and_rechecked_from_snapshot(se
                          claim_ids=("c1",))
     rendered = present_draft(draft, presentation, category="events")
     assert present_draft(rendered, presentation, category="events") == rendered
-    assert rendered.body.endswith("#События #Досуг")
+    assert rendered.body.endswith("#События")
+    historical = presentation.model_copy(update={"version": 2})
+    assert present_draft(rendered, historical, category="events").body.endswith("#События #Досуг")
     assert "Рубрика:" not in rendered.body
     assert "Карта из источника: https://www.google.com/maps/" in rendered.body
     validate_presentation(

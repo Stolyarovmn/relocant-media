@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -10,11 +11,13 @@ from sqlalchemy.orm import Session
 
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.domain.map_links import map_event_id, map_event_url
+from relocant_media.ops.events_export import EventsFeed, export_events, read_events_feed
 from relocant_media.ops.map_export import MapFeed, read_map_feed
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.storage.models import EditorialRun, Post, RawItem
 
 _FEED_URL = "https://stolyarovmn.github.io/relocant-media/map/incidents.json"
+_EVENTS_URL = "https://stolyarovmn.github.io/relocant-media/map/events.json"
 _ENTRY = re.compile(r"([1-9][0-9]{0,9}):(event_[0-9a-f]{20})")
 
 
@@ -64,15 +67,44 @@ def plan(
     return {message_id: buttons[message_id] for message_id in targets}
 
 
+def plan_event_buttons(
+    session: Session, targets: Mapping[int, str], feed: EventsFeed, telegram_app: str,
+) -> dict[int, str]:
+    snapshot = export_events(session, observed_at=datetime.now(UTC))
+    reviewed = {event.id: event for event in snapshot.events}
+    published = {event.id: event for event in feed.events}
+    buttons = {}
+    for message_id, event_id in targets.items():
+        event = reviewed.get(event_id)
+        if (event is None or event.archived or event != published.get(event_id)
+                or event.post_url != f"https://t.me/eduvbelgrad/{message_id}"):
+            raise ValueError("published event and confirmed afisha card must match")
+        url = map_event_url(event.source_url, telegram_app=telegram_app, places=True)
+        if not url.startswith("https://t.me/"):
+            raise ValueError("configured Telegram application is required")
+        buttons[message_id] = url
+    return buttons
+
+
 async def apply(database: Path, targets: Mapping[int, str], telegram_app: str, token: str) -> None:
     async with httpx.AsyncClient(timeout=25, follow_redirects=False) as client:
         response = await client.get(_FEED_URL, headers={"Cache-Control": "no-cache"})
         response.raise_for_status()
         feed = read_map_feed(response.content)
+        incident_ids = {event.id for event in feed.incidents}
+        incident_targets = {key: value for key, value in targets.items() if value in incident_ids}
+        event_targets = {key: value for key, value in targets.items() if value not in incident_ids}
+        events = EventsFeed()
+        if event_targets:
+            response = await client.get(_EVENTS_URL, headers={"Cache-Control": "no-cache"})
+            response.raise_for_status()
+            events = read_events_feed(response.content)
         engine = create_engine(f"sqlite:///{database.resolve().as_uri()}?mode=ro&uri=true")
         try:
             with Session(engine) as session:
-                buttons = plan(session, targets, feed, telegram_app)
+                buttons = plan(session, incident_targets, feed, telegram_app)
+                if event_targets:
+                    buttons.update(plan_event_buttons(session, event_targets, events, telegram_app))
         finally:
             engine.dispose()
         bot = TelegramBotAPI(token, client)

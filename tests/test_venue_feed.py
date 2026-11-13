@@ -95,6 +95,23 @@ async def test_teaser_article_is_not_full_evidence(source: SourceConfig) -> None
             await VenueFeedCollector(source, client).collect_url("https://museum.example/event/")
 
 
+def test_short_kolarac_concert_uses_date_from_heading(source):
+    from relocant_media.collectors.venue_feed import _article
+
+    source = source.model_copy(update={"id": "venue_kolarac"})
+    url = "https://www.kolarac.rs/koncerti/recital/"
+    article = (
+        "<h1>НИКОЛАЈ ЛУГАНСКИ 13. 11. 2026. у 20 Велика дворана</h1>"
+        "<article>НИКОЛАЈ ЛУГАНСКИ, клавир. Програм: Шуман, Шопен. "
+        "Улазнице: 2.000, 3.000, 4.000 динара.</article>"
+    )
+    published = datetime.now(UTC) - timedelta(hours=1)
+    assert "Велика дворана" in _article(article, url, source, published).body
+    with pytest.raises(ValueError, match="shorter than"):
+        _article(article.split("<article>")[0] + "<article>ДЕТАЉНИЈЕ</article>",
+                 url, source, published)
+
+
 @pytest.mark.asyncio
 async def test_old_entries_do_not_fetch_articles(source: SourceConfig) -> None:
     requested = []
