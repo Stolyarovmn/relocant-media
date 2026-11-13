@@ -20,6 +20,14 @@ on:
         description: Checkpoint SHA256 printed by the interrupted run (recovery only)
         type: string
         required: false
+      rollback_snapshot_at:
+        description: Owner-approved rollback only, exact timestamp of the last saved snapshot
+        type: string
+        required: false
+      rollback_public_post:
+        description: Owner-approved rollback only, latest public post verified against the snapshot
+        type: string
+        required: false
       fallback_blob_sha256:
         description: SHA256 of the private GPT result (fallback or map-republish)
         type: string
@@ -168,7 +176,7 @@ jobs:
           python -m relocant_media.ops.actions_runtime --mode "$WORKER_MODE" \
             --work "$RUNNER_TEMP/editorial-work" --output _site/data.json \
             --map-output _site/map/incidents.json
-      - name: Reconcile interrupted writer from verified checkpoint
+      - name: Reconcile interrupted writer
         if: steps.mode.outputs.value == 'recovery'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -181,9 +189,12 @@ jobs:
           ACTIONS_CUTOVER_CONFIRMED: ${{ vars.ACTIONS_CUTOVER_CONFIRMED }}
           RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
           RECOVERY_CHECKPOINT: ${{ inputs.recovery_checkpoint }}
+          ROLLBACK_SNAPSHOT_AT: ${{ inputs.rollback_snapshot_at }}
+          ROLLBACK_PUBLIC_POST: ${{ inputs.rollback_public_post }}
         run: |
           python -m relocant_media.ops.actions_recovery --run-id "$RECOVERY_RUN_ID" \
-            --checkpoint "$RECOVERY_CHECKPOINT" --work "$RUNNER_TEMP/editorial-work"
+            --checkpoint "$RECOVERY_CHECKPOINT" --rollback-snapshot-at "$ROLLBACK_SNAPSHOT_AT" \
+            --rollback-public-post "$ROLLBACK_PUBLIC_POST" --work "$RUNNER_TEMP/editorial-work"
       - name: Report saved editorial decisions
         if: >-
           steps.runtime.outcome == 'success' &&

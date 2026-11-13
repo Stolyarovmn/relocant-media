@@ -339,3 +339,11 @@ A second independently authorized private storage destination would be needed fo
 that guarantee. Existing historical attempts cannot acquire missing receipts from
 this change. Explicit owner acceptance of duplicate risk permits an audited rollback,
 but does not justify invented delivery receipts or guessed child exit codes.
+
+When the interrupted run has no recoverable checkpoint, the same workflow accepts
+`mode=recovery` with `recovery_run_id`, `rollback_snapshot_at` (the exact saved
+manifest timestamp) and `rollback_public_post` (the verified latest channel ID).
+Use these inputs only after the owner approves the possible replay of unsaved
+actions. The job verifies the stopped run, snapshot integrity and the public
+channel, preserves the saved intake budget and receipts, and records the manual
+rollback in the pointer using one compare-and-swap followed by readback.

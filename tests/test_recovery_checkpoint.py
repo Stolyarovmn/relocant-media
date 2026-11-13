@@ -1,7 +1,11 @@
 import hashlib
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import Mock
 
+import httpx
 import pytest
 
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
@@ -129,3 +133,54 @@ def test_actions_recovery_applies_only_verified_stopped_attempt(
             actions_recovery.recover(storage, "123", digest, tmp_path / "actions")
         assert storage.current == busy
         assert storage.writes == 0
+
+
+@pytest.mark.parametrize("visible_post", [103, 104])
+def test_owner_rollback_checks_public_channel_and_preserves_receipts(
+    recovery_fixture, tmp_path, monkeypatch, visible_post,
+):
+    from relocant_media.ops import actions_recovery
+    from relocant_media.ops.sqlite_backup_cli import create_snapshot
+
+    _, busy, _ = recovery_fixture
+    source = tmp_path / "source.sqlite3"
+    with closing(sqlite3.connect(source)) as db:
+        db.execute(
+            "INSERT INTO post (city,category,status,title,body,confidence,telegram_message_id) "
+            "VALUES ('belgrade','events','published','Title','Body',1,103)",
+        )
+        db.commit()
+    manifest = create_snapshot(source, tmp_path / "published")
+    manifest["drive_file_id"] = manifest["sha256"]
+    busy.update(snapshot=manifest, run_attempt="1", intake_state={"attempts": 2})
+    client = Mock()
+    client.read.side_effect = lambda: (client.current, "a" * 64)
+    client.current = busy
+    client.download.return_value = (tmp_path / "published/editorial.sqlite3").read_bytes()
+
+    def write(value, expected):
+        assert expected == "a" * 64
+        client.current = value
+        return expected
+
+    client.write.side_effect = write
+    stopped = Mock()
+    monkeypatch.setattr(actions_recovery, "verify_stopped_run", stopped)
+    http = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, text=f'<div data-post="eduvbelgrad/{visible_post}"></div>',
+    )))
+    monkeypatch.setattr(actions_recovery.httpx, "Client", lambda **kwargs: http)
+    args = (client, "123", manifest["created_at"], 103, tmp_path / "rollback")
+    if visible_post == 103:
+        audit = actions_recovery.rollback(*args)
+        client.write.assert_called_once()
+        assert client.current["status"] == "ready"
+        assert client.current["generation"] == busy["attempt"]
+        assert client.current["intake_state"] == busy["intake_state"]
+        assert client.current["snapshot"] == manifest
+        assert client.current["last_manual_recovery"] == audit
+    else:
+        with pytest.raises(ValueError, match="public channel differs"):
+            actions_recovery.rollback(*args)
+        client.write.assert_not_called()
+    stopped.assert_called_once_with("123", "1")
