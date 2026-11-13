@@ -11,7 +11,12 @@ from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.source_locations import extract_source_maps
-from relocant_media.domain.topic_tags import is_topic_footer, topic_tags
+from relocant_media.domain.topic_tags import (
+    is_draft_tag_line,
+    is_topic_footer,
+    strip_draft_tags,
+    topic_tags,
+)
 from relocant_media.services.event_place import resolve_event_place, resolve_saved_event_place
 from relocant_media.services.native_map import (
     NOTICE_LAYOUT,
@@ -104,7 +109,7 @@ def build_presentation(
     source_map = (select_source_map(enrichment, source_url=source_url)
                   if native_map is None and event_place is None else None)
     return EditorialPresentation(
-        version=3,
+        version=4,
         profile_sha256=profile.sha256, rubric_id=rubric.id, rubric_name=rubric.name,
         source_map=source_map,
         illustration=plan_illustration(
@@ -124,12 +129,17 @@ def present_draft(
              f"Рубрика: {presentation.rubric_name}")
     lines = [line for line in draft.body.splitlines()
              if not line.startswith(("Рубрика: ", "Карта из источника: "))
-             and (presentation.version == 1 or not is_topic_footer(line.strip()))]
+             and (presentation.version == 1 or not is_topic_footer(line.strip()))
+             and (presentation.version < 4 or not is_draft_tag_line(line))]
     body = "\n".join(lines).strip()
+    title = draft.title
+    if presentation.version >= 4:
+        title = strip_draft_tags(title)
+        body = strip_draft_tags(body)
     if presentation.source_map:
         body += f"\n\nКарта из источника: {presentation.source_map['url']}"
     body += f"\n\n{label}"
-    return draft.model_copy(update={"body": body})
+    return draft.model_copy(update={"title": title, "body": body})
 
 
 def _primary_url(documents: tuple[EvidenceDocument, ...]) -> str:

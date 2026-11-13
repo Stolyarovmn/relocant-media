@@ -60,6 +60,9 @@ dev = [
   "types-PyYAML>=6.0,<7",
 ]
 
+[tool.setuptools.package-data]
+"relocant_media.domain" = ["publication_tags_v*.yaml"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
