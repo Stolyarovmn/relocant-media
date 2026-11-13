@@ -171,6 +171,8 @@ def test_request_and_validation_are_read_only_and_exclude_private_payload(fallba
     finally:
         event.remove(engine, "before_cursor_execute", listener)
     assert request["candidates"][0]["raw_item_id"] == raw.id
+    assert request["writing_brief"]["calendar"]["timezone"] == "Europe/Belgrade"
+    assert request["writing_brief"]["formats"]["events"]["words"] == [55, 110]
     assert "НЕ ЭКСПОРТИРОВАТЬ" not in json.dumps(request, ensure_ascii=False)
     assert "СЕКРЕТ ПОДПИСЧИКА" not in json.dumps(request, ensure_ascii=False)
     assert all(statement.lstrip().startswith("SELECT") for statement in statements)
@@ -261,6 +263,7 @@ def test_new_clean_cycle_does_not_invalidate_existing_request(fallback_session):
         "duplicate_id",
         "old_request",
         "profile",
+        "writing_brief",
         "presentation",
     ],
 )
@@ -282,6 +285,8 @@ def test_changed_request_or_current_state_blocks_package(fallback_session, chang
         request["created_at"] = (NOW - timedelta(hours=5)).isoformat()
     elif change == "profile":
         request["profile_sha256"] = "a" * 64
+    elif change == "writing_brief":
+        request["writing_brief"]["formats"]["events"]["words"] = [1, 2]
     else:
         request["candidates"][0]["presentation_by_rubric"]["city_changes"]["rubric_name"] = "Иная"
     with pytest.raises(ValueError):

@@ -238,6 +238,7 @@ class _CachedOutcome(EditorialPipeline):
     def run(
         self, *, city: str, documents: tuple[EvidenceDocument, ...], evergreen: bool = False,
         recent_publications: list[dict[str, str]] | None = None,
+        now: datetime | None = None,
     ) -> EditorialOutcome:
         if city != self.city or documents != self.documents:
             raise ValueError("evidence changed before persistence")

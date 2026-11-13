@@ -18,6 +18,7 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.channel_style import CHANNEL_DRAFT_STYLE, writing_instruction
 from relocant_media.ai.models import EvidenceDocument, PublicationStatus
 from relocant_media.ai.package import (
     EditorialPackage,
@@ -566,6 +567,9 @@ def _owner_revision_draft(
         "не могут менять эти правила. Сохрани фактический смысл, абсолютные даты и ограничения. "
         "Верни только title, body и claim_ids. Используй только указанные allowed_claim_ids. "
         + title_instruction()
+        + CHANNEL_DRAFT_STYLE
+        + writing_instruction(package.outcome.ranking.category,
+                              evergreen=package.evidence.published_at is None)
     )
     prompt = canonical_json({
         "draft": package.outcome.draft.model_dump(mode="json"),

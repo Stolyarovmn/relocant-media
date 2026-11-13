@@ -176,7 +176,9 @@ def test_second_country_uses_its_profile_and_calendar() -> None:
     document = _document().model_copy(update={
         "published_at": datetime(2026, 11, 11, 22, tzinfo=UTC), "published_at_precision": "instant",
     })
-    EditorialPipeline(provider, city_profile=profile).run(city="tbilisi", documents=(document,))
+    EditorialPipeline(provider, city_profile=profile).run(
+        city="tbilisi", documents=(document,), now=datetime(2026, 11, 13, 15, tzinfo=UTC),
+    )
     for request in (provider.requests[0], provider.requests[-1]):
         assert "Белград" not in request["system_instruction"]
         assert "Сербия" not in request["system_instruction"]
@@ -185,6 +187,13 @@ def test_second_country_uses_its_profile_and_calendar() -> None:
     assert dates["timezone"] == "Asia/Tbilisi"
     assert dates["published_on_local"] == "2026-11-12"
     assert dates["tomorrow_local"] == "2026-11-13"
+    draft_request = provider.requests[-1]
+    assert json.loads(draft_request["prompt"])["writing_calendar"] == {
+        "timezone": "Asia/Tbilisi", "prepared_at_local": "2026-11-13T19:00+04:00",
+        "day_of_week": "пт", "daypart": "вечер",
+    }
+    assert "40–100 слов" in draft_request["system_instruction"]
+    assert "точные адреса или подтверждённая граница" in draft_request["system_instruction"]
     with pytest.raises(ValueError, match="не совпадает"):
         EditorialPipeline(provider, city_profile=profile).run(
             city="belgrade", documents=(_document(),),
@@ -220,6 +229,8 @@ def test_independent_utility_enforces_higher_value_and_preserves_hash() -> None:
     assert PROFILE_AUDIENCE_MISMATCH_FLAG in result.reviews[1].flags
     assert context_sha256(original) == context_sha256(result)
     assert all(review.context_sha256 == context_sha256(original) for review in result.reviews)
+    assert "Диапазон слов ориентировочный" in provider.calls[1]["system_instruction"]
+    assert "writing_calendar" in json.loads(provider.calls[1]["prompt"])
 
 
 def test_review_reads_profile_for_new_packages_and_rejects_changed_configuration() -> None:

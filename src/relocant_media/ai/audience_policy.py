@@ -91,11 +91,10 @@ def profile_audience_policy(profile: CityEditorialProfile) -> str:
 
 
 def profile_draft_style(profile: CityEditorialProfile) -> str:
-    common = CHANNEL_DRAFT_STYLE.replace("Подача канала «Еду в Белград»:", "Подача:")
     return (
         f"Город: {profile.city_name}. Страна: {profile.country_name}. "
         f"Читатель: {profile.audience.name}. "
         "selection объясняет угол подачи, но не является дополнительным источником фактов. "
         "Хештег и проверенные ссылки добавляет отдельный механизм до ревью; "
-        "не добавляй их сам. " + common
+        "не добавляй их сам. " + CHANNEL_DRAFT_STYLE
     )

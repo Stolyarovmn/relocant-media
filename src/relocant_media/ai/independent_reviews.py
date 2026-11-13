@@ -13,7 +13,11 @@ from relocant_media.ai.audience_policy import (
     profile_audience_policy,
     profile_draft_style,
 )
-from relocant_media.ai.channel_style import CHANNEL_DRAFT_STYLE
+from relocant_media.ai.channel_style import (
+    CHANNEL_DRAFT_STYLE,
+    writing_context,
+    writing_instruction,
+)
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.ai.package import (
     EditorialPackage,
@@ -76,6 +80,7 @@ def reviewed_package(
         raise ValueError("independent reviews require hold placeholders")
     if now is not None and now.tzinfo is None:
         raise ValueError("review time must be timezone-aware")
+    review_time = now or datetime.now(UTC)
     profile = city_profile
     if profile is None and package.outcome.ranking.selection is not None:
         profile = load_city_profile(package.city)
@@ -207,6 +212,14 @@ def reviewed_package(
                 profile_draft_style(profile) + profile_audience_policy(profile)
                 if profile else CHANNEL_DRAFT_STYLE + RELOCANT_AUDIENCE_POLICY
             )
+            instructions += writing_instruction(
+                package.outcome.ranking.category,
+                evergreen=package.evidence.published_at is None,
+            ) + (
+                "Оцени заголовок, порядок сведений, читаемость и уместность тона в clarity. "
+                "Диапазон слов ориентировочный. Замечание о длине само по себе не блокирует "
+                "публикацию. Проверяй, что влияние погоды или сезона подтверждено источником."
+            )
         raw = provider.generate_json(
             task=f"independent_{role}", system_instruction=instructions,
             prompt=canonical_json({
@@ -217,7 +230,9 @@ def reviewed_package(
                     **publication_date_context(d.published_at, d.published_at_precision,
                         timezone_name=profile.timezone if profile else None))
                     for d in package.event.documents],
-                "now_utc": (now or datetime.now(UTC)).astimezone(UTC).isoformat(),
+                "now_utc": review_time.astimezone(UTC).isoformat(),
+                **({"writing_calendar": writing_context(profile, review_time)}
+                   if role == "utility" else {}),
                 "draft_sha256": draft_hash, "context_sha256": context_hash,
             }),
             response_schema=response_model.model_json_schema(),
