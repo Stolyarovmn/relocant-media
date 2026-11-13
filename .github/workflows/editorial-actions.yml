@@ -5,8 +5,13 @@ on:
       mode:
         description: Read-only preview or canonical worker (requires completed cutover)
         type: choice
-        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish, map-republish-review, digest]
+        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish, map-republish-review, digest, digest-preview]
         default: preview
+      digest_preview_at:
+        description: 'Digest preview only: timestamp with offset, e.g. 2026-11-14T07:30:00+01:00'
+        type: string
+        required: false
+        default: ''
       discovery_batch:
         description: 'Discovery only: JSON {"version":1,"city":"belgrade","urls":["https://..."]}'
         type: string
@@ -165,6 +170,7 @@ jobs:
           WORKER_MODE: ${{ steps.mode.outputs.value }}
           CLOUD_DISCOVERY_BATCH: ${{ inputs.discovery_batch }}
           RELOCANT_MAP_TELEGRAM_APP: ${{ vars.RELOCANT_MAP_TELEGRAM_APP }}
+          DIGEST_PREVIEW_AT: ${{ inputs.digest_preview_at }}
           MAP_BACKFILL_TARGETS: ${{ inputs.map_targets }}
           MAP_REPUBLICATION_REQUEST: ${{ inputs.map_republication }}
           GPT_FALLBACK_BLOB_SHA256: ${{ inputs.fallback_blob_sha256 }}
@@ -207,7 +213,8 @@ jobs:
       - name: Publish only sanitized projection
         if: >-
           always() && steps.mode.outputs.value != 'recovery' &&
-          steps.mode.outputs.value != 'fallback-preview' && !startsWith(inputs.mode, 'map-')
+          steps.mode.outputs.value != 'fallback-preview' &&
+          steps.mode.outputs.value != 'digest-preview' && !startsWith(inputs.mode, 'map-')
         id: projection
         env:
           NEWSROOM_GITHUB_TOKEN: ${{ github.token }}
@@ -246,7 +253,8 @@ jobs:
       (needs.cycle.result == 'success' || needs.cycle.result == 'failure') &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true' &&
       inputs.mode != 'preview' && inputs.mode != 'recovery' &&
-      inputs.mode != 'digest' && needs.cycle.outputs.worker_mode != 'digest' &&
+      inputs.mode != 'digest' && inputs.mode != 'digest-preview' &&
+      needs.cycle.outputs.worker_mode != 'digest' &&
       inputs.mode != 'fallback-preview' && inputs.mode != 'fallback' && !startsWith(inputs.mode, 'map-')
     needs: cycle
     runs-on: ubuntu-latest

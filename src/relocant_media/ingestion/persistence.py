@@ -94,7 +94,7 @@ def _block_changed_evidence(session: Session, raw_item_id: int) -> None:
             post.status = "human_review"
 
 
-def _upsert_media_snapshot(
+def upsert_media_snapshot(
     session: Session,
     raw_item_id: int,
     item: CollectedRawItem,
@@ -180,7 +180,7 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
         ))
         if persisted is None:
             raise RuntimeError("raw item upsert did not materialize a row")
-        _upsert_media_snapshot(session, persisted.id, item)
+        upsert_media_snapshot(session, persisted.id, item)
     return len(items)
 
 

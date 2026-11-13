@@ -60,7 +60,8 @@ def test_render_uses_compact_html_one_hashtag_and_grouped_map():
                Entry("🚋 Транспорт", "Линия 26", source),
                Entry("🌦 Погода", "Дождь", source),
                Entry("⚡ Свет", "Отключение", source, map_id=second)]
-    assert render(slot, entries[:1]) is None
+    assert render(slot, []) is None
+    assert render(slot, entries[:1]) is not None
     digest = render(slot, entries, "https://t.me/relocant_media_belgrade_bot/map")
     assert digest is not None and digest.map_url is not None
     assert is_map_event_url(digest.map_url) and first in digest.map_url and second in digest.map_url

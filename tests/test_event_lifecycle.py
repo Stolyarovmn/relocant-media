@@ -157,3 +157,33 @@ def test_changed_source_does_not_rewrite_already_sent_editorial_history() -> Non
         assert original_run.outcome == original_outcome
         assert session.query(SourceRevision).count() == 1
     engine.dispose()
+
+def test_published_schedule_change_is_queued_with_original_channel_post():
+    from relocant_media.services.followup import revision_reply_target
+    from relocant_media.services.watched_updates import queue_watched_change
+    from relocant_media.storage.models import Post
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        original = _seed_reviewed_item(session, delivery_status="sent")
+        post = Post(
+            city="belgrade", category="events", title="Фестиваль",
+            body="Начало в 18:00.", status="published", telegram_message_id=51,
+            confidence=Decimal("0.9"),
+            published_at=datetime(2026, 10, 20, 12, tzinfo=UTC),
+        )
+        session.add(post)
+        session.flush()
+        session.get(EditorialRun, original.id).post_id = post.id
+        update = CollectedRawItem(
+            original.source_id, original.external_id, original.url,
+            "Festival 25 October", "Festival starts at 19:00 at Old Hall.",
+            original.published_at,
+        )
+        assert capture_collected_batch(session, [update]) == (0, 1)
+        revision = queue_watched_change(session, original, update)
+        assert revision is not None
+        assert revision_reply_target(session, revision, "belgrade") == 51
+        assert queue_watched_change(session, original, update) is None
+        assert original.body == "Festival starts at 18:00 at Old Hall."

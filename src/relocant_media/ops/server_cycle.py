@@ -75,7 +75,11 @@ from relocant_media.domain.presentation import (
     title_instruction,
     valid_title_presentation,
 )
-from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
+from relocant_media.ingestion.persistence import (
+    capture_collected_batch,
+    sync_source,
+    upsert_media_snapshot,
+)
 from relocant_media.ops.cycle_audit import audit_cycle
 from relocant_media.ops.newsroom_status import summarize
 from relocant_media.ops.newsroom_triage import triage_queue
@@ -100,6 +104,7 @@ from relocant_media.services.editorial_products import (
     verify_live_map,
 )
 from relocant_media.services.event_eligibility import event_content_reason
+from relocant_media.services.event_lifecycle import source_revision_lifecycle_context
 from relocant_media.services.gpt_fallback import pending_gpt_ids
 from relocant_media.services.kpi import record_subscriber_observation
 from relocant_media.services.package_import import import_package
@@ -142,6 +147,7 @@ from relocant_media.services.transport_map import (
 from relocant_media.services.transport_map_source import extract_transport_map
 from relocant_media.services.utility_geography import resolve_power_points, resolve_utility_geometry
 from relocant_media.services.utility_map import BVK_NEWS_SOURCE, utility_scope
+from relocant_media.services.watched_updates import queue_watched_change
 from relocant_media.services.water_outage_scope import extract_official_water_map
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
 from relocant_media.storage.media_models import RawItemMediaSnapshot
@@ -238,7 +244,7 @@ class _CachedOutcome(EditorialPipeline):
     def run(
         self, *, city: str, documents: tuple[EvidenceDocument, ...], evergreen: bool = False,
         recent_publications: list[dict[str, str]] | None = None,
-        now: datetime | None = None,
+        now: datetime | None = None, source_update: bool = False,
     ) -> EditorialOutcome:
         if city != self.city or documents != self.documents:
             raise ValueError("evidence changed before persistence")
@@ -511,7 +517,8 @@ async def collect_sources(
         fetched[item.url] = "primary_source_review_hold"
     submission_links: dict[int, list[str]] = {}
     attempted_tips: set[int] = set()
-    watch: dict[str, Any] = {"checked": 0, "changed": [], "failures": []}
+    watch: dict[str, Any] = {"checked": 0, "changed": [], "queued": [], "failures": []}
+    watched_changes: list[tuple[int, Any]] = []
     with Session(engine) as session:
         rows = batch_submissions(session) if submissions_only else pending_submissions(session)
         tips = [(row.id, row.payload) for row in rows]
@@ -624,6 +631,7 @@ async def collect_sources(
                 if evidence_changed(original, current):
                     articles.append(current)
                     watch["changed"].append(original.id)
+                    watched_changes.append((original.id, current))
             except (httpx.HTTPError, ValueError) as error:
                 watch["failures"].append({"raw_item_id": original.id,
                                           "error_type": type(error).__name__})
@@ -816,6 +824,11 @@ async def collect_sources(
             sync_source(session, "belgrade", transport_source)
         written, changes = capture_collected_batch(
             session, [*articles, *review_holds, *metadata_holds, *transport_notices])
+        for original_id, live in watched_changes:
+            parent = session.get(RawItem, original_id)
+            if parent is not None and (new_id := queue_watched_change(session, parent, live)):
+                upsert_media_snapshot(session, new_id, live)
+                watch["queued"].append(new_id)
         for submission_id, payload in tips:
             urls = submission_links[submission_id]
             urls.extend(url for url in tip_urls(payload)
@@ -891,6 +904,7 @@ def prepare_reviewed(
         assert source is not None
         profile = load_city_profile(source.city)
         existing = session.get(EditorialRun, raw_id)
+        revision = source_revision_lifecycle_context(session, raw_id)
         reassessing = existing is not None and eligible_empty_policy_hold(session, raw_id)
         if existing is not None and not reassessing:
             return {"raw_item_id": raw_id, "status": existing.outcome["status"],
@@ -940,7 +954,7 @@ def prepare_reviewed(
             city=source.city, documents=documents,
             recent_publications=[{"id": str(row["id"]), "title": row["title"],
                                   "body": row["body"][:1200], "status": row["status"]}
-                                 for row in recent[:20]],
+                                 for row in recent[:20]], source_update=revision is not None,
             evergreen=source.source_type == GUIDE_SOURCE_TYPE)
     if outcome.draft is not None:
         duplicate = find_repeated_publication(

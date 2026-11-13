@@ -11,7 +11,15 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import create_engine, select
 from sqlalchemy.engine import ScalarResult
 from sqlalchemy.orm import Session
@@ -105,21 +113,59 @@ class PublicEvent(PublicModel):
         return self
 
 
+class SponsoredPlace(PublicModel):
+    id: str = Field(pattern=r"^event_[0-9a-f]{20}$")
+    kind: Literal["sponsored_place"] = "sponsored_place"
+    title: Label
+    source_url: str
+    post_url: str
+    starts_at: AwareDatetime
+    expires_at: AwareDatetime
+    timezone: str
+    venue: Venue
+
+    @field_validator("source_url")
+    @classmethod
+    def public_url(cls, value: str) -> str:
+        return PublicEvent.public_url(value)
+
+    @field_validator("post_url")
+    @classmethod
+    def published_url(cls, value: str) -> str:
+        return PublicEvent.published_url(value)
+
+    @model_validator(mode="after")
+    def consistent(self) -> SponsoredPlace:
+        if self.id != map_event_id(self.post_url) or self.starts_at >= self.expires_at:
+            raise ValueError("invalid paid place identity or display period")
+        ZoneInfo(self.timezone)
+        if not 44.2 <= self.venue.latitude <= 45.2 or not 19.8 <= self.venue.longitude <= 21.1:
+            raise ValueError("paid place outside the supported Belgrade map")
+        return self
+
+
 class EventsFeed(PublicModel):
     version: Literal[1] = 1
     generated_at: AwareDatetime | None = None
     events: tuple[PublicEvent, ...] = Field(default=(), max_length=MAX_EVENTS)
+    sponsored_places: tuple[SponsoredPlace, ...] = Field(default=(), max_length=100)
 
     @model_validator(mode="after")
     def unique_events(self) -> EventsFeed:
-        if len({event.id for event in self.events}) != len(self.events):
+        cards: tuple[PublicEvent | SponsoredPlace, ...] = (*self.events, *self.sponsored_places)
+        if len({card.id for card in cards}) != len(cards):
             raise ValueError("duplicate event identifier")
-        if self.events and self.generated_at is None:
+        if cards and self.generated_at is None:
             raise ValueError("event feed timestamp required")
         if self.generated_at is not None and any(
             event.archived != (event.expires_at <= self.generated_at) for event in self.events
         ):
             raise ValueError("event archive state differs from snapshot time")
+        if self.generated_at is not None and any(
+            not row.starts_at <= self.generated_at < row.expires_at
+            for row in self.sponsored_places
+        ):
+            raise ValueError("paid place outside campaign period")
         return self
 
 
@@ -277,6 +323,34 @@ def _backfill_claimed(
     return True
 
 
+def _sponsored_places(
+    policy: dict[str, Any], city: str, timezone: str, now: datetime,
+) -> tuple[SponsoredPlace, ...]:
+    result: dict[str, SponsoredPlace] = {}
+    for row in policy.get("advertisements", []):
+        if not isinstance(row, dict) or not isinstance(row.get("place"), dict):
+            continue
+        message_id = row.get("channel_message_id")
+        if type(message_id) is not int or not active_map_ad(policy, message_id, now):
+            continue
+        post = f"https://t.me/{PUBLIC_CHANNELS[city]}/{message_id}"
+        try:
+            place = row["place"]
+            record = SponsoredPlace(
+                id=map_event_id(post), title=place["title"], source_url=place["source_url"],
+                post_url=post,
+                starts_at=TypeAdapter(AwareDatetime).validate_python(row["starts_at"]),
+                expires_at=TypeAdapter(AwareDatetime).validate_python(row["ends_at"]),
+                timezone=timezone, venue=Venue.model_validate(place["venue"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        result.setdefault(record.id, record)
+        if len(result) >= 100:
+            break
+    return tuple(result.values())
+
+
 def export_events(session: Session, *, observed_at: datetime, city: str = "belgrade") -> EventsFeed:
     if observed_at.tzinfo is None or city not in PUBLIC_CHANNELS:
         raise ValueError("explicit city channel and aware snapshot time required")
@@ -347,7 +421,9 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
             continue
         if len(events) >= MAX_EVENTS:
             break
-    return EventsFeed(generated_at=observed_at.astimezone(UTC), events=tuple(events.values()))
+    places = _sponsored_places(policy, city, profile.timezone, observed_at)
+    return EventsFeed(generated_at=observed_at.astimezone(UTC), events=tuple(events.values()),
+                      sponsored_places=places)
 
 
 def export_events_snapshot(database: Path, output: Path, observed_at: str) -> None:

@@ -1,7 +1,7 @@
 import {
   clusterMapPoints, incidentTimes, placeCountdown, placeStatus, readPlaces,
   straightLineDistance, updateStamp,
-} from "./core.js?v=7";
+} from "./core.js?v=8";
 import { calendarLink } from "./calendar.js?v=1";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
@@ -77,8 +77,9 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   let attempts = 0;
 
   function visiblePlaces(now) {
-    return state.entries.filter((place) => place.id === state.selected
-      || placeStatus(place, now) !== "closed");
+    return state.entries.filter((place) => place.paidPlace
+      ? placeStatus(place, now) === "active"
+      : place.id === state.selected || placeStatus(place, now) !== "closed");
   }
 
   function showList(open) {
@@ -96,7 +97,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     countdown.dataset.placeId = place.id;
     const when = make("span", "place-when", placeTimes(place));
     const venue = make("span", "place-venue", place.venue);
-    const parts = [countdown, when, venue];
+    const parts = place.paidPlace ? [venue] : [countdown, when, venue];
     if (place.sponsored) parts.unshift(make("span", "place-ad", "★ Реклама"));
     if (state.origin) parts.push(make("span", "place-distance", distanceLabel(state.origin, place)));
     return parts;
@@ -131,7 +132,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     if (place.post) links.append(link(place.post, "Пост в Telegram ↗"));
     if (place.schedule) links.append(link(place.schedule, "Расписание ↗"));
     links.append(link(place.source, "Источник ↗"));
-    const calendar = calendarLink(place, now);
+    const calendar = place.paidPlace ? null : calendarLink(place, now);
     if (calendar) links.append(calendar);
     detail.replaceChildren(close, make("h3", "", place.title), ...describe(place, now));
     if (place.address && place.address !== place.venue) detail.append(make("p", "place-address", place.address));
