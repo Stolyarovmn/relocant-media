@@ -1,0 +1,73 @@
+name: Editorial Watchdog
+on:
+  schedule:
+    - cron: '4,14,24,34,44,54 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Check state without sending alerts or recovering a snapshot
+        type: boolean
+        default: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: editorial-watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
+      vars.ACTIONS_CUTOVER_CONFIRMED == 'true' &&
+      vars.EDITORIAL_STORAGE_BACKEND == 'ssh'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e .
+      - uses: actions/cache/restore@v4
+        with:
+          path: .editorial-watchdog-state
+          key: editorial-watchdog-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: editorial-watchdog-v1-
+      - name: Check queue and reconcile verified checkpoints
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STORAGE_PRIVATE_KEY: ${{ secrets.EDITORIAL_SSH_PRIVATE_KEY }}
+          STORAGE_KNOWN_HOSTS: ${{ secrets.EDITORIAL_SSH_KNOWN_HOSTS }}
+          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
+          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
+          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
+          EDITORIAL_OWNER_CHAT_ID: ${{ vars.EDITORIAL_OWNER_CHAT_ID }}
+          EDITORIAL_OWNER_USER_ID: ${{ vars.EDITORIAL_OWNER_USER_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          umask 077
+          identity="$RUNNER_TEMP/editorial-watchdog-identity"
+          mkdir "$identity"
+          trap 'rm -rf "$identity" "$RUNNER_TEMP/editorial-watchdog-recovery"' EXIT
+          printf '%s\n' "$STORAGE_PRIVATE_KEY" > "$identity/key"
+          printf '%s\n' "$STORAGE_KNOWN_HOSTS" > "$identity/known_hosts"
+          export EDITORIAL_SSH_KEY_PATH="$identity/key"
+          export EDITORIAL_SSH_KNOWN_HOSTS_PATH="$identity/known_hosts"
+          args=()
+          if [ "$DRY_RUN" = true ]; then args+=(--dry-run); fi
+          python -m relocant_media.ops.editorial_watchdog --state .editorial-watchdog-state \
+            --work "$RUNNER_TEMP/editorial-watchdog-recovery" "${args[@]}"
+      - uses: actions/cache/save@v4
+        if: steps.check.outputs.changed == 'true'
+        with:
+          path: .editorial-watchdog-state
+          key: editorial-watchdog-v1-${{ github.run_id }}-${{ github.run_attempt }}
