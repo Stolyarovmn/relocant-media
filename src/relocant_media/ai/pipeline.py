@@ -1,9 +1,11 @@
 import json
 from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ValidationError
 
 from relocant_media.ai.audience_policy import profile_audience_policy, profile_draft_style
+from relocant_media.ai.channel_style import writing_context, writing_instruction
 from relocant_media.ai.models import (
     ClaimSet,
     EditorialOutcome,
@@ -138,12 +140,12 @@ class EditorialPipeline:
         self._provider = provider
         self.city_profile = city_profile
 
-    def _ask_draft(self, payload: dict[str, object]) -> RussianDraft:
+    def _ask_draft(self, payload: dict[str, object], style: str) -> RussianDraft:
         return _ask(
             self._provider,
             task="draft",
             system_instruction=(DRAFT_BASE_SYSTEM + profile_draft_style(self.city_profile)
-                                if self.city_profile else DRAFT_SYSTEM),
+                                if self.city_profile else DRAFT_SYSTEM) + style,
             payload=payload,
             response_model=RussianDraft,
         )
@@ -155,6 +157,7 @@ class EditorialPipeline:
         documents: tuple[EvidenceDocument, ...],
         evergreen: bool = False,
         recent_publications: list[dict[str, str]] | None = None,
+        now: datetime | None = None,
     ) -> EditorialOutcome:
         if not documents:
             raise ValueError("at least one evidence document is required")
@@ -281,6 +284,7 @@ class EditorialPipeline:
         draft_payload: dict[str, object] = {
             "city": city,
             "category": ranking.category,
+            "writing_calendar": writing_context(profile, now or datetime.now(UTC)),
             **profile_payload,
             **({"selection": ranking.selection.model_dump(mode="json")}
                if ranking.selection else {}),
@@ -294,9 +298,12 @@ class EditorialPipeline:
                 if claim.claim_id in supported_claim_ids
             ],
         }
-        draft = self._ask_draft(draft_payload)
+        style = writing_instruction(ranking.category, evergreen=evergreen)
+        draft = self._ask_draft(draft_payload, style)
         if draft_language_reason(draft.title, draft.body) is not None:
-            draft = self._ask_draft({**draft_payload, "correction": DRAFT_LANGUAGE_RETRY_NOTE})
+            draft = self._ask_draft(
+                {**draft_payload, "correction": DRAFT_LANGUAGE_RETRY_NOTE}, style,
+            )
         if not set(draft.claim_ids).issubset(supported_claim_ids):
             return EditorialOutcome(
                 status=PublicationStatus.BLOCKED,

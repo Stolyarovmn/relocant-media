@@ -17,6 +17,7 @@ from pydantic import AwareDatetime, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.channel_style import writing_brief
 from relocant_media.ai.models import PublicationStatus
 from relocant_media.ai.package import (
     EditorialPackage,
@@ -75,6 +76,7 @@ class _FallbackRequest(StrictModel):
     created_at: AwareDatetime
     profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     city_profile: CityEditorialProfile
+    writing_brief: dict[str, Any] | None = None
     candidates: list[_CandidateRequest] = Field(min_length=1, max_length=MAX_CANDIDATES)
 
 
@@ -286,6 +288,7 @@ def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
                 "created_at": now.isoformat(),
                 "city_profile": profile.model_dump(mode="json"),
                 "profile_sha256": profile.sha256,
+                "writing_brief": writing_brief(profile, now),
                 "candidates": candidates,
             }
             for raw_id in _failed_ids(run, now):
@@ -346,6 +349,10 @@ def validate_fallback_package(
             mode="json"
         ):
             raise FallbackValidationError("Профиль города изменился после запроса")
+        if parsed.writing_brief is not None and parsed.writing_brief != writing_brief(
+            profile, parsed.created_at,
+        ):
+            raise FallbackValidationError("Правила подачи не совпадают с резервным запросом")
         registry = _registry()
         expected = _candidate_request(
             session, package.raw_item_id, profile=profile, registry=registry, now=now

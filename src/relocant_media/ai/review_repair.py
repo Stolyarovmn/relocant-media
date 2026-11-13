@@ -9,6 +9,7 @@ from relocant_media.ai.audience_policy import (
     AUDIENCE_MISMATCH_FLAG,
     PROFILE_AUDIENCE_MISMATCH_FLAG,
 )
+from relocant_media.ai.channel_style import CHANNEL_DRAFT_STYLE, writing_instruction
 from relocant_media.ai.independent_reviews import reviewed_package
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.ai.package import EditorialPackage, PackageDraft, canonical_json
@@ -72,6 +73,9 @@ def review_with_repairs(
                 "Не добавляй факты, выводы, ссылки или обещания вне исходных подтверждённых "
                 "claims и evidence. Не пытайся исправить отсутствие подтверждений выдумкой. "
                 + title_instruction()
+                + CHANNEL_DRAFT_STYLE
+                + writing_instruction(current.outcome.ranking.category,
+                                      evergreen=current.evidence.published_at is None)
                 + "Верни только RussianDraft; claim_ids должны ссылаться только на исходные "
                 "подтверждённые утверждения. Нельзя менять подтверждения, оценки и решения "
                 "проверок. После исправления текст снова независимо проверят обе роли."

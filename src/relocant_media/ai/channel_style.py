@@ -1,28 +1,77 @@
-"""Owner-selected presentation choices, not conclusions from engagement metrics."""
+"""Правила подачи для подготовки текста и независимой проверки."""
 
-CHANNEL_STYLE_VERSION = "belgrade-presentation-v6"
+from datetime import datetime
+from importlib.resources import files
+from typing import Any
+from zoneinfo import ZoneInfo
 
-CHANNEL_DRAFT_STYLE = """
-Подача канала «Еду в Белград»: один пост — один конкретный повод.
-Начни заголовок с события или изменения и понятного места; не скрывай суть ради интриги.
-Первый абзац сразу отвечает, что произошло или состоится и почему это полезно жителю.
-Далее оставь 2–4 существенные детали, короткими абзацами либо списком, когда он удобнее.
-Весь основной текст читается сразу. Отделяй абзацы пустой строкой. Для плотного сообщения
-используй короткие подписи к подтверждённым деталям: Где, Когда, Что изменится, Объезд,
-Площадка, Вход, Билеты или Запись. Обычной короткой новости достаточно двух абзацев.
-Используй простой текст: форматирование заголовка, подписей, времени и цитат добавляет шаблон.
-Оставь заголовок и текст без хештегов. Шаблон добавит один хештег основной категории.
-Для афиши: конкретная дата, время, площадка, условия входа — только если подтверждены.
-Указанные в источнике ограничения аудитории (пол, возраст, жители района, членство)
-сохраняй; не превращай мероприятие для определённой группы в открытое для всех.
-Короткая новость обычно умещается в 350–900 знаков основного текста; это ориентир,
-а не повод выкинуть важное условие, ограничение или существенную оговорку.
-Не повторяй заголовок в первом предложении. Убери канцелярит и церемониальные вступления.
-Сохраняй условность планов и атрибуцию спорных утверждений. Не придумывай оценки,
-популярность, шутки, срочность, дефицит билетов или призыв купить. Нейтральное событие
-не помечай молниями. Правила, рекламу, предложку и навигацию не добавляй в хвост новости:
-они находятся в описании и служебных закрепах. Не вставляй сырой URL первоисточника в
-заголовок или основной текст: транспорт сам добавляет в конце короткий кликабельный
-«Источник», а полный URL сохраняется в evidence/review package. Ссылки на доказательства
-сохраняются штатным механизмом; не заменяй первоисточник ссылкой на пересказ другого канала.
-"""
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from relocant_media.domain.city_profile import CityEditorialProfile
+
+
+class _WritingFormat(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    categories: tuple[str, ...] = Field(min_length=1)
+    words: tuple[int, int]
+    structure: str = Field(min_length=1)
+    tone: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def ordered_range(self) -> "_WritingFormat":
+        if not 0 < self.words[0] <= self.words[1]:
+            raise ValueError("Неверный диапазон слов")
+        return self
+
+
+class _WritingMatrix(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: str
+    common: str
+    context: str
+    weather: str
+    guide: str
+    formats: dict[str, _WritingFormat]
+
+    @model_validator(mode="after")
+    def distinct_categories(self) -> "_WritingMatrix":
+        categories = [category for rule in self.formats.values() for category in rule.categories]
+        if "city" not in self.formats or len(set(categories)) != len(categories):
+            raise ValueError("Категории матрицы должны быть уникальны, нужен формат city")
+        return self
+
+
+_MATRIX = _WritingMatrix.model_validate(yaml.safe_load(
+    files(__package__).joinpath("writing_matrix.yaml").read_text(encoding="utf-8"),
+))
+_BY_CATEGORY = {category: rule for rule in _MATRIX.formats.values() for category in rule.categories}
+CHANNEL_STYLE_VERSION = _MATRIX.version
+CHANNEL_DRAFT_STYLE = f"\n{_MATRIX.common}\n{_MATRIX.context}\n{_MATRIX.weather}\n"
+
+
+def writing_instruction(category: str, *, evergreen: bool = False) -> str:
+    if evergreen:
+        return f"\n{_MATRIX.guide}\n"
+    rule = _BY_CATEGORY.get(category, _MATRIX.formats["city"])
+    low, high = rule.words
+    return f"\nДля категории {category}: {low}–{high} слов. {rule.structure} {rule.tone}\n"
+
+
+def writing_context(profile: CityEditorialProfile | None, now: datetime) -> dict[str, str]:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Время подготовки должно содержать часовой пояс")
+    zone = profile.timezone if profile else "Europe/Belgrade"
+    local = now.astimezone(ZoneInfo(zone))
+    return {
+        "timezone": zone,
+        "prepared_at_local": local.isoformat(timespec="minutes"),
+        "day_of_week": ("пн", "вт", "ср", "чт", "пт", "сб", "вс")[local.weekday()],
+        "daypart": ("ночь", "утро", "день", "вечер")[local.hour // 6],
+    }
+
+
+def writing_brief(profile: CityEditorialProfile, now: datetime) -> dict[str, Any]:
+    return {**_MATRIX.model_dump(mode="json"), "calendar": writing_context(profile, now)}

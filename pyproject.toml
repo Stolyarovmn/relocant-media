@@ -61,6 +61,7 @@ dev = [
 ]
 
 [tool.setuptools.package-data]
+"relocant_media.ai" = ["writing_matrix.yaml"]
 "relocant_media.domain" = ["publication_tags_v*.yaml"]
 
 [tool.pytest.ini_options]
