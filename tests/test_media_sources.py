@@ -24,7 +24,10 @@ def _registry():
 
 def test_verified_media_follow_the_normal_news_path_and_are_never_high_risk() -> None:
     registry = _registry()
-    assert set(media_sources()) == set(MEDIA)
+    assert set(media_sources()) == {*MEDIA, "media_aero_telegraf"}
+    aviation = registry["media_aero_telegraf"]
+    assert aviation.ownership == "media" and aviation.categories == ("transport",)
+    assert aviation.policy.auto_publish is False
     for source_id in MEDIA:
         source = registry[source_id]
         assert source.ownership == "media" and source.source_type == "news_media"
