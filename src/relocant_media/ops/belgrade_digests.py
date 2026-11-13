@@ -84,6 +84,8 @@ class Entry:
     url: str
     link_text: str = "Источник"
     map_id: str = ""
+    starts_on: date | None = None
+    source_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -120,8 +122,9 @@ def _recap_text(value: str) -> str:
     return " ".join(_EMOJI.sub("", strip_draft_tags(value)).split())
 
 
-def _day(value: date) -> str:
-    return f"{value.day} {_MONTHS[value.month - 1]}"
+def _day(value: date, *, year: int | None = None) -> str:
+    label = f"{value.day} {_MONTHS[value.month - 1]}"
+    return f"{label} {value.year} года" if year is not None and value.year != year else label
 
 
 def _incidents(session: Session, now: datetime) -> list[Entry]:
@@ -129,7 +132,10 @@ def _incidents(session: Session, now: datetime) -> list[Entry]:
     result = []
     streets = load_street_index(Path("cities/belgrade/map/roads.json.gz"))
     feed = export_map(session, observed_at=now, streets=streets)
-    for notice in sorted(feed.incidents, key=lambda item: item.starts_at or tomorrow):
+    for notice in sorted(feed.incidents, key=lambda item: (
+        (item.starts_at or tomorrow).astimezone(now.tzinfo).date() != now.date(),
+        item.starts_at or tomorrow,
+    )):
         if notice.archived or notice.starts_at is None or notice.ends_at is None:
             continue
         if not any(window.starts_at < tomorrow and now < window.ends_at
@@ -150,7 +156,9 @@ def _incidents(session: Session, now: datetime) -> list[Entry]:
         if text:
             map_id = notice.id if (notice.points or notice.lines or notice.areas
                                   or notice.addresses or notice.segments) else ""
-            result.append(Entry(_LABELS[notice.kind], text, notice.source_url, map_id=map_id))
+            starts_on = notice.starts_at.astimezone(now.tzinfo).date()
+            result.append(Entry(_LABELS[notice.kind], text, notice.source_url, map_id=map_id,
+                                starts_on=starts_on))
     return result
 
 
@@ -160,7 +168,7 @@ def _road_text(notice: Incident, segments: Sequence[Segment]) -> str:
     if not scope:
         return ""
     period = (_day(notice.starts_on) if notice.starts_on == notice.ends_on else
-              f"с {_day(notice.starts_on)} по {_day(notice.ends_on)}")
+              f"с {_day(notice.starts_on)} по {_day(notice.ends_on, year=notice.starts_on.year)}")
     return f"{_short(scope)}. Период работ — {period}."
 
 
@@ -227,9 +235,11 @@ def _routes(session: Session, today: date, excluded: set[str]) -> list[Entry]:
         numbers = ", ".join(sorted(routes)[:8]).upper()
         stop_text = (f" В объявлении указаны остановки {', '.join(sorted(stops)[:5])}."
                      if stops else "")
-        result.append(Entry(_LABELS["route"], f"Изменения на линиях {numbers} по {_day(end)}."
-                            f"{stop_text} Схема движения — в объявлении.", item.url))
-    return result
+        subject = f"на линии {numbers}" if len(routes) == 1 else f"на линиях {numbers}"
+        text = (f"Изменения {subject} по {_day(end, year=today.year)}."
+                f"{stop_text} Схема движения — в объявлении.")
+        result.append(Entry(_LABELS["route"], text, item.url, starts_on=start))
+    return sorted(result, key=lambda item: item.starts_on != today)
 
 
 def morning_entries(session: Session, now: datetime, forecast: Forecast | None,
@@ -249,14 +259,16 @@ def morning_entries(session: Session, now: datetime, forecast: Forecast | None,
 
 def evening_entries(session: Session, now: datetime) -> list[Entry]:
     since = datetime.combine(now.date(), time.min, now.tzinfo)
-    posts = session.scalars(select(Post).join(EditorialRun, EditorialRun.post_id == Post.id).where(
+    posts = session.execute(select(Post, RawItem.url)
+        .join(EditorialRun, EditorialRun.post_id == Post.id)
+        .join(RawItem, RawItem.id == EditorialRun.raw_item_id).where(
         Post.city == _CITY, Post.telegram_message_id > 0, Post.published_at >= since,
         Post.published_at <= now, EditorialRun.delivery_status == "sent",
         ~Post.title.startswith("[тестовый запуск]"),
     ).order_by(Post.published_at.desc()).limit(30)).all()
     seen = set()
     entries = []
-    for post in sorted(posts, key=lambda row: _PRIORITY.get(row.category, 4)):
+    for post, source_url in sorted(posts, key=lambda row: _PRIORITY.get(row[0].category, 4)):
         title = _short(_recap_text(post.title))
         key = re.sub(r"[^\w]+", " ", title.casefold()).strip()
         if not key or key in seen:
@@ -266,11 +278,14 @@ def evening_entries(session: Session, now: datetime) -> list[Entry]:
         if (len(lead) > 240 or len(lead.split()) > 36 or post.body.lstrip().startswith("#")
                 or "https://" in lead or lead.casefold().rstrip(".") == title.casefold()):
             lead = ""
-        entries.append(Entry(title, lead, f"{_CHANNEL}/{post.telegram_message_id}", "Подробнее"))
+        entries.append(Entry(title, lead, f"{_CHANNEL}/{post.telegram_message_id}", "Подробнее",
+                             source_url=source_url))
     if len(entries) >= 2:
         tomorrow = now.date() + timedelta(days=1)
         tomorrow_start = datetime.combine(tomorrow, time.min, now.tzinfo)
-        preview = _incidents(session, tomorrow_start)
+        covered = {entry.source_url for entry in entries[:3]}
+        preview = [item for item in _incidents(session, tomorrow_start)
+                   if item.starts_on == tomorrow and item.url not in covered]
         if preview:
             item = preview[0]
             entries = entries[:3] + [Entry(f"К утру {_day(tomorrow)}", item.text, item.url)]
