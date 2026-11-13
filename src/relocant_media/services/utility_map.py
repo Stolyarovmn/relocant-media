@@ -16,6 +16,7 @@ from relocant_media.services.water_outage_scope import (
     extract_official_water_map,
     extract_water_outage_scopes,
     extract_water_segments,
+    reported_water_places,
 )
 
 UTILITY_MAP_MODE = "utility_map_review"
@@ -92,7 +93,8 @@ def build_utility_point(
     addresses, segments = utility_scope(document)
     official = extract_official_water_map(document, html)
     if (not addresses and not segments and official is None
-            and not extract_power_scopes(document) and not extract_water_outage_scopes(document)):
+            and not extract_power_scopes(document) and not extract_water_outage_scopes(document)
+            and reported_water_places(document) is None):
         return None
     verified = _map_geography(geography, addresses, segments)
     point = {

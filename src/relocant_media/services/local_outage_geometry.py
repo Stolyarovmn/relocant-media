@@ -130,6 +130,22 @@ class AreaIndex:
         return (self._settlements.get((district, _exact(name)))
                 or self._settlement_aliases.get((district, settlement_name_key(name)), ()))
 
+    def settlement_reference(self, name: str, municipality: str) -> Coordinate | None:
+        """Ориентир внутри известного поселения; не контур отключения."""
+        polygons = self.settlement(name, municipality) or self.settlement(
+            f"Naselje {name}", municipality,
+        )
+        for area in polygons:
+            ring = area.rings[0]
+            latitudes, longitudes = zip(*ring, strict=True)
+            low, high = min(latitudes), max(latitudes)
+            west, east = min(longitudes), max(longitudes)
+            for x, y in ((.5, .5), (.25, .5), (.75, .5), (.5, .25), (.5, .75)):
+                point = low + (high - low) * x, west + (east - west) * y
+                if _within(point, (area,)):
+                    return point
+        return None
+
     def settlement_contains(self, name: str, municipality: str, point: Coordinate) -> bool:
         return _within(point, self.settlement(name, municipality))
 

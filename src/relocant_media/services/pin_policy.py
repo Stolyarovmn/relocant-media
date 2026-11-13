@@ -21,6 +21,15 @@ def _ad_active(ad: dict[str, Any], now: datetime) -> bool:
         return False
 
 
+def active_map_ad(policy: dict[str, Any], message_id: int, now: datetime) -> bool:
+    """Только оплаченная и одобренная кампания с отдельным правом на карту."""
+    return any(
+        row.get("channel_message_id") == message_id and row.get("map_featured") is True
+        and _ad_active(row, now)
+        for row in policy.get("advertisements", ()) if isinstance(row, dict)
+    )
+
+
 async def maintain_pins(bot: TelegramBotAPI, policy: dict[str, Any], *,
                         now: datetime | None = None,
                         news_message_ids: set[int] | None = None) -> dict[str, Any]:

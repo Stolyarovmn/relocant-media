@@ -47,6 +47,7 @@ from relocant_media.services.utility_scope import (
 from relocant_media.services.water_outage_scope import (
     WaterScope,
     extract_water_outage_scopes,
+    reported_water_places,
     water_outage_window,
 )
 from relocant_media.storage.media_models import RawItemMediaSnapshot
@@ -118,6 +119,7 @@ class Pin(PublicModel):
     label: Label
     address: Address | None = None
     coordinate_source: Literal["rgz"] | None = None
+    approximate: bool = False
 
 
 Ring = Annotated[tuple[Coordinate, ...], Field(min_length=4, max_length=1000)]
@@ -180,6 +182,7 @@ class Incident(PublicModel):
     addresses: Annotated[tuple[Address, ...], Field(max_length=_MAX_HOUSES)] = ()
     ranges: Annotated[tuple[PrintedRange, ...], Field(max_length=_MAX_HOUSES)] = ()
     settlements: Annotated[tuple[Settlement, ...], Field(max_length=120)] = ()
+    reported_scope: Label | None = None
     segments: Annotated[tuple[Segment, ...], Field(max_length=3)] = ()
     windows: Annotated[tuple[Window, ...], Field(max_length=300)] = ()
 
@@ -437,12 +440,22 @@ def _water(
             pins.append(Pin(lat=position[0], lon=position[1], label=label, address=address,
                             coordinate_source="rgz" if location and location.osm_url is None
                             else None))
-    fallback_title = f"Отключение воды · {segments[0].street}" if segments else document.title
+    reported = reported_water_places(document)
+    reported_scope = None
+    if reported is not None:
+        municipality, names, street_text = reported
+        reported_scope = f"{municipality}: {', '.join(names)}; улицы: {street_text}"[:260]
+        if index is not None:
+            for name in names:
+                if position := index.settlement_reference(name, municipality):
+                    pins.append(Pin(lat=position[0], lon=position[1], label=name, approximate=True))
+    fallback_title = (f"Отключение воды · {reported[0]}" if reported else
+                      f"Отключение воды · {segments[0].street}" if segments else document.title)
     return _incident(
         document, "water", title or fallback_title, windows, segments=segments,
         lines=tuple(lines), source_map_url=point["official_map_url"] if point else None,
-        addresses=tuple(houses), points=tuple(pins), areas=tuple(areas[:_MAX_AREAS]),
-        settlements=tuple(settlements[:120]),
+        addresses=tuple(houses), points=tuple(pins[:_MAX_HOUSES]), areas=tuple(areas[:_MAX_AREAS]),
+        settlements=tuple(settlements[:120]), reported_scope=reported_scope,
     )
 
 
@@ -538,7 +551,10 @@ def export_map(
                or_(RawItem.source_id.in_((BVK_NEWS_SOURCE, SOURCE_ID)),
                    (RawItem.source_id == _CITY_SOURCE) &
                    or_(RawItem.url.contains("/vodovod-i-kanalizacija/"),
-                       RawItem.url.contains("/elektricna-energija/"), published)),
+                       RawItem.url.contains("/elektricna-energija/"),
+                       RawItem.url.contains("/beoinfo-vesti/") & (
+                           RawItem.title.ilike("%bez vode%") | RawItem.title.contains("без воде")
+                       ), published)),
                or_(published, recent))
         .order_by(RawItem.ingested_at.desc(), RawItem.id.desc())
     )
@@ -560,7 +576,8 @@ def export_map(
             water_scopes = extract_water_outage_scopes(document)
             if schedule:
                 incident = _power(document, schedule, point, title, areas)
-            elif water_scopes or (point and point["mode"] == UTILITY_MAP_MODE):
+            elif (water_scopes or (point and point["mode"] == UTILITY_MAP_MODE)
+                  or reported_water_places(document) is not None):
                 incident = _water(document, point, title, streets or {}, areas, water_scopes)
             elif title and run is not None and post is not None:
                 incident = _published_road(session, document, run, post, streets or {})

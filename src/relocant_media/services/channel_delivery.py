@@ -15,6 +15,7 @@ from relocant_media.bot.media_publisher import MediaBot, publish_media
 from relocant_media.bot.publisher import Publisher
 from relocant_media.domain.presentation import valid_title_presentation
 from relocant_media.services.editorial import DeliveryBlockedError, DeliveryResult, EditorialService
+from relocant_media.services.followup import revision_reply_target
 from relocant_media.services.production_media import (
     PreparedProductionMedia,
     prepare_production_media,
@@ -122,6 +123,12 @@ async def deliver_reviewed(
                 package, publisher, prepared_media, editorial_text=preview.text)
         except ValueError as error:
             raise DeliveryBlockedError(str(error)) from error
+        reply_to = revision_reply_target(session, raw_item_id, city)
+        reply_publisher = getattr(publisher, "publish_followup", None)
+        if reply_to is not None and native is None and (
+            prepared_media is not None or not callable(reply_publisher)
+        ):
+            raise DeliveryBlockedError("follow-up requires a reply-capable publisher")
         if native is not None:
             rich_bot, rich_message = native
             run.outcome = {**run.outcome,
@@ -156,11 +163,15 @@ async def deliver_reviewed(
     try:
         if rich_message is not None:
             assert rich_bot is not None
-            message_id = await send_native_message(rich_bot, target_channel_id, rich_message)
+            message_id = await send_native_message(rich_bot, target_channel_id, rich_message,
+                                                   reply_to=reply_to)
             if prepared_media is not None:
                 message_ids = [message_id]
         elif prepared_media is None:
-            message_id = await publisher.publish(preview.text)
+            if reply_to is not None and callable(reply_publisher):
+                message_id = await reply_publisher(preview.text, reply_to)
+            else:
+                message_id = await publisher.publish(preview.text)
             if type(message_id) is not int or message_id <= 0:
                 raise DeliveryBlockedError("publisher returned an invalid receipt")
         else:

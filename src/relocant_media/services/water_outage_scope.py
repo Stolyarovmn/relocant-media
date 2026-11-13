@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -20,11 +20,13 @@ _CITY_HOSTS = {"beograd.rs", "www.beograd.rs"}
 _CITY_PATH = re.compile(
     r"/(?:lat|cir)/servisne-informacije/vodovod-i-kanalizacija/a[1-9][0-9]*/[^/]+\.html\Z",
 )
+_CITY_NEWS_PATH = re.compile(r"/(?:lat|cir)/beoinfo-vesti/a[1-9][0-9]*/[^/]+\.html\Z")
 _POST_PATH = re.compile(r"/[a-z0-9]+(?:-[a-z0-9]+)+/\Z")
 _LETTERS = "A-Za-zČĆŽŠĐčćžšđА-Яа-яЈјЉљЊњЂђЋћЏџ"
 _NAME = rf"[{_LETTERS}][{_LETTERS} '\u2019-]{{0,98}}[{_LETTERS}]"
 _MUNICIPALITY = re.compile(
-    rf"\b(?:u|na|у|на)\s+(?:opštini|општини)\s+({_NAME})(?=\s*[,.;])", re.I,
+    rf"\b(?:u|na|у|на)\s+(?:opštini|општини)\s+({_NAME}?)(?=\s*[,.;]|\s+"
+    r"(?:prouzrokovaće|проузроковаће)\b)", re.I,
 )
 _OUTAGE = r"(?:bez vode će ostati potrošači|без воде ће остати потрошачи)"
 _FULL_SETTLEMENT = re.compile(
@@ -96,6 +98,32 @@ _CLOCK_RANGE = re.compile(
     r"\b(?:od|од)\s+([0-9]{1,2})[.:]([0-9]{2})\s+(?:do|до)\s+"
     r"([0-9]{1,2})[.:]([0-9]{2})\b", re.I,
 )
+_HOUR_RANGE = re.compile(
+    r"\b(?:od|од)\s+([0-9]{1,2})\s+(?:do|до)\s+([0-9]{1,2})\s+"
+    r"(?:sata|сати|časova|часова)\b", re.I,
+)
+_NEWS_DATE = re.compile(
+    r"\b(?:u|у)\s+"
+    r"(ponedeljak|utorak|sredu|četvrtak|petak|subotu|nedelju|"
+    r"понедељак|уторак|среду|четвртак|петак|суботу|недељу),?\s+"
+    r"([0-9]{1,2})\.\s*(" + "|".join(_MONTHS) + r")(?=\s*,?\s*(?:od|од)\s)", re.I,
+)
+_WEEKDAYS = ("ponedeljak utorak sredu četvrtak petak subotu nedelju "
+             "понедељак уторак среду четвртак петак суботу недељу").split()
+_NEWS_WATER = re.compile(
+    r"planiran\w*\s+radov\w*\s+na\s+vodovodnoj\s+mreži|"
+    r"планиран\w*\s+радов\w*\s+на\s+водоводној\s+мрежи", re.I,
+)
+_CANCELLED = re.compile(
+    r"\b(?:otkazan\w*|odložen\w*|obustavljen\w*|neće biti prekida|"
+    r"отказан\w*|одложен\w*|обустављен\w*|неће бити прекида)\b", re.I,
+)
+_REPORTED_SCOPE = re.compile(
+    rf"(?:potrošači|потрошачи)\s+(?:u|у)\s+(?:naseljima|насељима)\s+"
+    rf"(?P<places>[{_LETTERS}, '\u2019-]{{3,500}}?)"
+    rf"(?:,\s*|\s+)(?:kao i ulicama|као и улицама)\s+"
+    rf"(?P<streets>[{_LETTERS}, '\u2019-]{{3,500}})(?=\s*[.;]|\s*$)", re.I,
+)
 _MAP_ASSET = re.compile(
     r"/wp-content/uploads/[0-9]{4}/(?:0[1-9]|1[0-2])/"
     r"[a-z0-9_-]*\bmapa(?:[-_][a-z0-9_-]+)?\.(?:webp|png|jpe?g)\Z", re.I,
@@ -142,7 +170,10 @@ def _source_allowed(document: EvidenceDocument) -> bool:
     if document.source_id == "bvk_outage_news":
         return bool(_POST_PATH.fullmatch(_official_path(document.url, _BVK_HOSTS) or ""))
     if document.source_id in {"city_beograd", "city_beograd_news"}:
-        return bool(_CITY_PATH.fullmatch(_official_path(document.url, _CITY_HOSTS) or ""))
+        path = _official_path(document.url, _CITY_HOSTS) or ""
+        return bool(_CITY_PATH.fullmatch(path) or (
+            _CITY_NEWS_PATH.fullmatch(path) and _NEWS_WATER.search(_normalized(document.body))
+        ))
     return False
 
 
@@ -159,7 +190,23 @@ def _single_event_date(document: EvidenceDocument) -> date | None:
                 dates.add(date(int(match[6]), _MONTHS[match[5].lower()], int(match[4])))
     except ValueError:
         return None
-    return next(iter(dates)) if len(dates) == 1 else None
+    if dates:
+        return next(iter(dates)) if len(dates) == 1 else None
+    published = document.published_at
+    if (published is None or published.utcoffset() is None
+            or document.published_at_precision not in {"day", "instant"}):
+        return None
+    relative = list(_NEWS_DATE.finditer(_normalized(document.body)))
+    if len(relative) != 1:
+        return None
+    weekday, number, month = relative[0].groups()
+    posted = published.astimezone(ZoneInfo("Europe/Belgrade")).date()
+    for offset in range(15):
+        day = posted + timedelta(days=offset)
+        if (day.day == int(number) and day.month == _MONTHS[month.casefold()]
+                and day.weekday() == _WEEKDAYS.index(weekday.casefold()) % 7):
+            return day
+    return None
 
 
 def water_outage_window(document: EvidenceDocument) -> tuple[datetime, datetime] | None:
@@ -168,11 +215,32 @@ def water_outage_window(document: EvidenceDocument) -> tuple[datetime, datetime]
         return None
     body = _normalized(document.body)
     day = _single_event_date(document)
+    if _CANCELLED.search(body) or _CANCELLED.search(document.title):
+        return None
     return _window(day, body) if _WATER.search(body) is not None else None
 
 
+def reported_water_places(document: EvidenceDocument) -> tuple[str, tuple[str, ...], str] | None:
+    """Указанные места без утверждения, что отключены все дома или вся улица."""
+    if water_outage_window(document) is None:
+        return None
+    text = _normalized(document.body)
+    match = _REPORTED_SCOPE.search(text)
+    if match is None:
+        return None
+    municipalities = {_normalized(row[1]) for row in _MUNICIPALITY.finditer(text)}
+    if len(municipalities) != 1:
+        return None
+    names = tuple(re.split(r"\s*,\s*|\s+(?:i|и)\s+", match["places"].strip()))
+    if not names or len(names) > 20 or any(not re.fullmatch(_NAME, name) for name in names):
+        return None
+    return next(iter(municipalities)), names, match["streets"].strip()[:260]
+
+
 def _window(day: date | None, text: str) -> tuple[datetime, datetime] | None:
-    intervals = _CLOCK_RANGE.findall(text)
+    intervals = _CLOCK_RANGE.findall(text) + [
+        (start, "00", end, "00") for start, end in _HOUR_RANGE.findall(text)
+    ]
     if day is None or len(intervals) != 1:
         return None
     try:
@@ -274,7 +342,7 @@ def extract_water_outage_scopes(document: EvidenceDocument) -> tuple[WaterScope,
     if not _source_allowed(document) or len(document.body.encode()) > MAX_DOCUMENT_BYTES:
         return ()
     day = _single_event_date(document)
-    if day is None:
+    if day is None or _CANCELLED.search(document.title + " " + document.body):
         return ()
     lines = [text for line in document.body.splitlines() if (text := _normalized(line))]
     headings = {_normalized(match[1]).casefold()

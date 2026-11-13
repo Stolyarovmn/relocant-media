@@ -51,6 +51,7 @@ from relocant_media.services.editorial import (
     _event_items,
     _snapshot_member,
 )
+from relocant_media.services.followup import revision_reply_target
 from relocant_media.services.owner_review_prepare import (
     REVIEWED_STATES,
     assert_primary_evidence,
@@ -875,6 +876,12 @@ async def deliver_owner_approved(
                 package, publisher, prepared_media, editorial_text=text)
         except ValueError as error:
             raise DeliveryBlockedError(str(error)) from error
+        reply_to = revision_reply_target(session, raw_item_id, post.city)
+        reply_publisher = getattr(publisher, "publish_followup", None)
+        if reply_to is not None and native is None and (
+            prepared_media is not None or not callable(reply_publisher)
+        ):
+            raise DeliveryBlockedError("follow-up requires a reply-capable publisher")
         if native is not None:
             rich_bot, rich_message = native
             run.outcome = {**run.outcome,
@@ -908,11 +915,15 @@ async def deliver_owner_approved(
     try:
         if rich_message is not None:
             assert rich_bot is not None
-            message_id = await send_native_message(rich_bot, target_channel_id, rich_message)
+            message_id = await send_native_message(rich_bot, target_channel_id, rich_message,
+                                                   reply_to=reply_to)
             if prepared_media is not None:
                 message_ids = [message_id]
         elif prepared_media is None:
-            message_id = await publisher.publish(text)
+            if reply_to is not None and callable(reply_publisher):
+                message_id = await reply_publisher(text, reply_to)
+            else:
+                message_id = await publisher.publish(text)
             if type(message_id) is not int or message_id <= 0:
                 raise DeliveryBlockedError("publisher returned an invalid receipt")
         else:

@@ -18,7 +18,8 @@ def test_two_week_slots_use_belgrade_time():
     assert morning is not None and morning.kind == "morning"
     assert due_slot(datetime(2026, 11, 14, 7, 15, tzinfo=UTC)) is None
     assert due_slot(datetime(2026, 11, 27, 6, 30, tzinfo=UTC)) is not None
-    assert due_slot(datetime(2026, 11, 27, 19, 30, tzinfo=UTC)) is None
+    reminder = due_slot(datetime(2026, 11, 27, 19, 30, tzinfo=UTC))
+    assert reminder is not None and reminder.kind == "reminder"
 
 
 def test_forecast_uses_dated_belgrade_column_and_skips_stale_html():
@@ -98,3 +99,44 @@ def test_uncertain_send_is_recorded_and_never_repeated():
     assert receipt["state"] == "uncertain"
     assert asyncio.run(deliver(slot, digest, state, "updated", commit, send)) == receipt
     assert seen == ["sending", "uncertain"]
+
+def test_baraevo_near_date_keeps_the_published_scope():
+    from relocant_media.ai.models import EvidenceDocument
+    from relocant_media.services.water_outage_scope import (
+        reported_water_places,
+        water_outage_window,
+    )
+
+    document = EvidenceDocument(
+        source_id="city_beograd_news",
+        url="https://www.beograd.rs/lat/beoinfo-vesti/a116643/Delovi-Barajeva-u-utorak-bez-vode.html",
+        title="Delovi Barajeva u utorak bez vode",
+        body=(
+            "Planirani radovi na vodovodnoj mreži u opštini Barajevo prouzrokovaće u utorak, "
+            "17. novembra, od 8 do 22 sata prestanak vodosnabdevanja. "
+            "Bez vode će biti potrošači u naseljima Gaj, Ravni gaj, Boždarevac, Lisović, "
+            "Beljina, Arnajevo i Rožanci, kao i ulicama Svetosavskoj i Srednjokrajskoj."
+        ),
+        published_at=datetime(2026, 11, 13, tzinfo=_ZONE),
+        published_at_precision="day",
+    )
+    assert water_outage_window(document) == (
+        datetime(2026, 11, 17, 8, tzinfo=_ZONE), datetime(2026, 11, 17, 22, tzinfo=_ZONE),
+    )
+    scope = reported_water_places(document)
+    assert scope is not None and scope[0] == "Barajevo" and len(scope[1]) == 7
+    assert water_outage_window(document.model_copy(update={"published_at": None})) is None
+    cancelled = document.model_copy(update={"body": document.body + " Otkazani."})
+    assert water_outage_window(cancelled) is None
+
+
+def test_reminder_in_quiet_evening_can_publish_alone_with_original_link():
+    slot = due_slot(datetime(2026, 11, 16, 19, 30, tzinfo=UTC))
+    assert slot is not None
+    notice = Entry("💧 Вода", "Бараево — 08:00–22:00.", "https://www.beograd.rs/example",
+                   reminder=True, original=106)
+    draft = render(slot, [notice])
+    assert draft is not None
+    assert "Напоминание на завтра · 17 ноября" in draft.html
+    assert "https://t.me/eduvbelgrad/106" in draft.html
+    assert "#Сводка" not in draft.html

@@ -692,3 +692,13 @@ h1 {
     text-overflow: ellipsis;
   }
 }
+
+.outage-reference { display: grid; place-items: center; border-radius: 50%; background: #fffef9; border: 2px solid #006596; font-size: 14px; }
+
+.place-ad { font-weight: 700; color: #6d4300; }
+.place-pin.place-pin-ad:not(.place-pin-group) .place-pin-badge {
+  display: grid; place-items: center; width: auto; height: auto;
+  background: none; clip-path: none; color: #fff6ca; font-size: 19px;
+}
+.place-pin-ad .place-pin-badge::before { content: '★'; }
+.place-pin.place-pin-ad { background-color: #765000; }

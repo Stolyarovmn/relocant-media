@@ -135,7 +135,7 @@ export function readPlaces(document) {
         || (item.ends_at != null && (end === null || end <= start || end > expires))) return [];
     seen.add(item.id);
     return [{ id: item.id, title, source, schedule: schedule === source ? "" : schedule,
-      post, venue, address, lat, lon,
+      post, venue, address, lat, lon, sponsored: item.sponsored === true,
       archived: item.archived === true, start, end, expires }];
   });
 }
@@ -197,6 +197,7 @@ export function readIncidents(document) {
       kind: record.kind,
       title,
       archived: record.archived === true,
+      reportedScope: textValue(record.reported_scope),
       source,
       officialMap: safeLink(record.source_map_url),
       published: parseTime(record.published_at),
@@ -208,7 +209,8 @@ export function readIncidents(document) {
         .sort((a, b) => a.start - b.start),
       points: array(record.points).flatMap((point) => coords(point?.lat, point?.lon)
         ? [{ lat: point.lat, lon: point.lon, label: textValue(point.label),
-          address: readAddress(point.address), fromRegister: point.coordinate_source === "rgz" }] : []),
+          address: readAddress(point.address), fromRegister: point.coordinate_source === "rgz",
+          approximate: point.approximate === true }] : []),
       lines: array(record.lines).flatMap((line) => Array.isArray(line?.coordinates)
         && line.coordinates.length >= 2
         && line.coordinates.every((pair) => Array.isArray(pair) && coords(pair[0], pair[1]))

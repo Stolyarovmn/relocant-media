@@ -1,7 +1,8 @@
 import {
   clusterMapPoints, incidentTimes, placeCountdown, placeStatus, readPlaces,
   straightLineDistance, updateStamp,
-} from "./core.js?v=5";
+} from "./core.js?v=7";
+import { calendarLink } from "./calendar.js?v=1";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 
@@ -96,6 +97,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     const when = make("span", "place-when", placeTimes(place));
     const venue = make("span", "place-venue", place.venue);
     const parts = [countdown, when, venue];
+    if (place.sponsored) parts.unshift(make("span", "place-ad", "★ Реклама"));
     if (state.origin) parts.push(make("span", "place-distance", distanceLabel(state.origin, place)));
     return parts;
   }
@@ -126,9 +128,11 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       else [...list.children].find((node) => node.dataset.placeId === place.id)?.focus();
     });
     const links = make("div", "event-links");
-    links.append(link(place.source, "Первоисточник ↗"));
-    if (place.schedule) links.append(link(place.schedule, "Расписание ↗"));
     if (place.post) links.append(link(place.post, "Пост в Telegram ↗"));
+    if (place.schedule) links.append(link(place.schedule, "Расписание ↗"));
+    links.append(link(place.source, "Источник ↗"));
+    const calendar = calendarLink(place, now);
+    if (calendar) links.append(calendar);
     detail.replaceChildren(close, make("h3", "", place.title), ...describe(place, now));
     if (place.address && place.address !== place.venue) detail.append(make("p", "place-address", place.address));
     detail.append(links);
@@ -137,12 +141,14 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   function mark(places, zoom) {
     const [first] = places;
     const multiple = places.length > 1;
-    const title = multiple ? `События рядом · ${places.length}` : first.title;
+    const sponsored = !multiple && first.sponsored;
+    const title = multiple ? `События рядом · ${places.length}`
+      : sponsored ? `Реклама · ${first.title}` : first.title;
     const badge = make("span", "place-pin-badge", multiple ? String(places.length) : "");
     badge.setAttribute("aria-hidden", "true");
     const active = places.some((place) => place.id === state.selected);
     const icon = leaflet.divIcon({
-      className: `place-pin${multiple ? " place-pin-group" : ""}${active ? " place-pin-selected" : ""}`,
+      className: `place-pin${multiple ? " place-pin-group" : ""}${active ? " place-pin-selected" : ""}${sponsored ? " place-pin-ad" : ""}`,
       html: badge, iconSize: [38, 38], iconAnchor: [19, 19],
     });
     const location = [first.lat, first.lon];
