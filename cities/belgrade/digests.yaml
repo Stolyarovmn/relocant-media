@@ -3,3 +3,7 @@ ends_before: '2026-11-27T20:30'
 morning: '07:30'
 evening: '20:30'
 delivery_window_minutes: 45
+reminders_from: '2026-11-16'
+official_reminder_sources:
+  '2026-11-17':
+    - https://www.beograd.rs/lat/beoinfo-vesti/a116643/Delovi-Barajeva-u-utorak-bez-vode.html

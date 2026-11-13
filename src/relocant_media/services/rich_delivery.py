@@ -32,11 +32,12 @@ from relocant_media.services.utility_map import UTILITY_MAP_MODE
 class RichMessageBot(Protocol):
     async def send_rich_message(
         self, chat_id: int | str, html: str, *, photo: PhotoUpload | None = None,
-        map_url: str | None = None,
+        map_url: str | None = None, reply_to: int | None = None,
     ) -> int: ...
 
     async def send_notice_message(
         self, chat_id: int | str, html: str, *, source_url: str, map_url: str | None = None,
+        reply_to: int | None = None,
     ) -> int: ...
 
 
@@ -217,10 +218,20 @@ def rich_receipt(
 
 
 async def send_native_message(
-    bot: RichMessageBot, target: int, prepared: PreparedNativeMessage | str,
+    bot: RichMessageBot, target: int, prepared: PreparedNativeMessage | str, *,
+    reply_to: int | None = None,
 ) -> int:
     """Одна попытка; неопределённый результат обрабатывает общая долговечная квитанция."""
     value = PreparedNativeMessage(prepared) if isinstance(prepared, str) else prepared
+    if reply_to is not None:
+        html = value.html + (f'<p><a href="https://t.me/eduvbelgrad/{reply_to}">'
+                             "Первый пост</a></p>" if value.source_preview_url is None else
+                             f'\n\n<a href="https://t.me/eduvbelgrad/{reply_to}">Первый пост</a>')
+        if value.source_preview_url is not None:
+            return await bot.send_notice_message(target, html, source_url=value.source_preview_url,
+                                                 map_url=value.map_url, reply_to=reply_to)
+        return await bot.send_rich_message(target, html, photo=value.photo, map_url=value.map_url,
+                                           reply_to=reply_to)
     if value.source_preview_url is not None:
         if value.map_url is None or value.photo is not None:
             raise ValueError("notice preview needs a map link and no attached photo")

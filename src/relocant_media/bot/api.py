@@ -6,7 +6,11 @@ from typing import Protocol, cast
 
 import httpx
 
-from relocant_media.bot.formatting import compact_source_link, source_link_entities
+from relocant_media.bot.formatting import (
+    compact_source_link,
+    formatted_text_units,
+    source_link_entities,
+)
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
 from relocant_media.domain.map_links import is_map_event_url
 from relocant_media.domain.source_locations import is_public_https_url
@@ -145,12 +149,13 @@ class TelegramBotAPI:
 
     async def send_rich_message(
         self, chat_id: int | str, html: str, *, photo: PhotoUpload | None = None,
-        map_url: str | None = None,
+        map_url: str | None = None, reply_to: int | None = None,
     ) -> int:
         """Отправить уже проверенный rich HTML один раз, без повторов или fallback."""
         if not html.strip():
             raise ValueError("rich message HTML is required")
         reply_markup = map_reply_markup(map_url) if map_url is not None else None
+        reply = self._reply(reply_to)
         references = [media_id for media_id in ("transport_map", "notice_cover")
                       for _ in range(html.count(f"tg://photo?id={media_id}"))]
         if photo is None:
@@ -161,6 +166,8 @@ class TelegramBotAPI:
             }
             if reply_markup is not None:
                 payload["reply_markup"] = reply_markup
+            if reply:
+                payload["reply_parameters"] = reply
             result = await self._call("sendRichMessage", payload)
         else:
             if len(references) != 1:
@@ -181,6 +188,8 @@ class TelegramBotAPI:
                 data["reply_markup"] = json.dumps(
                     reply_markup, ensure_ascii=False, separators=(",", ":"),
                 )
+            if reply:
+                data["reply_parameters"] = json.dumps(reply)
             response = await self._client.post(
                 f"{self._base_url}/sendRichMessage",
                 data=data,
@@ -284,6 +293,7 @@ class TelegramBotAPI:
 
     async def send_notice_message(
         self, chat_id: int | str, html: str, *, source_url: str, map_url: str | None = None,
+        reply_to: int | None = None,
     ) -> int:
         if not is_public_https_url(source_url):
             raise ValueError("notice preview requires a public HTTPS source")
@@ -295,17 +305,39 @@ class TelegramBotAPI:
         }
         if map_url is not None:
             payload["reply_markup"] = map_reply_markup(map_url)
+        if reply := self._reply(reply_to):
+            payload["reply_parameters"] = reply
         return self._message_id(await self._call("sendMessage", payload))
+
+    @staticmethod
+    def _reply(reply_to: int | None) -> dict[str, object]:
+        if reply_to is None:
+            return {}
+        if type(reply_to) is not int or reply_to <= 0:
+            raise ValueError("reply requires an existing channel message ID")
+        return {"message_id": reply_to, "allow_sending_without_reply": True}
 
     async def send_digest_message(
         self, chat_id: int, html: str, *, map_url: str | None = None,
+        photo: Path | None = None, reply_to: int | None = None,
     ) -> int:
         payload: dict[str, object] = {
-            "chat_id": chat_id, "text": html, "parse_mode": "HTML",
-            "link_preview_options": {"is_disabled": True}, "disable_notification": True,
+            "chat_id": chat_id, "parse_mode": "HTML", "disable_notification": True,
         }
         if map_url is not None:
             payload["reply_markup"] = map_reply_markup(map_url)
+        if reply := self._reply(reply_to):
+            payload["reply_parameters"] = reply
+        if photo is not None:
+            if formatted_text_units(html) > 1024:
+                raise ValueError("digest exceeds photo caption limit")
+            form = {key: value if isinstance(value, str) else json.dumps(value)
+                    for key, value in payload.items()}
+            form["caption"] = html
+            response = await self._client.post(f"{self._base_url}/sendPhoto", data=form,
+                                               files={"photo": self._photo(photo)})
+            return self._message_id(self._result("sendPhoto", response))
+        payload.update(text=html, link_preview_options={"is_disabled": True})
         return self._message_id(await self._call("sendMessage", payload))
 
     async def delete_message(self, chat_id: int | str, message_id: int) -> None:

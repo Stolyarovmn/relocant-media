@@ -2,15 +2,15 @@ import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=6";
-import { setupPlaces } from "./places.js?v=5";
+} from "./core.js?v=7";
+import { calendarLink } from "./calendar.js?v=1";
+import { setupPlaces } from "./places.js?v=6";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
 const searchResults = byId("address-results");
 const eventList = byId("event-list");
 const feedback = byId("feedback");
-const archive = byId("archive");
 const mapFrame = byId("map").parentElement;
 const layerButtons = [...byId("layer-filter").querySelectorAll("button")];
 const announcementBody = byId("announcement-body");
@@ -146,7 +146,7 @@ function visibleIncidents(now) {
 }
 
 function showsArchived(incident) {
-  return archive.checked || state.previewArchive === incident.id;
+  return state.previewArchive === incident.id;
 }
 
 function orderedIncidents(now) {
@@ -175,7 +175,8 @@ function eventCard(incident, now) {
   const dot = make("i");
   dot.setAttribute("aria-hidden", "true");
   category.append(dot, kinds[incident.kind].label);
-  const badge = make("span", "event-state", incident.archived ? "Архив" : statuses[status]);
+  const badge = make("span", "event-state", status === "planned" ? "⏰ Запланировано"
+    : incident.archived ? "Архив" : statuses[status]);
   badge.dataset.status = status;
   meta.append(category, badge);
   const heading = make("h3");
@@ -210,6 +211,10 @@ function eventCard(incident, now) {
     const scope = settlement.parent ? `${settlement.name} · часть ${settlement.parent}`
       : settlement.name;
     card.append(make("p", "event-scope", `${scope} · ${settlement.municipality} · ${addressWindowText(settlement.window)}`));
+  }
+  if (incident.reportedScope) {
+    card.append(make("p", "event-scope", incident.reportedScope),
+      make("p", "event-scope", "Точки обозначают населённые пункты. Точные границы не указаны."));
   }
   if (roadOrientation(incident)) {
     card.append(make("p", "event-scope", "Точные границы участка не подтверждены."));
@@ -247,7 +252,9 @@ function eventCard(incident, now) {
     card.append(ranges);
   }
   const links = make("div", "event-links");
-  links.append(link(incident.source, "Первоисточник ↗"));
+  links.append(link(incident.source, "Источник ↗"));
+  const calendar = calendarLink(incident, now);
+  if (calendar) links.append(calendar);
   if (incident.officialMap && incident.officialMap !== incident.source) {
     links.append(link(incident.officialMap,
       incident.kind === "road" ? "Схема секретариата ↗" : "Официальная карта ↗"));
@@ -289,7 +296,7 @@ function bindFeature(layer, group, incident, label, window, fromRegister) {
   if (roadOrientation(incident)) {
     popup.append(make("p", "", "Ориентир. Точные границы перекрытия не подтверждены."));
   }
-  popup.append(link(incident.source, "Первоисточник ↗"));
+  popup.append(link(incident.source, "Источник ↗"));
   if (fromRegister) {
     const credit = make("p");
     credit.append(link("https://data.gov.rs/sr/datasets/adresni-registar/", "Координаты · реестр Сербии ↗"));
@@ -375,6 +382,14 @@ function renderPointClusters() {
     }
     const [point] = group;
     const { lat, lon, label, address, window, fromRegister, incident, archived, now } = point;
+    if (point.approximate && !archived) {
+      const planned = incidentStatus(incident, now) === "planned";
+      const icon = leaflet.divIcon({ className: "outage-reference",
+        html: planned ? "⏰" : "💧", iconSize: [26, 26], iconAnchor: [13, 13] });
+      bindFeature(leaflet.marker([lat, lon], { icon, title: label }), state.pointLayer,
+        incident, `${label} · ориентир`, window, false);
+      continue;
+    }
     const selected = incident.id === state.selected;
     const expired = !unexpired(window || address?.window, now);
     bindFeature(leaflet.circleMarker([lat, lon], {
@@ -747,10 +762,6 @@ for (const button of layerButtons) {
     render();
   });
 }
-archive.addEventListener("change", () => {
-  if (!archive.checked) state.previewArchive = "";
-  render();
-});
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) clearTimeout(clockTimer);
   else if (state.mode === "incidents") {

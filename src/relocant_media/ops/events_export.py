@@ -30,6 +30,7 @@ from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.ops.newsroom_export import public_article_url
 from relocant_media.services.event_place import resolve_saved_event_place
 from relocant_media.services.event_place_adapters import cukarica_stage_start
+from relocant_media.services.pin_policy import active_map_ad
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 
 MAX_EVENTS = 1000
@@ -65,6 +66,7 @@ class PublicEvent(PublicModel):
     coordinate_source_url: str
     venue_source_url: str
     schedule_source_url: str | None = None
+    sponsored: bool = False
 
     @field_validator("source_url", "coordinate_source_url", "venue_source_url")
     @classmethod
@@ -279,6 +281,7 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
     if observed_at.tzinfo is None or city not in PUBLIC_CHANNELS:
         raise ValueError("explicit city channel and aware snapshot time required")
     profile = load_city_profile(city)
+    policy = json.loads(Path(f"cities/{city}/pin-policy.json").read_text(encoding="utf-8"))
     rows = session.execute(
         select(RawItem, EditorialRun, Post)
         .join(Source, Source.id == RawItem.source_id)
@@ -335,6 +338,7 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                     coordinate_source_url=place["coordinate_source_url"],
                     venue_source_url=place["venue_source_url"],
                     schedule_source_url=place.get("schedule_source_url"),
+                    sponsored=active_map_ad(policy, post.telegram_message_id or 0, observed_at),
                 )
                 events.setdefault(event.id, event)
                 break

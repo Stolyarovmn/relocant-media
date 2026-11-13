@@ -1,0 +1,114 @@
+{
+  "morning": [
+    {
+      "file": "morning-01.jpg",
+      "artist": "Peachoftree",
+      "license": "CC BY-SA 3.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Belgrade_sunrise.jpg"
+    },
+    {
+      "file": "morning-02.jpg",
+      "artist": "Lessormore",
+      "license": "CC BY-SA 4.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Blok_61,_New_Belgrade_15.jpg"
+    },
+    {
+      "file": "morning-03.jpg",
+      "artist": "Pudelek (Marcin Szala)",
+      "license": "CC BY-SA 3.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Sunrise_in_Zemun,_Belgrade_(2).JPG"
+    },
+    {
+      "file": "morning-04.jpg",
+      "artist": "Lessormore",
+      "license": "CC BY-SA 4.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Blok_61,_New_Belgrade_20.jpg"
+    },
+    {
+      "file": "morning-05.jpg",
+      "artist": "User:Михајло Анђелковић",
+      "license": "CC BY-SA 3.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Novi_Beograd_-_Sunrise_02.11.2010.jpg"
+    },
+    {
+      "file": "morning-06.jpg",
+      "artist": "Lessormore",
+      "license": "CC BY-SA 4.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Blok_61,_New_Belgrade_22.jpg"
+    },
+    {
+      "file": "morning-07.jpg",
+      "artist": "Pudelek (Marcin Szala)",
+      "license": "CC BY-SA 3.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Sunrise_in_Zemun,_Belgrade.JPG"
+    }
+  ],
+  "evening": [
+    {
+      "file": "evening-01.jpg",
+      "artist": "Ivanbuki",
+      "license": "CC BY-SA 4.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Zalazak_sunca_sa_Kalemegdana.jpg"
+    },
+    {
+      "file": "evening-02.jpg",
+      "artist": "Jeff Attaway",
+      "license": "CC BY 2.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Aerial_view_of_the_Sava_River_in_Belgrade_-a.jpg"
+    },
+    {
+      "file": "evening-03.jpg",
+      "artist": "Stefanphotog",
+      "license": "CC BY-SA 4.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Crveno_nebo_iznad_Beograda.jpg"
+    },
+    {
+      "file": "evening-04.jpg",
+      "artist": "anj?i from London, UK",
+      "license": "CC BY 2.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Sava_view_from_Kalemegdan,_Belgrade.jpg"
+    },
+    {
+      "file": "evening-06.jpg",
+      "artist": "User:Михајло Анђелковић",
+      "license": "CC BY-SA 3.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Belgrade_-_Panorama_from_the_left_side_of_Sava.jpg"
+    },
+    {
+      "file": "evening-08.jpg",
+      "artist": "Petar Milošević",
+      "license": "CC BY-SA 4.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Ada_Bridge_pylon_(Sava_river,_Belgrade).jpg"
+    },
+    {
+      "file": "evening-09.jpg",
+      "artist": "Thanos Hrisikos",
+      "license": "CC BY 3.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Belgrade,_Serbia_-_panoramio_(1).jpg"
+    },
+    {
+      "file": "evening-10.jpg",
+      "artist": "Peretz Partensky from San Francisco, USA",
+      "license": "CC BY-SA 2.0",
+      "url": "https://commons.wikimedia.org/wiki/File:Beograd,_Serbia_(3801788657).jpg"
+    },
+    {
+      "file": "evening-13.jpg",
+      "artist": "Bybbisch94, Christian Gebhardt",
+      "license": "CC BY-SA 4.0",
+      "url": "https://commons.wikimedia.org/wiki/File:20230422.Abschied_von_Belgrad.-011.jpg"
+    },
+    {
+      "file": "evening-14.jpg",
+      "artist": "Bybbisch94, Christian Gebhardt",
+      "license": "CC BY-SA 4.0",
+      "url": "https://commons.wikimedia.org/wiki/File:20230422.Abschied_von_Belgrad.-013.jpg"
+    },
+    {
+      "file": "evening-15.jpg",
+      "artist": "Bybbisch94, Christian Gebhardt",
+      "license": "CC BY-SA 4.0",
+      "url": "https://commons.wikimedia.org/wiki/File:20230422.Abschied_von_Belgrad.-015.jpg"
+    }
+  ]
+}

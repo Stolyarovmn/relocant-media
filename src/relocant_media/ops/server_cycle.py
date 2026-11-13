@@ -1020,6 +1020,22 @@ class ChannelPublisher:
     def __init__(self, bot: TelegramBotAPI):
         self.bot = bot
 
+    async def publish_followup(self, text: str, reply_to: int) -> int:
+        formatted = editorial_message_html(text)
+        if formatted is None or not valid_title_presentation(text.split("\n", 1)[0]):
+            raise ValueError("follow-up requires a formatted reviewed post")
+        html, source_url = formatted
+        suffix = f'<a href="https://t.me/eduvbelgrad/{reply_to}">Первый пост</a>'
+        if formatted_text_units(html + "\n\n" + suffix) <= TELEGRAM_TEXT_LIMIT:
+            return await self.bot.send_notice_message(
+                APPROVED_CHANNEL_ID, html + "\n\n" + suffix, source_url=source_url,
+                reply_to=reply_to,
+            )
+        return await self.bot.send_rich_message(
+            APPROVED_CHANNEL_ID, rich_editorial_html(html) + f"<p>{suffix}</p>",
+            reply_to=reply_to,
+        )
+
     async def publish(self, text: str) -> int:
         if not valid_title_presentation(text.split("\n", 1)[0]):
             raise ValueError("title presentation does not match channel mode")
