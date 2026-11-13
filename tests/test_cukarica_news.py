@@ -39,6 +39,7 @@ def test_article_keeps_lead_full_body_and_local_publication_time():
     assert item.external_id == "655"
     assert item.url == ARTICLE_URL
     assert item.source_id == "cukarica_official"
+    assert item.source_html == article_html()
     assert "19. до 23. октобра" in item.body
     assert "064/8718-468" in item.body
     assert "Подели вест" not in item.body

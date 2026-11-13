@@ -16,10 +16,11 @@ from relocant_media.ai.package import canonical_json, draft_sha256
 from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.ingestion.persistence import capture_collected_batch
 from relocant_media.ops.events_export import export_events, export_events_snapshot, read_events_feed
+from relocant_media.ops.map_backfill import plan_event_buttons
 from relocant_media.ops.newsroom_publish import EVENTS_PATH, _publish_events
 from relocant_media.ops.pages_assets import copy_assets
 from relocant_media.services.event_place import resolve_saved_event_place
-from relocant_media.services.event_place_adapters import _DOB_INTERVIEW_2026
+from relocant_media.services.event_place_adapters import _CUKARICA_POST_2026, _DOB_INTERVIEW_2026
 from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source, Submission
 
@@ -150,6 +151,39 @@ def test_feed_only_exposes_allowlisted_published_fields_and_keeps_archive_id(ses
     assert "PRIVATE_INTAKE" not in first.model_dump_json()
     assert "reviews" not in first.model_dump_json() and "raw_item_id" not in first.model_dump_json()
     assert not session.dirty and not session.new and not session.deleted
+
+
+def test_published_cukarica_event_without_html_uses_corroborated_program(session, monkeypatch):
+    article = document().model_copy(update={
+        "source_id": "cukarica_news",
+        "url": _CUKARICA_POST_2026,
+        "title": "Кабаре „Да, то су били дани“",
+        "body": (
+            "Кабаре ће бити изведено на великој сцени Културног центра „Чукарица“ "
+            "24. новембра, са почетком у 20 часова."
+        ),
+    })
+    item, _, post, _ = seed(session, doc=article, attested=False)
+    session.delete(session.get(RawItemMediaSnapshot, item.id))
+    post.telegram_message_id = 104
+    session.commit()
+
+    feed = export_events(session, observed_at=NOW)
+    assert len(feed.events) == 1
+    event = feed.events[0]
+    assert event.post_url == "https://t.me/eduvbelgrad/104"
+    assert event.starts_at.isoformat() == "2026-11-24T20:00:00+01:00"
+    assert event.venue.address == "Turgenjevljeva 5, Beograd"
+    monkeypatch.setattr(
+        "relocant_media.ops.map_backfill.export_events",
+        lambda session, observed_at: export_events(session, observed_at=NOW),
+    )
+    app = "https://t.me/relocant_media_belgrade_bot"
+    assert plan_event_buttons(session, {104: event.id}, feed, app) == {
+        104: f"{app}?startapp=places_{event.id}",
+    }
+    with pytest.raises(ValueError, match="confirmed afisha card"):
+        plan_event_buttons(session, {103: event.id}, feed, app)
 
 
 @pytest.mark.parametrize("verified_time", [True, False])

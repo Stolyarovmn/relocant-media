@@ -29,6 +29,7 @@ from relocant_media.domain.map_links import map_event_id
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.ops.newsroom_export import public_article_url
 from relocant_media.services.event_place import resolve_saved_event_place
+from relocant_media.services.event_place_adapters import cukarica_stage_start
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 
 MAX_EVENTS = 1000
@@ -219,6 +220,12 @@ def _backfill_claimed(
         if citation.source_id == document.source_id and citation.url == document.url
     )
     text = " ".join(quotes.casefold().split())
+    if (document.source_id == "cukarica_news"
+            and place.get("time_basis") == "source_cukarica_main_stage"):
+        starts_at = datetime.fromisoformat(place["starts_at"])
+        return cukarica_stage_start(text, corroborated_year=starts_at.year) == starts_at.replace(
+            tzinfo=None,
+        )
     dob = document.source_id == "venue_youth_centre" and place.get("time_basis") in {
         "source_dob_concert_header",
         "source_dob_linked_concert",

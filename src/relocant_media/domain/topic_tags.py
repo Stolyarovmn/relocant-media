@@ -9,7 +9,7 @@ _TOPIC_TAGS = {
     "crime": "#Безопасность",
     "culture": "#Культура",
     "economy": "#Экономика",
-    "events": "#События #Досуг",
+    "events": "#События",
     "health": "#Здоровье",
     "immigration": "#Документы",
     "jobs": "#Работа",
@@ -23,11 +23,14 @@ _TOPIC_TAGS = {
     "transport": "#Транспорт",
     "utilities": "#Коммуналка",
 }
-_TAG_LINES = frozenset(_TOPIC_TAGS.values())
+_LEGACY_EVENT_TAGS = "#События #Досуг"
+_TAG_LINES = frozenset((*_TOPIC_TAGS.values(), _LEGACY_EVENT_TAGS))
 _TAG = re.compile(r"#[А-Яа-яЁё]+")
 
 
-def topic_tags(category: str) -> str:
+def topic_tags(category: str, *, presentation_version: int) -> str:
+    if category == "events" and presentation_version == 2:
+        return _LEGACY_EVENT_TAGS
     return _TOPIC_TAGS.get(category, "#Город")
 
 
