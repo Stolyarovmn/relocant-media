@@ -78,6 +78,18 @@ export function launchMap(search, telegramParam) {
   return { mode: "incidents", id: launchEvent(search, telegramParam) };
 }
 
+export function launchDigestEvents(search, telegramParam) {
+  const params = new URLSearchParams(search);
+  for (const candidate of [params.get("events"), params.get("tgWebAppStartParam"), telegramParam]) {
+    if (typeof candidate !== "string") continue;
+    const ids = candidate.startsWith("digest_") ? candidate.slice(7).split("-") : candidate.split("~");
+    if (ids.length >= 2 && ids.length <= 4 && ids.every((id) => eventId.test(id))) {
+      return [...new Set(ids)];
+    }
+  }
+  return [];
+}
+
 function parseTime(value) {
   if (typeof value !== "string" || !timestamp.test(value)) return null;
   const result = Date.parse(value);

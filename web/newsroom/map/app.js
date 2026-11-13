@@ -1,8 +1,8 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, kinds, launchMap, nextTransition, readIncidents,
+  incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=5";
+} from "./core.js?v=6";
 import { setupPlaces } from "./places.js?v=5";
 
 const byId = (id) => document.getElementById(id);
@@ -18,6 +18,7 @@ const announcementToggle = byId("toggle-announcements");
 const selectedPreview = byId("selected-preview");
 const telegram = globalThis.Telegram?.WebApp;
 const initialRoute = launchMap(location.search, telegram?.initDataUnsafe?.start_param);
+const digestIds = launchDigestEvents(location.search, telegram?.initDataUnsafe?.start_param);
 const center = [44.8186, 20.4609];
 const region = [[44.22, 19.65], [45.23, 21.35]];
 const mobile = matchMedia("(max-width: 740px)");
@@ -33,6 +34,7 @@ const state = {
   loaded: false,
   loadFailed: false,
   deepPending: initialRoute.mode === "incidents" ? initialRoute.id : "",
+  digestIds,
   mode: "",
   stamp: "",
   loading: false,
@@ -139,6 +141,7 @@ function showMapNote() {
 
 function visibleIncidents(now) {
   return state.incidents.filter((incident) => enabled.has(incident.kind)
+    && (!state.digestIds.length || state.digestIds.includes(incident.id))
     && (showsArchived(incident) || incidentStatus(incident, now) !== "closed"));
 }
 
@@ -493,6 +496,16 @@ function focusIncident(incident) {
   return true;
 }
 
+function focusDigest() {
+  const now = Date.now();
+  const locations = visibleIncidents(now).flatMap((incident) => [
+    ...exactMapPoints(state.index, incident, now, false).map(({ lat, lon }) => [lat, lon]),
+    ...visibleMapLines(incident, now, false).flatMap((line) => line.coordinates),
+    ...incident.areas.filter((area) => unexpired(area.window, now, false)).flatMap((area) => area.rings[0]),
+  ]);
+  if (locations.length && state.map) state.map.fitBounds(locations, { padding: [35, 65], maxZoom: 16 });
+}
+
 function openEvent(incident, { fromCard = false } = {}) {
   const now = Date.now();
   state.deepPending = "";
@@ -568,6 +581,7 @@ async function loadEvents() {
     if (pending) openEvent(pending);
     else {
       render();
+      if (state.digestIds.length) focusDigest();
       if (state.deepPending && deepAttempts < 2) {
         deepAttempts += 1;
         refreshTimer = setTimeout(loadEvents, deepAttempts === 1 ? 7000 : 18000);
@@ -606,6 +620,9 @@ function loadAddressIndex() {
     const event = state.incidents.find((incident) => incident.id === state.refocusEvent);
     state.refocusEvent = "";
     if (state.mode === "incidents" && event && !state.address) focusIncident(event);
+    if (state.mode === "incidents" && state.digestIds.length && !state.address && !state.selected) {
+      focusDigest();
+    }
     return state.index;
   }).catch(() => {
     addressRequest = null;
@@ -813,7 +830,11 @@ function showMode(mode, id = "") {
 
 setupMap();
 const places = setupPlaces({ map: state.map, mobile, animate, telegram, byId, make, link, readJSON, onSync: syncFeed });
-byId("show-incidents").addEventListener("click", () => showMode("incidents"));
+byId("show-incidents").addEventListener("click", () => {
+  state.digestIds = [];
+  if (state.mode === "incidents") render();
+  else showMode("incidents");
+});
 byId("show-places").addEventListener("click", () => showMode("places"));
 telegram?.ready?.();
 showMode(initialRoute.mode, initialRoute.id);

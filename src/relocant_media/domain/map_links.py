@@ -34,5 +34,25 @@ def map_event_url(
 
 
 def is_map_event_url(url: str) -> bool:
-    return any(url.startswith(prefix) and _EVENT_ID.fullmatch(url[len(prefix):])
-               for prefix in _MAP_LINK_PREFIXES)
+    if any(url.startswith(prefix) and _EVENT_ID.fullmatch(url[len(prefix):])
+           for prefix in _MAP_LINK_PREFIXES):
+        return True
+    prefixes = (f"{_MAP_PAGE}?events=", *(f"{app}?startapp=digest_" for app in _TELEGRAM_APPS))
+    for prefix in prefixes:
+        if url.startswith(prefix):
+            ids = url[len(prefix):].split("~" if prefix.endswith("=") else "-")
+            return 2 <= len(ids) <= 4 and all(_EVENT_ID.fullmatch(value) for value in ids)
+    return False
+
+
+def map_digest_url(ids: tuple[str, ...], *, telegram_app: str | None = None) -> str | None:
+    if not ids:
+        return None
+    if len(ids) > 4 or not all(_EVENT_ID.fullmatch(value) for value in ids):
+        raise ValueError("invalid digest map IDs")
+    if len(ids) == 1:
+        return (f"{telegram_app}?startapp={ids[0]}" if telegram_app in _TELEGRAM_APPS else
+                f"{_MAP_PAGE}?event={ids[0]}")
+    if telegram_app in _TELEGRAM_APPS:
+        return f"{telegram_app}?startapp=digest_{'-'.join(ids)}"
+    return f"{_MAP_PAGE}?events={'~'.join(ids)}"

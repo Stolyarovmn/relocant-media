@@ -3,7 +3,8 @@ import { test } from "node:test";
 
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, launchEvent, launchMap, nextTransition, placeCountdown, placeStatus,
+  incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, nextTransition,
+  placeCountdown, placeStatus,
   pointsAtScale, readIncidents, readPlaces, searchAddresses, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
@@ -35,6 +36,12 @@ test("открытие объявления по ссылке браузера �
   assert.equal(launchEvent(`?tgWebAppStartParam=${roadId}`, waterId), roadId);
   assert.equal(launchEvent("?event=unknown", powerId), powerId);
   assert.equal(launchEvent("?tgWebAppStartParam=javascript%3Aalert%281%29", ""), "");
+});
+
+test("ссылка сводки открывает только перечисленные объявления", () => {
+  assert.deepEqual(launchDigestEvents(`?events=${roadId}~${waterId}`), [roadId, waterId]);
+  assert.deepEqual(launchDigestEvents("", `digest_${roadId}-${powerId}`), [roadId, powerId]);
+  assert.deepEqual(launchDigestEvents("", `digest_${roadId}-invalid`), []);
 });
 
 test("ссылка на афишу отделена от существующих ссылок городских работ", () => {

@@ -297,6 +297,17 @@ class TelegramBotAPI:
             payload["reply_markup"] = map_reply_markup(map_url)
         return self._message_id(await self._call("sendMessage", payload))
 
+    async def send_digest_message(
+        self, chat_id: int, html: str, *, map_url: str | None = None,
+    ) -> int:
+        payload: dict[str, object] = {
+            "chat_id": chat_id, "text": html, "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": True}, "disable_notification": True,
+        }
+        if map_url is not None:
+            payload["reply_markup"] = map_reply_markup(map_url)
+        return self._message_id(await self._call("sendMessage", payload))
+
     async def delete_message(self, chat_id: int | str, message_id: int) -> None:
         result = await self._call(
             "deleteMessage",
