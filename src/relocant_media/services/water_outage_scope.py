@@ -24,8 +24,9 @@ _CITY_NEWS_PATH = re.compile(r"/(?:lat|cir)/beoinfo-vesti/a[1-9][0-9]*/[^/]+\.ht
 _POST_PATH = re.compile(r"/[a-z0-9]+(?:-[a-z0-9]+)+/\Z")
 _LETTERS = "A-Za-zČĆŽŠĐčćžšđА-Яа-яЈјЉљЊњЂђЋћЏџ"
 _NAME = rf"[{_LETTERS}][{_LETTERS} '\u2019-]{{0,98}}[{_LETTERS}]"
+_AREA_NAME_FOR_DISTRICT = rf"[{_LETTERS}][{_LETTERS} '\u2019-]{{0,98}}?[{_LETTERS}]"
 _MUNICIPALITY = re.compile(
-    rf"\b(?:u|na|у|на)\s+(?:opštini|општини)\s+({_NAME}?)(?=\s*[,.;]|\s+"
+    rf"\b(?:u|na|у|на)\s+(?:opštini|општини)\s+({_AREA_NAME_FOR_DISTRICT})(?=\s*[,.;]|\s+"
     r"(?:prouzrokovaće|проузроковаће)\b)", re.I,
 )
 _OUTAGE = r"(?:bez vode će ostati potrošači|без воде ће остати потрошачи)"
