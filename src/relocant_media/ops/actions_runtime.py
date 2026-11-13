@@ -32,6 +32,7 @@ from relocant_media.ai.package import canonical_json
 from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ops.belgrade_digests import due_slot as due_digest_slot
 from relocant_media.ops.belgrade_digests import run as run_digest
+from relocant_media.ops.digest_preview import preview as preview_digest
 from relocant_media.ops.events_export import export_events_snapshot
 from relocant_media.ops.map_backfill import apply as apply_map_buttons
 from relocant_media.ops.map_backfill import parse_targets as parse_map_button_targets
@@ -58,7 +59,7 @@ BELGRADE_STREETS = Path("cities/belgrade/map/roads.json.gz")
 BELGRADE_AREAS = Path("cities/belgrade/map/outage-areas.json.gz")
 MODES = {
     "preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback",
-    "map-backfill", "map-republish", "map-republish-review", "digest",
+    "map-backfill", "map-republish", "map-republish-review", "digest", "digest-preview",
 }
 
 
@@ -545,6 +546,15 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         return 0
     work.mkdir(parents=True, exist_ok=False, mode=0o700)
     database = restored(drive, state["snapshot"], work)
+    if mode == "digest-preview":
+        if environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
+            raise ValueError("digest preview requires a manual request")
+        when = datetime.fromisoformat(environment["DIGEST_PREVIEW_AT"])
+        result = asyncio.run(preview_digest(
+            database, when, environment.get("RELOCANT_MAP_TELEGRAM_APP", ""),
+        ))
+        print(json.dumps({"digest_preview": result}, ensure_ascii=False), flush=True)
+        return 0
     if mode == "preview":
         export_public(database, output, state["snapshot"]["created_at"], None)
         if map_output is not None:
