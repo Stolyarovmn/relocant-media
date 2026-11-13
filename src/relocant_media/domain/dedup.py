@@ -29,6 +29,7 @@ from relocant_media.domain.event_facts import (
     terminal_anchor,
     transport_routes,
 )
+from relocant_media.domain.topic_tags import is_topic_footer
 
 _TRACKING_KEYS = {
     "fbclid",
@@ -436,11 +437,13 @@ def find_repeated_publication(
 
 def _publication_content(value: str) -> str:
     """Убирает только известные отдельные строки оформления публикации."""
-    return re.sub(
+    plain = re.sub(
         r"(?m)^(?:Рубрика: [^\r\n]+|Карта из источника: https?://\S+)\r?$",
         "",
         value,
     ).strip()
+    content, separator, footer = plain.rpartition("\n")
+    return content.rstrip() if separator and is_topic_footer(footer) else plain
 
 
 def cluster_events(candidates: list[EventCandidate]) -> list[list[EventCandidate]]:

@@ -90,8 +90,9 @@ def review_with_repairs(
         if current.presentation is not None:
             from relocant_media.services.editorial_products import present_draft
 
-            draft = PackageDraft.model_validate(
-                present_draft(draft, current.presentation).model_dump())
+            draft = PackageDraft.model_validate(present_draft(
+                draft, current.presentation, category=current.outcome.ranking.category,
+            ).model_dump())
         if (not valid_title_presentation(draft.title)
                 or not set(draft.claim_ids).issubset(supported)
                 or len(draft.claim_ids) != len(set(draft.claim_ids))):

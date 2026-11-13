@@ -103,9 +103,11 @@ def test_transport_map_is_bound_to_snapshot_and_reviewed_html(line):
         profile = load_city_profile("belgrade")
         presentation = build_presentation(session, 1, (article,), document_ids=[1],
                                           profile=profile, rubric_id="city_changes")
-        draft = present_draft(RussianDraft(title="В Сремчице изменились маршруты",
-                                           body="Работы идут до 5 декабря 2026 года.",
-                                           claim_ids=("period",)), presentation)
+        draft = present_draft(
+            RussianDraft(title="В Сремчице изменились маршруты",
+                         body="Работы идут до 5 декабря 2026 года.", claim_ids=("period",)),
+            presentation, category="transport",
+        )
         presentation = bind_native_map_draft(presentation, draft)
         native = presentation.native_map
         assert native is not None
@@ -117,16 +119,24 @@ def test_transport_map_is_bound_to_snapshot_and_reviewed_html(line):
         assert "<tg-map" not in native["message_html"]
         assert "id=transport_map" not in native["message_html"]
         assert f'href="{ARTICLE}">Источник' in native["message_html"]
-        validate_presentation(presentation, profile, (article,), draft, rubric_id="city_changes")
+        validate_presentation(
+            presentation, profile, (article,), draft,
+            rubric_id="city_changes", category="transport",
+        )
         verify_stored_presentation(session, 1, (article,), document_ids=[1],
                                    presentation=presentation)
         # Сохранённые до обновления пакеты пересобираются прежним способом.
-        historical = presentation.model_copy(update={"native_map": {
+        historical = presentation.model_copy(update={"version": 1, "native_map": {
             key: native[key] for key in ("point", "source_raw_item_id")
         }})
-        historical = bind_native_map_draft(historical, draft)
+        historical_draft = present_draft(draft.model_copy(update={
+            "body": draft.body.removesuffix("\n\n#Транспорт"),
+        }), historical)
+        historical = bind_native_map_draft(historical, historical_draft)
         assert "<tg-map" in historical.native_map["message_html"]
-        validate_presentation(historical, profile, (article,), draft, rubric_id="city_changes")
+        validate_presentation(
+            historical, profile, (article,), historical_draft, rubric_id="city_changes",
+        )
         changed_html = _map_html(line=line, latitude="44.640515")
         assert transport_point(article, notice, changed_html) != native["point"]
 

@@ -202,7 +202,8 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
         if package.presentation is None:
             raise ValueError("selected package requires reviewed presentation")
         validate_presentation(package.presentation, profile, documents, draft,
-                              rubric_id=outcome.ranking.selection.rubric_id)
+                              rubric_id=outcome.ranking.selection.rubric_id,
+                              category=outcome.ranking.category)
     elif package.presentation is not None:
         raise ValueError("presentation requires selection brief")
     if not _citations_are_grounded(claims, documents):

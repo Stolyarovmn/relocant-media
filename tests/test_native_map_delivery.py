@@ -100,7 +100,9 @@ def payload(session, *, city="belgrade", map_enabled=True, country_value=None, t
                                 published_at=published)
     presentation = build_presentation(session, raw.id, (document,), document_ids=[raw.id],
                                       profile=profile, rubric_id="weekend", source_url=url)
-    draft = present_draft(RussianDraft(title=title, body=body, claim_ids=("c1",)), presentation)
+    draft = present_draft(
+        RussianDraft(title=title, body=body, claim_ids=("c1",)), presentation, category="events",
+    )
     presentation = bind_native_map_draft(presentation, draft)
     selection = SelectionBrief(
         policy_version=profile.policy_version, profile_sha256=profile.sha256,
@@ -147,7 +149,7 @@ def test_snapshot_to_exact_html_is_portable_and_bound_before_reviews(session, ci
     assert presentation.native_map is not None
     assert "<tg-map " in presentation.native_map["message_html"]
     validate_presentation(presentation, profile, (document,), package.outcome.draft,
-                          rubric_id="weekend")
+                          rubric_id="weekend", category="events")
     verify_stored_presentation(session, package.raw_item_id, (document,),
                               document_ids=[package.raw_item_id], presentation=presentation)
     verify_live_map(presentation, document, html + "<footer>Обновление</footer>")
@@ -165,6 +167,7 @@ def test_optional_unsupported_json_ld_country_falls_back_to_text(session, countr
 def test_legacy_presentation_omits_none_without_changing_hash(session):
     data, _, _, _ = payload(session, map_enabled=False)
     original = copy.deepcopy(data["presentation"])
+    original["version"] = 1
     assert "native_map" not in original
     assert "event_place" not in original
     value = EditorialPresentation.model_validate(original)
@@ -183,7 +186,9 @@ def test_event_presentation_binds_afisha_to_saved_and_live_source(session):
     assert presentation.event_place["venue"]["name"] == "Галерея А"
     assert presentation.event_place["ends_at"] is None
     docs = tuple(package.event.documents)
-    validate_presentation(presentation, profile, docs, package.outcome.draft, rubric_id="weekend")
+    validate_presentation(
+        presentation, profile, docs, package.outcome.draft, rubric_id="weekend", category="events",
+    )
     verify_stored_presentation(session, package.raw_item_id, docs,
                               document_ids=[package.raw_item_id], presentation=presentation)
     verify_live_map(presentation, document, html + "<footer>Обновление</footer>")

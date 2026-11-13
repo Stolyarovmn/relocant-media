@@ -6,6 +6,8 @@ import re
 from html import escape, unescape
 from urllib.parse import urlsplit
 
+from relocant_media.domain.topic_tags import is_topic_footer, topic_tag_spans
+
 SOURCE_LABEL = "Источник"
 TELEGRAM_TEXT_LIMIT = 4096
 _SOURCE_LINE = re.compile(r"(?m)^Источник:[ \t]*(https://\S+?)[ \t]*$")
@@ -80,15 +82,21 @@ def editorial_html_parts(
     labels = _NOTICE_LABEL if notice else _EDITORIAL_LABEL
     times = _TIME_RANGE if notice else _EDITORIAL_TIME
     main, separator, rubric = body.rpartition("\n\nРубрика: ")
+    topics = ""
+    if not separator:
+        main, _, candidate = body.rpartition("\n\n")
+        if is_topic_footer(candidate):
+            topics = candidate
     parts = [f"<b>{escape(title)}</b>"]
-    for part in escape(main if separator else body).split("\n\n"):
+    for part in escape(main if separator or topics else body).split("\n\n"):
         if part.startswith("«") and part.endswith("»"):
             parts.append(f"<blockquote>{part}</blockquote>")
         else:
             lines = labels.sub(r"<b>\1</b>:", part)
             parts.append(times.sub(r"<code>\g<0></code>", lines))
     source = f'<a href="{escape(source_url, quote=True)}">{SOURCE_LABEL}</a>'
-    footer = [f"<b>Рубрика</b>: {escape(rubric)}", source] if separator else [source]
+    label = f"<b>Рубрика</b>: {escape(rubric)}" if separator else topics
+    footer = [label, source] if label else [source]
     return parts, footer
 
 
@@ -126,6 +134,8 @@ def editorial_caption(text: str) -> tuple[str, tuple[dict[str, object], ...]]:
                     mark("bold", position + label.start(1), position + label.end(1))
                 for hour in _EDITORIAL_TIME.finditer(part):
                     mark("code", position + hour.start(), position + hour.end())
+                for start, end in topic_tag_spans(part):
+                    mark("hashtag", position + start, position + end)
             position += len(part) + 2
     return visible, tuple(entities)
 

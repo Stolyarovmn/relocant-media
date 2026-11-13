@@ -58,7 +58,7 @@ def ready_package(seeded):
         draft = provider._responses["draft"].model_copy(update={
             "title": presentation_title(provider._responses["draft"].title),
         })
-        draft = present_draft(draft, presentation)
+        draft = present_draft(draft, presentation, category=provider._responses["rank"].category)
         outcome = EditorialOutcome(
             status="ready", reason="verified", confidence=.99,
             ranking=provider._responses["rank"], claims=provider._responses["claims"],
