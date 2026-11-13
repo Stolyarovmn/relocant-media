@@ -1,0 +1,20 @@
+id: media_aero_telegraf
+name: Aero.rs
+publisher: Telegraf
+ownership: media
+url: https://aero.telegraf.rs/avio-kompanije
+language: sr-Latn
+source_type: news_media
+trust: 0.75
+check_every: 1h
+categories: [transport]
+extraction:
+  strategy: aero_telegraf
+  status: active
+  approved_hosts: [aero.telegraf.rs]
+policy:
+  auto_publish: false
+  high_risk: false
+verification:
+  checked_at: '2026-11-14'
+  note: Профильное издание. Только свежие материалы по перевозчику или Белграду; самостоятельное сообщение СМИ с атрибуцией и проверкой редактора.

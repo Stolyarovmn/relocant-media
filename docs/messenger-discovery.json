@@ -347,6 +347,159 @@
           "https://invite.viber.com/?g2=AQBMMeg%2BOeZlQEssOvMj0FQt45PBeuhq2s1VmggSNHEj3opF7AlgTSlgj%2BBiqitf"
         ]
       }
+    },
+    {
+      "id": "telegram_newsserbia",
+      "platform": "telegram",
+      "name": "Новости из Сербии",
+      "url": "https://t.me/s/newsserbia",
+      "scope": [
+        "belgrade",
+        "serbia"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_posts",
+      "selection_basis": [
+        "user_mb_folder",
+        "verified_public_preview"
+      ],
+      "collection": {
+        "status": "runtime_public_preview",
+        "adapter": "telegram_public_preview",
+        "account_required": false
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-11-14",
+        "verification_urls": [
+          "https://t.me/s/newsserbia"
+        ]
+      }
+    },
+    {
+      "id": "telegram_ikonamitakikonami",
+      "platform": "telegram",
+      "name": "Нескучный Белград",
+      "url": "https://t.me/s/ikonamitakikonami",
+      "scope": [
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_posts",
+      "selection_basis": [
+        "user_mb_folder",
+        "verified_public_preview"
+      ],
+      "collection": {
+        "status": "runtime_public_preview",
+        "adapter": "telegram_public_preview",
+        "account_required": false
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-11-14",
+        "verification_urls": [
+          "https://t.me/s/ikonamitakikonami"
+        ]
+      }
+    },
+    {
+      "id": "telegram_zarko_tusic",
+      "platform": "telegram",
+      "name": "Жарко Тусић",
+      "url": "https://t.me/s/zarko_tusic",
+      "scope": [
+        "belgrade"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_posts",
+      "selection_basis": [
+        "user_mb_folder",
+        "verified_public_preview"
+      ],
+      "collection": {
+        "status": "runtime_public_preview",
+        "adapter": "telegram_public_preview",
+        "account_required": false
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-11-14",
+        "verification_urls": [
+          "https://t.me/s/zarko_tusic"
+        ]
+      }
+    },
+    {
+      "id": "telegram_serbiyamoivz",
+      "platform": "telegram",
+      "name": "Красивая Сербия ♡",
+      "url": "https://t.me/s/serbiyamoivz",
+      "scope": [
+        "belgrade",
+        "serbia"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_posts",
+      "selection_basis": [
+        "user_mb_folder",
+        "verified_public_preview"
+      ],
+      "collection": {
+        "status": "runtime_public_preview",
+        "adapter": "telegram_public_preview",
+        "account_required": false
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-11-14",
+        "verification_urls": [
+          "https://t.me/s/serbiyamoivz"
+        ]
+      }
+    },
+    {
+      "id": "telegram_novisadaily",
+      "platform": "telegram",
+      "name": "Нови Сад Daily",
+      "url": "https://t.me/s/novisadaily",
+      "scope": [
+        "novi_sad"
+      ],
+      "role": "discovery_only",
+      "publication_evidence": false,
+      "requires_primary_verification": true,
+      "authoritative_for": [],
+      "content_origin": "publisher_posts",
+      "selection_basis": [
+        "user_mb_folder",
+        "verified_public_preview"
+      ],
+      "collection": {
+        "status": "catalog_only",
+        "adapter": "telegram_public_preview",
+        "account_required": false,
+        "reason": "novi_sad_editorial_runtime_not_configured"
+      },
+      "verification": {
+        "status": "verified_current",
+        "verified_on": "2026-11-14",
+        "verification_urls": [
+          "https://t.me/s/novisadaily"
+        ]
+      }
     }
   ]
 }

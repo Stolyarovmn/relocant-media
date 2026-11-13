@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from relocant_media.collectors.aero_telegraf import SOURCE_ID as AVIATION_SOURCE
+from relocant_media.collectors.aero_telegraf import article_id as aviation_article_id
 from relocant_media.collectors.base import RawItem
 from relocant_media.collectors.beograd_article import match_beograd_article_url
 from relocant_media.collectors.cukarica_news import ARTICLE_PATH
@@ -96,8 +98,10 @@ def source_for_url(url: str, sources: dict[str, SourceConfig]) -> str | None:
             return key
         # A link from a channel to an article of a verified outlet becomes that outlet's item.
         # Homepages and section pages (fewer than two path segments) are not articles.
+        if AVIATION_SOURCE in sources and aviation_article_id(url):
+            return AVIATION_SOURCE
         for key, source in sources.items():
-            if source.source_type != "news_media":
+            if source.source_type != "news_media" or key == AVIATION_SOURCE:
                 continue
             try:
                 _allowed(url, source)
@@ -137,6 +141,21 @@ def public_search_plan(
     return result[:2]
 
 
+def _matches_article(text: str, article: RawItem) -> bool:
+    if topic_matches(text, article.title):
+        return True
+    if article.source_id != AVIATION_SOURCE:
+        return False
+    # Common airline and airport/destination terms survive Serbian/Russian spelling.
+    def terms(value: str) -> set[str]:
+        raw = folded(value).replace("guangdzou", "guangzhou").replace("guanchzhou", "guangzhou")
+        raw = re.sub(r"\bguancz(?:h)?ou\b", "guangzhou", raw)
+        raw = raw.replace("er srbija", "air serbia")
+        return set(re.findall(r"[a-z]{3,}|\d{1,4}", raw))
+    lead, title = terms(text), terms(article.title)
+    return {"air", "serbia"} <= lead & title and len((lead & title) - {"air", "serbia"}) >= 2
+
+
 async def resolve_public_discovery(
     lead: PublicDiscoveryLead,
     *,
@@ -156,20 +175,29 @@ async def resolve_public_discovery(
     """
     results: list[str] = []
     primary_urls: list[str] = []
+    media_urls: list[str] = []
     searches_performed = 0
 
     for url in lead.outbound_urls[:10]:
         result = await resolve_link(url)
         if result is None:
             continue
+        if aviation_article_id(url):
+            if result in {"primary_source_collected", "already_collected"}:
+                media_urls.append(url)
+            continue
         results.append(result)
         primary_urls.append(url)
 
     # This is a pointer to independently collected evidence, never claim confirmation.
     for article in tuple(articles):
-        if topic_matches(lead.text, article.title) and article.url not in primary_urls:
-            primary_urls.append(article.url)
-            results.append("primary_source_collected")
+        if not _matches_article(lead.text, article) or article.url in primary_urls:
+            continue
+        if article.source_id == AVIATION_SOURCE:
+            media_urls.append(article.url)
+            continue
+        primary_urls.append(article.url)
+        results.append("primary_source_collected")
 
     if not any(result == "primary_source_collected" for result in results):
         for source_id, search_url in search_plan(lead.text):
@@ -188,9 +216,11 @@ async def resolve_public_discovery(
         result in {"primary_source_collected", "already_collected"}
         for result in results
     )
+    status = ("primary_source_resolved" if resolved else
+              "media_source_for_editor_review" if media_urls else "deferred_missing_primary_source")
     return PrimaryResolution(
-        status="primary_source_resolved" if resolved else "deferred_missing_primary_source",
-        primary_results=tuple(results),
-        primary_urls=tuple(primary_urls),
+        status=status,
+        primary_results=tuple(results) + (("attributed_media",) if media_urls else ()),
+        primary_urls=tuple(dict.fromkeys([*primary_urls, *media_urls])),
         searches_performed=searches_performed,
     )
