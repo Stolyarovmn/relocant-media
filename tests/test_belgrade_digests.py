@@ -1,10 +1,11 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 from relocant_media.collectors.rhmz_forecast import parse_forecast, parse_warning
-from relocant_media.domain.map_links import is_map_event_url
-from relocant_media.ops.belgrade_digests import Entry, deliver, due_slot, render
+from relocant_media.domain.map_links import is_map_event_url, map_event_id
+from relocant_media.ops.belgrade_digests import Entry, _road_text, deliver, due_slot, render
+from relocant_media.ops.map_export import Incident, Segment
 
 _ZONE = ZoneInfo("Europe/Belgrade")
 
@@ -64,6 +65,15 @@ def test_render_uses_compact_html_one_hashtag_and_grouped_map():
     assert is_map_event_url(digest.map_url) and first in digest.map_url and second in digest.map_url
     assert "<b>Свет</b>" in digest.html and "⚡" not in digest.html
     assert "&lt;Центр&gt;" in digest.html and digest.html.count("#Сводка") == 1
+
+
+def test_long_roadworks_keep_the_end_year():
+    source = "https://www.bgprevoz.rs/linije/aktuelne-izmene/1153"
+    segment = Segment(municipality="Novi Beograd", street="Zemunski put",
+                      start="Sajmište", end="Zarije Vujoševića")
+    incident = Incident(id=map_event_id(source), kind="road", title="Работы", source_url=source,
+                        starts_on=date(2026, 11, 14), ends_on=date(2027, 9, 2), segments=(segment,))
+    assert _road_text(incident, incident.segments).endswith("по 2 сентября 2027 года.")
 
 
 def test_uncertain_send_is_recorded_and_never_repeated():
