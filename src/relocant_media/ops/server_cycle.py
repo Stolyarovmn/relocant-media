@@ -1060,7 +1060,7 @@ def policy_reassessment_ids(engine: Engine) -> tuple[list[int], list[int]]:
     with Session(engine) as session:
         reason = EditorialRun.outcome["reason"].as_string()
         correction_cutoff = datetime.now(UTC) - timedelta(days=8)
-        rows = session.execute(select(EditorialRun.raw_item_id, reason).join(RawItem).join(Source)
+        rows = session.scalars(select(EditorialRun).join(RawItem).join(Source)
             .where(Source.city == "belgrade", EditorialRun.post_id.is_(None),
                    EditorialRun.delivery_status == "pending",
                    (reason == "source_auto_publish_disabled") | (
@@ -1068,11 +1068,11 @@ def policy_reassessment_ids(engine: Engine) -> tuple[list[int], list[int]]:
                        & (RawItem.published_at >= correction_cutoff)
                    ))
             .order_by(RawItem.published_at.desc())).all()
-        for raw_id, previous_reason in rows:
-            if eligible_empty_policy_hold(session, raw_id):
-                target = (policy_holds if previous_reason == "source_auto_publish_disabled"
+        for run in rows:
+            if eligible_empty_policy_hold(session, run.raw_item_id):
+                target = (policy_holds if run.outcome["reason"] == "source_auto_publish_disabled"
                           else corrections)
-                target.append(raw_id)
+                target.append(run.raw_item_id)
     return corrections, policy_holds
 
 
