@@ -711,9 +711,11 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
             if len(confirmed) >= 4:
                 break
         confirmed = confirmed[:4]
-        priority_url = next(iter(_policy().official_reminder_sources.get(
-            now.date() + timedelta(days=1), (),
-        )), None)
+        priority_url = None
+        if slot.kind != "morning":
+            priority_url = next(iter(_policy().official_reminder_sources.get(
+                now.date() + timedelta(days=1), (),
+            )), None)
         priority_missing = bool(priority_url and all(row.url != priority_url for row in confirmed))
         if (priority_missing or candidates and not confirmed) and (
             len(entries) < 2 or now < slot.expires - timedelta(minutes=15)

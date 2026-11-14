@@ -1,14 +1,27 @@
 import asyncio
+import json
 from datetime import UTC, date, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import create_engine
+import httpx
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from test_transport_map import _map_html
+from test_utility_scope import document as power_document
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.bot.formatting import TELEGRAM_TEXT_LIMIT, formatted_text_units
-from relocant_media.collectors.rhmz_forecast import parse_forecast, parse_warning
+from relocant_media.collectors.base import RawItem as CollectedItem
+from relocant_media.collectors.rhmz_forecast import (
+    FORECAST_URL,
+    WARNING_URL,
+    parse_forecast,
+    parse_warning,
+)
 from relocant_media.domain.map_links import is_map_event_url, map_event_id
+from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
+from relocant_media.ops import belgrade_digests
 from relocant_media.ops.belgrade_digests import (
     Entry,
     _evidence_sha,
@@ -20,6 +33,7 @@ from relocant_media.ops.belgrade_digests import (
     render,
 )
 from relocant_media.ops.map_export import Address, Incident, PrintedRange, Segment, Window
+from relocant_media.sources.registry import load_source_file
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source
 
 _ZONE = ZoneInfo("Europe/Belgrade")
@@ -184,6 +198,109 @@ def test_morning_link_uses_only_a_sent_post_for_the_current_notice():
         ))
         assert _link_to_published(session, current, now) == current
     engine.dispose()
+
+
+def test_next_morning_delivers_addresses_and_all_map_items_before_evening_reminder(
+    tmp_path, monkeypatch,
+):
+    now = datetime(2026, 11, 16, 7, 30, tzinfo=_ZONE)
+    slot = due_slot(now)
+    assert slot is not None and slot.kind == "morning"
+    assert date(2026, 11, 17) in belgrade_digests._policy().official_reminder_sources
+    app = "https://t.me/relocant_media_belgrade_bot"
+    transport = "https://www.bgprevoz.rs/linije/aktuelne-izmene/"
+    power = power_document(
+        "Vračar 9.00 - 11.00 PRVA ULICA: 42,\n"
+        "Zvezdara 13.00 - 15.00 DRUGA ULICA: 2,",
+        title="ELEKTRIČNA ENERGIJA: Planirana isključenja za 16. novembar 2026. godine",
+        published_at=now.replace(day=15),
+    )
+    period = "Период измене: 14.11.2026–30.11.2026.\n"
+    road = CollectedItem(
+        source_id="bgprevoz_changes", url=transport + "1501", external_id="1501", published_at=None,
+        title="Радови у улици", body=period + "Затварање улице Прве.",
+        source_html=_map_html(notice_id=1501, line=True),
+    )
+    route = CollectedItem(
+        source_id="bgprevoz_changes", url=transport + "1502", external_id="1502", published_at=None,
+        title="Линија бр. 60", body=period + "Затварање улице Друге. Кружна линија.",
+        source_html=_map_html(notice_id=1502, line=True),
+    )
+    # An official line can lack textual endpoints, while a verified Russian brief
+    # supplies the human-readable restriction in the digest.
+    policy = belgrade_digests._policy()
+    brief = belgrade_digests.TransportBrief(text="Перекрыта Первая улица.", details=())
+    monkeypatch.setattr(belgrade_digests, "_policy", lambda: policy.model_copy(update={
+        "transport_briefs": {_evidence_sha(EvidenceDocument.model_validate(
+            road, from_attributes=True,
+        )): brief},
+    }))
+    db = tmp_path / "digest.sqlite3"
+    engine = create_engine(f"sqlite:///{db}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        for source_id in (power.source_id, road.source_id):
+            sync_source(session, "belgrade", load_source_file(
+                Path("cities/belgrade/sources") / f"{source_id}.yaml",
+            ))
+        capture_collected_batch(session, [
+            CollectedItem(**power.model_dump(), external_id="power-16"), road, route,
+        ])
+        for item in session.scalars(select(RawItem)):
+            item.ingested_at = now.replace(day=15)
+        raw = session.scalar(select(RawItem).where(RawItem.url == power.url))
+        assert raw is not None
+        post = Post(city="belgrade", title="Отключение света", body="Список домов",
+                    category="utilities", status="ready", confidence=1,
+                    published_at=now.replace(day=15), telegram_message_id=201)
+        session.add(post)
+        session.flush()
+        session.add(EditorialRun(raw_item_id=raw.id, post_id=post.id, delivery_status="sent",
+                                 outcome={}, evidence={"title": raw.title, "body": raw.body}))
+        session.commit()
+    engine.dispose()
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(belgrade_digests, "datetime", FrozenDateTime)
+    monkeypatch.setattr(belgrade_digests, "_cover", lambda slot: None)
+    real_client = httpx.AsyncClient
+    sent = []
+
+    def telegram(request):
+        if str(request.url) in {FORECAST_URL, WARNING_URL}:
+            return httpx.Response(404)
+        assert request.url.host == "api.telegram.org" and request.url.path.endswith("/sendMessage")
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 202}})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(
+        transport=httpx.MockTransport(telegram), **kwargs,
+    ))
+    state = {}
+
+    def commit(current, sha, updates):
+        state.update(updates)
+        return state, "updated"
+
+    receipt = asyncio.run(belgrade_digests.run(db, slot, state, "base", commit, {
+        "TELEGRAM_BOT_TOKEN": "test-token", "RELOCANT_MAP_TELEGRAM_APP": app,
+    }))
+    assert receipt["state"] == "sent" and len(sent) == 1
+    message = sent[0]
+    html = message["text"]
+    assert '<a href="https://t.me/eduvbelgrad/201">Подробнее</a>' in html
+    assert "<blockquote expandable><b>Адреса и время работ</b>" in html
+    assert "PRVA ULICA, 42 — 09:00–11:00" in html
+    assert "DRUGA ULICA, 2 — 13:00–15:00" in html
+    button = message["reply_markup"]["inline_keyboard"][0][0]
+    assert button["text"] == "Посмотреть на карте"
+    expected_ids = {map_event_id(item.url) for item in (road, route, power)}
+    assert button["url"].startswith(app + "?startapp=digest_")
+    assert set(button["url"].split("digest_", 1)[1].split("-")) == expected_ids
 
 
 def test_uncertain_send_is_recorded_and_never_repeated():
