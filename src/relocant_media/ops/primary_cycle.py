@@ -73,7 +73,7 @@ def run_cycle(
     process: Callable[[int], dict[str, Any]], limit: int = 5,
     refresh_until: bool = False, newest_first: bool = False,
     allow_partial_ingest: bool = False,
-    reassessment_ids: Callable[[], list[int]] | None = None,
+    reassessment_ids: Callable[[], tuple[list[int], list[int]]] | None = None,
     continue_on_error: bool = False,
     candidate_priorities: Callable[[], dict[str, int]] | None = None,
     priority_items: Callable[[], set[int]] | None = None,
@@ -110,6 +110,7 @@ def run_cycle(
             heartbeat["collection_failures"] = collection["failures"]
             if collection["failures"] and not allow_partial_ingest:
                 raise ValueError("source collection incomplete")
+            corrections, policy_holds = reassessment_ids() if reassessment_ids else ([], [])
             with Session(engine) as session:
                 deferred = deferred_items(session) if deferred_items else set()
                 manifest = select_candidates(session, city=city,
@@ -122,11 +123,19 @@ def run_cycle(
                     source_priorities=candidate_priorities() if candidate_priorities else None)
             if reassessment_ids is not None:
                 selected = {candidate["raw_item_id"] for candidate in manifest["candidates"]}
-                extra = [i for i in reassessment_ids() if i not in selected and i not in deferred]
+                corrections = [i for i in corrections if i not in selected and i not in deferred]
+                policy_holds = [i for i in policy_holds if i not in selected and i not in deferred]
+                # Repair one previously stalled decision even if the fresh queue is full.
+                if corrections:
+                    manifest["candidates"].insert(0, {
+                        "raw_item_id": corrections[0], "reassessment": True,
+                    })
+                    del manifest["candidates"][limit:]
+                slots = limit - len(manifest["candidates"])
                 manifest["candidates"].extend({"raw_item_id": i, "reassessment": True}
-                    for i in extra[:max(0, limit - len(selected))])
+                    for i in (corrections[1:] + policy_holds)[:slots])
                 manifest["candidate_count"] = len(manifest["candidates"])
-                manifest["reassessment_count"] = len(extra)
+                manifest["reassessment_count"] = len(corrections) + len(policy_holds)
             # Jev is a non-authoritative, optional observer; it never edits the queue.
             if jev_enabled():
                 try:
@@ -168,7 +177,7 @@ def run_cycle(
                     allowed_raw_ids=allowed_items() if allowed_items else None)
                 revision_count = session.scalar(select(func.count()).select_from(
                     SourceRevision).join(RawItem).join(Source).where(Source.city == city))
-            additional_remaining = len(reassessment_ids()) if reassessment_ids else 0
+            additional_remaining = sum(map(len, reassessment_ids())) if reassessment_ids else 0
             complete = (remaining["eligible_count"] + additional_remaining == 0
                         and not processing_errors)
             heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
