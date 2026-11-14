@@ -1,10 +1,12 @@
-"""Guarded autonomous assessment of previously unexamined policy holds."""
+"""Guarded reassessment of unresolved editorial decisions without a draft."""
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
+from relocant_media.domain.audience import local_flight_change
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import evidence_freshness
 from relocant_media.services.editorial import _candidate, _document, _event_items, _snapshot_member
@@ -22,15 +24,24 @@ def eligible_empty_policy_hold(
         return False
     outcome = run.outcome
     if (run.post_id is not None or run.delivery_status != "pending"
-            or run.staging_message_id is not None or outcome.get("status") != "human_review"
-            or outcome.get("reason") != "source_auto_publish_disabled"
+            or run.staging_message_id is not None
             or any(outcome.get(key) is not None for key in ("claims", "verification", "draft"))
             or "_package" in outcome or "_autonomous_assessment" in outcome):
+        return False
+    status, reason = outcome.get("status"), outcome.get("reason")
+    rejected = (status, reason) == ("skipped", "ranking_rejected")
+    if not rejected and (status != "human_review" or reason not in {
+        "source_auto_publish_disabled", "selection_ungrounded_evidence",
+    }):
         return False
     if evidence_freshness(item.title, item.body, item.published_at, now or datetime.now(UTC),
                           precision=item.published_at_precision, source_type=source.source_type,
                           verified_at=item.ingested_at).action != "keep":
         return False
+    if rejected:
+        profile = load_city_profile(source.city)
+        if not local_flight_change(item.title, item.body, profile.geography.city_aliases):
+            return False
     members = _event_items(session, anchor=item, anchor_source=source)
     expected = [_snapshot_member(member, policy) for member, policy in members]
     return (run.evidence.get("city") == source.city

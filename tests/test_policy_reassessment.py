@@ -113,3 +113,24 @@ def test_ready_or_changed_evidence_cannot_bypass_reviewed_import(state):
         persist_policy_reassessment(session, 1, outcome,
             (documents[0].model_copy(update={"body": "Изменено"}),), now=NOW)
     assert run.outcome["reason"] == "source_auto_publish_disabled"
+
+
+@pytest.mark.parametrize(("status", "reason", "flight", "eligible"), [
+    ("human_review", "selection_ungrounded_evidence", False, True),
+    ("skipped", "ranking_rejected", True, True),
+    ("skipped", "ranking_rejected", False, False),
+    ("human_review", "source_changed_requires_review", True, False),
+])
+def test_only_targeted_saved_decisions_are_reopened(state, status, reason, flight, eligible):
+    session, _, run, _ = state
+    item = session.get(RawItem, run.raw_item_id)
+    source = session.get(Source, item.source_id)
+    if flight:
+        item.title = "Air Serbia obustavlja letove za Guangdžou"
+        item.body = "Er Srbija povukla je iz prodaje letove između Beograda i Guangdžoua."
+    run.evidence = {**_document(item).model_dump(mode="json"), "city": source.city,
+                    "event_key": event_key(_candidate(item)),
+                    "documents": [_snapshot_member(item, source)]}
+    run.outcome = {**run.outcome, "status": status, "reason": reason}
+    session.commit()
+    assert eligible_empty_policy_hold(session, item.id, now=NOW) is eligible

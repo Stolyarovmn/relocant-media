@@ -56,6 +56,17 @@ class CapturingProvider(FakeProvider):
         return super().generate_json(**kwargs)
 
 
+class CorrectedRankingProvider(CapturingProvider):
+    def __init__(self, responses, corrected):
+        super().__init__(responses)
+        self.corrected = corrected
+
+    def generate_json(self, **kwargs: Any) -> str:
+        if kwargs["task"] == "rank" and "correction" in json.loads(kwargs["prompt"]):
+            self._responses["rank"] = self.corrected
+        return super().generate_json(**kwargs)
+
+
 def provider_for(profile, *, category="utilities", selection=None):
     return CapturingProvider({
         "rank": _ranking(category).model_copy(update={"selection": selection or brief(profile)}),
@@ -120,7 +131,60 @@ def test_unsupported_selection_stops_before_expensive_stages(mutation, reason) -
     )
     assert result.reason == reason
     assert result.status == PublicationStatus.HUMAN_REVIEW
-    assert provider.calls == ["rank"]
+    expected_calls = ["rank", "rank"] if reason == "selection_ungrounded_evidence" else ["rank"]
+    assert provider.calls == expected_calls
+
+
+def test_water_notice_retries_selection_with_verbatim_evidence() -> None:
+    profile = load_city_profile("belgrade")
+    document = _document()
+    good = _ranking().model_copy(update={"selection": brief(profile, document)})
+    citation = good.selection.evidence_refs[0].model_copy(update={
+        "quote": document.body + " Raspored auto cisterni:",
+    })
+    bad = good.model_copy(update={"selection": good.selection.model_copy(update={
+        "evidence_refs": (citation,),
+    })})
+    provider = CorrectedRankingProvider(
+        {"rank": bad, "claims": _claims(), "verify": _verification(), "draft": _draft()}, good,
+    )
+    result = EditorialPipeline(provider, city_profile=profile).run(
+        city="belgrade", documents=(document,),
+    )
+    assert result.status == PublicationStatus.READY
+    assert provider.calls == ["rank", "rank", "claims", "verify", "draft"]
+    assert "no merged passages" in json.loads(provider.requests[1]["prompt"])["correction"]
+
+
+@pytest.mark.parametrize("corrected", [True, False])
+def test_air_serbia_cancellation_gets_a_second_look_or_review(corrected) -> None:
+    profile = load_city_profile("belgrade")
+    document = _document().model_copy(update={
+        "title": "Air Serbia obustavlja letove za Guangdžou posle 27. novembra",
+        "body": "Er Srbija povukla je iz prodaje direktne letove između Beograda i Guangdžoua.",
+    })
+    rejected = _ranking("economy").model_copy(update={"should_process": False})
+    selected = _ranking("transport").model_copy(update={"selection": brief(profile, document)})
+    provider = CorrectedRankingProvider(
+        {"rank": rejected, "claims": _claims(document.body), "verify": _verification(),
+         "draft": _draft().model_copy(update={
+             "title": "Air Serbia сняла с продажи рейсы в Гуанчжоу",
+             "body": "Из продажи убрали прямые рейсы между Белградом и Гуанчжоу.",
+         })},
+        selected if corrected else rejected,
+    )
+    result = EditorialPipeline(provider, city_profile=profile).run(
+        city="belgrade", documents=(document,),
+    )
+    assert provider.calls[:2] == ["rank", "rank"]
+    assert "пассажиров" in json.loads(provider.requests[1]["prompt"])["correction"]
+    if corrected:
+        assert result.status == PublicationStatus.READY
+        assert result.ranking.category == "transport"
+    else:
+        assert result.status == PublicationStatus.HUMAN_REVIEW
+        assert result.reason == "local_flight_change_requires_review"
+        assert provider.calls == ["rank", "rank"]
 
 
 def test_rejected_high_relevance_does_not_enter_old_borderline_fallback() -> None:

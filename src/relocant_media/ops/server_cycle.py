@@ -20,7 +20,12 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.diagnostics import AI_PHASES
 from relocant_media.ai.gemini_process import IsolatedGeminiProvider
-from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
+from relocant_media.ai.models import (
+    EditorialOutcome,
+    EvidenceDocument,
+    PublicationStatus,
+    RankingResult,
+)
 from relocant_media.ai.package import EditorialPackage
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.ai.provider import StructuredAIProvider
@@ -911,6 +916,16 @@ def prepare_reviewed(
                     "reason": existing.outcome.get("reason", "already_processed")}
         twin = _reviewed_event_item(session, anchor=raw, anchor_source=source)
         if twin is not None:
+            if reassessing:
+                documents = tuple(_document(item) for item, _ in
+                                  _event_items(session, anchor=raw, anchor_source=source))
+                persist_policy_reassessment(session, raw_id, EditorialOutcome(
+                    status=PublicationStatus.SKIPPED, reason="event_already_reviewed",
+                    ranking=RankingResult(should_process=False, relevance=0, category="city",
+                                          confidence=1, rationale="Событие уже проверено"),
+                    confidence=1), documents)
+                return {"raw_item_id": raw_id, "status": "skipped",
+                        "reason": "event_already_reviewed"}
             # The service refuses a second review of the same event; without a run this item
             # would fail the same way in every cycle and take a processing slot each time.
             session.add(EditorialRun(
@@ -939,7 +954,6 @@ def prepare_reviewed(
                                         timezone_name=profile.timezone)
                     if source.source_type == "official_venue_events" else None)
     if freshness.action != "keep" or venue_reason is not None:
-        from relocant_media.ai.models import RankingResult
         outcome = EditorialOutcome(
             status=(PublicationStatus.SKIPPED if freshness.action == "discard"
                     or venue_reason is not None else PublicationStatus.HUMAN_REVIEW),
@@ -964,7 +978,10 @@ def prepare_reviewed(
             outcome = outcome.model_copy(update={
                 "status": PublicationStatus.SKIPPED,
                 "reason": f"draft_repeats_recent_post:{duplicate}", "draft": None})
-    if outcome.status != PublicationStatus.READY or outcome.draft is None:
+    needs_reviewed_package = (reassessing and outcome.status == PublicationStatus.HUMAN_REVIEW
+                              and outcome.ranking.selection is not None)
+    if outcome.draft is None or (outcome.status != PublicationStatus.READY
+                                 and not needs_reviewed_package):
         with Session(engine) as session:
             run = (persist_policy_reassessment(session, raw_id, outcome, documents)
                    if reassessing else
@@ -1037,11 +1054,26 @@ def prepare_reviewed(
     return result
 
 
-def policy_reassessment_ids(engine: Engine) -> list[int]:
+def policy_reassessment_ids(engine: Engine) -> tuple[list[int], list[int]]:
+    corrections: list[int] = []
+    policy_holds: list[int] = []
     with Session(engine) as session:
-        ids = session.scalars(select(EditorialRun.raw_item_id).join(RawItem).join(Source)
-            .where(Source.city == "belgrade").order_by(RawItem.published_at.desc()))
-        return [i for i in ids if eligible_empty_policy_hold(session, i)]
+        reason = EditorialRun.outcome["reason"].as_string()
+        correction_cutoff = datetime.now(UTC) - timedelta(days=8)
+        rows = session.scalars(select(EditorialRun).join(RawItem).join(Source)
+            .where(Source.city == "belgrade", EditorialRun.post_id.is_(None),
+                   EditorialRun.delivery_status == "pending",
+                   (reason == "source_auto_publish_disabled") | (
+                       reason.in_(("selection_ungrounded_evidence", "ranking_rejected"))
+                       & (RawItem.published_at >= correction_cutoff)
+                   ))
+            .order_by(RawItem.published_at.desc())).all()
+        for run in rows:
+            if eligible_empty_policy_hold(session, run.raw_item_id):
+                target = (policy_holds if run.outcome["reason"] == "source_auto_publish_disabled"
+                          else corrections)
+                target.append(run.raw_item_id)
+    return corrections, policy_holds
 
 
 class ChannelPublisher:

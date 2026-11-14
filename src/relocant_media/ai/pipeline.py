@@ -26,7 +26,7 @@ from relocant_media.ai.prompts import (
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.ai.selection import selection_reason
-from relocant_media.domain.audience import audience_relevance_reason
+from relocant_media.domain.audience import audience_relevance_reason, local_flight_change
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import publication_date_context
@@ -98,6 +98,12 @@ CITATION_RETRY_NOTE = (
     "Previous quotes were not found verbatim in the evidence. Copy each quote character for "
     "character from one contiguous passage; no ellipsis, no merged passages, no corrected "
     "spelling or punctuation."
+)
+
+FLIGHT_RETRY_NOTE = (
+    "Повторно оцени подтверждённое изменение рейсов по пользе для пассажиров, "
+    "которых оно затрагивает. Проверь связь маршрута с городом и категорию transport. "
+    "При положительном решении приложи точные выдержки из источника."
 )
 
 
@@ -181,24 +187,48 @@ class EditorialPipeline:
         )
         profile_payload = ({"city_profile": profile.model_dump(mode="json"),
                             "profile_sha256": profile.sha256} if profile else {})
-        ranking = _ask(
-            self._provider,
-            task="rank",
-            system_instruction=rank_instruction + (RANK_EVERGREEN if evergreen else ""),
-            payload={"city": city, "evidence": evidence,
-                     **profile_payload,
-                     **({"recent_publications": recent_publications}
-                        if recent_publications is not None else {}),
-                     **({"content_type": "evergreen_guide"} if evergreen else {})},
-            response_model=RankingResult,
-        )
+        rank_payload = {"city": city, "evidence": evidence, **profile_payload,
+                        **({"recent_publications": recent_publications}
+                           if recent_publications is not None else {}),
+                        **({"content_type": "evergreen_guide"} if evergreen else {})}
+
+        def rank(correction: str | None = None) -> RankingResult:
+            return _ask(
+                self._provider, task="rank",
+                system_instruction=rank_instruction + (RANK_EVERGREEN if evergreen else ""),
+                payload={**rank_payload, **({"correction": correction} if correction else {})},
+                response_model=RankingResult,
+            )
+
+        ranking = rank()
         if profile is not None:
-            if not ranking.should_process:
-                return EditorialOutcome(status=PublicationStatus.SKIPPED, reason="ranking_rejected",
-                    ranking=ranking, confidence=ranking.confidence)
-            reason = selection_reason(ranking, profile, documents, evergreen=evergreen)
+            rubric = profile.rubric("city_changes")
+            flight_change = (
+                not evergreen and rubric is not None and "transport" in rubric.categories
+                and any(local_flight_change(d.title, d.body, profile.geography.city_aliases)
+                        for d in documents)
+            )
+            reason = (selection_reason(ranking, profile, documents, evergreen=evergreen)
+                      if ranking.should_process else None)
+            corrections = []
+            if reason == "selection_ungrounded_evidence":
+                corrections.append(CITATION_RETRY_NOTE)
+            if flight_change and (not ranking.should_process or ranking.category != "transport"):
+                corrections.append(FLIGHT_RETRY_NOTE)
+            if corrections:
+                corrected = rank(" ".join(corrections))
+                # A rejected retry cannot erase an accepted topic's review requirement.
+                if corrected.should_process or not ranking.should_process:
+                    ranking = corrected
+                    reason = (selection_reason(ranking, profile, documents, evergreen=evergreen)
+                              if ranking.should_process else None)
+            if flight_change and (not ranking.should_process or ranking.category != "transport"):
+                reason = "local_flight_change_requires_review"
             if reason:
                 return EditorialOutcome(status=PublicationStatus.HUMAN_REVIEW, reason=reason,
+                    ranking=ranking, confidence=ranking.confidence)
+            if not ranking.should_process:
+                return EditorialOutcome(status=PublicationStatus.SKIPPED, reason="ranking_rejected",
                     ranking=ranking, confidence=ranking.confidence)
         borderline = not ranking.should_process and is_borderline(
             ranking.relevance, ranking.confidence, ranking.category,
