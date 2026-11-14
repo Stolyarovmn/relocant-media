@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.bot.api import TelegramBotAPI
-from relocant_media.bot.formatting import formatted_text_units
+from relocant_media.bot.formatting import TELEGRAM_TEXT_LIMIT, formatted_text_units
 from relocant_media.collectors.beograd_article import BelgradeArticleCollector
 from relocant_media.collectors.factory import build_collector
 from relocant_media.collectors.rhmz_forecast import (
@@ -50,7 +50,7 @@ from relocant_media.services.local_street_geometry import load_street_index
 from relocant_media.services.road_scope import resolve_road_segments
 from relocant_media.services.transport_map import SOURCE_ID, _signature
 from relocant_media.services.transport_map_source import _notice_id, extract_transport_map
-from relocant_media.services.utility_scope import extract_power_scopes
+from relocant_media.services.utility_scope import extract_power_scopes, house_in_range
 from relocant_media.services.water_outage_scope import (
     extract_water_outage_scopes,
     reported_water_places,
@@ -71,6 +71,21 @@ _LABELS = {"road": "🚧 Перекрытия", "route": "🚋 Транспор�
 _TITLE = {"morning": "Белград сегодня", "evening": "Главное за день",
           "reminder": "Напоминание на завтра"}
 _EMOJI = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u200D\uFE0F\u20E3]+")
+_CIRCULAR_ROUTE = re.compile(r"\b(?:кружна линија|kružna linija)\b", re.I)
+_EXISTING_STOPS = re.compile(
+    r"\b(?:сва постојећа стајалишта|sva postojeća stajališta)\b", re.I,
+)
+_MOVED_STOP = re.compile(
+    r"(?:стајалиште|stajalište)\s+[„“\"]([^»“”\"]{2,70})[»“”\"]"
+    r"[^.;]{0,100}\b(?:се измешта|se izmešta)\b", re.I,
+)
+
+
+class TransportBrief(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: str = Field(min_length=1, max_length=230)
+    details: tuple[str, ...] = Field(max_length=12)
 
 
 class Pilot(BaseModel):
@@ -83,6 +98,7 @@ class Pilot(BaseModel):
     delivery_window_minutes: int = Field(ge=5, le=60)
     reminders_from: date | None = None
     official_reminder_sources: dict[date, tuple[str, ...]] = Field(default_factory=dict)
+    transport_briefs: dict[str, TransportBrief] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -112,6 +128,7 @@ class Entry:
     place: bool = False
     scheduled_start: datetime | None = None
     scheduled_end: datetime | None = None
+    address_rows: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -168,10 +185,14 @@ def _day(value: date, *, year: int | None = None) -> str:
 
 
 def _evidence_sha(document: EvidenceDocument) -> str:
-    return hashlib.sha256((document.title + "\n" + document.body).encode()).hexdigest()
+    return _content_sha(document.title, document.body)
 
 
-def _incidents(session: Session, now: datetime) -> list[Entry]:
+def _content_sha(title: str, body: str) -> str:
+    return hashlib.sha256((title + "\n" + body).encode()).hexdigest()
+
+
+def _incidents(session: Session, now: datetime, policy: Pilot) -> list[Entry]:
     tomorrow = datetime.combine(now.date() + timedelta(days=1), time.min, now.tzinfo)
     result = []
     streets = load_street_index(Path("cities/belgrade/map/roads.json.gz"))
@@ -187,7 +208,7 @@ def _incidents(session: Session, now: datetime) -> list[Entry]:
             continue
         if notice.kind == "road" and (notice.starts_on is None or notice.ends_on is None):
             continue
-        text = _incident_text(notice, now, tomorrow)
+        text, address_rows = _incident_content(notice, now, tomorrow)
         if notice.kind == "road" and not text:
             source = session.scalar(select(RawItem).where(
                 RawItem.source_id == SOURCE_ID, RawItem.url == notice.source_map_url,
@@ -197,7 +218,7 @@ def _incidents(session: Session, now: datetime) -> list[Entry]:
                 segments = [Segment.model_validate(value["segment"])
                             for value in resolve_road_segments(doc, streets)]
                 text = _road_text(notice, segments)
-        if text:
+        if text or notice.kind == "road" and notice.lines:
             map_id = notice.id if (notice.points or notice.lines or notice.areas
                                   or notice.addresses or notice.segments
                                   or notice.reported_scope) else ""
@@ -210,10 +231,18 @@ def _incidents(session: Session, now: datetime) -> list[Entry]:
             ).order_by(RawItem.ingested_at.desc(), RawItem.id.desc()).limit(1))
             raw_document = (EvidenceDocument.model_validate(raw, from_attributes=True)
                             if raw else None)
+            if raw_document and notice.kind == "road":
+                brief = policy.transport_briefs.get(_evidence_sha(raw_document))
+                if brief is not None:
+                    text, address_rows = brief.text, brief.details
+            elif raw_document and notice.kind == "water" and notice.reported_scope:
+                if reported := reported_water_places(raw_document):
+                    address_rows = (f"Посёлки: {', '.join(reported[1])}", f"Улицы: {reported[2]}")
             result.append(Entry(_LABELS[notice.kind], text, url, map_id=map_id,
                                 starts_on=starts_on, source_url=notice.source_url,
                                 source_id=raw_document.source_id if raw_document else "",
-                                evidence_sha=_evidence_sha(raw_document) if raw_document else ""))
+                                evidence_sha=_evidence_sha(raw_document) if raw_document else "",
+                                address_rows=address_rows))
     return result
 
 
@@ -227,50 +256,69 @@ def _road_text(notice: Incident, segments: Sequence[Segment]) -> str:
     return f"{_short(scope)}. Период работ — {period}."
 
 
-def _incident_text(notice: Incident, now: datetime, tomorrow: datetime) -> str:
+def _outage_period(start: datetime, end: datetime, now: datetime) -> str:
+    local_start, local_end = start.astimezone(now.tzinfo), end.astimezone(now.tzinfo)
+    begin = f"{local_start:%H:%M}"
+    finish = f"{local_end:%H:%M}"
+    if local_start.date() != now.date():
+        begin = f"{_day(local_start.date())} в {begin}"
+    if local_end.date() != local_start.date():
+        finish = f"{_day(local_end.date())} в {finish}"
+    return f"{begin}–{finish}"
+
+
+def _incident_content(
+    notice: Incident, now: datetime, tomorrow: datetime,
+) -> tuple[str, tuple[str, ...]]:
     if notice.kind == "road":
-        return _road_text(notice, notice.segments)
+        return _road_text(notice, notice.segments), ()
     if notice.reported_scope and notice.starts_at and notice.ends_at:
-        begin = notice.starts_at.astimezone(now.tzinfo)
-        finish = notice.ends_at.astimezone(now.tzinfo)
         district = notice.reported_scope.partition(":")[0]
-        return f"{district} — {begin:%H:%M}–{finish:%H:%M}."
+        period = _outage_period(notice.starts_at, notice.ends_at, now)
+        return f"{district} — {period}.", (notice.reported_scope,)
     rows: list[Settlement | Address | PrintedRange] = [
         *notice.settlements, *notice.addresses, *notice.ranges,
     ]
-    active = [row for row in rows if row.starts_at < tomorrow and now < row.ends_at]
-    if not active and notice.kind == "water" and notice.segments:
-        segment = notice.segments[0]
-        window = next((item for item in notice.windows
-                       if item.starts_at < tomorrow and now < item.ends_at), None)
-        if window is not None:
-            start_local = window.starts_at.astimezone(now.tzinfo)
-            end_local = window.ends_at.astimezone(now.tzinfo)
-            period = (f"{start_local:%H:%M}–{end_local:%H:%M}"
-                      if start_local.date() == end_local.date() else
-                      f"{start_local:%d.%m %H:%M}–{end_local:%d.%m %H:%M}")
-            return (f"{segment.municipality}, {segment.street}, от {segment.start} до "
-                    f"{segment.end} — {period}.")
-    if not active:
-        return ""
-    first = active[0]
-    local_start = first.starts_at.astimezone(now.tzinfo)
-    local_end = first.ends_at.astimezone(now.tzinfo)
-    start = f"{local_start:%H:%M}"
-    end = f"{local_end:%H:%M}"
-    if local_start.date() != now.date():
-        start = f"{_day(local_start.date())} в {start}"
-    if local_end.date() != now.date():
-        end = f"{_day(local_end.date())} в {end}"
-    if isinstance(first, Settlement):
-        place = f"{first.name} ({first.parent})" if first.parent else first.name
-    else:
-        place = f"{first.street}, {first.number}"
-    rest = " Другие адреса и часы — в объявлении." if len(active) > 1 else ""
-    return f"{first.municipality}, {place} — {start}–{end}.{rest}"
+    active = sorted((row for row in rows if row.starts_at < tomorrow and now < row.ends_at),
+                    key=lambda row: (row.starts_at, row.ends_at, row.municipality))
+    printed_ranges: dict[tuple[str, str, datetime, datetime], list[str]] = {}
+    for row in active:
+        if isinstance(row, PrintedRange):
+            key = row.municipality, row.street, row.starts_at, row.ends_at
+            printed_ranges.setdefault(key, []).append(row.number)
+    districts: dict[str, None] = {}
+    grouped: dict[tuple[str, str, datetime, datetime], list[str]] = {}
+    for row in active:
+        districts[row.municipality] = None
+        if isinstance(row, Settlement):
+            place = f"{row.name} ({row.parent})" if row.parent else f"{row.name} целиком"
+            number = ""
+        else:
+            place, number = row.street, row.number
+        key = row.municipality, place, row.starts_at, row.ends_at
+        if isinstance(row, Address) and any(
+            house_in_range(number, part.strip())
+            for printed in printed_ranges.get(key, ()) for part in printed.split(",")
+        ):
+            continue
+        grouped.setdefault(key, []).append(number)
+    if notice.kind == "water" and len(notice.windows) == 1:
+        window = notice.windows[0]
+        if window.starts_at < tomorrow and now < window.ends_at:
+            for segment in notice.segments:
+                districts[segment.municipality] = None
+                place = f"{segment.street}, от {segment.start} до {segment.end}"
+                grouped.setdefault((segment.municipality, place, window.starts_at,
+                                    window.ends_at), [])
+    details = tuple(
+        f"{district}, {place}{', ' + ', '.join(dict.fromkeys(numbers)) if any(numbers) else ''}"
+        f" — {_outage_period(start, end, now)}"
+        for (district, place, start, end), numbers in grouped.items()
+    )
+    return (_short(", ".join(districts)) + ".", details) if details else ("", ())
 
 
-def _routes(session: Session, today: date, excluded: set[str]) -> list[Entry]:
+def _routes(session: Session, today: date, policy: Pilot) -> list[Entry]:
     result = []
     items = session.scalars(select(RawItem).join(Source).where(
         Source.id == SOURCE_ID, Source.city == _CITY, Source.enabled.is_(True),
@@ -278,7 +326,7 @@ def _routes(session: Session, today: date, excluded: set[str]) -> list[Entry]:
     ).order_by(RawItem.ingested_at.desc(), RawItem.id.desc()).limit(70))
     for item in items:
         doc = EvidenceDocument.model_validate(item, from_attributes=True)
-        if item.url in excluded or _notice_id(doc) is None:
+        if _notice_id(doc) is None:
             continue
         period = _PERIOD.fullmatch(item.body.partition("\n")[0])
         if period is None:
@@ -289,25 +337,45 @@ def _routes(session: Session, today: date, excluded: set[str]) -> list[Entry]:
             continue
         if not start <= today <= end:
             continue
-        _, routes, _, stops = _signature(item.title, item.body, today.year)
+        _, routes, _, _ = _signature(item.title, item.body, today.year)
         if not routes:
             continue
         numbers = ", ".join(sorted(routes)[:8]).upper()
-        stop_text = (f" В объявлении указаны остановки {', '.join(sorted(stops)[:5])}."
-                     if stops else "")
-        subject = f"на линии {numbers}" if len(routes) == 1 else f"на линиях {numbers}"
-        text = (f"Изменения {subject} по {_day(end, year=today.year)}."
-                f"{stop_text} Схема движения — в объявлении.")
-        result.append(Entry(_LABELS["route"], text, item.url, starts_on=start))
-    return sorted(result, key=lambda item: item.starts_on != today)
+        period_text = f"до {_day(end, year=today.year)}"
+        brief = policy.transport_briefs.get(_evidence_sha(doc))
+        if brief is not None:
+            text, details = brief.text, brief.details
+        elif len(routes) == 1 and _CIRCULAR_ROUTE.search(item.body):
+            text = f"Линия {numbers} работает по кольцевому маршруту {period_text}."
+            details = (("На изменённом участке сохраняются все остановки.",)
+                       if _EXISTING_STOPS.search(item.body) else ())
+        elif len(routes) == 1 and (moved := _MOVED_STOP.findall(" ".join(item.body.split()))):
+            moved = list(dict.fromkeys(moved))
+            stops = ", ".join(f"«{stop.strip()}»" for stop in moved[:4])
+            text = f"На маршруте {numbers} {period_text} изменены остановки: {stops}."
+            details = ()
+        else:
+            continue
+        result.append(Entry(_LABELS["route"], text, item.url, starts_on=start,
+                            source_id=doc.source_id, evidence_sha=_evidence_sha(doc),
+                            address_rows=details))
+    return sorted(result, key=lambda entry: entry.starts_on != today)
 
 
 def morning_entries(session: Session, now: datetime, forecast: Forecast | None,
                     warning: str | None = None) -> list[Entry]:
-    notices = _incidents(session, now)
-    routes = _routes(session, now.date(), {item.url for item in notices})
+    policy = _policy()
+    notices = _incidents(session, now, policy)
     roads = [item for item in notices if item.label == _LABELS["road"]]
-    utility = [item for item in notices if item.label != _LABELS["road"]]
+    routes = _routes(session, now.date(), policy)
+    road_maps = {item.url: item.map_id for item in roads if item.map_id}
+    routes = [replace(item, map_id=road_maps.get(item.url, "")) for item in routes]
+    route_url = routes[0].url if routes else None
+    roads = [item for item in roads if item.text and item.url != route_url]
+    routes = [_link_to_published(session, entry, now) for entry in routes]
+    roads = [_link_to_published(session, entry, now) for entry in roads]
+    utility = [_link_to_published(session, entry, now)
+               for entry in notices if entry.label != _LABELS["road"]]
     if warning:
         weather = [Entry(_LABELS["weather"], warning, WARNING_URL, "РХМЗ / MeteoAlarm")]
         return (weather + roads[:1] + routes[:1] + utility + roads[1:2])[:4]
@@ -348,10 +416,11 @@ def evening_entries(session: Session, now: datetime) -> list[Entry]:
 def _tomorrow_entries(session: Session, now: datetime) -> list[Entry]:
     tomorrow = now.date() + timedelta(days=1)
     tomorrow_start = datetime.combine(tomorrow, time.min, now.tzinfo)
-    entries = {entry.url: entry for entry in _incidents(session, tomorrow_start)
-               if entry.starts_on == tomorrow}
+    policy = _policy()
+    entries = {entry.url: entry for entry in _incidents(session, tomorrow_start, policy)
+               if entry.starts_on == tomorrow and entry.text}
     # Preserve a separately requested announcement if the normal scan is unusually busy.
-    for source in _policy().official_reminder_sources.get(tomorrow, ()):
+    for source in policy.official_reminder_sources.get(tomorrow, ()):
         candidate = entries.pop(source, None)
         entries = {source: candidate or Entry(_LABELS["water"], "", source, starts_on=tomorrow,
                                               source_id="city_beograd_news"), **entries}
@@ -375,13 +444,37 @@ def _tomorrow_entries(session: Session, now: datetime) -> list[Entry]:
     return list(entries.values())
 
 
-def _original_post(session: Session, url: str) -> int | None:
-    return session.scalar(select(Post.telegram_message_id).join(
+def _original_post(
+    session: Session, url: str, *, as_of: datetime | None = None, evidence_sha: str = "",
+) -> int | None:
+    query = select(Post.telegram_message_id, RawItem.title, RawItem.body).join(
         EditorialRun, EditorialRun.post_id == Post.id,
     ).join(RawItem, RawItem.id == EditorialRun.raw_item_id).where(
         Post.city == _CITY, EditorialRun.delivery_status == "sent", RawItem.url == url,
-        Post.telegram_message_id > 0,
-    ).order_by(Post.published_at.asc(), Post.id.asc()).limit(1))
+        Post.telegram_message_id > 0, ~Post.title.startswith("[тестовый запуск]"),
+    )
+    if as_of is None:
+        query = query.order_by(Post.published_at.asc(), Post.id.asc())
+    else:
+        # Do not point today's schedule at a post about an earlier revision of the same URL.
+        query = query.where(
+            Post.published_at <= as_of,
+            EditorialRun.evidence["title"].as_string() == RawItem.title,
+            EditorialRun.evidence["body"].as_string() == RawItem.body,
+        ).order_by(Post.published_at.desc(), Post.id.desc())
+    if not evidence_sha:
+        return session.scalars(query.limit(1)).first()
+    for message_id, title, body in session.execute(query).tuples():
+        if _content_sha(title, body) == evidence_sha:
+            return message_id
+    return None
+
+
+def _link_to_published(session: Session, entry: Entry, now: datetime) -> Entry:
+    for url in dict.fromkeys((entry.url, entry.source_url or entry.url)):
+        if message_id := _original_post(session, url, as_of=now, evidence_sha=entry.evidence_sha):
+            return replace(entry, url=f"{_CHANNEL}/{message_id}", link_text="Подробнее")
+    return entry
 
 
 async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | None:
@@ -415,7 +508,7 @@ async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | 
     # If address or timing changed, an old map button could open stale boundaries.
     # Hold these for the revision loop unless the announcement is the explicitly
     # configured water source and supplies its full current scope.
-    text = entry.text
+    text, address_rows = entry.text, entry.address_rows
     if entry.place:
         place = resolve_event_place(document, live.source_html or "",
                                     profile=load_city_profile(_CITY))
@@ -439,10 +532,11 @@ async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | 
         reported = reported_water_places(document)
         if reported is not None and period is not None:
             starts, ends = period
-            text = (f"{reported[0]} — {starts:%H:%M}–{ends:%H:%M}. "
-                    f"Посёлки: {', '.join(reported[1])}.")
+            text = f"{reported[0]} — {starts:%H:%M}–{ends:%H:%M}."
+            address_rows = (f"Посёлки: {', '.join(reported[1])}", f"Улицы: {reported[2]}")
         elif same:
-            text = _incident_text(notice, day_start, next_day) or text
+            updated_text, address_rows = _incident_content(notice, day_start, next_day)
+            text = updated_text or text
         else:
             return None
     elif entry.label == _LABELS["power"]:
@@ -457,7 +551,8 @@ async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | 
             return None
     else:
         return None
-    return replace(entry, text=_short(text), map_id=entry.map_id if same else "", reminder=True)
+    return replace(entry, text=_short(text), address_rows=address_rows,
+                   map_id=entry.map_id if same else "", reminder=True)
 
 
 def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) -> Digest | None:
@@ -468,6 +563,7 @@ def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) ->
     title = _TITLE["reminder"] if reminder_only else _TITLE[slot.kind]
     day = slot.scheduled.date() + timedelta(days=1 if reminder_only else 0)
     lines = [f"<b>{title} · {_day(day)}</b>"]
+    details: dict[int, tuple[str, tuple[str, ...]]] = {}
     used_emoji = 0
     for entry in entries[:4]:
         label = entry.label
@@ -484,13 +580,44 @@ def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) ->
         if entry.place and entry.map_id:
             url = map_event_url(entry.url, telegram_app=telegram_app, places=True)
             location = f' · <a href="{escape(url, quote=True)}">На карте</a>'
-        lines.append(f'<b>{escape(label)}</b>{text} '
-                     f'<a href="{escape(entry.url, quote=True)}">{entry.link_text}</a>'
+        label_html = f"<b>{escape(label)}</b>"
+        link = f' <a href="{escape(entry.url, quote=True)}">{entry.link_text}</a>'
+        if entry.label in {_LABELS["road"], _LABELS["route"]} and entry.link_text == "Источник":
+            label_html = f'<a href="{escape(entry.url, quote=True)}">{label_html}</a>'
+            link = ""
+        lines.append(f'{label_html}{text}{link}'
                      f'{original}{location}')
+        if entry.address_rows:
+            heading = ("Адреса и время работ" if entry.label in {_LABELS["power"], _LABELS["water"]}
+                       else "Подробнее")
+            details[len(lines) - 1] = (heading, entry.address_rows)
     tag = ("#Коммуналка" if reminder_only and all(
         item.label in {_LABELS["water"], _LABELS["power"]} for item in entries
     ) else "#Сводка")
-    return Digest("\n\n".join([*lines, tag]), map_digest_url(
+    lines.append(tag)
+    units = formatted_text_units("\n\n".join(lines))
+    remaining_rows = sum(len(rows) for _, rows in details.values())
+    remaining_units = TELEGRAM_TEXT_LIMIT - units
+    for index, (title, rows) in details.items():
+        heading = f"<b>{title}</b>"
+        overflow = "Полный список — по ссылке выше."
+        budget = remaining_units * len(rows) // max(1, remaining_rows)
+        remaining_rows -= len(rows)
+        remaining = budget - formatted_text_units(heading + overflow) - 4
+        quote = [heading]
+        for row in rows:
+            line = f"• {escape(row)}"
+            remaining -= formatted_text_units(line) + 1
+            if remaining < 0:
+                quote.append(overflow)
+                break
+            quote.append(line)
+        quote_html = "\n<blockquote expandable>" + "\n".join(quote) + "</blockquote>"
+        quote_units = formatted_text_units(quote_html)
+        if len(quote) > 1 and budget >= quote_units:
+            lines[index] += quote_html
+            remaining_units -= quote_units
+    return Digest("\n\n".join(lines), map_digest_url(
         tuple(dict.fromkeys(item.map_id for item in entries[:4] if item.map_id and not item.place)),
         telegram_app=telegram_app,
     ))
@@ -608,8 +735,9 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
                 caption = digest.html + "\n\n" + credit
                 if formatted_text_units(caption) > 1024:
                     compact = [
-                        replace(item, text="" if item.link_text == "Подробнее" else
-                                _clip_text(item.text, 125))
+                        replace(item, text="" if item.link_text == "Подробнее"
+                                and item.label not in _LABELS.values()
+                                else _clip_text(item.text, 125))
                         for item in entries
                     ]
                     shortened = render(slot, compact, environment.get("RELOCANT_MAP_TELEGRAM_APP"))

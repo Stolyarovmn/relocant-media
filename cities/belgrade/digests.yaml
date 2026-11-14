@@ -7,3 +7,20 @@ reminders_from: '2026-11-16'
 official_reminder_sources:
   '2026-11-17':
     - https://www.beograd.rs/lat/beoinfo-vesti/a116643/Delovi-Barajeva-u-utorak-bez-vode.html
+# Each key binds the Russian summary to the current title and body of the official notice.
+transport_briefs:
+  # https://www.bgprevoz.rs/linije/aktuelne-izmene/1090
+  '688f27a24be8772a92476c95dc429e587a251719ba938728d2c72f10fe46bba4':
+    text: >-
+      На Војвођанской между Хајдук Вељкова и Десанке Максимовић до 31 декабря открыто по полосе в каждую сторону.
+    details:
+      - Нишка — Шекспирова — поочерёдный проезд.
+      - №604 и 605 — через Др Ивана Рибара, Виноградску.
+      - «Ново насеље» — к Якову на 150 м дальше, к центру на 260 м раньше. «Орешац 1» — в обе стороны.
+  # https://www.bgprevoz.rs/linije/aktuelne-izmene/1153
+  '1e79eb19e664db05e1bb03187094b12365e465e580b199acd0f3065350d91376':
+    text: >-
+      №60 до 2 сентября 2027 года идёт по кольцу от Зелени-венаца через Бранков мост,
+      Ушче и Саймиште. На объезде работают все остановки.
+    details:
+      - Земунски пут закрыт у Сајмиште и Зарије Вујошевића. Разворот — на парковке Parking Servis.

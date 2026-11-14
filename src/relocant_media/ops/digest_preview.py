@@ -57,6 +57,7 @@ async def preview(database: Path, as_of: datetime, telegram_app: str) -> dict[st
         if draft and cover else None,
         "entries": [{"label": item.label, "text": item.text, "url": item.url,
                      "map_id": item.map_id} for item in entries],
+        "html": draft.html if draft else None,
         "map_url": draft.map_url if draft else None,
     }
 
