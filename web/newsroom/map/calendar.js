@@ -1,6 +1,6 @@
 const encoder = new TextEncoder();
 const instant = (value) => new Date(value).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-const day = (value) => value.replaceAll("-", "");
+const day = (value) => new Date(value).toISOString().slice(0, 10).replaceAll("-", "");
 const escape = (value) => String(value ?? "").replace(/\\/g, "\\\\")
   .replace(/\r\n|\n|\r/g, "\\n").replace(/[;,]/g, "\\$&");
 function fold(line) {
@@ -16,10 +16,10 @@ function fold(line) {
 
 export function calendarEvents(item, now) {
   if (item.archived) return [];
-  if (item.startDay && item.endDay && item.end > now) {
-    const next = new Date(item.endDay + "T00:00:00Z");
+  if (Number.isFinite(item.startDay) && Number.isFinite(item.endDay) && item.end > now) {
+    const next = new Date(item.endDay);
     next.setUTCDate(next.getUTCDate() + 1);
-    return [{ start: day(item.startDay), end: day(next.toISOString().slice(0, 10)), allDay: true }];
+    return [{ start: day(item.startDay), end: day(next), allDay: true }];
   }
   const windows = item.windows?.length ? item.windows : [item];
   return windows.filter(({ start, end }) => Number.isFinite(start)

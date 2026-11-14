@@ -3,8 +3,8 @@ import {
   incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
 } from "./core.js?v=8";
-import { calendarLink } from "./calendar.js?v=1";
-import { setupPlaces } from "./places.js?v=7";
+import { calendarLink } from "./calendar.js?v=2";
+import { setupPlaces } from "./places.js?v=8";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
