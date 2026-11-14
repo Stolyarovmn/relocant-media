@@ -1,4 +1,4 @@
-"""Точечное исправление номера в опубликованном тексте; исходная БД остаётся неизменной."""
+"""Ручные исправления опубликованного текста или подписи сводки."""
 
 from __future__ import annotations
 
@@ -19,7 +19,8 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.package import EditorialPackage, canonical_json, context_sha256, draft_sha256
-from relocant_media.bot.formatting import compact_source_link
+from relocant_media.bot.api import map_reply_markup
+from relocant_media.bot.formatting import compact_source_link, formatted_text_units
 from relocant_media.ops.actions_runtime import REPO, restored, validate_ready
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
 from relocant_media.services.channel_delivery import APPROVED_CHANNELS_BY_CITY
@@ -83,13 +84,34 @@ class CorrectionPlan(BaseModel):
         return self
 
 
-def validate_plan(content: bytes, expected_sha: str, *, now: datetime) -> CorrectionPlan:
+class DigestCorrectionPlan(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    version: Literal[2]
+    city: Literal["belgrade"]
+    message_id: int = Field(gt=0)
+    slot: str = Field(pattern=r"^belgrade:[0-9]{4}-[0-9]{2}-[0-9]{2}:(morning|evening)$")
+    old_caption_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    caption_html: str = Field(min_length=1, max_length=6000)
+    map_url: str
+    reviews: tuple[CorrectionReview, CorrectionReview]
+
+    @model_validator(mode="after")
+    def valid_caption(self) -> Self:
+        if not 0 < formatted_text_units(self.caption_html) <= 1024:
+            raise ValueError("Подпись сводки превышает предел Telegram")
+        map_reply_markup(self.map_url)
+        return self
+
+
+def _validate_plan_input(content: bytes, expected_sha: str, now: datetime) -> None:
     if (not _SHA.fullmatch(expected_sha) or len(content) > MAX_PLAN_BYTES
             or hashlib.sha256(content).hexdigest() != expected_sha):
         raise ValueError("Хеш или размер плана не соответствует запросу")
     if now.tzinfo is None:
         raise ValueError("Время проверки должно содержать часовой пояс")
-    plan = CorrectionPlan.model_validate_json(content)
+
+
+def _validate_reviews(plan: CorrectionPlan | DigestCorrectionPlan, now: datetime) -> None:
     context = _digest(plan.model_dump(mode="json", exclude={"reviews"}))
     identities = {review.reviewer_id.strip().casefold() for review in plan.reviews}
     if (len(identities) != 2 or "" in identities
@@ -99,6 +121,12 @@ def validate_plan(content: bytes, expected_sha: str, *, now: datetime) -> Correc
                    or not timedelta(0) <= now - review.reviewed_at <= timedelta(hours=2)
                    for review in plan.reviews)):
         raise ValueError("Нужны два свежих независимых одобрения точного плана")
+
+
+def validate_plan(content: bytes, expected_sha: str, *, now: datetime) -> CorrectionPlan:
+    _validate_plan_input(content, expected_sha, now)
+    plan = CorrectionPlan.model_validate_json(content)
+    _validate_reviews(plan, now)
     return plan
 
 
@@ -208,6 +236,83 @@ def _confirm_result(result: Any, payload: dict[str, Any]) -> None:
         raise ValueError("Bot API не подтвердил точный исправленный текст и получателя")
 
 
+def _caption_signature(html: str) -> dict[str, Any]:
+    node = BeautifulSoup(html, "html.parser")
+    for br in node.find_all("br"):
+        br.replace_with("\n")
+    for quote in node.select("blockquote"):
+        quote.insert_before("\n")
+        quote.insert_after("\n")
+    return {
+        "text": " ".join(node.get_text().split()),
+        "links": [str(link["href"]) for link in node.select("a[href]")],
+        "quotes": len(node.select("blockquote[expandable]")),
+    }
+
+
+def _edit_digest(
+    storage: SSHStateClient, plan: DigestCorrectionPlan, plan_sha: str, work: Path,
+    client: httpx.Client, token: str, checked_at: datetime,
+) -> dict[str, Any]:
+    state, _ = storage.read()
+    receipt = state.get("digest_receipts", {}).get(plan.slot, {})
+    if receipt.get("state") != "sent" or receipt.get("message_id") != plan.message_id:
+        raise ValueError("Отправленная сводка не найдена в квитанциях")
+    public_url = f"https://t.me/{CHANNEL_USERNAME}/{plan.message_id}?embed=1"
+    soup = BeautifulSoup(_get_html(client, public_url), "html.parser")
+    node = soup.select_one(f'[data-post="{CHANNEL_USERNAME}/{plan.message_id}"]')
+    if node is None or node.select_one(".tgme_widget_message_photo_wrap") is None:
+        raise ValueError("Ожидалась существующая сводка с фотографией")
+    caption = node.select_one(".tgme_widget_message_text")
+    if caption is None:
+        raise ValueError("У сводки отсутствует подпись")
+    expected = _caption_signature(plan.caption_html)
+    visible = _caption_signature(caption.decode_contents())
+    if visible != expected and _digest(visible) != plan.old_caption_sha256:
+        raise ValueError("Опубликованная подпись изменилась")
+    chat_id = APPROVED_CHANNELS_BY_CITY[plan.city]
+    payload = {"chat_id": chat_id, "message_id": plan.message_id,
+               "caption": plan.caption_html, "parse_mode": "HTML",
+               "reply_markup": map_reply_markup(plan.map_url)}
+    work.mkdir(mode=0o700, parents=True, exist_ok=False)
+    intent_sha = _upload_audit(storage, work, "intent", {
+        "version": 2, "operation": "editMessageCaption", "plan_sha256": plan_sha,
+        "edit_payload_sha256": _digest(payload), "message_id": plan.message_id,
+        "chat_id": chat_id, "checked_at": checked_at.isoformat(),
+    })
+    print(json.dumps({"correction_intent_sha256": intent_sha}), flush=True)
+    record: dict[str, Any] = {
+        "version": 2, "intent_sha256": intent_sha, "message_id": plan.message_id,
+        "chat_id": chat_id, "recorded_at": datetime.now(UTC).isoformat(),
+    }
+    try:
+        if not re.fullmatch(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,100}", token):
+            raise ValueError("Некорректный токен Bot API")
+        response = client.post(f"https://api.telegram.org/bot{token}/editMessageCaption",
+                               json=payload, timeout=30, follow_redirects=False)
+        body = response.json()
+        result = body.get("result", {})
+        if (response.status_code == 400 and visible == expected
+                and body.get("description", "").startswith("Bad Request: message is not modified")):
+            record["status"] = "already_corrected"
+        elif (body.get("ok") is True and result.get("message_id") == plan.message_id
+              and result.get("chat", {}).get("id") == chat_id and result.get("photo")
+              and " ".join(result.get("caption", "").split()) == expected["text"]
+              and [entity["url"] for entity in result.get("caption_entities", [])
+                   if entity["type"] == "text_link"] == expected["links"]
+              and sum(entity["type"] == "expandable_blockquote"
+                      for entity in result.get("caption_entities", [])) == expected["quotes"]
+              and result.get("reply_markup") == payload["reply_markup"]):
+            record.update(status="corrected", expandable_quotes=expected["quotes"],
+                          map_url=plan.map_url)
+        else:
+            record.update(status="uncertain", telegram_status=response.status_code)
+    except Exception as error:
+        record.update(status="uncertain", error_type=type(error).__name__)
+    receipt_sha = _upload_audit(storage, work, "receipt", record)
+    return {**record, "receipt_sha256": receipt_sha}
+
+
 def execute(
     storage: SSHStateClient, plan_sha: str, work: Path, client: httpx.Client, *,
     token: str, now: datetime | None = None,
@@ -215,7 +320,13 @@ def execute(
     checked_at = now or datetime.now(UTC)
     if not _SHA.fullmatch(plan_sha):
         raise ValueError("Нужен SHA256 приватного плана")
-    plan = validate_plan(storage.download(plan_sha), plan_sha, now=checked_at)
+    content = storage.download(plan_sha)
+    _validate_plan_input(content, plan_sha, checked_at)
+    if json.loads(content).get("version") == 2:
+        digest_plan = DigestCorrectionPlan.model_validate_json(content)
+        _validate_reviews(digest_plan, checked_at)
+        return _edit_digest(storage, digest_plan, plan_sha, work, client, token, checked_at)
+    plan = validate_plan(content, plan_sha, now=checked_at)
     state, state_sha = storage.read()
     validate_ready(state)
     work.mkdir(mode=0o700, parents=True, exist_ok=False)

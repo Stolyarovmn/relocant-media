@@ -56,3 +56,9 @@
 python work/gpt_fallback_handoff.py put-correction --plan <private/plan.json>
 gh workflow run editorial-correction.yml --repo Stolyarovmn/relocant-media --ref main -f plan_sha256=<sha>
 ```
+
+Для сводки с фото тот же workflow принимает план версии 2. В плане указываются
+слот, ID сообщения, отпечаток видимой подписи, новая подпись и ссылка Mini App.
+Запуск проверяет квитанцию отправки и публичный пост, затем меняет подпись и
+кнопку одним вызовом Telegram. Фото сохраняется. Оба ревью привязываются к
+точному плану, а намерение и результат сохраняются в редакционном хранилище.
