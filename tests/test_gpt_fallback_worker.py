@@ -217,6 +217,49 @@ def test_real_fallback_validation_requires_the_recorded_gemini_failure(
     assert (session.get(EditorialRun, raw.id) is None) is invalidate
 
 
+def test_real_gemini_failure_can_recover_an_existing_selection_hold(
+    fallback_session, monkeypatch,
+):
+    session, raw, _ = fallback_session
+    source = session.get(Source, raw.source_id)
+    document = EvidenceDocument.model_validate(_snapshot_member(raw, source))
+    hold = EditorialRun(
+        raw_item_id=raw.id, delivery_status="pending",
+        outcome={"status": "human_review", "reason": "selection_ungrounded_evidence"},
+        evidence={**document.model_dump(mode="json"), "city": source.city,
+                  "event_key": event_key(_candidate(raw)),
+                  "documents": [_snapshot_member(raw, source)]},
+    )
+    session.add(hold)
+    session.commit()
+    assert gpt_fallback.pending_gpt_ids(session, now=NOW) == {raw.id}
+    request = gpt_fallback.build_request(session, now=NOW)
+    package = package_for_request(request)
+    monkeypatch.setattr(worker, "_check_live_evidence", lambda package: None)
+    result = worker.run_worker(session.get_bind(), _parse(_input(package, request)), now=NOW)
+    assert result["imported"] == 1
+    assert result["unresolved"] == 0
+    session.refresh(hold)
+    assert hold.outcome["_previous_policy_hold"]["outcome"]["reason"] == (
+        "selection_ungrounded_evidence"
+    )
+    assert hold.outcome["_autonomous_assessment"]["reviewed_package"]
+    assert gpt_fallback.pending_gpt_ids(session, now=NOW) == set()
+
+
+def test_gpt_fallback_does_not_reopen_a_hold_with_a_delivery_receipt(fallback_session):
+    session, raw, _ = fallback_session
+    hold = EditorialRun(
+        raw_item_id=raw.id, delivery_status="pending", staging_message_id=42,
+        outcome={"status": "human_review", "reason": "selection_ungrounded_evidence"},
+        evidence={},
+    )
+    session.add(hold)
+    session.commit()
+    assert gpt_fallback.pending_gpt_ids(session, now=NOW) == set()
+    assert gpt_fallback.build_request(session, now=NOW) is None
+
+
 @pytest.mark.parametrize("existing_hold", [False, True])
 def test_subset_response_keeps_unresolved_tail_but_accepts_a_known_human_hold(
     ready_package, offline, existing_hold,

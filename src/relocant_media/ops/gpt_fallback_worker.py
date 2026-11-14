@@ -22,6 +22,7 @@ from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.ops import server_cycle, server_runtime
 from relocant_media.services.gpt_fallback import validate_fallback_package
 from relocant_media.services.package_import import import_package
+from relocant_media.services.policy_reassessment import eligible_empty_policy_hold
 from relocant_media.storage.models import EditorialRun
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -137,7 +138,7 @@ def run_worker(
                     session, payload.request, package, now=now or datetime.now(UTC),
                 )
                 phase = "import"
-                run = import_package(session, package, now=now)
+                run = import_package(session, package, now=now, replace_empty_hold=True)
                 imported += 1
                 if run.outcome.get("status") == "ready":
                     ready += 1
@@ -160,12 +161,15 @@ def run_worker(
                       and 0 < candidate["raw_item_id"] < 2**63}
                      if isinstance(candidates, list) else set())
     with Session(engine) as session:
-        resolved = set(session.scalars(select(EditorialRun.raw_item_id).where(
+        saved_ids = session.scalars(select(EditorialRun.raw_item_id).where(
             EditorialRun.raw_item_id.in_(requested_ids),
             EditorialRun.outcome["status"].as_string().in_({
                 "ready", "human_review", "skipped", "blocked",
             }),
-        )))
+        )).all()
+        resolved = {raw_id for raw_id in saved_ids if not eligible_empty_policy_hold(
+            session, raw_id, now=now,
+        )}
     unresolved = len(requested_ids - resolved)
     status = ("PRIMARY_FAILED" if not imported else
               "PRIMARY_PARTIAL" if rejected or errors or blocked or unresolved else "PRIMARY_OK")
