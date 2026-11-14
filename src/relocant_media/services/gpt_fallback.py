@@ -26,6 +26,7 @@ from relocant_media.ai.package import (
     canonical_json,
     evaluate_package,
 )
+from relocant_media.domain.audience import local_utility_notice
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.dedup import event_key, find_repeated_publication
 from relocant_media.domain.editorial_products import EditorialPresentation
@@ -275,12 +276,26 @@ def _candidate_request(
 
 
 def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
-    """Первое незавершённое окно с подтверждёнными сбоями Gemini за четыре часа."""
+    """Действующие коммунальные предупреждения идут перед обычной очередью резерва."""
     now = _utc(now)
     with session.no_autoflush:
         profile = load_city_profile("belgrade")
         registry = _registry()
-        for run in reversed(_recent_runs(session, now)):
+        windows = [(run, _failed_ids(run, now)) for run in reversed(_recent_runs(session, now))]
+        pending = pending_gpt_ids(session, now=now)
+        urgent = {
+            item.id for item, source in session.execute(
+                select(RawItem, Source).join(Source).where(RawItem.id.in_(pending))
+            )
+            if local_utility_notice(item.source_id, item.url, item.title, item.body)
+            and evidence_freshness(
+                item.title, item.body, item.published_at, now,
+                precision=item.published_at_precision, source_type=source.source_type,
+                verified_at=item.ingested_at, timezone_name=profile.timezone,
+            ).action == "keep"
+        }
+        windows.sort(key=lambda window: urgent.isdisjoint(window[1]))
+        for run, failed in windows:
             candidates: list[dict[str, Any]] = []
             request = {
                 "version": 1,
@@ -291,7 +306,7 @@ def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
                 "writing_brief": writing_brief(profile, now),
                 "candidates": candidates,
             }
-            for raw_id in _failed_ids(run, now):
+            for raw_id in sorted(failed, key=lambda raw_id: raw_id not in urgent):
                 if (session.get(EditorialRun, raw_id, populate_existing=True) is not None
                         and not eligible_empty_policy_hold(session, raw_id, now=now)):
                     continue

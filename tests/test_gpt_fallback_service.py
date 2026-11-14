@@ -415,6 +415,33 @@ def test_build_request_caps_five_unique_unresolved_candidates(fallback_session):
     assert [row["raw_item_id"] for row in request["candidates"]] == ids[:5]
 
 
+def test_fresh_utility_notice_precedes_an_older_gemini_failure(fallback_session):
+    session, first, run = fallback_session
+    water = RawItem(
+        source_id=first.source_id, external_id="outage",
+        url="https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/a1/x.html",
+        title="Kvarovi na vodovodnoj mreži",
+        body="Do 15.00\nČukarica: Ljube Rankovića 47 – Ostružnica",
+        published_at=first.published_at, published_at_precision="instant",
+        ingested_at=first.ingested_at,
+    )
+    session.add(water)
+    session.flush()
+    later = SchedulerRun(
+        task_key=run.task_key, task_type=run.task_type, city=run.city, status="partial",
+        scheduled_for=NOW - timedelta(minutes=4), started_at=NOW - timedelta(minutes=4),
+        finished_at=NOW - timedelta(minutes=3),
+        details={"processing_errors": [
+            {"raw_item_id": water.id, "error_type": "GeminiWorkerError"},
+        ]},
+    )
+    session.add(later)
+    session.commit()
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request["scheduler_run_id"] == later.id
+    assert [candidate["raw_item_id"] for candidate in request["candidates"]] == [water.id]
+
+
 def test_unregistered_secondary_source_blocks_entire_bundle(fallback_session):
     session, first, _ = fallback_session
     source = Source(
