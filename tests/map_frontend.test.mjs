@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { buildCalendar } from "../web/newsroom/map/calendar.js";
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, nextTransition,
@@ -42,6 +43,16 @@ test("ссылка сводки открывает только перечисл
   assert.deepEqual(launchDigestEvents(`?events=${roadId}~${waterId}`), [roadId, waterId]);
   assert.deepEqual(launchDigestEvents("", `digest_${roadId}-${powerId}`), [roadId, powerId]);
   assert.deepEqual(launchDigestEvents("", `digest_${roadId}-invalid`), []);
+});
+
+test("перекрытие с датами из выгрузки даёт календарное событие на весь день", () => {
+  const road = incident({
+    id: roadId, kind: "road", starts_on: "2026-11-14", ends_on: "2026-12-31",
+    starts_at: "2026-11-14T00:00:00+01:00", ends_at: "2027-01-01T00:00:00+01:00",
+  });
+  const calendar = buildCalendar(road, Date.parse("2026-11-14T12:00:00+01:00"));
+  assert.match(calendar, /DTSTART;VALUE=DATE:20261114\r\nDTEND;VALUE=DATE:20270101/);
+  assert.equal(buildCalendar(road, Date.parse("2027-01-01T00:00:00+01:00")), null);
 });
 
 test("ссылка на афишу отделена от существующих ссылок городских работ", () => {

@@ -2,7 +2,7 @@ import {
   clusterMapPoints, incidentTimes, placeCountdown, placeStatus, readPlaces,
   straightLineDistance, updateStamp,
 } from "./core.js?v=8";
-import { calendarLink } from "./calendar.js?v=1";
+import { calendarLink } from "./calendar.js?v=2";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 
