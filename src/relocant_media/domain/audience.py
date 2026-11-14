@@ -1,6 +1,7 @@
 """Narrow deterministic exclusions from the Belgrade general-interest feed."""
 
 import re
+from urllib.parse import urlsplit
 
 from relocant_media.domain.attention import normalize
 
@@ -41,3 +42,25 @@ def local_flight_change(title: str, body: str, city_aliases: tuple[str, ...]) ->
         re.search(r"(?<!\w)" + re.escape(alias) + r"(?:a|u|а|е|ом)?(?!\w)", lead)
         for name in city_aliases if (alias := normalize(name))
     )
+
+
+_OUTAGE_NOTICE = re.compile(
+    r"\b(?:kvarov\w*|кваров\w*|bez\s+v\s*ode|без\s+вод\w*|"
+    r"isključenj\w*|искључењ\w*|отключен\w*)\b", re.IGNORECASE,
+)
+_NOTICE_TIME = re.compile(r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b")
+
+
+def local_utility_notice(source_id: str, url: str, title: str, body: str) -> bool:
+    """Recognize actionable outages from dedicated, registered city or utility sources."""
+    if source_id == "city_beograd_news":
+        try:
+            path = urlsplit(url).path
+        except ValueError:
+            return False
+        if not any(f"/servisne-informacije/{section}/" in path
+                   for section in ("vodovod-i-kanalizacija", "elektricna-energija")):
+            return False
+    elif source_id != "bvk_outage_news" and not source_id.startswith("eds_belgrade_outages_"):
+        return False
+    return bool(_OUTAGE_NOTICE.search(f"{title}\n{body}") and _NOTICE_TIME.search(body))
