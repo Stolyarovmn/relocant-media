@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
-from relocant_media.domain.audience import local_flight_change
+from relocant_media.domain.audience import local_flight_change, local_utility_notice
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import evidence_freshness
@@ -26,10 +26,15 @@ def eligible_empty_policy_hold(
     if (run.post_id is not None or run.delivery_status != "pending"
             or run.staging_message_id is not None
             or any(outcome.get(key) is not None for key in ("claims", "verification", "draft"))
-            or "_package" in outcome or "_autonomous_assessment" in outcome):
+            or "_package" in outcome):
         return False
     status, reason = outcome.get("status"), outcome.get("reason")
     rejected = (status, reason) == ("skipped", "ranking_rejected")
+    utility = rejected and local_utility_notice(item.source_id, item.url, item.title, item.body)
+    if "_autonomous_assessment" in outcome:
+        previous = outcome.get("_previous_policy_hold", {}).get("outcome", {})
+        if not utility or previous.get("reason") != "selection_ungrounded_evidence":
+            return False
     if not rejected and (status != "human_review" or reason not in {
         "source_auto_publish_disabled", "selection_ungrounded_evidence",
     }):
@@ -38,7 +43,7 @@ def eligible_empty_policy_hold(
                           precision=item.published_at_precision, source_type=source.source_type,
                           verified_at=item.ingested_at).action != "keep":
         return False
-    if rejected:
+    if rejected and not utility:
         profile = load_city_profile(source.city)
         if not local_flight_change(item.title, item.body, profile.geography.city_aliases):
             return False

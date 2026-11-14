@@ -187,6 +187,33 @@ def test_air_serbia_cancellation_gets_a_second_look_or_review(corrected) -> None
         assert provider.calls == ["rank", "rank"]
 
 
+@pytest.mark.parametrize("corrected", [True, False])
+def test_short_official_water_outage_is_not_discarded(corrected) -> None:
+    profile = load_city_profile("belgrade")
+    document = _document().model_copy(update={
+        "url": "https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/a1/x.html",
+        "title": "Kvarovi na mreži za 14. novembar 2026. godine",
+        "body": "Do 15.00\nČukarica: Ljube Rankovića 47 – Ostružnica\nBez v ode su potrošači.",
+    })
+    rejected = _ranking().model_copy(update={"should_process": False})
+    selected = _ranking().model_copy(update={"selection": brief(profile, document)})
+    claims = _claims(document.body).model_dump()
+    claims["claims"][0]["citations"][0]["url"] = document.url
+    provider = CorrectedRankingProvider(
+        {"rank": rejected, "claims": type(_claims()).model_validate(claims),
+         "verify": _verification(), "draft": _draft()}, selected if corrected else rejected,
+    )
+    result = EditorialPipeline(provider, city_profile=profile).run(
+        city="belgrade", documents=(document,),
+    )
+    assert provider.calls[:2] == ["rank", "rank"]
+    if corrected:
+        assert result.status == PublicationStatus.READY
+    else:
+        assert result.status == PublicationStatus.HUMAN_REVIEW
+        assert result.reason == "local_utility_notice_requires_review"
+
+
 def test_rejected_high_relevance_does_not_enter_old_borderline_fallback() -> None:
     profile = load_city_profile("belgrade")
     provider = FakeProvider({"rank": _ranking().model_copy(update={"should_process": False})})

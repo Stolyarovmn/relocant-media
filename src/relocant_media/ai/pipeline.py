@@ -26,7 +26,11 @@ from relocant_media.ai.prompts import (
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.ai.selection import selection_reason
-from relocant_media.domain.audience import audience_relevance_reason, local_flight_change
+from relocant_media.domain.audience import (
+    audience_relevance_reason,
+    local_flight_change,
+    local_utility_notice,
+)
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import publication_date_context
@@ -104,6 +108,11 @@ FLIGHT_RETRY_NOTE = (
     "Повторно оцени подтверждённое изменение рейсов по пользе для пассажиров, "
     "которых оно затрагивает. Проверь связь маршрута с городом и категорию transport. "
     "При положительном решении приложи точные выдержки из источника."
+)
+
+UTILITY_RETRY_NOTE = (
+    "Повторно оцени официальное отключение для жителей конкретных адресов. "
+    "Выбери utilities и процитируй короткие дословные выдержки про место и время работ."
 )
 
 
@@ -208,13 +217,22 @@ class EditorialPipeline:
                 and any(local_flight_change(d.title, d.body, profile.geography.city_aliases)
                         for d in documents)
             )
+            utility_notice = (
+                not evergreen and rubric is not None and "utilities" in rubric.categories
+                and any(local_utility_notice(d.source_id, d.url, d.title, d.body)
+                        for d in documents)
+            )
+            expected_category = (
+                "utilities" if utility_notice else "transport" if flight_change else None
+            )
             reason = (selection_reason(ranking, profile, documents, evergreen=evergreen)
                       if ranking.should_process else None)
             corrections = []
             if reason == "selection_ungrounded_evidence":
                 corrections.append(CITATION_RETRY_NOTE)
-            if flight_change and (not ranking.should_process or ranking.category != "transport"):
-                corrections.append(FLIGHT_RETRY_NOTE)
+            if expected_category and (not ranking.should_process
+                                      or ranking.category != expected_category):
+                corrections.append(UTILITY_RETRY_NOTE if utility_notice else FLIGHT_RETRY_NOTE)
             if corrections:
                 corrected = rank(" ".join(corrections))
                 # A rejected retry cannot erase an accepted topic's review requirement.
@@ -222,8 +240,10 @@ class EditorialPipeline:
                     ranking = corrected
                     reason = (selection_reason(ranking, profile, documents, evergreen=evergreen)
                               if ranking.should_process else None)
-            if flight_change and (not ranking.should_process or ranking.category != "transport"):
-                reason = "local_flight_change_requires_review"
+            if expected_category and (not ranking.should_process
+                                      or ranking.category != expected_category):
+                reason = ("local_utility_notice_requires_review" if utility_notice
+                          else "local_flight_change_requires_review")
             if reason:
                 return EditorialOutcome(status=PublicationStatus.HUMAN_REVIEW, reason=reason,
                     ranking=ranking, confidence=ranking.confidence)
