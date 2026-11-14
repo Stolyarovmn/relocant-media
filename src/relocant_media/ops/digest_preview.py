@@ -66,7 +66,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--as-of", type=datetime.fromisoformat, required=True)
-    parser.add_argument("--telegram-app", default="https://t.me/relocant_media_belgrade_bot/map")
+    parser.add_argument("--telegram-app", default="https://t.me/relocant_media_belgrade_bot")
     args = parser.parse_args()
     print(json.dumps(asyncio.run(preview(args.database, args.as_of, args.telegram_app)),
                      ensure_ascii=False, indent=2))
