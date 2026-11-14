@@ -44,6 +44,7 @@ from relocant_media.services.editorial_products import (
     verify_stored_presentation,
 )
 from relocant_media.services.native_map import bind_native_map_draft
+from relocant_media.services.policy_reassessment import eligible_empty_policy_hold
 from relocant_media.sources.registry import SourceConfig, load_source_registry
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -195,12 +196,11 @@ def pending_gpt_ids(session: Session, *, now: datetime) -> set[int]:
         registry = _registry()
         unresolved = session.execute(select(RawItem, Source).join(Source).where(
             RawItem.id.in_(failed_ids),
-            ~select(EditorialRun.raw_item_id).where(
-                EditorialRun.raw_item_id == RawItem.id,
-            ).exists(),
         ))
         return {item.id for item, source in unresolved
-                if _registered_public(item, source, registry.get(source.id))}
+                if _registered_public(item, source, registry.get(source.id))
+                and (session.get(EditorialRun, item.id, populate_existing=True) is None
+                     or eligible_empty_policy_hold(session, item.id, now=now))}
 
 
 def _candidate_request(
@@ -292,7 +292,8 @@ def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
                 "candidates": candidates,
             }
             for raw_id in _failed_ids(run, now):
-                if session.get(EditorialRun, raw_id, populate_existing=True) is not None:
+                if (session.get(EditorialRun, raw_id, populate_existing=True) is not None
+                        and not eligible_empty_policy_hold(session, raw_id, now=now)):
                     continue
                 try:
                     candidate = _candidate_request(
@@ -410,7 +411,9 @@ def validate_fallback_package(
         }:
             raise FallbackValidationError("Пакет не прошёл действующие редакционные проверки")
         existing = session.get(EditorialRun, package.raw_item_id, populate_existing=True)
-        if existing is not None:
+        if existing is not None and not eligible_empty_policy_hold(
+            session, package.raw_item_id, now=now,
+        ):
             fingerprint = hashlib.sha256(
                 canonical_json(package.model_dump(mode="json")).encode()
             ).hexdigest()
