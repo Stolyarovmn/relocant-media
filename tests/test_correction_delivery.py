@@ -28,6 +28,67 @@ QUOTE = "Линија бр. 5538 Возила ће саобраћати од Б�
 TOKEN = "123456789:" + "FAKE_OFFLINE_TOKEN_" * 2
 
 
+@pytest.mark.parametrize("receipt_id", [108, 109])
+def test_digest_correction_edits_only_the_photo_caption_and_keyboard(tmp_path, receipt_id):
+    slot = "belgrade:2026-11-14:morning"
+    old = "<b>Белград сегодня · 14 ноября</b><br>Исходная подпись"
+    url = "https://t.me/eduvbelgrad/102"
+    caption = (
+        '<b>Белград сегодня · 14 ноября</b>\n\nСвет <a href="' + url + '">Подробнее</a>\n'
+        '<blockquote expandable>Адреса и время работ\n• Масарикова, 2</blockquote>'
+    )
+    map_url = ("https://t.me/relocant_media_belgrade_bot/map?startapp="
+               "digest_event_90cd369f163d60459854-event_1a9d4a7a1e5be0b3f7da")
+    plan = {
+        "version": 2, "city": "belgrade", "message_id": 108, "slot": slot,
+        "old_caption_sha256": worker._digest(worker._caption_signature(old)),
+        "caption_html": caption, "map_url": map_url,
+    }
+    digest = worker._digest(plan)
+    plan["reviews"] = [
+        {"reviewer_id": role, "role": role, "context_sha256": digest,
+         "reviewed_at": NOW.isoformat(), "verdict": "approve", "score": 95,
+         "flags": [], "live_source_checked": True}
+        for role in ("facts", "utility")
+    ]
+    content, sha = encode_plan(plan)
+    state = {"digest_receipts": {slot: {"state": "sent", "message_id": receipt_id}}}
+    storage = MemoryStorage(state, {sha: content})
+    methods = []
+
+    def respond(request):
+        methods.append(request.method)
+        if request.method == "GET":
+            assert str(request.url) == "https://t.me/eduvbelgrad/108?embed=1"
+            return httpx.Response(200, text=(
+                '<div class="tgme_widget_message" data-post="eduvbelgrad/108">'
+                f'<div class="tgme_widget_message_text">{old}</div>'
+                '<a class="tgme_widget_message_photo_wrap"></a></div>'
+            ))
+        assert request.url.path.endswith("/editMessageCaption")
+        payload = json.loads(request.content)
+        assert payload["message_id"] == 108 and payload["caption"] == caption
+        assert set(payload) == {"chat_id", "message_id", "caption", "parse_mode", "reply_markup"}
+        return httpx.Response(200, json={"ok": True, "result": {
+            "message_id": 108, "chat": {"id": payload["chat_id"]}, "photo": [{}],
+            "caption": worker._caption_signature(caption)["text"],
+            "caption_entities": [
+                {"type": "text_link", "url": url}, {"type": "expandable_blockquote"},
+            ],
+            "reply_markup": payload["reply_markup"],
+        }})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        if receipt_id != 108:
+            with pytest.raises(ValueError, match="квитанциях"):
+                worker.execute(storage, sha, tmp_path / "edit", client, token=TOKEN, now=NOW)
+            assert methods == []
+        else:
+            result = worker.execute(storage, sha, tmp_path / "edit", client, token=TOKEN, now=NOW)
+            assert result["status"] == "corrected" and result["expandable_quotes"] == 1
+            assert methods == ["GET", "POST"]
+
+
 def plan_dict(raw_id=1):
     value = {"version": 1, "city": "belgrade", "raw_item_id": raw_id, "message_id": 94,
              "old_fragment": OLD, "new_fragment": NEW, "evidence_url": EVIDENCE_URL,
