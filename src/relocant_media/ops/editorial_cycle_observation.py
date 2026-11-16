@@ -38,7 +38,7 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
         for raw_id in details.get("processed_raw_item_ids", [])[:5]:
             row = db.execute(
                 """SELECT raw_item.source_id, editorial_run.outcome,
-                          editorial_run.delivery_status, post.telegram_message_id
+                          editorial_run.delivery_status, post.telegram_message_id, post.category
                    FROM raw_item
                    LEFT JOIN editorial_run ON editorial_run.raw_item_id = raw_item.id
                    LEFT JOIN post ON post.id = editorial_run.post_id
@@ -47,18 +47,22 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
             ).fetchone()
             if row is None:
                 continue
-            source, raw_outcome, delivery, message_id = row
+            source, raw_outcome, delivery, message_id, category = row
             outcome = json.loads(raw_outcome) if raw_outcome else {}
             presentation = (outcome.get("_package") or {}).get("presentation") or {}
             native_map = bool(presentation.get("native_map"))
             source_map = bool(presentation.get("source_map"))
-            map_format = "telegram_html" if native_map else "source_link" if source_map else None
+            has_button = bool((outcome.get("_rich_delivery") or {}).get("map_url"))
+            map_format = ("mini_app" if has_button else "telegram_html" if native_map else
+                          "source_link" if source_map else None)
             materials.append({
                 "raw_item_id": raw_id, "source_id": _token(source),
                 "status": _token(outcome.get("status")), "reason": _token(outcome.get("reason")),
                 "rubric": _token(presentation.get("rubric_id")),
-                "has_map": native_map or source_map,
+                "has_map": native_map or source_map or has_button,
                 "map_format": map_format,
+                "event_map_needs_review": category == "events" and delivery == "sent"
+                and not has_button,
                 "illustration": _token((presentation.get("illustration") or {}).get(
                     "illustration_mode")),
                 "delivery": _token(delivery), "telegram_message_id": message_id,

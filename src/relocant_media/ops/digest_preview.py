@@ -17,7 +17,13 @@ from relocant_media.collectors.rhmz_forecast import (
     parse_forecast,
     parse_warning,
 )
-from relocant_media.ops.belgrade_digests import _cover, due_slot, morning_entries, render
+from relocant_media.ops.belgrade_digests import (
+    _cover,
+    _with_cover,
+    due_slot,
+    morning_entries,
+    render,
+)
 
 
 async def preview(database: Path, as_of: datetime, telegram_app: str) -> dict[str, object]:
@@ -48,13 +54,13 @@ async def preview(database: Path, as_of: datetime, telegram_app: str) -> dict[st
     finally:
         engine.dispose()
     draft = render(slot, entries, telegram_app)
-    cover = _cover(slot)
+    draft, photo = _with_cover(slot, entries, draft, telegram_app) if draft else (None, None)
+    cover = _cover(slot) if photo else None
     return {
         "scheduled": slot.scheduled.isoformat(),
-        "cover": str(cover[0]) if cover else None,
+        "cover": str(photo) if photo else None,
         "cover_credit": cover[1] if cover else None,
-        "caption_units": formatted_text_units(draft.html + "\n\n" + cover[1])
-        if draft and cover else None,
+        "caption_units": formatted_text_units(draft.html) if draft and photo else None,
         "entries": [{"label": item.label, "text": item.text, "url": item.url,
                      "map_id": item.map_id} for item in entries],
         "html": draft.html if draft else None,

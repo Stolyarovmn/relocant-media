@@ -1,7 +1,7 @@
 import {
   clusterMapPoints, incidentTimes, placeCountdown, placeStatus, readPlaces,
   straightLineDistance, updateStamp,
-} from "./core.js?v=8";
+} from "./core.js?v=9";
 import { calendarLink } from "./calendar.js?v=2";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
@@ -98,6 +98,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     const when = make("span", "place-when", placeTimes(place));
     const venue = make("span", "place-venue", place.venue);
     const parts = place.paidPlace ? [venue] : [countdown, when, venue];
+    if (place.visitorHours) parts.push(make("span", "place-when", place.visitorHours));
     if (place.sponsored) parts.unshift(make("span", "place-ad", "★ Реклама"));
     if (state.origin) parts.push(make("span", "place-distance", distanceLabel(state.origin, place)));
     return parts;

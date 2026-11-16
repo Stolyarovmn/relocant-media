@@ -162,6 +162,38 @@ def test_long_address_quote_is_bounded_by_telegram_text_limit():
     assert "&lt;Центр&gt;" in digest.html
 
 
+def test_evening_cover_keeps_long_address_lists_reachable():
+    slot = due_slot(datetime(2026, 11, 16, 19, 30, tzinfo=UTC))
+    assert slot is not None
+    app = "https://t.me/relocant_media_belgrade_bot"
+    event = "event_6b93722844d60e041820"
+    rows = tuple(f"Улица {index}, дом 125 — 08:30–12:00" for index in range(100))
+    entries = [
+        Entry("💧 Вода", "Бараево — 08:00–22:00.", "https://www.beograd.rs/water",
+              reminder=True, address_rows=("Посёлки: Гай и Бождаревац",)),
+        Entry("⚡ Свет", "Плановые отключения в нескольких общинах.",
+              "https://t.me/eduvbelgrad/120", "Подробнее", map_id=event,
+              reminder=True, address_rows=rows),
+        Entry("Новости города", "Обычная новость за день.", "https://t.me/eduvbelgrad/122",
+              "Подробнее"),
+    ]
+    original = render(slot, entries, app)
+    assert original is not None and formatted_text_units(original.html) > 1024
+    digest, photo = belgrade_digests._with_cover(slot, entries, original, app)
+    assert photo is not None and photo.name == "evening-04.jpg"
+    assert formatted_text_units(digest.html) <= 1024
+    assert "Посёлки: Гай и Бождаревац" in digest.html
+    assert 'href="https://t.me/eduvbelgrad/120">Подробнее' in digest.html
+    assert f'href="{app}?startapp={event}">Все адреса' in digest.html
+    assert "Фото:" in digest.html and digest.map_url == original.map_url
+
+    unlinked = [entries[0], Entry("⚡ Свет", "", "https://www.beograd.rs/light",
+                                  address_rows=rows), entries[2]]
+    original = render(slot, unlinked, app)
+    assert original is not None
+    assert belgrade_digests._with_cover(slot, unlinked, original, app) == (original, None)
+
+
 def test_morning_link_uses_only_a_sent_post_for_the_current_notice():
     now = datetime(2026, 11, 14, 7, 30, tzinfo=_ZONE)
     source_url = "https://www.beograd.rs/example"

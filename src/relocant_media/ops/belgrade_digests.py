@@ -129,6 +129,7 @@ class Entry:
     scheduled_start: datetime | None = None
     scheduled_end: datetime | None = None
     address_rows: tuple[str, ...] = ()
+    address_link: str = ""
 
 
 @dataclass(frozen=True)
@@ -552,6 +553,7 @@ async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | 
     else:
         return None
     return replace(entry, text=_short(text), address_rows=address_rows,
+                   evidence_sha=_evidence_sha(document),
                    map_id=entry.map_id if same else "", reminder=True)
 
 
@@ -582,6 +584,8 @@ def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) ->
             location = f' · <a href="{escape(url, quote=True)}">На карте</a>'
         label_html = f"<b>{escape(label)}</b>"
         link = f' <a href="{escape(entry.url, quote=True)}">{entry.link_text}</a>'
+        if entry.address_link:
+            link += f' · <a href="{escape(entry.address_link, quote=True)}">Все адреса</a>'
         if entry.label in {_LABELS["road"], _LABELS["route"]} and entry.link_text == "Источник":
             label_html = f'<a href="{escape(entry.url, quote=True)}">{label_html}</a>'
             link = ""
@@ -646,6 +650,47 @@ def _cover(slot: Slot) -> tuple[Path, str] | None:
         return None
 
 
+def _with_cover(
+    slot: Slot, entries: list[Entry], digest: Digest, telegram_app: str | None,
+) -> tuple[Digest, Path | None]:
+    if slot.kind == "reminder" or all(entry.reminder for entry in entries):
+        return digest, None
+    cover = _cover(slot)
+    if cover is None:
+        return digest, None
+    photo, credit = cover
+    suffix = "\n\n" + credit
+    if formatted_text_units(digest.html + suffix) <= 1024:
+        return Digest(digest.html + suffix, digest.map_url), photo
+
+    compact = [
+        replace(entry, text="" if entry.link_text == "Подробнее"
+                and entry.label not in _LABELS.values() else _clip_text(entry.text, 125))
+        for entry in entries[:4]
+    ]
+    utility = {_LABELS["water"], _LABELS["power"]}
+    longest_first = sorted(
+        range(len(compact)), key=lambda i: sum(map(len, compact[i].address_rows)), reverse=True,
+    )
+    for index in [None, *longest_first]:
+        if index is not None:
+            entry = compact[index]
+            if entry.label not in utility or not entry.address_rows:
+                continue
+            address_link = (map_digest_url((entry.map_id,), telegram_app=telegram_app)
+                            if entry.map_id else entry.url if entry.link_text == "Подробнее"
+                            else None)
+            if address_link is None:
+                continue
+            # An exact original already has a reader-facing link in the lead.
+            compact[index] = replace(entry, address_rows=(),
+                                     address_link=address_link if address_link != entry.url else "")
+        candidate = render(slot, compact, telegram_app)
+        if candidate is not None and formatted_text_units(candidate.html + suffix) <= 1024:
+            return Digest(candidate.html + suffix, candidate.map_url), photo
+    return digest, None
+
+
 Commit = Callable[[dict[str, Any], str, dict[str, Any]], tuple[dict[str, Any], str]]
 
 
@@ -700,6 +745,9 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
                 originals = {entry.url: entry.original or _original_post(
                     session, entry.source_url or entry.url,
                 ) for entry in candidates}
+                matching_posts = {entry.url: _link_to_published(session, entry, now)
+                                  for entry in candidates if not entry.place
+                                  and entry.evidence_sha}
         finally:
             engine.dispose()
         reply_to = None
@@ -722,35 +770,20 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
         ):
             return {"state": "reminder_source_unconfirmed", "items": len(candidates)}
         if confirmed:
-            confirmed = [replace(item, original=originals[item.url]) for item in confirmed]
             if len(confirmed) == 1 and (slot.kind == "reminder" or len(entries) < 2):
-                reply_to = confirmed[0].original
-            entries = confirmed + entries[:max(0, 4 - len(confirmed))]
-        digest = render(slot, entries, environment.get("RELOCANT_MAP_TELEGRAM_APP"))
-        photo = None
-        if digest is not None and slot.kind != "reminder" and not all(
-            entry.reminder for entry in entries
-        ):
-            cover = _cover(slot)
-            if cover is not None:
-                photo, credit = cover
-                caption = digest.html + "\n\n" + credit
-                if formatted_text_units(caption) > 1024:
-                    compact = [
-                        replace(item, text="" if item.link_text == "Подробнее"
-                                and item.label not in _LABELS.values()
-                                else _clip_text(item.text, 125))
-                        for item in entries
-                    ]
-                    shortened = render(slot, compact, environment.get("RELOCANT_MAP_TELEGRAM_APP"))
-                    if shortened is not None:
-                        caption = shortened.html + "\n\n" + credit
-                if formatted_text_units(caption) <= 1024:
-                    digest = Digest(caption, digest.map_url)
+                reply_to = originals[confirmed[0].url]
+            for index, item in enumerate(confirmed):
+                linked = matching_posts.get(item.url)
+                if linked and linked.url != item.url and linked.evidence_sha == item.evidence_sha:
+                    confirmed[index] = replace(item, url=linked.url, link_text=linked.link_text)
                 else:
-                    photo = None
+                    confirmed[index] = replace(item, original=originals[item.url])
+            entries = confirmed + entries[:max(0, 4 - len(confirmed))]
+        telegram_app = environment.get("RELOCANT_MAP_TELEGRAM_APP")
+        digest = render(slot, entries, telegram_app)
         if digest is None:
             return {"state": "insufficient_items", "items": len(entries)}
+        digest, photo = _with_cover(slot, entries, digest, telegram_app)
         if datetime.now(UTC) >= slot.expires:
             return {"state": "window_closed"}
         bot = TelegramBotAPI(environment["TELEGRAM_BOT_TOKEN"], client)

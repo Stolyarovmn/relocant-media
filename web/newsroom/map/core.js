@@ -138,7 +138,8 @@ export function readPlaces(document) {
     const paidPlace = item.kind === "sponsored_place";
     if (paidPlace && (!post || end !== null)) return [];
     return [{ id: item.id, title, source, schedule: schedule === source ? "" : schedule,
-      post, venue, address, lat, lon, paidPlace, sponsored: paidPlace || item.sponsored === true,
+      post, venue, address, visitorHours: textValue(item.visitor_hours), lat, lon,
+      paidPlace, sponsored: paidPlace || item.sponsored === true,
       archived: item.archived === true, start, end, expires }];
   });
 }

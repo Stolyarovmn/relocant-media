@@ -14,6 +14,7 @@ from test_event_place_adapters import _source
 from relocant_media.ai.models import RussianDraft
 from relocant_media.ai.package import canonical_json, draft_sha256
 from relocant_media.collectors.base import RawItem as CollectedItem
+from relocant_media.domain.map_links import map_event_id
 from relocant_media.ingestion.persistence import capture_collected_batch
 from relocant_media.ops.events_export import export_events, export_events_snapshot, read_events_feed
 from relocant_media.ops.map_backfill import plan_event_buttons
@@ -151,6 +152,31 @@ def test_feed_only_exposes_allowlisted_published_fields_and_keeps_archive_id(ses
     assert "PRIVATE_INTAKE" not in first.model_dump_json()
     assert "reviews" not in first.model_dump_json() and "raw_item_id" not in first.model_dump_json()
     assert not session.dirty and not session.new and not session.deleted
+
+
+def test_reviewed_event_matches_a_sent_post_even_when_the_article_is_media(session):
+    registry = Path("cities/belgrade/reviewed-map-events.json")
+    record = json.loads(registry.read_text(encoding="utf-8"))[0]
+    item, run, post, _ = seed(session)
+    session.get(Source, item.source_id).ownership = "media"
+    item.url = record["source_url"]
+    post.title = record["post_title"]
+    post.telegram_message_id = record["message_id"]
+    checked = NOW + timedelta(days=3)
+    run.delivery_status = "pending"
+    assert export_events(session, observed_at=checked).events == ()
+    run.delivery_status = "sent"
+    post.title = "Другая публикация"
+    assert export_events(session, observed_at=checked).events == ()
+    post.title = record["post_title"]
+    feed = export_events(session, observed_at=checked)
+    event, = feed.events
+    assert event.id == map_event_id(record["source_url"])
+    assert event.post_url == "https://t.me/eduvbelgrad/121"
+    assert event.visitor_hours == "Ежедневно 12:00–20:00"
+    assert not event.archived and export_events(session, observed_at=checked + timedelta(
+        days=20,
+    )).events[0].archived
 
 
 def test_published_cukarica_event_without_html_uses_corroborated_program(session, monkeypatch):

@@ -20,7 +20,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, or_, select
 from sqlalchemy.engine import ScalarResult
 from sqlalchemy.orm import Session
 
@@ -33,6 +33,7 @@ from relocant_media.ai.package import (
 )
 from relocant_media.ai.pipeline import _citations_are_grounded
 from relocant_media.domain.city_profile import load_city_profile
+from relocant_media.domain.dedup import canonicalize_url
 from relocant_media.domain.map_links import map_event_id
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.ops.newsroom_export import public_article_url
@@ -74,6 +75,7 @@ class PublicEvent(PublicModel):
     coordinate_source_url: str
     venue_source_url: str
     schedule_source_url: str | None = None
+    visitor_hours: Label | None = None
     sponsored: bool = False
 
     @field_validator("source_url", "coordinate_source_url", "venue_source_url")
@@ -111,6 +113,30 @@ class PublicEvent(PublicModel):
         ):
             raise ValueError("unknown end requires the next local midnight cutoff")
         return self
+
+
+class ReviewedMapEvent(PublicModel):
+    message_id: int = Field(gt=0)
+    post_title: Label
+    title: Label
+    source_url: str
+    starts_at: AwareDatetime
+    ends_at: AwareDatetime
+    venue: Venue
+    coordinate_source_url: str
+    venue_source_url: str
+    schedule_source_url: str
+    visitor_hours: Label | None = None
+
+    def card(self, city: str, timezone: str, now: datetime) -> PublicEvent:
+        if not 44.2 <= self.venue.latitude <= 45.2 or not 19.8 <= self.venue.longitude <= 21.1:
+            raise ValueError("reviewed venue outside the supported Belgrade map")
+        return PublicEvent(
+            **self.model_dump(exclude={"message_id", "post_title"}),
+            id=map_event_id(self.source_url),
+            post_url=f"https://t.me/{PUBLIC_CHANNELS[city]}/{self.message_id}",
+            expires_at=self.ends_at, timezone=timezone, archived=self.ends_at <= now,
+        )
 
 
 class SponsoredPlace(PublicModel):
@@ -351,6 +377,34 @@ def _sponsored_places(
     return tuple(result.values())
 
 
+def _reviewed_events(
+    session: Session, city: str, timezone: str, now: datetime,
+) -> dict[str, PublicEvent]:
+    registry = Path(f"cities/{city}/reviewed-map-events.json")
+    if not registry.is_file():
+        return {}
+    records = TypeAdapter(tuple[ReviewedMapEvent, ...]).validate_json(registry.read_bytes())
+    events = {}
+    for record in records:
+        matches = session.scalar(
+            select(Post.id)
+            .join(EditorialRun, EditorialRun.post_id == Post.id)
+            .join(RawItem, RawItem.id == EditorialRun.raw_item_id)
+            .where(
+                Post.city == city, Post.title == record.post_title,
+                Post.telegram_message_id == record.message_id, Post.published_at <= now,
+                or_(RawItem.url == record.source_url,
+                    RawItem.canonical_url == canonicalize_url(record.source_url)),
+                EditorialRun.delivery_status == "sent",
+            )
+            .limit(1)
+        )
+        if matches is not None:
+            card = record.card(city, timezone, now)
+            events[card.id] = card
+    return events
+
+
 def export_events(session: Session, *, observed_at: datetime, city: str = "belgrade") -> EventsFeed:
     if observed_at.tzinfo is None or city not in PUBLIC_CHANNELS:
         raise ValueError("explicit city channel and aware snapshot time required")
@@ -363,7 +417,11 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
         .join(Post, Post.id == EditorialRun.post_id)
         .where(
             Source.city == city,
-            Source.ownership == "official",
+            or_(
+                Source.ownership == "official",
+                EditorialRun.outcome["_package"]["presentation"]["event_place"]["source_url"]
+                .as_string().is_not(None),
+            ),
             Source.enabled.is_(True),
             Post.city == city,
             Post.category == "events",
@@ -375,8 +433,14 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
         .order_by(Post.published_at.desc(), Post.id.desc())
         .limit(MAX_EVENTS * 2)
     )
-    events: dict[str, PublicEvent] = {}
+    events = _reviewed_events(session, city, profile.timezone, observed_at)
+    reviewed_posts = {event.post_url for event in events.values()}
     for item, run, post in rows:
+        if len(events) >= MAX_EVENTS:
+            break
+        post_url = f"https://t.me/{PUBLIC_CHANNELS[city]}/{post.telegram_message_id}"
+        if post_url in reviewed_posts:
+            continue
         try:
             package = _reviewed_package(session, run, post, item)
             if package is None:
@@ -402,7 +466,7 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                     id=place["id"],
                     title=post.title,
                     source_url=document.url,
-                    post_url=f"https://t.me/{PUBLIC_CHANNELS[city]}/{post.telegram_message_id}",
+                    post_url=post_url,
                     starts_at=place["starts_at"],
                     ends_at=place["ends_at"],
                     expires_at=place["expires_at"],
@@ -419,8 +483,6 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
         except (ValueError, TypeError, KeyError, OverflowError):
             # Повреждённый исторический пакет не раскрывается и не ломает публичный фид.
             continue
-        if len(events) >= MAX_EVENTS:
-            break
     places = _sponsored_places(policy, city, profile.timezone, observed_at)
     return EventsFeed(generated_at=observed_at.astimezone(UTC), events=tuple(events.values()),
                       sponsored_places=places)
