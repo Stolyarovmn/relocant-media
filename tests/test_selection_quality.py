@@ -283,6 +283,8 @@ def test_second_country_uses_its_profile_and_calendar() -> None:
         "timezone": "Asia/Tbilisi", "prepared_at_local": "2026-11-13T19:00+04:00",
         "day_of_week": "пт", "daypart": "вечер",
     }
+    assert "ближайший подтверждённый шаг" in draft_request["system_instruction"]
+    assert "Привязывай каждый срок к своему изменению" in draft_request["system_instruction"]
     assert "40–100 слов" in draft_request["system_instruction"]
     assert "точные адреса или подтверждённая граница" in draft_request["system_instruction"]
     with pytest.raises(ValueError, match="не совпадает"):
@@ -320,6 +322,9 @@ def test_independent_utility_enforces_higher_value_and_preserves_hash() -> None:
     assert PROFILE_AUDIENCE_MISMATCH_FLAG in result.reviews[1].flags
     assert context_sha256(original) == context_sha256(result)
     assert all(review.context_sha256 == context_sha256(original) for review in result.reviews)
+    assert "к какому изменению относится каждый срок" in provider.calls[0]["system_instruction"]
+    assert "ближайший подтверждённый шаг" in provider.calls[1]["system_instruction"]
+    assert "осталось ли время действовать" in provider.calls[1]["system_instruction"]
     assert "Диапазон слов ориентировочный" in provider.calls[1]["system_instruction"]
     assert "writing_calendar" in json.loads(provider.calls[1]["prompt"])
 
