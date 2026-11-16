@@ -1,0 +1,20 @@
+[
+  {
+    "message_id": 121,
+    "post_title": "В Галерее Штаб открылась международная выставка «MOST.HUNGARY-SERBIA»",
+    "title": "Выставка MOST.HUNGARY-SERBIA",
+    "source_url": "https://www.danas.rs/kultura/galerija-stab-izlozba-most-hungary-serbia/",
+    "starts_at": "2026-11-13T19:00:00+01:00",
+    "ends_at": "2026-11-29T20:00:00+01:00",
+    "venue": {
+      "name": "Galerija Štab / Art Dragstor",
+      "address": "Bulevar Vudroa Vilsona 14, TC Galerija, 2-й этаж, Белград",
+      "latitude": 44.8027352,
+      "longitude": 20.4464364
+    },
+    "coordinate_source_url": "https://dragstor.art/kontakt/",
+    "venue_source_url": "https://dragstor.art/kontakt/",
+    "schedule_source_url": "https://afisha.rs/sr/festivali/mosthungary-serbia-u-galeriji-stab-madarska-skulptura-i-srpsko-slikars-sr3394",
+    "visitor_hours": "Ежедневно 12:00–20:00"
+  }
+]
