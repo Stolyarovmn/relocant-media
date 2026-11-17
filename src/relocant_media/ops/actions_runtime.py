@@ -344,7 +344,8 @@ def report_failure(run_dir: Path, code: int) -> None:
         report = json.loads((run_dir / "server-report.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
-    print_failure_coordinates(report)
+    if isinstance(report, dict):
+        print_failure_coordinates(report)
 
 
 def _counters(value: object, keys: tuple[str, ...]) -> dict[str, int]:
@@ -728,10 +729,14 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if observed_run is not None and not observed_run.is_dir():
         observed_run = None  # the worker failed before creating its output
     feedback_stats = None
+    intake_result = saved_intake.get("last_result", {})
     if (
         observed_run is not None and mode == "intake"
-        and saved_intake.get("last_result", {}).get("pipeline_started")
+        and intake_result.get("pipeline_started")
     ):
+        pipeline_code = intake_result.get("pipeline_exit_code")
+        if type(pipeline_code) is int:
+            report_failure(observed_run, pipeline_code)
         try:
             report = json.loads((observed_run / "server-report.json").read_text(encoding="utf-8"))
             feedback_stats = report.get("private_feedback")
