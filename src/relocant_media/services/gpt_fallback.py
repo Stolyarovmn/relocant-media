@@ -283,10 +283,12 @@ def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
         registry = _registry()
         windows = [(run, _failed_ids(run, now)) for run in reversed(_recent_runs(session, now))]
         pending = pending_gpt_ids(session, now=now)
+        pending_items = session.execute(
+            select(RawItem, Source).join(Source).where(RawItem.id.in_(pending)),
+        ).all()
+        official = {item.id for item, source in pending_items if source.ownership == "official"}
         urgent = {
-            item.id for item, source in session.execute(
-                select(RawItem, Source).join(Source).where(RawItem.id.in_(pending))
-            )
+            item.id for item, source in pending_items
             if local_utility_notice(item.source_id, item.url, item.title, item.body)
             and evidence_freshness(
                 item.title, item.body, item.published_at, now,
@@ -294,7 +296,11 @@ def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
                 verified_at=item.ingested_at, timezone_name=profile.timezone,
             ).action == "keep"
         }
-        windows.sort(key=lambda window: urgent.isdisjoint(window[1]))
+        # Ранний нерелевантный сбой СМИ не должен всё окно перекрывать афиши и
+        # объявления служб. Приоритет только для очереди, не для допуска к выпуску.
+        windows.sort(key=lambda window: (
+            urgent.isdisjoint(window[1]), official.isdisjoint(window[1]),
+        ))
         for run, failed in windows:
             candidates: list[dict[str, Any]] = []
             request = {
@@ -306,7 +312,9 @@ def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
                 "writing_brief": writing_brief(profile, now),
                 "candidates": candidates,
             }
-            for raw_id in sorted(failed, key=lambda raw_id: raw_id not in urgent):
+            for raw_id in sorted(failed, key=lambda raw_id: (
+                raw_id not in urgent, raw_id not in official,
+            )):
                 if (session.get(EditorialRun, raw_id, populate_existing=True) is not None
                         and not eligible_empty_policy_hold(session, raw_id, now=now)):
                     continue

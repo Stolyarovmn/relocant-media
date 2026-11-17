@@ -444,6 +444,47 @@ def test_fresh_utility_notice_precedes_an_older_gemini_failure(fallback_session)
     assert [candidate["raw_item_id"] for candidate in request["candidates"]] == [water.id]
 
 
+def test_official_city_event_is_not_blocked_by_an_older_media_failure(fallback_session):
+    from pathlib import Path
+
+    session, official, run = fallback_session
+    official.title = "Izložba u Beogradu"
+    official.body = "Izložba će biti otvorena 18. novembra u 19 časova u Kulturnom centru."
+    official.url = "https://www.beograd.rs/lat/beoinfo-vesti/a116900/Izlozba.html"
+    config = next(source for source in load_source_registry(Path("cities/belgrade/sources"))
+                  if source.id == "media_n1_srbija")
+    session.add(Source(
+        id=config.id, city="belgrade", name=config.name, url=str(config.url),
+        source_type=config.source_type, trust=Decimal(str(config.trust)),
+        ownership=config.ownership, high_risk=config.policy.high_risk,
+        auto_publish=config.policy.auto_publish, enabled=True,
+    ))
+    session.flush()
+    media = RawItem(
+        source_id=config.id, external_id="national-politics",
+        url="https://n1info.rs/vesti/politicka-izjava/", title="Politička izjava",
+        body="Izjava o radu nacionalne skupštine.", published_at=official.published_at,
+        published_at_precision="instant", ingested_at=official.ingested_at,
+    )
+    session.add(media)
+    session.flush()
+    older = SchedulerRun(
+        task_key=run.task_key, task_type=run.task_type, city=run.city, status="partial",
+        scheduled_for=NOW - timedelta(minutes=50), started_at=NOW - timedelta(minutes=50),
+        finished_at=NOW - timedelta(minutes=40),
+        details={"processing_errors": [
+            {"raw_item_id": media.id, "error_type": "GeminiWorkerError"},
+        ]},
+    )
+    session.add(older)
+    session.commit()
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request["scheduler_run_id"] == run.id
+    assert [candidate["raw_item_id"] for candidate in request["candidates"]] == [official.id]
+    assert session.get(EditorialRun, official.id) is None
+    assert session.get(EditorialRun, media.id) is None
+
+
 def test_unregistered_secondary_source_blocks_entire_bundle(fallback_session):
     session, first, _ = fallback_session
     source = Source(
