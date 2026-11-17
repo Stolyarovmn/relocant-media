@@ -12,6 +12,7 @@ from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.cloud_discovery import ORIGIN as CLOUD_DISCOVERY_ORIGIN
 from relocant_media.services.submission_queue import NEWS_KINDS
+from relocant_media.services.submission_reference import submission_reference
 from relocant_media.storage.models import Submission
 
 INCIDENT = re.compile(
@@ -75,7 +76,7 @@ def _feedback_text(row: Submission, reason: str) -> str:
     if reason == "already_considered":
         text = ("Этот повод уже есть в очереди редакции. "
                 "Если появились новые сведения, ответьте на это сообщение.")
-    return f"Обращение №{row.id}\n\n{text}"
+    return f"Обращение №{submission_reference(row)}\n\n{text}"
 
 
 def _feedback_timestamp(payload: dict[str, Any], key: str) -> datetime | None:
