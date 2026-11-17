@@ -33,7 +33,8 @@ def test_real_published_reprint_is_one_event_in_both_directions() -> None:
 def single_route_detour_reprint() -> tuple[EventCandidate, EventCandidate]:
     publication = datetime(2026, 11, 15, 23, tzinfo=UTC)
     details = (
-        "Radovi se izvode na kolovozu Ulice Gandijeva (u smeru ka Dr Huga Klajna), od kućnog broja 4. "
+        "Radovi se izvode na kolovozu Ulice Gandijeva (u smeru ka Dr Huga Klajna), "
+        "od kućnog broja 4. "
         "U smeru ka Zemunu vozila će saobraćati ulicama Gandijeva, Egipatska, Tošin bunar "
         "i dalje redovnom trasom, dok će u suprotnom smeru saobraćati redovnom trasom. "
         "U smeru ka Zemunu, linija će koristiti sva postojeća stajališta, "
