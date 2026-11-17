@@ -107,6 +107,17 @@ def public_reference(engine, sid):
         return reference
 
 
+def use_legacy_menu(engine, sid):
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        notices = {
+            key: {field: value for field, value in notice.items() if field != "submit_on_pick"}
+            for key, notice in row.payload["reader_notices"].items()
+        }
+        row.payload = {**row.payload, "reader_notices": notices}
+        session.commit()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
 async def test_reader_news_menu_number_and_media_followup(engine, direct):
@@ -125,21 +136,21 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
 
     sid = submission_id(engine)
     reference = public_reference(engine, sid)
-    assert f"Черновик №{reference}" in telegram.messages[-1][1]["text"]
-    selected = await telegram.receive(engine, telegram.press(2, "Предложить новость", ago=200))
-    assert selected["reader_notices"]["response_seconds"]["prompt"][0] >= 200
-    prompt = telegram.messages[-1]
-    assert "Что, где и когда произошло?" in prompt[1]["text"]
-
+    menu = telegram.messages[-1]
+    assert reference not in menu[1]["text"]
+    assert menu[1]["reply_markup"]["is_persistent"] is True
+    assert menu[1]["reply_markup"]["one_time_keyboard"] is False
+    materials = []
     if not direct:
-        await telegram.receive(engine, telegram.message(
-            3, caption="Дорожное объявление", photo=[{"file_id": "photo-small"}, photo],
+        materials.append(telegram.message(
+            2, caption="Дорожное объявление", photo=[{"file_id": "photo-small"}, photo],
         ))
-    await telegram.receive(engine, telegram.message(4, caption="Место работ", video=video))
-    submitted = await telegram.receive(
-        engine, telegram.press(5, f"Отправить №{reference}", message=prompt, ago=200),
-    )
+    materials.append(telegram.message(3, caption="Место работ", video=video))
+    click = telegram.press(4, "Предложить новость", message=menu, ago=200)
+    repeated_click = telegram.press(5, "Предложить новость", message=menu, ago=200)
+    submitted = await telegram.receive(engine, *materials, click, repeated_click)
     assert submitted["reader_notices"]["response_seconds"]["accepted"][0] >= 200
+    assert len(telegram.messages) == 2
     acceptance_id, acceptance = telegram.messages[-1]
     with Session(engine) as session:
         row = session.scalars(select(Submission)).one()
@@ -167,7 +178,7 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
 
     replay = await telegram.receive(engine, extra)
     assert replay["received"] == 0
-    assert len(telegram.messages) == 4
+    assert len(telegram.messages) == 3
     with Session(engine) as session:
         row = session.scalars(select(Submission)).one()
         assert row.id == sid
@@ -195,9 +206,11 @@ async def test_reader_stale_submit_cannot_send_changed_topic(engine):
     telegram = Telegram(direct=False)
     await telegram.receive(engine, telegram.message(1, text="Описание"))
     sid = submission_id(engine)
+    use_legacy_menu(engine, sid)
     await telegram.receive(engine, telegram.legacy_click(2, sid=sid, action="pick:news_tip"))
     old_prompt = telegram.messages[-1]
     await telegram.receive(engine, telegram.legacy_click(3, sid=sid, action="menu"))
+    use_legacy_menu(engine, sid)
     await telegram.receive(engine, telegram.legacy_click(4, sid=sid, action="pick:complaint"))
     new_prompt = telegram.messages[-1]
 
@@ -226,6 +239,7 @@ async def test_reader_old_numbered_button_cannot_submit_another_draft(engine, di
     await telegram.receive(engine, telegram.message(1, text="Первый сюжет"))
     first_id = submission_id(engine)
     first_reference = public_reference(engine, first_id)
+    use_legacy_menu(engine, first_id)
     await telegram.receive(engine, telegram.press(2, "Предложить новость"))
     first_prompt = telegram.messages[-1]
     first_submit = telegram.press(3, f"Отправить №{first_reference}", message=first_prompt)
@@ -240,6 +254,7 @@ async def test_reader_old_numbered_button_cannot_submit_another_draft(engine, di
     assert second_id != first_id
     second_reference = public_reference(engine, second_id)
     assert second_reference != first_reference
+    use_legacy_menu(engine, second_id)
     await telegram.receive(engine, telegram.press(5, "Предложить новость"))
     second_prompt = telegram.messages[-1]
     await telegram.receive(engine, telegram.message(6, text="Второй сюжет"))
@@ -272,8 +287,7 @@ async def test_reader_confirmation_precedes_editorial_and_followup_reopens_case(
     await telegram.receive(engine, start)
     sid = submission_id(engine)
     reference = public_reference(engine, sid)
-    await telegram.receive(engine, telegram.press(2, "Предложить новость"))
-    telegram.updates = [telegram.press(3, f"Отправить №{reference}")]
+    telegram.updates = [telegram.press(2, "Предложить новость")]
 
     def editorial():
         assert f"Номер обращения — {reference}." in telegram.messages[-1][1]["text"]
@@ -317,24 +331,61 @@ async def test_reader_can_submit_a_draft_with_an_already_issued_numeric_number(e
         row = session.get(Submission, sid)
         row.payload = {k: v for k, v in row.payload.items() if k != "public_reference"}
         session.commit()
+    use_legacy_menu(engine, sid)
     await telegram.receive(engine, telegram.press(2, "Предложить новость"))
     await telegram.receive(engine, telegram.press(3, f"Отправить №{sid}"))
     assert f"Номер обращения — {sid}." in telegram.messages[-1][1]["text"]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("direct", "opening"), [
+    (False, "/start"),
+    (False, "Привет!"),
+    (True, "Добрый день 👋"),
+])
+async def test_reader_greeting_opens_menu_without_submitting(engine, direct, opening):
+    telegram = Telegram(direct)
+    await telegram.receive(engine, telegram.message(1, text=opening))
+    sid = submission_id(engine)
+    reference = public_reference(engine, sid)
+    menu = telegram.messages[-1]
+    assert "Можно отправить несколько сообщений и приложить фото или видео." in menu[1]["text"]
+    assert reference not in menu[1]["text"]
+    await telegram.receive(engine, telegram.press(2, "Предложить новость", message=menu))
+    assert "Что, где и когда произошло?" in telegram.messages[-1][1]["text"]
+    with Session(engine) as session:
+        draft = session.get(Submission, sid)
+        assert draft.status == "choosing" and draft.payload["text"] == ""
+        assert not batch_submissions(session)
+    intro = telegram.message(3, text="Привет! Поменялся маршрут 18.")
+    second = telegram.message(4, text="Остановка на улице Негошева.")
+    corrected = telegram.message(3, text="Привет! Поменялся маршрут 19.")
+    edit = {"update_id": 5, "edited_message": corrected["message"]}
+    click = telegram.press(6, "Предложить новость", message=menu)
+    await telegram.receive(engine, intro, second, edit, click)
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        assert row.status == "new"
+        assert row.payload["text"] == "Привет! Поменялся маршрут 19.\nОстановка на улице Негошева."
+    assert f"Номер обращения — {reference}." in telegram.messages[-1][1]["text"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
 @pytest.mark.parametrize("selected", [False, True], ids=["menu", "form"])
-async def test_reader_cancel_removes_the_keyboard(engine, direct, selected):
+async def test_reader_cancel_replaces_old_keyboard_with_new_entry(engine, direct, selected):
     telegram = Telegram(direct)
     await telegram.receive(engine, telegram.message(1, text="Описание"))
-    reference = public_reference(engine, submission_id(engine))
+    sid = submission_id(engine)
+    reference = public_reference(engine, sid)
     if selected:
+        use_legacy_menu(engine, sid)
         await telegram.receive(engine, telegram.press(2, "Предложить новость"))
     cancellation = telegram.press(3, f"Отменить №{reference}")
     await telegram.receive(engine, cancellation)
     receipt = telegram.messages[-1][1]
-    assert receipt["reply_markup"] == {"remove_keyboard": True}
+    assert receipt["reply_markup"]["keyboard"] == [[{"text": "Новое обращение"}]]
+    assert receipt["reply_markup"]["is_persistent"] is True
     assert f"Черновик №{reference} отменён." in receipt["text"]
     assert receipt["reply_parameters"]["message_id"] == 3
     with Session(engine) as session:
@@ -342,8 +393,11 @@ async def test_reader_cancel_removes_the_keyboard(engine, direct, selected):
         assert not batch_submissions(session)
     await telegram.receive(engine, cancellation)
     assert sum(
-        msg.get("reply_markup") == {"remove_keyboard": True} for _, msg in telegram.messages
+        msg.get("reply_markup", {}).get("keyboard") == [[{"text": "Новое обращение"}]]
+        for _, msg in telegram.messages
     ) == 1
+    await telegram.receive(engine, telegram.press(4, "Новое обращение"))
+    assert "выберите действие ниже" in telegram.messages[-1][1]["text"]
 
 
 @pytest.mark.asyncio
@@ -361,7 +415,7 @@ async def test_reader_can_clear_the_old_keyboard_of_a_cancelled_numeric_draft(en
         session.commit()
     await telegram.receive(engine, telegram.message(1, text=f"Отменить №{sid}"))
     receipt = telegram.messages[-1][1]
-    assert receipt["reply_markup"] == {"remove_keyboard": True}
+    assert receipt["reply_markup"]["keyboard"] == [[{"text": "Новое обращение"}]]
     assert f"Черновик №{sid} уже отменён." in receipt["text"]
     await telegram.receive(engine, telegram.message(2, text="Новое обращение"))
     await telegram.receive(engine, telegram.message(3, text=f"Отменить №{sid}"))
@@ -415,9 +469,8 @@ async def test_reader_manual_categories_stay_out_of_news_batch(engine, button, k
         else telegram.press(2, button)
     )
     await telegram.receive(engine, selected)
-    click = telegram.press(3, f"Отправить №{reference}")
-    await telegram.receive(engine, click)
-    await telegram.receive(engine, click)
+    assert f"Номер обращения — {reference}." in telegram.messages[-1][1]["text"]
+    await telegram.receive(engine, selected)
     with Session(engine) as session:
         row = session.scalars(select(Submission)).one()
         assert row.kind == kind
