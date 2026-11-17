@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -76,7 +77,9 @@ def main() -> None:
     parser.add_argument("output", type=Path, help="new private file, outside the repository")
     args = parser.parse_args()
     database = args.database.resolve(strict=True)
-    engine = create_engine(f"sqlite:///{database.as_uri()}?mode=ro&uri=true")
+    engine = create_engine(
+        "sqlite://", creator=lambda: sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True),
+    )
     try:
         with Session(engine) as session:
             state = export_intake_state(session, datetime.now(UTC))

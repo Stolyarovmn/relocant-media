@@ -1,17 +1,21 @@
+import json
+import sys
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session
 from test_owner_review_intake import OWNER, OWNER_CHAT, OwnerBot, _review
 from test_private_intake import engine as _engine
 
 from relocant_media.ops.intake_batch import collect_batch
 from relocant_media.ops.serverless_queue import decode_result
-from relocant_media.ops.serverless_snapshot import export_intake_state
+from relocant_media.ops.serverless_snapshot import export_intake_state, main
 from relocant_media.services.serverless_intake import import_inbox
-from relocant_media.storage.models import Submission, TelegramUpdateReceipt
+from relocant_media.storage.models import Base, Submission, TelegramUpdateReceipt
 
 engine = _engine
 
@@ -88,6 +92,23 @@ def test_export_requires_resolved_source_receipts(engine):
         session.commit()
         with pytest.raises(ValueError, match="unresolved"):
             export_intake_state(session, datetime.now(UTC))
+
+
+def test_shadow_export_reads_a_snapshot_without_overwriting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "test snapshot.sqlite3"
+    output = tmp_path / "seed.json"
+    sqlite_engine = create_engine(URL.create("sqlite", database=str(database)))
+    Base.metadata.create_all(sqlite_engine)
+    sqlite_engine.dispose()
+    contents = database.read_bytes()
+    monkeypatch.setattr(sys, "argv", ["serverless_snapshot", str(database), str(output)])
+    main()
+    assert json.loads(output.read_text(encoding="utf-8"))["version"] == 1
+    assert database.read_bytes() == contents
+    with pytest.raises(FileExistsError):
+        main()
 
 
 @pytest.mark.asyncio
