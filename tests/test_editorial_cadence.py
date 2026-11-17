@@ -65,6 +65,7 @@ def test_hourly_timer_retains_single_service_and_persistent_serialized_runtime()
     data = workflow()
     assert data["jobs"]["cycle"]["concurrency"] == {
         "group": "canonical-editorial-state", "cancel-in-progress": "false",
+        "queue": "max",
     }
     assert "vars.ACTIONS_EDITORIAL_ENABLED == 'true'" in data["jobs"]["cycle"]["if"]
     runtime = next(step for step in data["jobs"]["cycle"]["steps"]
@@ -107,6 +108,7 @@ def test_manual_operations_have_separate_workflow_queues_and_shared_state_lock()
     assert data["concurrency"] == {
         "group": "${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' "
                  "|| startsWith(inputs.mode, 'map-') && 'editorial-map-operations' "
+                 "|| inputs.mode == 'preview' && 'editorial-preview' "
                  "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' "
                  "&& 'editorial-manual-cycle' "
                  "|| 'canonical-editorial-writer' }}",

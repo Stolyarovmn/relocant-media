@@ -100,6 +100,7 @@ def test_runtime_workflow_observes_failures_without_broadening_execution_rights(
     assert "TELEGRAM_BOT_TOKEN" not in recovery["env"]
     assert cycle["concurrency"] == {
         "group": "canonical-editorial-state", "cancel-in-progress": False,
+        "queue": "max",
     }
     # A failed CI/storage preflight also counts when the worker step never ran.
     assert observation["env"]["RUNTIME_OUTCOME"] == (
