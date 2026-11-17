@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 from relocant_media.domain.event_facts import (
     clock_ranges,
@@ -55,6 +56,17 @@ _TRANSPORT_ACTION = re.compile(
     r"\b(?:ukid\w*|izmešt\w*|izmest\w*|uspostav\w*|zatvar\w*|"
     r"u?dvosmer\w*|jednosmer\w*)\b",
     flags=re.IGNORECASE | re.UNICODE,
+)
+_BEOGRADE_WORK_SECTION = re.compile(r"\bradovi se izvode na ([^.]+)\.", re.I)
+_BEOGRADE_ORDERED_DETOUR = re.compile(
+    r"\bu smeru ka ([^.,]+?) (?:vozila )?će saobraćati ulicama ([^.]*) "
+    r"i dalje redovnom trasom\s*, dok će u suprotnom smeru saobraćati redovnom trasom",
+    re.I,
+)
+_BEOGRADE_SKIPPED_STOP = re.compile(
+    r"\bu smeru ka ([^.,]+?), linija će koristiti sva postojeća stajališta, "
+    r"osim stajališta ([^.]+)\.",
+    re.I,
 )
 DEFAULT_EVENT_WINDOW = timedelta(hours=48)
 DEFAULT_TITLE_SIMILARITY = 0.78
@@ -272,6 +284,15 @@ def _same_source_transport_reprint(
     if left_host is None or left_host != right_host:
         return False
 
+    if left.source_id == "city_beograd_news":
+        left_detour = _single_route_detour(left)
+        if (
+            left_detour is not None
+            and left_detour == _single_route_detour(right)
+            and _body_token_similarity(left.body, right.body) >= _SAME_SOURCE_BODY_TOKEN_SIMILARITY
+        ):
+            return True
+
     if (
         left._facts(include_title=False).numbers != right._facts(include_title=False).numbers
         or left._facts(include_title=True).material != right._facts(include_title=True).material
@@ -317,6 +338,45 @@ def _same_source_transport_reprint(
     ):
         return False
     return _body_token_similarity(left.body, right.body) >= _SAME_SOURCE_BODY_TOKEN_SIMILARITY
+
+
+def _single_route_detour(candidate: EventCandidate) -> tuple[object, ...] | None:
+    """Опознаёт повтор объявления об объезде одного маршрута по точным деталям."""
+    if candidate.published_at is None or len(candidate.body) > _SAME_SOURCE_MAX_BODY_CHARS:
+        return None
+    if "osim stajališta" not in candidate.body.casefold():
+        return None
+    body = " ".join(candidate.body.split())
+    routes = transport_routes(body)
+    if len(routes) != 1:
+        return None
+    site = _BEOGRADE_WORK_SECTION.search(body)
+    detour = _BEOGRADE_ORDERED_DETOUR.search(body)
+    stop = _BEOGRADE_SKIPPED_STOP.search(body)
+    if site is None or detour is None or stop is None:
+        return None
+    direction, streets = detour.groups()
+    if normalize_text(direction) != normalize_text(stop[1]):
+        return None
+    ordered_streets = tuple(normalize_text(street) for street in streets.split(","))
+    if len(ordered_streets) < 3 or not all(ordered_streets):
+        return None
+
+    local = candidate.published_at.astimezone(ZoneInfo("Europe/Belgrade"))
+    dates = event_dates(body, local.year)
+    numbers = numeric_facts(body, local.year)
+    if re.search(r"\bod sutra do\b", body, re.I) and len(dates) == 1:
+        start = (local.date() + timedelta(days=1)).isoformat()
+        dates |= {start}
+        numbers |= {start}
+    if len(dates) != 2:
+        return None
+    return (
+        routes, dates, numbers, candidate._facts(include_title=True).material,
+        re.sub(r"\bu smeru ka ulici ", "u smeru ka ", normalize_text(site[1])),
+        normalize_text(direction), ordered_streets,
+        normalize_text(stop[2]),
+    )
 
 
 def _anchored_transport_reprint(left: EventCandidate, right: EventCandidate) -> bool:
