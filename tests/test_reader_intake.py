@@ -7,13 +7,14 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+import relocant_media.api.app as api
 from relocant_media.ops.intake_batch import collect_batch
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.private_intake import receive_private_tips
 from relocant_media.services.submission_feedback import reply_to_submissions, resolve_submission
 from relocant_media.services.submission_queue import batch_submissions, pending_submissions
 from relocant_media.services.submission_reference import PUBLIC_REFERENCE_PATTERN
-from relocant_media.storage.models import AdRequest, Base, Post, Submission
+from relocant_media.storage.models import AdRequest, Base, Post, Submission, TelegramUpdateReceipt
 
 READER = 29
 DM_CHAT = -2000000000011
@@ -164,7 +165,7 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
         assert [item.id for item in batch_submissions(session)] == [sid]
         assert session.scalar(select(Post)) is None
     assert acceptance["text"].startswith(
-        f"Спасибо! Мы приняли обращение в работу.\nНомер обращения — {reference}.",
+        f"Ваше обращение №{reference} отправлено в работу.",
     )
     assert not any(method == "answerCallbackQuery" for method, _ in telegram.calls)
 
@@ -267,7 +268,7 @@ async def test_reader_old_numbered_button_cannot_submit_another_draft(engine, di
         assert first.payload["text"] == "Первый сюжет"
         assert second.status == "collecting"
         assert second.payload["text"] == "Второй сюжет"
-    assert sum(f"Номер обращения — {first_reference}." in value["text"]
+    assert sum(f"Ваше обращение №{first_reference} отправлено в работу." in value["text"]
                for _, value in telegram.messages) == 1
 
     await telegram.receive(
@@ -290,7 +291,8 @@ async def test_reader_confirmation_precedes_editorial_and_followup_reopens_case(
     telegram.updates = [telegram.press(2, "Предложить новость")]
 
     def editorial():
-        assert f"Номер обращения — {reference}." in telegram.messages[-1][1]["text"]
+        confirmation = telegram.messages[-1][1]["text"]
+        assert f"Ваше обращение №{reference} отправлено в работу." in confirmation
         return 0
 
     result = await collect_batch(
@@ -334,7 +336,7 @@ async def test_reader_can_submit_a_draft_with_an_already_issued_numeric_number(e
     use_legacy_menu(engine, sid)
     await telegram.receive(engine, telegram.press(2, "Предложить новость"))
     await telegram.receive(engine, telegram.press(3, f"Отправить №{sid}"))
-    assert f"Номер обращения — {sid}." in telegram.messages[-1][1]["text"]
+    assert f"Ваше обращение №{sid} отправлено в работу." in telegram.messages[-1][1]["text"]
 
 
 @pytest.mark.asyncio
@@ -367,7 +369,7 @@ async def test_reader_greeting_opens_menu_without_submitting(engine, direct, ope
         row = session.get(Submission, sid)
         assert row.status == "new"
         assert row.payload["text"] == "Привет! Поменялся маршрут 19.\nОстановка на улице Негошева."
-    assert f"Номер обращения — {reference}." in telegram.messages[-1][1]["text"]
+    assert f"Ваше обращение №{reference} отправлено в работу." in telegram.messages[-1][1]["text"]
 
 
 @pytest.mark.asyncio
@@ -469,7 +471,7 @@ async def test_reader_manual_categories_stay_out_of_news_batch(engine, button, k
         else telegram.press(2, button)
     )
     await telegram.receive(engine, selected)
-    assert f"Номер обращения — {reference}." in telegram.messages[-1][1]["text"]
+    assert f"Ваше обращение №{reference} отправлено в работу." in telegram.messages[-1][1]["text"]
     await telegram.receive(engine, selected)
     with Session(engine) as session:
         row = session.scalars(select(Submission)).one()
@@ -483,3 +485,60 @@ async def test_reader_manual_categories_stay_out_of_news_batch(engine, button, k
             assert ads[0].payload["submission_id"] == row.id
         else:
             assert ads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
+async def test_webhook_sends_menu_and_durable_ack_in_the_request(engine, direct, monkeypatch):
+    telegram = Telegram(direct)
+    telegram.parent = -1000000000123
+    original_call = telegram._call
+
+    async def observe_send(method, params):
+        if method == "sendMessage" and params["text"].startswith("Ваше обращение №"):
+            with Session(engine) as session:
+                row = session.scalars(select(Submission)).one()
+                assert row.status == "new"
+                assert row.payload["text"] == "Место работ\nУточняющее фото"
+                assert row.payload["attachments"][0]["file_id"] == "reader-photo"
+                assert session.get(TelegramUpdateReceipt, 4).status == "processed"
+                assert session.scalar(select(Post)) is None
+        return await original_call(method, params)
+
+    monkeypatch.setattr(telegram, "_call", observe_send)
+    monkeypatch.setattr(api, "engine", engine)
+    monkeypatch.setattr(api, "TelegramBotAPI", lambda *_: telegram)
+    monkeypatch.setattr(api.settings, "app_env", "staging")
+    monkeypatch.setattr(api.settings, "telegram_runtime_enabled", True)
+    monkeypatch.setattr(api.settings, "telegram_bot_token", "test-token")
+    monkeypatch.setattr(api.settings, "telegram_webhook_secret", "test-webhook-secret")
+    monkeypatch.setattr(api.settings, "telegram_staging_channel_id", str(telegram.parent))
+
+    path = "/telegram/intake-webhook"
+    first = telegram.message(1, text="Здравствуйте!")
+    secret = {"X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api.app), base_url="https://staging.test",
+    ) as client:
+        denied = await client.post(path, json=first)
+        assert denied.status_code == 401 and telegram.messages == []
+        opened = await client.post(path, json=first, headers=secret)
+        assert opened.status_code == 200
+        assert len(telegram.messages) == 1
+        assert telegram.messages[0][1]["text"].startswith("Напишите, что хотите сообщить.")
+
+        details = telegram.message(2, text="Место работ")
+        photo = telegram.message(3, caption="Уточняющее фото", photo=[{"file_id": "reader-photo"}])
+        click = telegram.press(4, "Предложить новость")
+        for update in (details, photo, click, click):
+            response = await client.post(path, json=update, headers=secret)
+            assert response.status_code == 200
+
+        monkeypatch.setattr(api.settings, "app_env", "prod")
+        disabled = await client.post(path, json=telegram.message(5, text="/start"), headers=secret)
+        assert disabled.status_code == 404
+
+    assert len(telegram.messages) == 2
+    reference = public_reference(engine, submission_id(engine))
+    assert f"Ваше обращение №{reference} отправлено в работу." in telegram.messages[1][1]["text"]
+    assert not any(method == "getUpdates" for method, _ in telegram.calls)

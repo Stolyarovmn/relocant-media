@@ -117,7 +117,8 @@ async def test_send_message_passes_explicit_text_link_entities_without_forcing_p
 
 
 @pytest.mark.asyncio
-async def test_set_webhook_sends_secret_and_explicit_allowed_updates() -> None:
+@pytest.mark.parametrize("reader_intake", [False, True])
+async def test_set_webhook_sends_secret_and_explicit_allowed_updates(reader_intake: bool) -> None:
     payloads: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -126,13 +127,17 @@ async def test_set_webhook_sends_secret_and_explicit_allowed_updates() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         bot = TelegramBotAPI("test-token", client)
-        await bot.set_webhook("https://example.test/telegram/webhook", "secret")
+        await bot.set_webhook(
+            "https://example.test/telegram/webhook", "secret", reader_intake=reader_intake,
+        )
 
     assert payloads == [
         {
             "url": "https://example.test/telegram/webhook",
             "secret_token": "secret",
-            "allowed_updates": list(ALLOWED_UPDATE_TYPES),
+            "allowed_updates": [*ALLOWED_UPDATE_TYPES, "edited_message"]
+            if reader_intake else list(ALLOWED_UPDATE_TYPES),
             "drop_pending_updates": False,
+            **({"max_connections": 1} if reader_intake else {}),
         }
     ]

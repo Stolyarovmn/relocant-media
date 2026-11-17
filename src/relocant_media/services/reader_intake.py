@@ -185,6 +185,7 @@ def _new_case(
     *,
     message_id: int,
     received_at: datetime,
+    channel_id: int,
 ) -> Submission:
     payload: dict[str, Any] = {
         "city": "belgrade",
@@ -197,7 +198,7 @@ def _new_case(
     }
     if topic_id is not None:
         payload.update(
-            origin="channel_direct_messages", channel_id=APPROVED_CHANNEL_ID, topic_id=topic_id
+            origin="channel_direct_messages", channel_id=channel_id, topic_id=topic_id
         )
     row = Submission(
         kind="reader_unclassified",
@@ -375,7 +376,11 @@ def _clear_cancelled_keyboard(
 
 
 def record_reader_message(
-    session: Session, message: dict[str, Any], *, edited: bool = False
+    session: Session,
+    message: dict[str, Any],
+    *,
+    edited: bool = False,
+    channel_id: int = APPROVED_CHANNEL_ID,
 ) -> bool:
     identity = _identity(message)
     items = _items(message)
@@ -427,7 +432,8 @@ def record_reader_message(
                 row = candidate
     if row is None:
         row = _new_case(
-            session, user_id, chat_id, topic_id, message_id=message_id, received_at=received_at
+            session, user_id, chat_id, topic_id,
+            message_id=message_id, received_at=received_at, channel_id=channel_id,
         )
         _menu(row, key="menu", message_id=message_id, received_at=received_at)
     elif start and row.status == "choosing":
@@ -512,6 +518,7 @@ def _apply_action(
             topic_id,
             message_id=message_id,
             received_at=received_at,
+            channel_id=row.payload.get("channel_id", APPROVED_CHANNEL_ID),
         )
         _menu(new_case, key="menu", message_id=None, received_at=received_at)
         return "Открываю новое обращение."
@@ -565,8 +572,7 @@ def _apply_action(
     _notice(
         row,
         "accepted",
-        "Спасибо! Мы приняли обращение в работу.\n"
-        f"Номер обращения — {reference}.\n\n"
+        f"Ваше обращение №{reference} отправлено в работу.\n\n"
         "Здесь сообщим результат. "
         "Фото, видео или уточнение можно дослать ответом на это сообщение.",
         keyboard=_start_keyboard(row),
@@ -579,7 +585,9 @@ def _has_submission_content(row: Submission, kind: str) -> bool:
     return bool(row.payload["text"] or (kind == "news_tip" and row.payload["attachments"]))
 
 
-async def reader_destination(bot: TelegramBotAPI, row: Submission) -> dict[str, Any] | None:
+async def reader_destination(
+    bot: TelegramBotAPI, row: Submission, *, channel_id: int = APPROVED_CHANNEL_ID,
+) -> dict[str, Any] | None:
     payload = row.payload
     cid = payload.get("chat_id")
     if type(cid) is not int:
@@ -589,7 +597,7 @@ async def reader_destination(bot: TelegramBotAPI, row: Submission) -> dict[str, 
     topic_id = payload.get("topic_id")
     if (
         payload.get("origin") != "channel_direct_messages"
-        or payload.get("channel_id") != APPROVED_CHANNEL_ID
+        or payload.get("channel_id") != channel_id
         or type(topic_id) is not int
         or topic_id <= 0
     ):
@@ -598,7 +606,7 @@ async def reader_destination(bot: TelegramBotAPI, row: Submission) -> dict[str, 
     if (
         not isinstance(chat, dict)
         or chat.get("is_direct_messages") is not True
-        or (chat.get("parent_chat") or {}).get("id") != APPROVED_CHANNEL_ID
+        or (chat.get("parent_chat") or {}).get("id") != channel_id
     ):
         return None
     return {"chat_id": cid, "direct_messages_topic_id": topic_id}
@@ -615,7 +623,8 @@ def _save_notice(row: Submission, key: str, **fields: Any) -> None:
 
 
 async def deliver_reader_notices(
-    engine: Engine, bot: TelegramBotAPI, *, limit: int = 30
+    engine: Engine, bot: TelegramBotAPI, *, limit: int = 30,
+    channel_id: int = APPROVED_CHANNEL_ID,
 ) -> dict[str, Any]:
     stats: dict[str, Any] = {"sent": 0, "uncertain": 0, "blocked": 0, "response_seconds": {}}
     with Session(engine) as session:
@@ -634,7 +643,7 @@ async def deliver_reader_notices(
                 if sum(stats[k] for k in ("sent", "uncertain", "blocked")) >= limit:
                     return stats
                 try:
-                    destination = await reader_destination(bot, row)
+                    destination = await reader_destination(bot, row, channel_id=channel_id)
                 except (httpx.HTTPError, TelegramAPIError):
                     # No send was attempted. Keep this notice queued for the next pass.
                     break
