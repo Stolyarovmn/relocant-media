@@ -323,6 +323,53 @@ async def test_reader_can_submit_a_draft_with_an_already_issued_numeric_number(e
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
+@pytest.mark.parametrize("selected", [False, True], ids=["menu", "form"])
+async def test_reader_cancel_removes_the_keyboard(engine, direct, selected):
+    telegram = Telegram(direct)
+    await telegram.receive(engine, telegram.message(1, text="Описание"))
+    reference = public_reference(engine, submission_id(engine))
+    if selected:
+        await telegram.receive(engine, telegram.press(2, "Предложить новость"))
+    cancellation = telegram.press(3, f"Отменить №{reference}")
+    await telegram.receive(engine, cancellation)
+    receipt = telegram.messages[-1][1]
+    assert receipt["reply_markup"] == {"remove_keyboard": True}
+    assert f"Черновик №{reference} отменён." in receipt["text"]
+    assert receipt["reply_parameters"]["message_id"] == 3
+    with Session(engine) as session:
+        assert session.scalars(select(Submission)).one().status == "cancelled"
+        assert not batch_submissions(session)
+    await telegram.receive(engine, cancellation)
+    assert sum(
+        msg.get("reply_markup") == {"remove_keyboard": True} for _, msg in telegram.messages
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_reader_can_clear_the_old_keyboard_of_a_cancelled_numeric_draft(engine):
+    telegram = Telegram(direct=False)
+    with Session(engine) as session:
+        row = Submission(
+            kind="reader_unclassified", status="cancelled", telegram_user_id=READER,
+            payload={"reader_intake": True, "chat_id": READER,
+                     "reader_notices": {"cancelled": {"status": "sent"}}},
+        )
+        session.add(row)
+        session.flush()
+        sid = row.id
+        session.commit()
+    await telegram.receive(engine, telegram.message(1, text=f"Отменить №{sid}"))
+    receipt = telegram.messages[-1][1]
+    assert receipt["reply_markup"] == {"remove_keyboard": True}
+    assert f"Черновик №{sid} уже отменён." in receipt["text"]
+    await telegram.receive(engine, telegram.message(2, text="Новое обращение"))
+    await telegram.receive(engine, telegram.message(3, text=f"Отменить №{sid}"))
+    assert "keyboard" in telegram.messages[-1][1]["reply_markup"]
+    assert len(telegram.messages) == 2
+
+
+@pytest.mark.asyncio
 async def test_reader_notice_timeout_does_not_resend_ambiguous_delivery(engine):
     telegram = Telegram(direct=False)
     telegram.send_timeout = True
@@ -352,14 +399,22 @@ async def test_reader_native_request_from_other_channel_does_not_create_or_send(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("button", "kind"), [
-    ("Сообщить об ошибке", "correction"), ("Реклама", "ad_request"),
+    ("Сообщить об ошибке", "correction"),
+    ("Платное размещение", "ad_request"),
+    ("Редакционное партнёрство", "partnership"),
+    ("Реклама", "ad_request"),
+    ("Сотрудничество", "partnership"),
 ])
-async def test_reader_correction_and_ads_stay_out_of_news_batch(engine, button, kind):
+async def test_reader_manual_categories_stay_out_of_news_batch(engine, button, kind):
     telegram = Telegram(direct=True)
     await telegram.receive(engine, telegram.message(1, text="Описание https://example.org/a"))
     sid = submission_id(engine)
     reference = public_reference(engine, sid)
-    await telegram.receive(engine, telegram.press(2, button))
+    selected = (
+        telegram.message(2, text=button) if button in {"Реклама", "Сотрудничество"}
+        else telegram.press(2, button)
+    )
+    await telegram.receive(engine, selected)
     click = telegram.press(3, f"Отправить №{reference}")
     await telegram.receive(engine, click)
     await telegram.receive(engine, click)
