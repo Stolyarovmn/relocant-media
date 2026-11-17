@@ -49,9 +49,9 @@ on:
 permissions:
   contents: read
 concurrency:
-  # Keep manually requested edits and subscription runs out of the automatic queue.
+  # Keep explicit editorial retries, map edits and subscription runs out of the auto queue.
   # All modes use the same state lock below.
-  group: ${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || startsWith(inputs.mode, 'map-') && 'editorial-map-operations' || 'canonical-editorial-writer' }}
+  group: ${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || startsWith(inputs.mode, 'map-') && 'editorial-map-operations' || github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' && 'editorial-manual-cycle' || 'canonical-editorial-writer' }}
   cancel-in-progress: false
 jobs:
   cycle:

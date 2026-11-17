@@ -107,6 +107,8 @@ def test_manual_operations_have_separate_workflow_queues_and_shared_state_lock()
     assert data["concurrency"] == {
         "group": "${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' "
                  "|| startsWith(inputs.mode, 'map-') && 'editorial-map-operations' "
+                 "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' "
+                 "&& 'editorial-manual-cycle' "
                  "|| 'canonical-editorial-writer' }}",
         "cancel-in-progress": "false",
     }
