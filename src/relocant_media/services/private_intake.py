@@ -18,8 +18,17 @@ from relocant_media.services.owner_review import (
     record_owner_callback,
     record_owner_reply,
 )
+from relocant_media.services.reader_intake import (
+    deliver_reader_notices,
+    record_reader_callback,
+    record_reader_message,
+)
+from relocant_media.services.reader_resolution import (
+    record_reader_resolution_callback,
+    record_reader_resolution_reply,
+)
 from relocant_media.services.submission_feedback import save_requested_followup
-from relocant_media.storage.models import Submission, TelegramUpdateReceipt
+from relocant_media.storage.models import Submission, TelegramConversation, TelegramUpdateReceipt
 
 
 def save_channel_tip(
@@ -141,6 +150,7 @@ async def receive_private_tips(
     accept_private_tips: bool = True,
     owner_user_id: int | None = None,
     owner_chat_id: int | None = None,
+    reader_feedback_enabled: bool = False,
 ) -> dict[str, Any]:
     if not enabled:
         return {"status": "disabled", "received": 0, "owner_action_required": False}
@@ -187,7 +197,7 @@ async def receive_private_tips(
     updates = await bot._call("getUpdates", params)
     if not isinstance(updates, list) or len(updates) > 100:
         raise ValueError("invalid Telegram update batch")
-    if not updates:
+    if not updates and not reader_feedback_enabled:
         return {
             "status": "ready",
             "received": 0,
@@ -206,14 +216,31 @@ async def receive_private_tips(
                 "owner_action_required": False,
                 "telegram_sends": 0,
             }
-        return await _store_updates(
+        result = await _store_updates(
             engine,
             bot,
             updates,
             accept_private_tips=accept_private_tips,
             owner_user_id=owner_user_id,
             owner_chat_id=owner_chat_id,
+            reader_feedback_enabled=reader_feedback_enabled,
         )
+        if accept_private_tips and reader_feedback_enabled:
+            notices = await deliver_reader_notices(engine, bot)
+            result["reader_notices"] = notices
+            result["telegram_sends"] += notices["sent"]
+        return result
+
+
+def _legacy_private_message(session: Session, message: dict[str, Any]) -> bool:
+    text = message.get("text")
+    if not isinstance(text, str):
+        return False
+    command = text.strip().partition(" ")[0].split("@", maxsplit=1)[0].lower()
+    if command in ("/tip", "/correction", "/ad", "/cancel"):
+        return True
+    sender = message.get("from", {}).get("id")
+    return type(sender) is int and session.get(TelegramConversation, sender) is not None
 
 
 async def _store_updates(
@@ -224,6 +251,7 @@ async def _store_updates(
     accept_private_tips: bool = True,
     owner_user_id: int | None = None,
     owner_chat_id: int | None = None,
+    reader_feedback_enabled: bool = False,
 ) -> dict[str, Any]:
     received = 0
     owner_actions = 0
@@ -234,6 +262,7 @@ async def _store_updates(
         if type(uid) is not int:
             raise ValueError("invalid Telegram update id")
         owner_result: OwnerUpdateResult | None = None
+        reader_answer: str | None = None
         callback = update.get("callback_query")
         with Session(engine) as session:
             if session.get(TelegramUpdateReceipt, uid) is not None:
@@ -245,6 +274,12 @@ async def _store_updates(
                     owner_user_id=owner_user_id,
                     owner_chat_id=owner_chat_id,
                 )
+                if owner_result is None and accept_private_tips and reader_feedback_enabled:
+                    owner_result = record_reader_resolution_callback(
+                        session, callback, owner_user_id=owner_user_id, owner_chat_id=owner_chat_id,
+                    )
+                    if owner_result is None:
+                        reader_answer = record_reader_callback(session, callback)
                 if owner_result is not None and owner_result.handled:
                     session.add(
                         TelegramUpdateReceipt(
@@ -257,7 +292,13 @@ async def _store_updates(
                     session.commit()
                     received += int(owner_result.accepted)
                     owner_actions += int(owner_result.accepted)
-            if owner_result is None:
+                elif reader_answer is not None:
+                    session.add(TelegramUpdateReceipt(
+                        update_id=uid, kind="reader_intake", status="processed",
+                        processed_at=datetime.now(UTC),
+                    ))
+                    session.commit()
+            if owner_result is None and reader_answer is None:
                 message = update.get("message", update.get("edited_message", {}))
                 chat = message.get("chat", {}) if isinstance(message, dict) else {}
                 accepted = False
@@ -269,6 +310,11 @@ async def _store_updates(
                         owner_user_id=owner_user_id,
                         owner_chat_id=owner_chat_id,
                     )
+                    if owner_result is None and accept_private_tips and reader_feedback_enabled:
+                        owner_result = record_reader_resolution_reply(
+                            session, message, owner_user_id=owner_user_id,
+                            owner_chat_id=owner_chat_id,
+                        )
                     if owner_result is not None and owner_result.handled:
                         accepted = owner_result.accepted
                         receipt_kind = "owner_review"
@@ -289,21 +335,31 @@ async def _store_updates(
                                 and parent.get("id") == APPROVED_CHANNEL_ID
                             )
                         if parents[cid]:
-                            accepted = save_channel_tip(
-                                session,
-                                message,
-                                edited="edited_message" in update,
-                            )
+                            body = message.get("text", message.get("caption", ""))
+                            edited = "edited_message" in update
+                            if reader_feedback_enabled and not (
+                                isinstance(body, str) and body.startswith("/ad ")
+                            ):
+                                accepted = record_reader_message(session, message, edited=edited)
+                            else:
+                                accepted = save_channel_tip(session, message, edited=edited)
                     elif (
                         accept_private_tips
                         and chat.get("type") == "private"
-                        and "message" in update
                     ):
-                        accepted = save_requested_followup(
-                            session, message
-                        ) or handle_private_message(
-                            session, message, city="belgrade"
-                        ).outcome == "submitted"
+                        if "message" in update:
+                            accepted = save_requested_followup(session, message)
+                            if not accepted and (
+                                not reader_feedback_enabled
+                                or _legacy_private_message(session, message)
+                            ):
+                                accepted = handle_private_message(
+                                    session, message, city="belgrade",
+                                ).outcome == "submitted"
+                            elif not accepted:
+                                accepted = record_reader_message(session, message)
+                        elif reader_feedback_enabled:
+                            accepted = record_reader_message(session, message, edited=True)
                 session.add(
                     TelegramUpdateReceipt(
                         update_id=uid,
@@ -319,6 +375,14 @@ async def _store_updates(
                     owner_actions += int(accepted)
         if owner_result is not None and owner_result.handled:
             telegram_sends += int(await _ack_owner_action(bot, callback, owner_result))
+        callback_id = callback.get("id") if isinstance(callback, dict) else None
+        if reader_answer is not None and isinstance(callback_id, str):
+            try:
+                await bot._call("answerCallbackQuery", {
+                    "callback_query_id": callback_id, "text": reader_answer,
+                })
+            except Exception:
+                pass
     return {
         "status": "ready",
         "received": received,

@@ -2,8 +2,9 @@
 import re
 from typing import Any
 
-from sqlalchemy import case, select
+from sqlalchemy import and_, case, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from relocant_media.domain.dedup import EventCandidate, same_event
 from relocant_media.storage.models import EditorialRun, RawItem, Source, Submission
@@ -11,8 +12,15 @@ from relocant_media.storage.models import EditorialRun, RawItem, Source, Submiss
 NEWS_KINDS = ("correction", "news_tip", "event", "question")
 
 
+def _news_filter() -> ColumnElement[bool]:
+    return or_(Submission.kind == "news_tip", and_(
+        Submission.kind.in_(NEWS_KINDS),
+        Submission.payload["reader_intake"].as_boolean().is_not(True),
+    ))
+
+
 def batch_submissions(session: Session, *, limit: int = 20) -> list[Submission]:
-    rows = session.scalars(select(Submission).where(Submission.kind.in_(NEWS_KINDS),
+    rows = session.scalars(select(Submission).where(_news_filter(),
         Submission.status.in_(("new", "source_linked")),
         Submission.payload["city"].as_string() == "belgrade",
         Submission.payload["test_only"].as_boolean().is_not(True),
@@ -43,7 +51,7 @@ def batch_submissions(session: Session, *, limit: int = 20) -> list[Submission]:
 
 def pending_submissions(session: Session, *, limit: int = 20) -> list[Submission]:
     rows = list(session.scalars(select(Submission).where(
-        Submission.kind.in_(NEWS_KINDS), Submission.status.in_(("new", "waiting_primary")),
+        _news_filter(), Submission.status.in_(("new", "waiting_primary")),
         Submission.payload["city"].as_string() == "belgrade",
     ).order_by(case((Submission.status == "new", 0), else_=1),
                case((Submission.kind == "correction", 0), else_=1),
@@ -63,6 +71,7 @@ def tip_urls(payload: dict[str, Any]) -> list[str]:
 
 def priority_raw_ids(session: Session) -> set[int]:
     rows = session.scalars(select(Submission).where(
-        Submission.kind.in_(NEWS_KINDS), Submission.status == "source_linked"))
+        _news_filter(), Submission.status == "source_linked",
+    ))
     return {raw_id for row in rows if row.payload.get("city") == "belgrade"
             for raw_id in row.payload.get("raw_item_ids", []) if type(raw_id) is int}
