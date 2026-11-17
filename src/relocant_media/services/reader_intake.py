@@ -57,6 +57,16 @@ ROUTE_LABELS = {
     **{label: kind for kind, (label, _) in ROUTES.items()},
 }
 NEW_CASE_LABEL = "Новое обращение"
+WELCOME_MENU = (
+    "Напишите, что хотите сообщить. Можно отправить несколько сообщений и приложить фото или видео."
+    "\n\nПерепроверьте детали, при необходимости дополните или исправьте сообщения, "
+    "затем выберите действие ниже. Весь текст и вложения отправятся одним обращением."
+)
+GREETING = re.compile(
+    r"(?:здравствуйте|здравствуй|привет|приветствую|доброе утро|добрый день|добрый вечер)"
+    r"[\s.!?,…👋]*",
+    re.IGNORECASE,
+)
 
 
 def _now() -> datetime:
@@ -103,6 +113,10 @@ def _button(row: Submission, label: str, action: str) -> dict[str, str]:
     return {"text": label, "callback_data": f"{CB_PREFIX}{row.id}:{action}"}
 
 
+def _start_keyboard(row: Submission) -> list[list[dict[str, str]]]:
+    return [[_button(row, NEW_CASE_LABEL, "new")]]
+
+
 def _notice(
     row: Submission,
     key: str,
@@ -111,7 +125,7 @@ def _notice(
     reply_to: int | None = None,
     keyboard: list[list[dict[str, str]]] | None = None,
     received_at: datetime | None = None,
-    remove_keyboard: bool = False,
+    submit_on_pick: bool = False,
 ) -> None:
     notices = dict(row.payload.get("reader_notices", {}))
     if key in notices:
@@ -123,8 +137,8 @@ def _notice(
         "reply_to": reply_to,
         "received_at": (received_at or _now()).isoformat(),
     }
-    if remove_keyboard:
-        notices[key]["remove_keyboard"] = True
+    if submit_on_pick:
+        notices[key]["submit_on_pick"] = True
     row.payload = {**row.payload, "reader_notices": notices, "reader_notice_pending": True}
 
 
@@ -136,10 +150,11 @@ def _menu(row: Submission, *, key: str, message_id: int | None, received_at: dat
     _notice(
         row,
         key,
-        f"Черновик №{reference}. Выберите тему на клавиатуре.",
+        WELCOME_MENU,
         reply_to=message_id,
         keyboard=keyboard,
         received_at=received_at,
+        submit_on_pick=True,
     )
 
 
@@ -149,7 +164,7 @@ def _prompt(row: Submission, *, key: str, received_at: datetime | None = None) -
     _notice(
         row,
         key,
-        f"№{reference} · {label}\n\n{instruction}\n\n"
+        f"{label}\n\n{instruction}\n\n"
         f"Когда всё пришлёте, нажмите «Отправить №{reference}».",
         keyboard=[
             [_button(row, f"Отправить №{reference}", "submit")],
@@ -252,18 +267,22 @@ def _message_ids(row: Submission) -> set[int]:
     }
 
 
-def _source_notice_id(row: Submission, action: str) -> int | None:
+def _source_notice(row: Submission, action: str) -> dict[str, Any]:
     stage = "prompt"
     if action == "new":
         stage = "accepted"
     elif action.startswith("pick:") or (action == "cancel" and row.status == "choosing"):
         stage = "menu"
     notices = row.payload.get("reader_notices", {})
-    latest: dict[str, Any] = max(
+    return max(
         (notice for key, notice in notices.items() if key.split(":", maxsplit=1)[0] == stage),
-        key=lambda notice: notice["received_at"],
+        key=lambda notice: (notice["received_at"], notice.get("telegram_message_id") or 0),
         default={},
     )
+
+
+def _source_notice_id(row: Submission, action: str) -> int | None:
+    latest = _source_notice(row, action)
     message_id = latest.get("telegram_message_id")
     return message_id if latest.get("status") == "sent" and type(message_id) is int else None
 
@@ -304,8 +323,16 @@ def _record_keyboard_choice(
             _clear_cancelled_keyboard(session, sender, match[2], message_id, received_at)
     else:
         kind = ROUTE_LABELS.get(label)
-        if kind is None or draft is None:
+        if kind is None:
             return False
+        if draft is None:
+            # Repeated taps in one poll can arrive before Telegram shows the new keyboard.
+            return any(
+                case.kind == kind
+                and case.payload.get("reader_notices", {}).get("accepted", {}).get("status")
+                == "pending"
+                for case in cases
+            )
         if draft.status == "collecting":
             return draft.kind == kind
         row, action = draft, f"pick:{kind}"
@@ -339,10 +366,11 @@ def _clear_cancelled_keyboard(
             or submission_reference(row) != reference):
         return
     cancelled = row.payload.get("reader_notices", {}).get("cancelled", {})
-    if cancelled.get("status") == "sent" and not cancelled.get("remove_keyboard"):
+    if (cancelled.get("status") == "sent" and not cancelled.get("remove_keyboard")
+            and not cancelled.get("keyboard")):
         _notice(
             row, "cancelled_keyboard", f"Черновик №{reference} уже отменён.",
-            reply_to=message_id, received_at=received_at, remove_keyboard=True,
+            reply_to=message_id, received_at=received_at, keyboard=_start_keyboard(row),
         )
 
 
@@ -354,8 +382,11 @@ def record_reader_message(
     if identity is None or items is None:
         return False
     user_id, chat_id, message_id, topic_id = identity
+    text = items["text"]
     start = not items["attachments"] and (
-        items["text"] == NEW_CASE_LABEL or items["text"].partition(" ")[0].split("@")[0] == "/start"
+        text == NEW_CASE_LABEL
+        or text.partition(" ")[0].split("@")[0] == "/start"
+        or GREETING.fullmatch(text) is not None
     )
     if not (items["text"] or items["attachments"]):
         return False
@@ -380,8 +411,12 @@ def record_reader_message(
         )
     ):
         return True
+    if not items["attachments"] and text in ROUTE_LABELS and not any(
+        case.status in DRAFT_STATES for case in cases
+    ):
+        start = True
     reply = message.get("reply_to_message") or {}
-    reply_id = reply.get("message_id")
+    reply_id = None if start else reply.get("message_id")
     row = next((case for case in cases if reply_id in _message_ids(case)), None)
     if row is None and reply_id is None:
         row = next((case for case in cases if case.status in DRAFT_STATES), None)
@@ -398,7 +433,7 @@ def record_reader_message(
     elif start and row.status == "choosing":
         _menu(row, key=f"menu:{message_id}", message_id=message_id, received_at=received_at)
     elif start and row.status == "collecting":
-        _prompt(row, key=f"prompt:{message_id}")
+        _prompt(row, key=f"prompt:{message_id}", received_at=received_at)
     if start:
         return True
     if not _append(row, message_id, items):
@@ -487,26 +522,30 @@ def _apply_action(
         _notice(
             row,
             "cancelled",
-            f"Черновик №{reference} отменён. Новое обращение можно начать сообщением.",
+            f"Черновик №{reference} отменён.",
             reply_to=message_id,
             received_at=received_at,
-            remove_keyboard=True,
+            keyboard=_start_keyboard(row),
         )
         return "Черновик отменён."
     notices = row.payload.get("reader_notices", {})
     route = action.removeprefix("pick:")
     if action.startswith("pick:") and route in ROUTES and row.status == "choosing":
+        if not _source_notice(row, action).get("submit_on_pick"):
+            row.kind = route
+            row.status = "collecting"
+            _prompt(row, key=f"prompt:{len(notices)}", received_at=received_at)
+            return f"Выбрано: {ROUTES[route][0]}."
+        if not _has_submission_content(row, route):
+            return ROUTES[route][1] + "\n\nЗатем выберите действие ниже."
         row.kind = route
-        row.status = "collecting"
-        _prompt(row, key=f"prompt:{len(notices)}", received_at=received_at)
-        return f"Выбрано: {ROUTES[route][0]}."
-    if action == "menu" and row.status == "collecting":
+    elif action == "menu" and row.status == "collecting":
         row.status = "choosing"
         _menu(row, key=f"menu:{len(notices)}", message_id=None, received_at=received_at)
         return "Выберите тему."
-    if action != "submit" or row.status != "collecting":
+    elif action != "submit" or row.status != "collecting":
         return "Используйте последнее сообщение бота."
-    if not row.payload["text"] and not (row.kind == "news_tip" and row.payload["attachments"]):
+    elif not _has_submission_content(row, row.kind):
         return "Добавьте описание или вложение, затем отправьте заявку."
     accepted_at = received_at
     row.status = "new"
@@ -530,10 +569,14 @@ def _apply_action(
         f"Номер обращения — {reference}.\n\n"
         "Здесь сообщим результат. "
         "Фото, видео или уточнение можно дослать ответом на это сообщение.",
-        keyboard=[[_button(row, NEW_CASE_LABEL, "new")]],
+        keyboard=_start_keyboard(row),
         received_at=accepted_at,
     )
     return f"Обращение №{reference} принято."
+
+
+def _has_submission_content(row: Submission, kind: str) -> bool:
+    return bool(row.payload["text"] or (kind == "news_tip" and row.payload["attachments"]))
 
 
 async def reader_destination(bot: TelegramBotAPI, row: Submission) -> dict[str, Any] | None:
@@ -608,14 +651,19 @@ async def deliver_reader_notices(
                     "link_preview_options": {"is_disabled": True},
                 }
                 if item["keyboard"]:
+                    keyboard = [
+                        [{"text": button["text"]} for button in line]
+                        for line in item["keyboard"]
+                    ]
+                    start_keyboard = keyboard == [[{"text": NEW_CASE_LABEL}]]
+                    persistent = start_keyboard or item.get("submit_on_pick") is True
                     params["reply_markup"] = {
-                        "keyboard": [
-                            [{"text": button["text"]} for button in line]
-                            for line in item["keyboard"]
-                        ],
+                        "keyboard": keyboard,
                         "resize_keyboard": True,
-                        "one_time_keyboard": True,
+                        "one_time_keyboard": not persistent,
                     }
+                    if persistent:
+                        params["reply_markup"]["is_persistent"] = True
                 elif item.get("remove_keyboard"):
                     params["reply_markup"] = {"remove_keyboard": True}
                 if item["reply_to"] is not None:
