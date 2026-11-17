@@ -1,3 +1,4 @@
+import re
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 
@@ -11,6 +12,7 @@ from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.private_intake import receive_private_tips
 from relocant_media.services.submission_feedback import reply_to_submissions, resolve_submission
 from relocant_media.services.submission_queue import batch_submissions, pending_submissions
+from relocant_media.services.submission_reference import PUBLIC_REFERENCE_PATTERN
 from relocant_media.storage.models import AdRequest, Base, Post, Submission
 
 READER = 29
@@ -98,6 +100,13 @@ def submission_id(engine):
         return session.scalars(select(Submission.id).order_by(Submission.id.desc())).first()
 
 
+def public_reference(engine, sid):
+    with Session(engine) as session:
+        reference = session.get(Submission, sid).payload["public_reference"]
+        assert re.fullmatch(PUBLIC_REFERENCE_PATTERN, reference)
+        return reference
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
 async def test_reader_news_menu_number_and_media_followup(engine, direct):
@@ -115,6 +124,8 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
     assert telegram.messages[-1][1]["reply_parameters"]["message_id"] == 1
 
     sid = submission_id(engine)
+    reference = public_reference(engine, sid)
+    assert f"Черновик №{reference}" in telegram.messages[-1][1]["text"]
     selected = await telegram.receive(engine, telegram.press(2, "Предложить новость", ago=200))
     assert selected["reader_notices"]["response_seconds"]["prompt"][0] >= 200
     prompt = telegram.messages[-1]
@@ -126,7 +137,7 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
         ))
     await telegram.receive(engine, telegram.message(4, caption="Место работ", video=video))
     submitted = await telegram.receive(
-        engine, telegram.press(5, f"Отправить №{sid}", message=prompt, ago=200),
+        engine, telegram.press(5, f"Отправить №{reference}", message=prompt, ago=200),
     )
     assert submitted["reader_notices"]["response_seconds"]["accepted"][0] >= 200
     acceptance_id, acceptance = telegram.messages[-1]
@@ -141,8 +152,9 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
         ]
         assert [item.id for item in batch_submissions(session)] == [sid]
         assert session.scalar(select(Post)) is None
-    assert f"№{sid}" in acceptance["text"]
-    assert "принята" in acceptance["text"]
+    assert acceptance["text"].startswith(
+        f"Спасибо! Мы приняли обращение в работу.\nНомер обращения — {reference}.",
+    )
     assert not any(method == "answerCallbackQuery" for method, _ in telegram.calls)
 
     reply_to = {"message_id": acceptance_id}
@@ -150,7 +162,7 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
                              reply_to_message=reply_to)
     confirmed = await telegram.receive(engine, extra)
     assert confirmed["reader_notices"]["sent"] == 1
-    assert f"№{sid}" in telegram.messages[-1][1]["text"]
+    assert f"№{reference}" in telegram.messages[-1][1]["text"]
     assert telegram.messages[-1][1]["reply_parameters"]["message_id"] == 6
 
     replay = await telegram.receive(engine, extra)
@@ -213,9 +225,10 @@ async def test_reader_old_numbered_button_cannot_submit_another_draft(engine, di
     telegram = Telegram(direct)
     await telegram.receive(engine, telegram.message(1, text="Первый сюжет"))
     first_id = submission_id(engine)
+    first_reference = public_reference(engine, first_id)
     await telegram.receive(engine, telegram.press(2, "Предложить новость"))
     first_prompt = telegram.messages[-1]
-    first_submit = telegram.press(3, f"Отправить №{first_id}", message=first_prompt)
+    first_submit = telegram.press(3, f"Отправить №{first_reference}", message=first_prompt)
     await telegram.receive(engine, first_submit)
     first_acceptance = telegram.messages[-1]
 
@@ -225,11 +238,13 @@ async def test_reader_old_numbered_button_cannot_submit_another_draft(engine, di
     )
     second_id = submission_id(engine)
     assert second_id != first_id
+    second_reference = public_reference(engine, second_id)
+    assert second_reference != first_reference
     await telegram.receive(engine, telegram.press(5, "Предложить новость"))
     second_prompt = telegram.messages[-1]
     await telegram.receive(engine, telegram.message(6, text="Второй сюжет"))
     await telegram.receive(
-        engine, telegram.press(7, f"Отправить №{first_id}", message=first_prompt),
+        engine, telegram.press(7, f"Отправить №{first_reference}", message=first_prompt),
     )
     with Session(engine) as session:
         first, second = session.scalars(select(Submission).order_by(Submission.id)).all()
@@ -237,11 +252,11 @@ async def test_reader_old_numbered_button_cannot_submit_another_draft(engine, di
         assert first.payload["text"] == "Первый сюжет"
         assert second.status == "collecting"
         assert second.payload["text"] == "Второй сюжет"
-    assert sum(f"Заявка №{first_id} принята" in value["text"]
+    assert sum(f"Номер обращения — {first_reference}." in value["text"]
                for _, value in telegram.messages) == 1
 
     await telegram.receive(
-        engine, telegram.press(8, f"Отправить №{second_id}", message=second_prompt),
+        engine, telegram.press(8, f"Отправить №{second_reference}", message=second_prompt),
     )
     with Session(engine) as session:
         second = session.get(Submission, second_id)
@@ -256,11 +271,12 @@ async def test_reader_confirmation_precedes_editorial_and_followup_reopens_case(
     start = telegram.message(1, ago=42, text="На улице появились ограждения")
     await telegram.receive(engine, start)
     sid = submission_id(engine)
+    reference = public_reference(engine, sid)
     await telegram.receive(engine, telegram.press(2, "Предложить новость"))
-    telegram.updates = [telegram.press(3, f"Отправить №{sid}")]
+    telegram.updates = [telegram.press(3, f"Отправить №{reference}")]
 
     def editorial():
-        assert "принята" in telegram.messages[-1][1]["text"]
+        assert f"Номер обращения — {reference}." in telegram.messages[-1][1]["text"]
         return 0
 
     result = await collect_batch(
@@ -277,7 +293,7 @@ async def test_reader_confirmation_precedes_editorial_and_followup_reopens_case(
     feedback = await reply_to_submissions(engine, telegram, enabled=True, only_ids={sid})
     assert feedback["sent"] == 1
     clarification_id, clarification = telegram.messages[-1]
-    assert str(sid) in clarification["text"]
+    assert f"Обращение №{reference}" in clarification["text"]
     assert clarification["reply_parameters"]["message_id"] == 1
     await telegram.receive(engine, telegram.message(
         4, caption="Из объявления на ограждениях", video={"file_id": "video"},
@@ -290,6 +306,20 @@ async def test_reader_confirmation_precedes_editorial_and_followup_reopens_case(
         assert row.payload["attachments"][0]["kind"] == "video"
         assert row.payload["feedback"]["missing_primary"]["user_wait_seconds"] >= 42
         assert row.payload["feedback"]["missing_primary"]["accepted_wait_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_reader_can_submit_a_draft_with_an_already_issued_numeric_number(engine):
+    telegram = Telegram(direct=False)
+    await telegram.receive(engine, telegram.message(1, text="Описание"))
+    sid = submission_id(engine)
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        row.payload = {k: v for k, v in row.payload.items() if k != "public_reference"}
+        session.commit()
+    await telegram.receive(engine, telegram.press(2, "Предложить новость"))
+    await telegram.receive(engine, telegram.press(3, f"Отправить №{sid}"))
+    assert f"Номер обращения — {sid}." in telegram.messages[-1][1]["text"]
 
 
 @pytest.mark.asyncio
@@ -328,8 +358,9 @@ async def test_reader_correction_and_ads_stay_out_of_news_batch(engine, button, 
     telegram = Telegram(direct=True)
     await telegram.receive(engine, telegram.message(1, text="Описание https://example.org/a"))
     sid = submission_id(engine)
+    reference = public_reference(engine, sid)
     await telegram.receive(engine, telegram.press(2, button))
-    click = telegram.press(3, f"Отправить №{sid}")
+    click = telegram.press(3, f"Отправить №{reference}")
     await telegram.receive(engine, click)
     await telegram.receive(engine, click)
     with Session(engine) as session:

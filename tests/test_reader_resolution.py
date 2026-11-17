@@ -125,6 +125,12 @@ def callback(row_id, which, message_id=51, owner=OWNER_ID):
 @pytest.mark.parametrize(("native", "duplicate"), [(False, False), (True, False), (True, True)])
 async def test_final_news_has_link_from_confirmed_receipt(engine, native, duplicate):
     row_id = accepted_tip(engine, native=native, duplicate=duplicate)
+    reference = "RM-7K4M-3D8Q" if native else str(row_id)
+    if native:
+        with Session(engine) as session:
+            row = session.get(Submission, row_id)
+            row.payload = {**row.payload, "public_reference": reference}
+            session.commit()
     bot = Bot()
     result = await process_reader_resolutions(engine, bot, enabled=True)
     assert result["sent"] == 1 and result["response_seconds"][0] >= 7
@@ -134,7 +140,7 @@ async def test_final_news_has_link_from_confirmed_receipt(engine, native, duplic
     assert out["chat_id"] == (NATIVE_CHAT if native else READER_ID)
     if native:
         assert out["direct_messages_topic_id"] == 17
-    assert f"№{row_id}" in out["text"] and "https://t.me/eduvbelgrad/90" in out["text"]
+    assert f"№{reference}" in out["text"] and "https://t.me/eduvbelgrad/90" in out["text"]
     with Session(engine) as session:
         row = session.get(Submission, row_id)
         assert row.status == "closed"

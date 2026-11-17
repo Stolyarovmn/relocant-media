@@ -11,6 +11,11 @@ from sqlalchemy.orm import Session
 
 from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
+from relocant_media.services.submission_reference import (
+    PUBLIC_REFERENCE_PATTERN,
+    new_submission_reference,
+    submission_reference,
+)
 from relocant_media.storage.models import AdRequest, Submission
 
 ROUTES = {
@@ -112,13 +117,14 @@ def _notice(
 
 
 def _menu(row: Submission, *, key: str, message_id: int | None, received_at: datetime) -> None:
+    reference = submission_reference(row)
     buttons = [_button(row, label, f"pick:{kind}") for kind, (label, _) in ROUTES.items()]
-    buttons.append(_button(row, f"Отменить №{row.id}", "cancel"))
+    buttons.append(_button(row, f"Отменить №{reference}", "cancel"))
     keyboard = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     _notice(
         row,
         key,
-        f"Обращение №{row.id}. Выберите тему на клавиатуре.",
+        f"Черновик №{reference}. Выберите тему на клавиатуре.",
         reply_to=message_id,
         keyboard=keyboard,
         received_at=received_at,
@@ -126,17 +132,18 @@ def _menu(row: Submission, *, key: str, message_id: int | None, received_at: dat
 
 
 def _prompt(row: Submission, *, key: str, received_at: datetime | None = None) -> None:
+    reference = submission_reference(row)
     label, instruction = ROUTES[row.kind]
     _notice(
         row,
         key,
-        f"№{row.id} · {label}\n\n{instruction}\n\n"
-        f"Когда всё пришлёте, нажмите «Отправить №{row.id}».",
+        f"№{reference} · {label}\n\n{instruction}\n\n"
+        f"Когда всё пришлёте, нажмите «Отправить №{reference}».",
         keyboard=[
-            [_button(row, f"Отправить №{row.id}", "submit")],
+            [_button(row, f"Отправить №{reference}", "submit")],
             [
-                _button(row, f"Сменить тему №{row.id}", "menu"),
-                _button(row, f"Отменить №{row.id}", "cancel"),
+                _button(row, f"Сменить тему №{reference}", "menu"),
+                _button(row, f"Отменить №{reference}", "cancel"),
             ],
         ],
         received_at=received_at,
@@ -155,6 +162,7 @@ def _new_case(
     payload: dict[str, Any] = {
         "city": "belgrade",
         "reader_intake": True,
+        "public_reference": new_submission_reference(session),
         "chat_id": chat_id,
         "received_at": received_at.isoformat(),
         "text": "",
@@ -274,8 +282,10 @@ def _record_keyboard_choice(
     received_at: datetime,
 ) -> bool:
     draft = next((case for case in cases if case.status in DRAFT_STATES), None)
-    if match := re.fullmatch(r"(Отправить|Сменить тему|Отменить) №([0-9]{1,18})", label):
-        row = draft if draft is not None and draft.id == int(match[2]) else None
+    if match := re.fullmatch(
+        rf"(Отправить|Сменить тему|Отменить) №({PUBLIC_REFERENCE_PATTERN}|[0-9]{{1,18}})", label,
+    ):
+        row = draft if draft is not None and submission_reference(draft) == match[2] else None
         action = NUMBERED_ACTIONS[match[1]]
     else:
         kind = next((kind for kind, (caption, _) in ROUTES.items() if label == caption), None)
@@ -358,7 +368,7 @@ def record_reader_message(
         _notice(
             row,
             f"limit:{message_id}",
-            f"№{row.id} · В заявке помещается до 24 вложений "
+            f"№{submission_reference(row)} · В заявке помещается до 24 вложений "
             "и 20 000 знаков. Для остального создайте новое обращение.",
             reply_to=message_id,
         )
@@ -371,7 +381,7 @@ def record_reader_message(
         _notice(
             row,
             f"added:{message_id}",
-            f"Добавлено к заявке №{row.id}.",
+            f"Добавлено к заявке №{submission_reference(row)}.",
             reply_to=message_id,
             received_at=received_at,
         )
@@ -415,6 +425,7 @@ def _apply_action(
     message_id: int,
     received_at: datetime,
 ) -> str:
+    reference = submission_reference(row)
     if action == "new":
         assert row.telegram_user_id is not None
         chat_id = row.payload["chat_id"]
@@ -433,13 +444,13 @@ def _apply_action(
         _menu(new_case, key="menu", message_id=None, received_at=received_at)
         return "Открываю новое обращение."
     if row.status not in DRAFT_STATES:
-        return f"Заявка №{row.id} уже отправлена."
+        return f"Заявка №{reference} уже отправлена."
     if action == "cancel":
         row.status = "cancelled"
         _notice(
             row,
             "cancelled",
-            f"Черновик №{row.id} отменён. Новое обращение можно начать сообщением.",
+            f"Черновик №{reference} отменён. Новое обращение можно начать сообщением.",
         )
         return "Черновик отменён."
     notices = row.payload.get("reader_notices", {})
@@ -475,12 +486,14 @@ def _apply_action(
     _notice(
         row,
         "accepted",
-        f"Заявка №{row.id} принята. Здесь сообщим результат. "
-        "Чтобы добавить к ней фото, видео или уточнение, ответьте на это сообщение.",
+        "Спасибо! Мы приняли обращение в работу.\n"
+        f"Номер обращения — {reference}.\n\n"
+        "Здесь сообщим результат. "
+        "Фото, видео или уточнение можно дослать ответом на это сообщение.",
         keyboard=[[_button(row, NEW_CASE_LABEL, "new")]],
         received_at=accepted_at,
     )
-    return f"Заявка №{row.id} принята."
+    return f"Обращение №{reference} принято."
 
 
 async def reader_destination(bot: TelegramBotAPI, row: Submission) -> dict[str, Any] | None:

@@ -15,6 +15,7 @@ from relocant_media.domain.dedup import EventCandidate, same_event
 from relocant_media.services.owner_review import OwnerUpdateResult
 from relocant_media.services.reader_intake import reader_destination
 from relocant_media.services.submission_feedback import INCIDENT
+from relocant_media.services.submission_reference import submission_reference
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 
 _OWNER_KINDS = {
@@ -238,7 +239,9 @@ def record_reader_resolution_callback(
         _set_resolution(row, media_requested=True)
         return OwnerUpdateResult(True, True, "Вложения подготовлены к отправке в этот чат.")
     if row.status == "closed":
-        return OwnerUpdateResult(True, False, f"Обращение №{row.id} уже закрыто.")
+        return OwnerUpdateResult(
+            True, False, f"Обращение №{submission_reference(row)} уже закрыто.",
+        )
     _close(row, _NO_ACTION, "owner_closed", now=datetime.now(UTC))
     return OwnerUpdateResult(True, True, "Решение сохранено. Автору отправим ответ.",
                              owner_chat_id, message_id)
@@ -270,7 +273,9 @@ def record_reader_resolution_reply(
         return None
     assert row is not None
     if row.status == "closed":
-        return OwnerUpdateResult(True, False, f"Обращение №{row.id} уже закрыто.")
+        return OwnerUpdateResult(
+            True, False, f"Обращение №{submission_reference(row)} уже закрыто.",
+        )
     text = message.get("text")
     if not isinstance(text, str) or not text.strip() or len(text) > 1800:
         return OwnerUpdateResult(True, False, "Пришлите итоговый ответ текстом до 1800 знаков.")
@@ -317,7 +322,7 @@ def _owner_card(row: Submission, reason: str, owner_chat_id: int) -> dict[str, A
     return {
         "chat_id": owner_chat_id,
         "text": (
-            f"Предложка №{row.id}. {_OWNER_KINDS.get(row.kind, 'Новость')}\n\n"
+            f"Предложка №{submission_reference(row)}. {_OWNER_KINDS.get(row.kind, 'Новость')}\n\n"
             f"{excerpt or 'Без текста.'}\n\n"
             f"Вложений: {len(row.payload.get('attachments', []))}.\n"
             f"{instructions}\n\n"
@@ -357,7 +362,8 @@ async def _owner_media(
     pending = _pending_media(row)
     for key, kind, file_id in pending[:3]:
         result = await _send_receipted(session, row, bot, key, {
-            "chat_id": owner_chat_id, kind: file_id, "caption": f"Вложение к заявке №{row.id}",
+            "chat_id": owner_chat_id, kind: file_id,
+            "caption": f"Вложение к заявке №{submission_reference(row)}",
             "protect_content": True, "allow_paid_broadcast": False,
             "reply_parameters": {"message_id": card["telegram_message_id"]},
         }, method=_MEDIA_METHODS[kind])
@@ -424,7 +430,9 @@ async def process_reader_resolutions(
                 else:
                     params = {
                         **destination,
-                        "text": f"Обращение №{row.id}\n\n{state['final']['text']}",
+                        "text": (
+                            f"Обращение №{submission_reference(row)}\n\n{state['final']['text']}"
+                        ),
                         "protect_content": True,
                         "allow_paid_broadcast": False,
                         "link_preview_options": {"is_disabled": True},
