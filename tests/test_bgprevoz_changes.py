@@ -102,6 +102,27 @@ def test_short_detail_is_not_accepted_as_full_evidence() -> None:
         )
 
 
+def test_explicit_suspension_replaces_stale_period_even_when_official_dates_are_reversed():
+    item = parse_bgprevoz_change(
+        _detail(period="17/11/2026 - 16/11/2026", body="Радови су обустављени до даљег."),
+        _source(), page_url="https://www.bgprevoz.rs/linije/aktuelne-izmene/1155",
+    )
+    assert item.body.startswith("Приостановлено.")
+    assert "17/11/2026 - 16/11/2026" in item.body
+    assert "Радови су обустављени до даљег." in item.body
+    assert "Период измене:" not in item.body
+    assert item.source_html
+
+
+def test_traffic_stoppage_is_not_mistaken_for_cancellation_of_works():
+    with pytest.raises(ValueError, match="period invalid"):
+        parse_bgprevoz_change(
+            _detail(period="17/11/2026 - 16/11/2026", body=(
+                "Саобраћај је обустављен до даљег. " + "Радови на коловозу. " * 10
+            )), _source(), page_url="https://www.bgprevoz.rs/linije/aktuelne-izmene/1155",
+        )
+
+
 @pytest.mark.asyncio
 async def test_collect_fetches_list_and_exact_detail_without_publication_time() -> None:
     source = _source()

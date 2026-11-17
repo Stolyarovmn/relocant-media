@@ -1277,6 +1277,7 @@ def main() -> None:
             ingest=ingest,
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output),
             limit=PROCESS_LIMIT,
+            locality_aliases=load_city_profile("belgrade").geography.city_aliases,
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
             priority_items=private_priorities,
             recent_source_counts=source_load,

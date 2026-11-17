@@ -81,6 +81,7 @@ def run_cycle(
     allowed_items: Callable[[], set[int]] | None = None,
     deferred_items: Callable[[Session], set[int]] | None = None,
     submissions_only: bool = False,
+    locality_aliases: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
             or not city.strip() or not 1 <= limit <= 5):
@@ -120,6 +121,7 @@ def run_cycle(
                     allowed_raw_ids=allowed_items() if allowed_items else None,
                     excluded_raw_ids=deferred,
                     recent_source_counts=recent_source_counts() if recent_source_counts else None,
+                    locality_aliases=locality_aliases,
                     source_priorities=candidate_priorities() if candidate_priorities else None)
             if reassessment_ids is not None:
                 selected = {candidate["raw_item_id"] for candidate in manifest["candidates"]}

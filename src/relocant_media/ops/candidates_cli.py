@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,7 @@ def select_candidates(
     recent_source_counts: dict[str, int] | None = None,
     allowed_raw_ids: set[int] | None = None,
     excluded_raw_ids: set[int] | None = None,
+    locality_aliases: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Only SELECT; the caller supplies a consistent read-only transaction."""
     if not city.strip() or not 1 <= limit <= 50:
@@ -162,10 +164,19 @@ def select_candidates(
     clusters = cluster_events(event_inputs)
     if newest_first:
         priorities = source_priorities or {}
-        def queue_order(group: list[EventCandidate]) -> tuple[int, int, datetime | None, int]:
+        locality = re.compile(
+            r"(?<!\w)(?:" + "|".join(re.escape(alias.casefold()) for alias in locality_aliases)
+            + r")\w*", re.I,
+        ) if locality_aliases else None
+        practical = re.compile(
+            r"saobrać|prevoz|isklju|bez vode|bez struje|grejanj|letov|otkaz|"
+            r"izložb|koncert|festival|vaučer|радов|превоз|искључ|грејањ|"
+            r"изложб|концерт|фестивал|отключ|перекры|выставк|рейс", re.I,
+        )
+
+        def queue_order(group: list[EventCandidate]) -> tuple[int, int, int, datetime | None, int]:
             item, source = by_id[group[0].raw_item_id]
             # Direct transport disruptions retain precedence over leisure mentions.
-            import re
             disruption = re.search(r"obustav|izmen.*saobra|preusmer|затвор|обустав|измен.*саобра",
                                    item.title.casefold())
             private_priority = any(member.raw_item_id in (priority_raw_ids or set())
@@ -173,7 +184,10 @@ def select_candidates(
             guide = source.source_type == GUIDE_SOURCE_TYPE
             band = (4 if private_priority or guide else 3 if disruption
                     else priorities.get(source.id, 0))
-            return (band, -(recent_source_counts or {}).get(source.id, 0),
+            lead = item.title + "\n" + item.body[:500]
+            local_practical = bool(source.source_type == "news_media" and locality
+                                   and locality.search(lead) and practical.search(lead))
+            return (band, int(local_practical), -(recent_source_counts or {}).get(source.id, 0),
                     item.published_at or item.ingested_at, item.id)
         clusters.sort(key=queue_order, reverse=True)
     candidates = []

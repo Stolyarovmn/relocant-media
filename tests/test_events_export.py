@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from test_editorial_package import bind_context, event_payload, parse
 from test_event_place import PROFILE, document, html
-from test_event_place_adapters import _source
+from test_event_place_adapters import _source, gallery_article
 
 from relocant_media.ai.models import RussianDraft
 from relocant_media.ai.package import canonical_json, draft_sha256
@@ -210,6 +210,22 @@ def test_published_cukarica_event_without_html_uses_corroborated_program(session
     }
     with pytest.raises(ValueError, match="confirmed afisha card"):
         plan_event_buttons(session, {103: event.id}, feed, app)
+
+
+def test_published_gallery_backfill_requires_reviewed_time_and_saved_exact_article(session):
+    article, page = gallery_article()
+    item, run, post, payload = seed(session, doc=article, source_html=page, attested=False)
+    post.telegram_message_id = 128
+    session.commit()
+    feed = export_events(session, observed_at=datetime(2026, 11, 17, 20, tzinfo=UTC))
+    event, = feed.events
+    assert event.post_url == "https://t.me/eduvbelgrad/128"
+    assert event.starts_at.isoformat() == "2026-11-18T19:00:00+01:00"
+    assert not event.archived and event.ends_at is None
+    payload["outcome"]["claims"]["claims"][0]["citations"][0]["quote"] = "Улаз је слободан."
+    persist_package(run, payload)
+    session.commit()
+    assert export_events(session, observed_at=NOW).events == ()
 
 
 @pytest.mark.parametrize("verified_time", [True, False])

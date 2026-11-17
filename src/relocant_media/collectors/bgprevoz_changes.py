@@ -25,6 +25,17 @@ _NOTICE_PATH = re.compile(
 _PERIOD = re.compile(
     r"^(?P<start>\d{2}/\d{2}/20\d{2})\s*[-–—]\s*(?P<end>\d{2}/\d{2}/20\d{2})$"
 )
+_SUSPENDED = re.compile(
+    r"^радови су (?:обустављени|одложени)(?: до даљег)?[.!]?$|"
+    r"^radovi su (?:obustavljeni|odloženi)(?: do daljeg)?[.!]?$", re.I,
+)
+
+
+def transport_notice_suspended(body: str) -> bool:
+    """Проверяем отдельное явное сообщение ведомства, а не упоминание перекрытия."""
+    return any(_SUSPENDED.fullmatch(line.strip()) for line in body.splitlines()[:5])
+
+
 _STOP_LINES = {
     "Зона радова",
     "Sekretarijat za javni prevoz",
@@ -155,18 +166,22 @@ def parse_bgprevoz_change(
             break
     if period_index is None:
         raise ValueError("Bgprevoz change period missing")
-    start, end = _parse_period(period_line)
-
     body_lines: list[str] = []
     for line in lines[period_index + 1 :]:
         if line in _STOP_LINES:
             break
         body_lines.append(line)
     body_text = "\n".join(body_lines).strip()
-    if len(body_text) < 120:
+    suspended = transport_notice_suspended(body_text)
+    if len(body_text) < 120 and not suspended:
         raise ValueError("Bgprevoz change body shorter than 120 characters")
-
-    period_text = f"Период измене: {start:%d.%m.%Y}–{end:%d.%m.%Y}."
+    if suspended:
+        # Ведомство иногда ставит конец раньше начала после отмены работ.
+        # Сохраняем отмену новым снимком, а не оставляем прежнюю активную геометрию.
+        period_text = f"Приостановлено. Период на странице: {period_line}."
+    else:
+        start, end = _parse_period(period_line)
+        period_text = f"Период измене: {start:%d.%m.%Y}–{end:%d.%m.%Y}."
     body = f"{period_text}\n{body_text}"
     return RawItem(
         source_id=source.id,

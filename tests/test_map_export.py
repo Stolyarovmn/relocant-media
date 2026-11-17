@@ -17,7 +17,13 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops.map_backfill import parse_targets, plan
-from relocant_media.ops.map_export import _power, _water, export_map_snapshot, read_map_feed
+from relocant_media.ops.map_export import (
+    _power,
+    _water,
+    export_map,
+    export_map_snapshot,
+    read_map_feed,
+)
 from relocant_media.ops.newsroom_publish import MAP_PATH, _publish_map
 from relocant_media.ops.pages_assets import copy_assets
 from relocant_media.services.local_outage_geometry import (
@@ -30,9 +36,42 @@ from relocant_media.services.transport_map import build_transport_map
 from relocant_media.services.utility_scope import extract_power_scopes
 from relocant_media.services.water_outage_scope import extract_water_outage_scopes
 from relocant_media.sources.registry import load_source_file
-from relocant_media.storage.models import Base, EditorialRun, Post, RawItem
+from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, SourceRevision
 
 NOW = datetime(2026, 11, 12, 7, tzinfo=UTC)
+
+
+def test_official_suspension_revision_removes_stale_map_without_rewriting_reviewed_evidence():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    notice = _notice()
+    with Session(engine) as session:
+        sync_source(session, "belgrade", load_source_file(
+            Path("cities/belgrade/sources/bgprevoz_changes.yaml"),
+        ))
+        original = CollectedItem(**notice.model_dump(), external_id="bgprevoz-1151",
+                                 source_html=_map_html(line=True))
+        capture_collected_batch(session, [original])
+        item = session.scalar(select(RawItem))
+        item.ingested_at = NOW
+        session.add(EditorialRun(raw_item_id=item.id, outcome={}, evidence={},
+                                 delivery_status="pending"))
+        session.commit()
+        assert len(export_map(session, observed_at=NOW).incidents) == 1
+        cancelled = CollectedItem(**notice.model_copy(update={"body": (
+            "Приостановлено. Период на странице: 17/11/2026 - 16/11/2026.\n"
+            "Радови су обустављени до даљег."
+        )}).model_dump(), external_id="bgprevoz-1151")
+        assert capture_collected_batch(session, [cancelled]) == (0, 1)
+        revision = session.scalar(select(SourceRevision))
+        revision.observed_at = NOW
+        session.commit()
+        assert item.body == notice.body  # История редакционного ревью неизменна.
+        assert export_map(session, observed_at=NOW).incidents == ()
+        revision.snapshot_sha256 = "0" * 64
+        session.commit()
+        assert len(export_map(session, observed_at=NOW).incidents) == 1
+    engine.dispose()
 
 
 def test_map_exports_three_layers_and_archived_button_target(tmp_path):

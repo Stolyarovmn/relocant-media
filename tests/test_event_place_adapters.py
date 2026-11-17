@@ -8,6 +8,54 @@ from relocant_media.ai.models import EvidenceDocument
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.services.event_place_adapters import extract_event_adapter
 
+GALLERY_URL = "https://www.cukarica.rs/vest/712-izlozba-slika-koraci-i-tragovi/"
+GALLERY_BODY = (
+    "Изложба слика „Кораци и трагови“ биће отворена 18. новембра у 19 часова, "
+    "у Галерији „Старт '06“ Културног центра „Чукарица“."
+)
+
+
+def gallery_article(body: str = GALLERY_BODY, published: str = "17.11.2026 11:04"):
+    from pathlib import Path
+
+    from relocant_media.collectors.cukarica_news import parse_cukarica_article
+    from relocant_media.sources.registry import load_source_file
+
+    page = (
+        '<div class="page-full-width"><header><h1>Изложба „Кораци и трагови“</h1>'
+        f'<p><i class="bi-calendar"></i>{published}</p></header>'
+        f'<!-- Excerpt --><div>{body}</div><div class="page-content">Улаз је слободан.</div></div>'
+    )
+    item = parse_cukarica_article(
+        page, load_source_file(Path("cities/belgrade/sources/cukarica_news.yaml")), GALLERY_URL,
+    )
+    return EvidenceDocument(**{key: getattr(item, key) for key in (
+        "source_id", "url", "title", "body", "published_at",
+    )}), page
+
+
+def test_gallery_uses_exact_room_and_dated_source_without_inventing_exhibition_end():
+    article, page = gallery_article()
+    facts = _adapt(article, page)
+    assert facts and facts["starts_at"] == "2026-11-18T19:00:00"
+    assert facts["ends_at"] is None
+    assert facts["venue"]["name"] == "Kulturni centar Čukarica · Galerija Start '06"
+    assert facts["venue"]["address"] == "Turgenjevljeva 5, Beograd"
+    assert facts["time_basis"] == "source_cukarica_gallery"
+    assert _adapt(article.model_copy(update={"published_at": None}), page) is None
+
+
+@pytest.mark.parametrize("body", [
+    GALLERY_BODY.replace("Старт '06", "Друга галерија"),
+    GALLERY_BODY.replace("у 19 часова", "увече"),
+    GALLERY_BODY + " Изложба је отказана.",
+    GALLERY_BODY + " Још једна изложба 19. новембра у 20 часова.",
+    GALLERY_BODY.replace("18. новембра", "18. јануара"),
+])
+def test_gallery_rejects_unknown_room_missing_time_cancellation_and_ambiguous_dates(body):
+    article, page = gallery_article(body)
+    assert _adapt(article, page) is None
+
 _DOB = "https://domomladine.org"
 _CONCERT_PATH = (
     "/koncerti/svetski-dan-flamenka-u-domu-omladine-beograda-el-sonido-de-la-vida-zvuk-zivota/"
