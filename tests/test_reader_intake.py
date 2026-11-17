@@ -41,15 +41,20 @@ class Telegram:
             message["direct_messages_topic"] = {"topic_id": TOPIC}
         return {"update_id": uid, "message": message}
 
-    def click(self, uid, *, message=None, button, reader=READER):
-        parent_id, params = message or self.messages[-1]
-        action = next(item["callback_data"] for group in params["reply_markup"]["inline_keyboard"]
-                      for item in group if item["text"] == button)
+    def press(self, uid, button, *, message=None, ago=0):
+        _, params = message or self.messages[-1]
+        markup = params["reply_markup"]
+        assert "inline_keyboard" not in markup
+        assert any(item["text"] == button for row in markup["keyboard"] for item in row)
+        return self.message(uid, ago=ago, text=button)
+
+    def legacy_click(self, uid, *, sid, action, message=None, reader=READER):
+        parent_id, _ = message or self.messages[-1]
         target = {"chat": self.chat, "message_id": parent_id}
         if self.direct:
             target["direct_messages_topic"] = {"topic_id": TOPIC}
         return {"update_id": uid, "callback_query": {"id": f"cb-{uid}",
-                "from": {"id": reader}, "message": target, "data": action}}
+                "from": {"id": reader}, "message": target, "data": f"intake:{sid}:{action}"}}
 
     async def _call(self, method, params):
         self.calls.append((method, params))
@@ -88,6 +93,11 @@ def engine():
     engine.dispose()
 
 
+def submission_id(engine):
+    with Session(engine) as session:
+        return session.scalars(select(Submission.id).order_by(Submission.id.desc())).first()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
 async def test_reader_news_menu_number_and_media_followup(engine, direct):
@@ -104,8 +114,9 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
     assert first["reader_notices"]["response_seconds"]["menu"][0] >= 50
     assert telegram.messages[-1][1]["reply_parameters"]["message_id"] == 1
 
-    await telegram.receive(engine, telegram.click(2, button="Предложить новость"))
-    assert any(method == "answerCallbackQuery" for method, _ in telegram.calls)
+    sid = submission_id(engine)
+    selected = await telegram.receive(engine, telegram.press(2, "Предложить новость", ago=200))
+    assert selected["reader_notices"]["response_seconds"]["prompt"][0] >= 200
     prompt = telegram.messages[-1]
     assert "Что, где и когда произошло?" in prompt[1]["text"]
 
@@ -114,11 +125,14 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
             3, caption="Дорожное объявление", photo=[{"file_id": "photo-small"}, photo],
         ))
     await telegram.receive(engine, telegram.message(4, caption="Место работ", video=video))
-    await telegram.receive(engine, telegram.click(5, message=prompt, button="Отправить заявку"))
+    submitted = await telegram.receive(
+        engine, telegram.press(5, f"Отправить №{sid}", message=prompt, ago=200),
+    )
+    assert submitted["reader_notices"]["response_seconds"]["accepted"][0] >= 200
     acceptance_id, acceptance = telegram.messages[-1]
     with Session(engine) as session:
         row = session.scalars(select(Submission)).one()
-        sid = row.id
+        assert row.id == sid
         assert row.kind == "news_tip"
         assert row.status == "new"
         assert row.payload["text"] == "Дорожное объявление\nМесто работ"
@@ -129,6 +143,7 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
         assert session.scalar(select(Post)) is None
     assert f"№{sid}" in acceptance["text"]
     assert "принята" in acceptance["text"]
+    assert not any(method == "answerCallbackQuery" for method, _ in telegram.calls)
 
     reply_to = {"message_id": acceptance_id}
     extra = telegram.message(6, caption="Вид с тротуара", photo=[{"file_id": "extra-photo"}],
@@ -152,7 +167,10 @@ async def test_reader_news_menu_number_and_media_followup(engine, direct):
 async def test_reader_cannot_select_another_authors_button(engine):
     telegram = Telegram(direct=True)
     await telegram.receive(engine, telegram.message(1, text="Заявка"))
-    await telegram.receive(engine, telegram.click(2, button="Пожаловаться", reader=READER + 1))
+    sid = submission_id(engine)
+    await telegram.receive(
+        engine, telegram.legacy_click(2, sid=sid, action="pick:complaint", reader=READER + 1),
+    )
     assert len(telegram.messages) == 1
     with Session(engine) as session:
         row = session.scalars(select(Submission)).one()
@@ -164,19 +182,25 @@ async def test_reader_cannot_select_another_authors_button(engine):
 async def test_reader_stale_submit_cannot_send_changed_topic(engine):
     telegram = Telegram(direct=False)
     await telegram.receive(engine, telegram.message(1, text="Описание"))
-    await telegram.receive(engine, telegram.click(2, button="Предложить новость"))
+    sid = submission_id(engine)
+    await telegram.receive(engine, telegram.legacy_click(2, sid=sid, action="pick:news_tip"))
     old_prompt = telegram.messages[-1]
-    await telegram.receive(engine, telegram.click(3, button="Сменить тему"))
-    await telegram.receive(engine, telegram.click(4, button="Пожаловаться"))
+    await telegram.receive(engine, telegram.legacy_click(3, sid=sid, action="menu"))
+    await telegram.receive(engine, telegram.legacy_click(4, sid=sid, action="pick:complaint"))
     new_prompt = telegram.messages[-1]
 
-    await telegram.receive(engine, telegram.click(5, message=old_prompt, button="Отправить заявку"))
+    await telegram.receive(
+        engine, telegram.legacy_click(5, sid=sid, action="submit", message=old_prompt),
+    )
     with Session(engine) as session:
         still_draft = session.scalars(select(Submission)).one()
         assert still_draft.kind == "complaint"
         assert still_draft.status == "collecting"
 
-    await telegram.receive(engine, telegram.click(6, message=new_prompt, button="Отправить заявку"))
+    await telegram.receive(
+        engine, telegram.legacy_click(6, sid=sid, action="submit", message=new_prompt),
+    )
+    assert any(method == "answerCallbackQuery" for method, _ in telegram.calls)
     with Session(engine) as session:
         accepted = session.scalars(select(Submission)).one()
         assert accepted.kind == "complaint"
@@ -185,12 +209,55 @@ async def test_reader_stale_submit_cannot_send_changed_topic(engine):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
+async def test_reader_old_numbered_button_cannot_submit_another_draft(engine, direct):
+    telegram = Telegram(direct)
+    await telegram.receive(engine, telegram.message(1, text="Первый сюжет"))
+    first_id = submission_id(engine)
+    await telegram.receive(engine, telegram.press(2, "Предложить новость"))
+    first_prompt = telegram.messages[-1]
+    first_submit = telegram.press(3, f"Отправить №{first_id}", message=first_prompt)
+    await telegram.receive(engine, first_submit)
+    first_acceptance = telegram.messages[-1]
+
+    await telegram.receive(engine, first_submit)
+    await telegram.receive(
+        engine, telegram.press(4, "Новое обращение", message=first_acceptance),
+    )
+    second_id = submission_id(engine)
+    assert second_id != first_id
+    await telegram.receive(engine, telegram.press(5, "Предложить новость"))
+    second_prompt = telegram.messages[-1]
+    await telegram.receive(engine, telegram.message(6, text="Второй сюжет"))
+    await telegram.receive(
+        engine, telegram.press(7, f"Отправить №{first_id}", message=first_prompt),
+    )
+    with Session(engine) as session:
+        first, second = session.scalars(select(Submission).order_by(Submission.id)).all()
+        assert first.status == "new"
+        assert first.payload["text"] == "Первый сюжет"
+        assert second.status == "collecting"
+        assert second.payload["text"] == "Второй сюжет"
+    assert sum(f"Заявка №{first_id} принята" in value["text"]
+               for _, value in telegram.messages) == 1
+
+    await telegram.receive(
+        engine, telegram.press(8, f"Отправить №{second_id}", message=second_prompt),
+    )
+    with Session(engine) as session:
+        second = session.get(Submission, second_id)
+        assert second.status == "new"
+        assert second.payload["text"] == "Второй сюжет"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
 async def test_reader_confirmation_precedes_editorial_and_followup_reopens_case(engine, direct):
     telegram = Telegram(direct)
     start = telegram.message(1, ago=42, text="На улице появились ограждения")
     await telegram.receive(engine, start)
-    await telegram.receive(engine, telegram.click(2, button="Предложить новость"))
-    telegram.updates = [telegram.click(3, button="Отправить заявку")]
+    sid = submission_id(engine)
+    await telegram.receive(engine, telegram.press(2, "Предложить новость"))
+    telegram.updates = [telegram.press(3, f"Отправить №{sid}")]
 
     def editorial():
         assert "принята" in telegram.messages[-1][1]["text"]
@@ -203,7 +270,7 @@ async def test_reader_confirmation_precedes_editorial_and_followup_reopens_case(
     assert result["pipeline_started"] is True
     with Session(engine) as session:
         row = session.scalars(select(Submission)).one()
-        sid = row.id
+        assert row.id == sid
         resolve_submission(row, [], now=datetime.now(UTC))
         session.commit()
 
@@ -260,8 +327,9 @@ async def test_reader_native_request_from_other_channel_does_not_create_or_send(
 async def test_reader_correction_and_ads_stay_out_of_news_batch(engine, button, kind):
     telegram = Telegram(direct=True)
     await telegram.receive(engine, telegram.message(1, text="Описание https://example.org/a"))
-    await telegram.receive(engine, telegram.click(2, button=button))
-    click = telegram.click(3, button="Отправить заявку")
+    sid = submission_id(engine)
+    await telegram.receive(engine, telegram.press(2, button))
+    click = telegram.press(3, f"Отправить №{sid}")
     await telegram.receive(engine, click)
     await telegram.receive(engine, click)
     with Session(engine) as session:
