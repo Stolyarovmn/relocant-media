@@ -17,12 +17,48 @@ from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
 from relocant_media.bot.api import TelegramBotAPI
+from relocant_media.ops.serverless_queue import peek_inbox
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.services.private_intake import receive_private_tips
 from relocant_media.services.reader_resolution import process_reader_resolutions
+from relocant_media.services.serverless_intake import import_inbox
 from relocant_media.services.submission_queue import batch_submissions
 from relocant_media.storage.file_lock import file_lock
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
+
+
+async def _consume_serverless(
+    engine: Engine, bot: TelegramBotAPI, *,
+    load_events: Callable[[int], list[dict[str, Any]]],
+    store_guard: Callable[[], AbstractContextManager[bool]],
+    state: dict[str, Any],
+    owner_user_id: int | None,
+    owner_chat_id: int | None,
+) -> dict[str, Any]:
+    cursor = state.get("serverless_sequence", 0)
+    events = await asyncio.to_thread(load_events, cursor)
+    with store_guard() as acquired:
+        if not acquired:
+            return {"status": "busy", "inspected": 0}
+        sequence = await import_inbox(
+            engine, bot, events, owner_user_id=owner_user_id, owner_chat_id=owner_chat_id,
+        )
+        if sequence is not None:
+            state["serverless_sequence"] = sequence
+    timings: dict[str, list[float]] = {}
+    for event in events:
+        notice = event.get("notice") or {}
+        seconds = notice.get("response_seconds")
+        stage = notice.get("key", "").partition(":")[0]
+        if (
+            stage in {"menu", "prompt", "accepted"} and isinstance(seconds, (int, float))
+            and not isinstance(seconds, bool)
+        ):
+            timings.setdefault(stage, []).append(seconds)
+    return {
+        "status": "ready", "received": len(events), "inspected": len(events),
+        "reader_notices": {"response_seconds": timings},
+    }
 
 
 async def collect_batch(
@@ -34,18 +70,27 @@ async def collect_batch(
     owner_user_id: int | None = None,
     owner_chat_id: int | None = None,
     reader_feedback_enabled: bool = False,
+    load_serverless_events: Callable[[int], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    intake = await receive_private_tips(
-        engine,
-        bot,
-        enabled=enabled,
-        poll_timeout=1,
-        store_guard=store_guard,
-        accept_private_tips=accept_private_tips,
-        owner_user_id=owner_user_id,
-        owner_chat_id=owner_chat_id,
-        reader_feedback_enabled=reader_feedback_enabled,
-    )
+    if load_serverless_events:
+        if not (enabled and accept_private_tips and reader_feedback_enabled):
+            raise ValueError("Serverless intake requires reader intake and feedback")
+        intake = await _consume_serverless(
+            engine, bot, load_events=load_serverless_events, store_guard=store_guard,
+            state=state, owner_user_id=owner_user_id, owner_chat_id=owner_chat_id,
+        )
+    else:
+        intake = await receive_private_tips(
+            engine,
+            bot,
+            enabled=enabled,
+            poll_timeout=1,
+            store_guard=store_guard,
+            accept_private_tips=accept_private_tips,
+            owner_user_id=owner_user_id,
+            owner_chat_id=owner_chat_id,
+            reader_feedback_enabled=reader_feedback_enabled,
+        )
     result: dict[str, Any] = dict(status=intake["status"],intake=intake,pipeline_started=False)
     if intake["status"] not in {"ready", "busy"}:
         return result
@@ -170,6 +215,15 @@ def main() -> None:
     owner_enabled = os.environ.get("EDITORIAL_OWNER_REVIEW_ENABLED") == "true"
     private_enabled = os.environ.get("EDITORIAL_PRIVATE_INTAKE_ENABLED") == "true"
     reader_feedback_enabled = os.environ.get("EDITORIAL_PRIVATE_FEEDBACK_ENABLED") == "true"
+    cloud_enabled = os.environ.get("EDITORIAL_SERVERLESS_INTAKE_ENABLED") == "true"
+    cloud_token = os.environ.pop("TGCLOUD_TOKEN", "")
+    if cloud_enabled and not cloud_token:
+        raise ValueError("Serverless CLI access is required")
+    cloud_project = Path.cwd() / "deploy" / "telegram-serverless"
+
+    def load_cloud_events(after: int) -> list[dict[str, Any]]:
+        return peek_inbox(cloud_project, cloud_token, after)
+
     owner_user_id = _optional_positive_int("EDITORIAL_OWNER_USER_ID", required=owner_enabled)
     owner_chat_id = _optional_positive_int("EDITORIAL_OWNER_CHAT_ID", required=owner_enabled)
     with file_lock(directory/"intake-consumer.lock") as acquired:
@@ -200,7 +254,8 @@ def main() -> None:
                     owner_chat_id=owner_chat_id,
                     store_guard=lambda: file_lock(directory/"worker.lock"),
                     run_pipeline=pipeline,state=state,checkpoint=checkpoint,
-                    reader_feedback_enabled=reader_feedback_enabled)
+                    reader_feedback_enabled=reader_feedback_enabled,
+                    load_serverless_events=load_cloud_events if cloud_enabled else None)
         try:
             result = asyncio.run(run())
             if owner_enabled and result.get("status") in {

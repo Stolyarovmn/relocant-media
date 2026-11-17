@@ -39,6 +39,7 @@ jobs:
         with:
           node-version: '22'
       - run: node --test tests/map_frontend.test.mjs
+      - run: node --test deploy/telegram-serverless/tests/intake.test.mjs
       - name: Validate Alembic migrations
         run: |
           alembic upgrade head

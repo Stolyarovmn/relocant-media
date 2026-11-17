@@ -657,6 +657,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     intake_state.write_text(json.dumps(state.get("intake_state", {})), encoding="utf-8")
     env = {**environment, "DATABASE_URL": f"sqlite:///{database.resolve().as_posix()}",
            "RELOCANT_RUNTIME_PLATFORM": "github-actions", "TELEGRAM_MTPROTO_ENABLED": "false"}
+    if mode != "intake":
+        env.pop("TGCLOUD_TOKEN", None)
     for name in list(env):
         if name.startswith("EDITORIAL_SSH_") or name in {
             "EDITORIAL_STORAGE_BACKEND", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
@@ -719,8 +721,11 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     _runtime_phase("snapshot_verified")
     saved_intake = json.loads(intake_state.read_text())
     # Retry budget lives outside SQLite; preserve it across ephemeral runners.
-    budget = {key: saved_intake[key] for key in ("signature", "attempts", "backup_pending")
-              if key in saved_intake}
+    budget = {
+        key: saved_intake[key]
+        for key in ("signature", "attempts", "backup_pending", "serverless_sequence")
+        if key in saved_intake
+    }
     has_cycle_report = mode in {"editorial", "fallback"} or (mode == "discovery" and created)
     observed_run = run_dir if has_cycle_report else next(
         iter(sorted((directory / "runs").glob("*/server-report.json"), reverse=True)), None)
