@@ -32,10 +32,14 @@ ROUTES = {
         "Пришлите ссылку на наш пост, ошибочный фрагмент и верные сведения.",
     ),
     "partnership": (
-        "Сотрудничество",
-        "Расскажите о проекте, приложите ссылку и опишите предложение.",
+        "Редакционное партнёрство",
+        "Предложите совместный материал, интервью или обмен информацией. "
+        "Расскажите о проекте и приложите ссылку.",
     ),
-    "ad_request": ("Реклама", "Пришлите ссылку на проект, формат размещения и желаемые даты."),
+    "ad_request": (
+        "Платное размещение",
+        "Для рекламы укажите проект, ссылку, желаемый формат и даты размещения.",
+    ),
     "technical": (
         "Карта или бот",
         "Опишите проблему. Пришлите ссылку, модель устройства и шаг, на котором она возникла.",
@@ -47,6 +51,11 @@ DRAFT_STATES = ("choosing", "collecting")
 OPEN_STATES = (*DRAFT_STATES, "new", "waiting_primary", "source_linked")
 MEDIA_TYPES = ("photo", "video", "document", "voice")
 NUMBERED_ACTIONS = {"Отправить": "submit", "Сменить тему": "menu", "Отменить": "cancel"}
+ROUTE_LABELS = {
+    "Сотрудничество": "partnership",
+    "Реклама": "ad_request",
+    **{label: kind for kind, (label, _) in ROUTES.items()},
+}
 NEW_CASE_LABEL = "Новое обращение"
 
 
@@ -102,6 +111,7 @@ def _notice(
     reply_to: int | None = None,
     keyboard: list[list[dict[str, str]]] | None = None,
     received_at: datetime | None = None,
+    remove_keyboard: bool = False,
 ) -> None:
     notices = dict(row.payload.get("reader_notices", {}))
     if key in notices:
@@ -113,6 +123,8 @@ def _notice(
         "reply_to": reply_to,
         "received_at": (received_at or _now()).isoformat(),
     }
+    if remove_keyboard:
+        notices[key]["remove_keyboard"] = True
     row.payload = {**row.payload, "reader_notices": notices, "reader_notice_pending": True}
 
 
@@ -278,6 +290,7 @@ def _record_keyboard_choice(
     cases: list[Submission],
     label: str,
     *,
+    sender: tuple[int, int, int | None],
     message_id: int,
     received_at: datetime,
 ) -> bool:
@@ -287,8 +300,10 @@ def _record_keyboard_choice(
     ):
         row = draft if draft is not None and submission_reference(draft) == match[2] else None
         action = NUMBERED_ACTIONS[match[1]]
+        if action == "cancel" and draft is None:
+            _clear_cancelled_keyboard(session, sender, match[2], message_id, received_at)
     else:
-        kind = next((kind for kind, (caption, _) in ROUTES.items() if label == caption), None)
+        kind = ROUTE_LABELS.get(label)
         if kind is None or draft is None:
             return False
         if draft.status == "collecting":
@@ -308,6 +323,27 @@ def _record_keyboard_choice(
                 row, f"choice:{message_id}", answer, reply_to=message_id, received_at=received_at
             )
     return True
+
+
+def _clear_cancelled_keyboard(
+    session: Session, sender: tuple[int, int, int | None], reference: str,
+    message_id: int, received_at: datetime,
+) -> None:
+    user_id, chat_id, topic_id = sender
+    row = session.scalar(select(Submission).where(
+        Submission.telegram_user_id == user_id,
+        Submission.payload["reader_intake"].as_boolean().is_(True),
+        cast(Submission.payload["chat_id"].as_string(), BigInteger) == chat_id,
+    ).order_by(Submission.id.desc()).limit(1))
+    if (row is None or row.status != "cancelled" or row.payload.get("topic_id") != topic_id
+            or submission_reference(row) != reference):
+        return
+    cancelled = row.payload.get("reader_notices", {}).get("cancelled", {})
+    if cancelled.get("status") == "sent" and not cancelled.get("remove_keyboard"):
+        _notice(
+            row, "cancelled_keyboard", f"Черновик №{reference} уже отменён.",
+            reply_to=message_id, received_at=received_at, remove_keyboard=True,
+        )
 
 
 def record_reader_message(
@@ -338,6 +374,7 @@ def record_reader_message(
             session,
             cases,
             items["text"],
+            sender=(user_id, chat_id, topic_id),
             message_id=message_id,
             received_at=received_at,
         )
@@ -451,6 +488,9 @@ def _apply_action(
             row,
             "cancelled",
             f"Черновик №{reference} отменён. Новое обращение можно начать сообщением.",
+            reply_to=message_id,
+            received_at=received_at,
+            remove_keyboard=True,
         )
         return "Черновик отменён."
     notices = row.payload.get("reader_notices", {})
@@ -576,6 +616,8 @@ async def deliver_reader_notices(
                         "resize_keyboard": True,
                         "one_time_keyboard": True,
                     }
+                elif item.get("remove_keyboard"):
+                    params["reply_markup"] = {"remove_keyboard": True}
                 if item["reply_to"] is not None:
                     params["reply_parameters"] = {
                         "message_id": item["reply_to"],

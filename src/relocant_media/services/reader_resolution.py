@@ -21,8 +21,8 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, S
 _OWNER_KINDS = {
     "correction": "Исправление нашего поста",
     "complaint": "Жалоба",
-    "ad_request": "Реклама",
-    "partnership": "Сотрудничество",
+    "ad_request": "Платное размещение",
+    "partnership": "Редакционное партнёрство",
     "technical": "Проблема с картой или ботом",
     "question": "Вопрос или предложение",
 }
