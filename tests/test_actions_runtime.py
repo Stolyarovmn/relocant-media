@@ -256,6 +256,35 @@ def test_failed_child_reports_only_whitelisted_failure_coordinates(
     assert 'TOKEN-123' not in err
 
 
+@pytest.mark.parametrize("pipeline_started", [True, False])
+def test_intake_pipeline_logs_failure_only_for_current_attempt(
+        context, tmp_path, monkeypatch, capsys, pipeline_started):
+    def child(command, env):
+        directory = Path(env["DATABASE_URL"].removeprefix("sqlite:///")).parent
+        (directory / "intake-batch-state.json").write_text(json.dumps({
+            "last_result": {"status": "pipeline_failed", "pipeline_started": pipeline_started,
+                            "pipeline_exit_code": 1},
+        }), encoding="utf-8")
+        output = directory / "runs" / "20261117T081300Z"
+        output.mkdir(parents=True)
+        (output / "server-report.json").write_text(json.dumps({
+            "status": "SERVER_FAILED", "error_type": "ValueError",
+            "error_site": "server_cycle.py:816", "secret": "PRIVATE-PROPOSAL-TEXT",
+        }), encoding="utf-8")
+        return 1
+
+    monkeypatch.setattr(runtime, "run_child", child)
+    assert execute(context, tmp_path, monkeypatch, mode="intake") == 1
+    assert context[0].state["status"] == "ready"
+    error = capsys.readouterr().err
+    reports = [record["runtime_failure"] for line in error.strip().splitlines()
+               if "runtime_failure" in (record := json.loads(line))]
+    assert reports == ([{
+        "status": "SERVER_FAILED", "error_type": "ValueError", "error_site": "server_cycle.py:816",
+    }] if pipeline_started else [])
+    assert "PRIVATE-PROPOSAL-TEXT" not in error
+
+
 @pytest.mark.parametrize('failure', ['crash', 'upload', 'commit'])
 def test_uncertain_attempt_stays_busy_and_blocks_next(context, tmp_path, monkeypatch, failure):
     store, drive = context
