@@ -374,6 +374,75 @@ async def test_reader_greeting_opens_menu_without_submitting(engine, direct, ope
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
+async def test_waiting_reader_receives_one_instruction_and_no_presence_text(engine, direct):
+    telegram = Telegram(direct)
+    await telegram.receive(engine, *[
+        telegram.message(uid, text=text, ago=300)
+        for uid, text in enumerate(("Привет!", "Новое обращение", "есть кто?"), 1)
+    ])
+    assert len(telegram.messages) == 1
+    assert "Весь текст и вложения отправятся одним обращением." in telegram.messages[0][1]["text"]
+    with Session(engine) as session:
+        row = session.scalars(select(Submission)).one()
+        assert row.status == "choosing" and row.payload["text"] == ""
+        assert not row.payload.get("reader_parts")
+        assert not batch_submissions(session)
+        assert len(session.scalars(select(TelegramUpdateReceipt)).all()) == 3
+    # A separately polled message written before the first response is not a new request.
+    await telegram.receive(engine, telegram.message(4, text="Новое обращение", ago=200))
+    assert len(telegram.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_reader_can_reopen_menu_after_receiving_the_previous_one(engine, monkeypatch):
+    import relocant_media.services.reader_intake as intake
+
+    clock = [datetime.now(UTC)]
+    monkeypatch.setattr(intake, "_now", lambda: clock[0])
+    telegram = Telegram(False)
+    await telegram.receive(engine, telegram.message(1, text="Описание события"))
+    sid = submission_id(engine)
+    clock[0] += timedelta(seconds=3)
+    again = telegram.message(2, text="Новое обращение")
+    again["message"]["date"] = int(clock[0].timestamp())
+    await telegram.receive(engine, again)
+    assert len(telegram.messages) == 2
+    with Session(engine) as session:
+        assert session.scalars(select(Submission.id)).all() == [sid]
+        assert session.get(Submission, sid).payload["text"] == "Описание события"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
+async def test_saved_keyboard_choice_before_welcome_is_delivered_is_not_lost(engine, direct):
+    telegram = Telegram(direct)
+    updates = [
+        telegram.message(1, text="Привет!"),
+        telegram.message(2, text="Изменился маршрут автобуса на улице Негошева."),
+        telegram.message(3, photo=[{"file_id": "photo", "file_unique_id": "photo-1"}]),
+        telegram.message(4, text="Предложить новость"),
+        telegram.message(5, text="Предложить новость"),
+    ]
+    await telegram.receive(engine, *updates)
+    assert len(telegram.messages) == 1
+    await telegram.receive(engine, telegram.message(6, text="Предложить новость", ago=300))
+    assert len(telegram.messages) == 1
+    with Session(engine) as session:
+        assert len(session.scalars(select(Submission)).all()) == 1
+    assert "отправлено в работу" in telegram.messages[0][1]["text"]
+    with Session(engine) as session:
+        row = session.scalars(select(Submission)).one()
+        assert row.status == "new" and row.kind == "news_tip"
+        assert row.payload["text"] == "Изменился маршрут автобуса на улице Негошева."
+        assert len(row.payload["attachments"]) == 1
+        assert row.payload["reader_notices"]["menu"]["status"] == "superseded"
+        assert row.payload["reader_notices"]["accepted"]["status"] == "sent"
+    await telegram.receive(engine, *updates)
+    assert len(telegram.messages) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
 @pytest.mark.parametrize("selected", [False, True], ids=["menu", "form"])
 async def test_reader_cancel_replaces_old_keyboard_with_new_entry(engine, direct, selected):
     telegram = Telegram(direct)

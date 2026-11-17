@@ -67,6 +67,41 @@ GREETING = re.compile(
     r"[\s.!?,…👋]*",
     re.IGNORECASE,
 )
+PRESENCE_CHECK = re.compile(
+    r"(?:есть\s+кто(?:[- ]нибудь)?|кто(?:[- ]нибудь)?\s+(?:есть|тут|здесь)|"
+    r"(?:вы|ты)\s+(?:тут|здесь)|алло|ау)[\s.!?,…]*", re.IGNORECASE,
+)
+
+
+def _start_text(text: str) -> bool:
+    return (text == NEW_CASE_LABEL or text.partition(" ")[0].split("@")[0] == "/start"
+            or GREETING.fullmatch(text) is not None
+            or PRESENCE_CHECK.fullmatch(text) is not None)
+
+
+def _notice_covers_input(notice: dict[str, Any], received_at: datetime) -> bool:
+    if notice.get("status") in {"pending", "sending", "uncertain"}:
+        return True
+    sent_at = notice.get("sent_at")
+    return (notice.get("status") == "sent" and isinstance(sent_at, str)
+            and received_at <= datetime.fromisoformat(sent_at))
+
+
+def _needs_start_notice(row: Submission, stage: str, received_at: datetime) -> bool:
+    notices = [notice for key, notice in row.payload.get("reader_notices", {}).items()
+               if key.split(":", maxsplit=1)[0] == stage]
+    if not notices:
+        return True
+    latest = max(notices, key=lambda notice: notice["received_at"])
+    # These messages were written while the reader was still waiting for this answer.
+    return not _notice_covers_input(latest, received_at)
+
+
+def _supersede_pending_prompts(row: Submission) -> None:
+    for key, notice in row.payload.get("reader_notices", {}).items():
+        if (key.split(":", maxsplit=1)[0] in {"menu", "prompt", "choice"}
+                and notice["status"] == "pending"):
+            _save_notice(row, key, status="superseded", superseded_at=_now().isoformat())
 
 
 def _now() -> datetime:
@@ -238,7 +273,8 @@ def _append(row: Submission, message_id: int, items: dict[str, Any]) -> bool:
         return False
     parts[str(message_id)] = items
     ordered = [parts[key] for key in sorted(parts, key=int)]
-    text = "\n".join(part["text"] for part in ordered if part["text"])
+    text = "\n".join(part["text"] for part in ordered if part["text"] and not (
+        not part["attachments"] and _start_text(part["text"])))
     attachments: dict[str, dict[str, Any]] = {}
     for part in ordered:
         for media in part["attachments"]:
@@ -330,14 +366,17 @@ def _record_keyboard_choice(
             # Repeated taps in one poll can arrive before Telegram shows the new keyboard.
             return any(
                 case.kind == kind
-                and case.payload.get("reader_notices", {}).get("accepted", {}).get("status")
-                == "pending"
+                and _notice_covers_input(
+                    case.payload.get("reader_notices", {}).get("accepted", {}), received_at)
                 for case in cases
             )
         if draft.status == "collecting":
             return draft.kind == kind
         row, action = draft, f"pick:{kind}"
-    if row is not None and _source_notice_id(row, action) is not None:
+    source_notice = _source_notice(row, action) if row is not None else {}
+    pending_choice = (action.startswith("pick:") and source_notice.get("status") == "pending"
+                      and source_notice.get("submit_on_pick") is True)
+    if row is not None and (_source_notice_id(row, action) is not None or pending_choice):
         notice_count = len(row.payload.get("reader_notices", {}))
         answer = _apply_action(
             session,
@@ -388,11 +427,7 @@ def record_reader_message(
         return False
     user_id, chat_id, message_id, topic_id = identity
     text = items["text"]
-    start = not items["attachments"] and (
-        text == NEW_CASE_LABEL
-        or text.partition(" ")[0].split("@")[0] == "/start"
-        or GREETING.fullmatch(text) is not None
-    )
+    start = not items["attachments"] and _start_text(text)
     if not (items["text"] or items["attachments"]):
         return False
     received_at = _date(message)
@@ -436,9 +471,11 @@ def record_reader_message(
             message_id=message_id, received_at=received_at, channel_id=channel_id,
         )
         _menu(row, key="menu", message_id=message_id, received_at=received_at)
-    elif start and row.status == "choosing":
+    elif (start and row.status == "choosing"
+          and _needs_start_notice(row, "menu", received_at)):
         _menu(row, key=f"menu:{message_id}", message_id=message_id, received_at=received_at)
-    elif start and row.status == "collecting":
+    elif (start and row.status == "collecting"
+          and _needs_start_notice(row, "prompt", received_at)):
         _prompt(row, key=f"prompt:{message_id}", received_at=received_at)
     if start:
         return True
@@ -526,6 +563,7 @@ def _apply_action(
         return f"Заявка №{reference} уже отправлена."
     if action == "cancel":
         row.status = "cancelled"
+        _supersede_pending_prompts(row)
         _notice(
             row,
             "cancelled",
@@ -556,6 +594,7 @@ def _apply_action(
         return "Добавьте описание или вложение, затем отправьте заявку."
     accepted_at = received_at
     row.status = "new"
+    _supersede_pending_prompts(row)
     row.payload = {**row.payload, "accepted_at": accepted_at.isoformat()}
     # The first message can be /start, so reply to the actual description when present.
     input_ids = row.payload.get("reader_parts", {})
@@ -582,7 +621,9 @@ def _apply_action(
 
 
 def _has_submission_content(row: Submission, kind: str) -> bool:
-    return bool(row.payload["text"] or (kind == "news_tip" and row.payload["attachments"]))
+    text = row.payload["text"].strip()
+    return bool((text and not _start_text(text))
+                or (kind == "news_tip" and row.payload["attachments"]))
 
 
 async def reader_destination(
