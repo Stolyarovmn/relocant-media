@@ -361,19 +361,23 @@ class TelegramBotAPI:
         if result is not True:
             raise TelegramAPIError("restrictChatMember did not return true")
 
-    async def set_webhook(self, url: str, secret_token: str) -> None:
+    async def set_webhook(
+        self, url: str, secret_token: str, *, reader_intake: bool = False,
+    ) -> None:
         if not url.startswith("https://"):
             raise ValueError("Telegram webhook URL must use HTTPS")
         if not secret_token:
             raise ValueError("Telegram webhook secret token is required")
-        result = await self._call(
-            "setWebhook",
-            {
-                "url": url,
-                "secret_token": secret_token,
-                "allowed_updates": list(ALLOWED_UPDATE_TYPES),
-                "drop_pending_updates": False,
-            },
-        )
+        allowed_updates = list(ALLOWED_UPDATE_TYPES)
+        params: dict[str, object] = {
+            "url": url,
+            "secret_token": secret_token,
+            "allowed_updates": allowed_updates,
+            "drop_pending_updates": False,
+        }
+        if reader_intake:
+            allowed_updates.append("edited_message")
+            params["max_connections"] = 1
+        result = await self._call("setWebhook", params)
         if result is not True:
             raise TelegramAPIError("setWebhook did not return true")

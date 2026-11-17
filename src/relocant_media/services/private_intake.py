@@ -36,6 +36,7 @@ def save_channel_tip(
     message: dict[str, Any],
     *,
     edited: bool = False,
+    channel_id: int = APPROVED_CHANNEL_ID,
 ) -> bool:
     sender = message.get("from", {})
     topic = message.get("direct_messages_topic", {})
@@ -64,7 +65,7 @@ def save_channel_tip(
         "topic_id": topic["topic_id"],
         "origin": "channel_direct_messages",
         "city": "belgrade",
-        "channel_id": APPROVED_CHANNEL_ID,
+        "channel_id": channel_id,
         "edited": edited,
         "media_present": any(
             key in message for key in ("photo", "video", "document", "voice")
@@ -216,7 +217,7 @@ async def receive_private_tips(
                 "owner_action_required": False,
                 "telegram_sends": 0,
             }
-        result = await _store_updates(
+        return await process_private_updates(
             engine,
             bot,
             updates,
@@ -225,11 +226,6 @@ async def receive_private_tips(
             owner_chat_id=owner_chat_id,
             reader_feedback_enabled=reader_feedback_enabled,
         )
-        if accept_private_tips and reader_feedback_enabled:
-            notices = await deliver_reader_notices(engine, bot)
-            result["reader_notices"] = notices
-            result["telegram_sends"] += notices["sent"]
-        return result
 
 
 def _legacy_private_message(session: Session, message: dict[str, Any]) -> bool:
@@ -243,7 +239,7 @@ def _legacy_private_message(session: Session, message: dict[str, Any]) -> bool:
     return type(sender) is int and session.get(TelegramConversation, sender) is not None
 
 
-async def _store_updates(
+async def process_private_updates(
     engine: Engine,
     bot: TelegramBotAPI,
     updates: list[dict[str, Any]],
@@ -252,7 +248,9 @@ async def _store_updates(
     owner_user_id: int | None = None,
     owner_chat_id: int | None = None,
     reader_feedback_enabled: bool = False,
+    channel_id: int = APPROVED_CHANNEL_ID,
 ) -> dict[str, Any]:
+    """Store authenticated Telegram updates, then deliver reader receipts."""
     received = 0
     owner_actions = 0
     telegram_sends = 0
@@ -332,7 +330,7 @@ async def _store_updates(
                             parent = info.get("parent_chat", {})
                             parents[cid] = (
                                 isinstance(parent, dict)
-                                and parent.get("id") == APPROVED_CHANNEL_ID
+                                and parent.get("id") == channel_id
                             )
                         if parents[cid]:
                             body = message.get("text", message.get("caption", ""))
@@ -340,9 +338,13 @@ async def _store_updates(
                             if reader_feedback_enabled and not (
                                 isinstance(body, str) and body.startswith("/ad ")
                             ):
-                                accepted = record_reader_message(session, message, edited=edited)
+                                accepted = record_reader_message(
+                                    session, message, edited=edited, channel_id=channel_id,
+                                )
                             else:
-                                accepted = save_channel_tip(session, message, edited=edited)
+                                accepted = save_channel_tip(
+                                    session, message, edited=edited, channel_id=channel_id,
+                                )
                     elif (
                         accept_private_tips
                         and chat.get("type") == "private"
@@ -383,7 +385,7 @@ async def _store_updates(
                 })
             except Exception:
                 pass
-    return {
+    result: dict[str, Any] = {
         "status": "ready",
         "received": received,
         "inspected": len(updates),
@@ -391,3 +393,8 @@ async def _store_updates(
         "owner_action_required": False,
         "telegram_sends": telegram_sends,
     }
+    if accept_private_tips and reader_feedback_enabled:
+        notices = await deliver_reader_notices(engine, bot, channel_id=channel_id)
+        result["reader_notices"] = notices
+        result["telegram_sends"] += notices["sent"]
+    return result
