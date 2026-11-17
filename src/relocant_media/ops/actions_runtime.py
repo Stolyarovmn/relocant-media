@@ -388,7 +388,9 @@ def _preparation_details(value: object) -> list[dict[str, Any]]:
     return result
 
 
-def intake_summary(saved: dict[str, Any]) -> dict[str, Any]:
+def intake_summary(
+    saved: dict[str, Any], feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Only statuses and counters of the last intake pass; never text, ids or exception values."""
     result = saved.get("last_result")
     if not isinstance(result, dict):
@@ -402,6 +404,24 @@ def intake_summary(saved: dict[str, Any]) -> dict[str, Any]:
     intake = _counters(result.get("intake"), ("received", "inspected", "telegram_sends"))
     if intake:
         summary["intake"] = intake
+    notices = result.get("intake", {}).get("reader_notices", {})
+    stages = notices.get("response_seconds", {})
+    timing_samples = {stage: stages.get(stage, []) for stage in ("menu", "prompt", "accepted")}
+    timing_samples["clarification"] = (feedback or {}).get("response_seconds", [])
+    timing_samples["final"] = [
+        sample for run in result.get("reader_resolution_passes", [])
+        for sample in run.get("response_seconds", [])
+    ]
+    reader_timings = {}
+    for stage, samples in timing_samples.items():
+        if isinstance(samples, list):
+            seconds = [n for n in samples if type(n) in (int, float) and 0 <= n < 1e9]
+            if seconds:
+                reader_timings[stage] = {
+                    "count": len(seconds), "min": min(seconds), "max": max(seconds),
+                }
+    if reader_timings:
+        summary["reader_response_seconds"] = reader_timings
     owner = result.get("owner_review")
     if isinstance(owner, dict):
         block: dict[str, Any] = {}
@@ -707,11 +727,24 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         observed_run = observed_run.parent
     if observed_run is not None and not observed_run.is_dir():
         observed_run = None  # the worker failed before creating its output
+    feedback_stats = None
+    if (
+        observed_run is not None and mode == "intake"
+        and saved_intake.get("last_result", {}).get("pipeline_started")
+    ):
+        try:
+            report = json.loads((observed_run / "server-report.json").read_text(encoding="utf-8"))
+            feedback_stats = report.get("private_feedback")
+        except (OSError, ValueError):
+            pass
+    private_intake_report = intake_summary(saved_intake, feedback_stats)
+    if timings := private_intake_report.get("reader_response_seconds"):
+        print(json.dumps({"reader_response_seconds": timings}), flush=True)
     last_cycle = state.get("last_cycle")
     ready = {**busy, "status": "ready", "generation": attempt, "snapshot": manifest,
              "intake_state": budget, "finished_at": datetime.now(UTC).isoformat(),
              "last_exit_code": code, "last_cycle": last_cycle,
-             "last_intake": intake_summary(saved_intake) or state.get("last_intake") or {},
+             "last_intake": private_intake_report or state.get("last_intake") or {},
              "last_editorial_at": (
                  datetime.now(UTC).isoformat() if mode == "editorial" and code == 0
                  else state.get("last_editorial_at"))}

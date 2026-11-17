@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.services.private_intake import receive_private_tips
+from relocant_media.services.reader_resolution import process_reader_resolutions
 from relocant_media.services.submission_queue import batch_submissions
 from relocant_media.storage.file_lock import file_lock
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
@@ -32,6 +33,7 @@ async def collect_batch(
     accept_private_tips: bool = True,
     owner_user_id: int | None = None,
     owner_chat_id: int | None = None,
+    reader_feedback_enabled: bool = False,
 ) -> dict[str, Any]:
     intake = await receive_private_tips(
         engine,
@@ -42,10 +44,23 @@ async def collect_batch(
         accept_private_tips=accept_private_tips,
         owner_user_id=owner_user_id,
         owner_chat_id=owner_chat_id,
+        reader_feedback_enabled=reader_feedback_enabled,
     )
     result: dict[str, Any] = dict(status=intake["status"],intake=intake,pipeline_started=False)
     if intake["status"] not in {"ready", "busy"}:
         return result
+    async def resolve_reader_cases() -> None:
+        if not (accept_private_tips and reader_feedback_enabled and intake["status"] == "ready"):
+            return
+        with store_guard() as acquired:
+            if not acquired:
+                return
+            passes = result.setdefault("reader_resolution_passes", [])
+            passes.append(await process_reader_resolutions(
+                engine, bot, enabled=True, owner_user_id=owner_user_id, owner_chat_id=owner_chat_id,
+            ))
+
+    await resolve_reader_cases()
     with Session(engine) as session:
         ids = [row.id for row in batch_submissions(session)]
     result["pending_submissions"] = len(ids)
@@ -62,6 +77,7 @@ async def collect_batch(
     result["pipeline_started"] = True
     code = await asyncio.to_thread(run_pipeline)
     result.update(status="ready" if code == 0 else "pipeline_failed",pipeline_exit_code=code)
+    await resolve_reader_cases()
     return result
 
 
@@ -139,6 +155,7 @@ def main() -> None:
     state_path = directory / "intake-batch-state.json"
     owner_enabled = os.environ.get("EDITORIAL_OWNER_REVIEW_ENABLED") == "true"
     private_enabled = os.environ.get("EDITORIAL_PRIVATE_INTAKE_ENABLED") == "true"
+    reader_feedback_enabled = os.environ.get("EDITORIAL_PRIVATE_FEEDBACK_ENABLED") == "true"
     owner_user_id = _optional_positive_int("EDITORIAL_OWNER_USER_ID", required=owner_enabled)
     owner_chat_id = _optional_positive_int("EDITORIAL_OWNER_CHAT_ID", required=owner_enabled)
     with file_lock(directory/"intake-consumer.lock") as acquired:
@@ -176,7 +193,8 @@ def main() -> None:
                     owner_user_id=owner_user_id,
                     owner_chat_id=owner_chat_id,
                     store_guard=lambda: file_lock(directory/"worker.lock"),
-                    run_pipeline=pipeline,state=state,checkpoint=checkpoint)
+                    run_pipeline=pipeline,state=state,checkpoint=checkpoint,
+                    reader_feedback_enabled=reader_feedback_enabled)
         try:
             result = asyncio.run(run())
             if owner_enabled and result.get("status") in {
@@ -194,7 +212,12 @@ def main() -> None:
         finally:
             engine.dispose()
         state.update(last_result=result,checked_at=datetime.now(UTC).isoformat())
-        if result.get("intake", {}).get("inspected", 0) or result.get("pipeline_started"):
+        reader_notices = result.get("intake", {}).get("reader_notices", {})
+        if (
+            result.get("intake", {}).get("inspected", 0) or result.get("pipeline_started")
+            or any(reader_notices.get(key) for key in ("sent", "uncertain", "blocked"))
+            or any(item.get("changed") for item in result.get("reader_resolution_passes", []))
+        ):
             state["backup_pending"] = True
         checkpoint()
         if state.get("backup_pending"):

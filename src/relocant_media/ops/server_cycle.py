@@ -1245,10 +1245,29 @@ def main() -> None:
             with Session(engine) as load_session:
                 return recent_source_load(load_session, now=datetime.now(UTC))
         scope: dict[str, Any] = {}
+        feedback_status: dict[str, Any] = {}
+
+        async def feedback() -> dict[str, Any]:
+            async with httpx.AsyncClient(timeout=25, trust_env=False) as feedback_client:
+                return await reply_to_submissions(engine,
+                    TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], feedback_client),
+                    enabled=os.environ.get("EDITORIAL_PRIVATE_FEEDBACK_ENABLED") == "true",
+                    only_ids=(set(scope.get("submission_ids", []))
+                              if args.submissions_only else None))
+
+        def send_feedback() -> None:
+            try:
+                feedback_status.update(asyncio.run(feedback()))
+            except Exception as feedback_error:
+                feedback_status.update(status="failed", error_type=type(feedback_error).__name__)
+
         def ingest() -> dict[str, Any]:
             stats = asyncio.run(collect_sources(engine, output=args.output,
                                                submissions_only=args.submissions_only))
             scope.update(stats)
+            # Reader questions can be sent as soon as source triage commits.
+            # They should not wait behind model calls or public delivery.
+            send_feedback()
             return stats
         def allowed_items() -> set[int]:
             return set(scope.get("submission_raw_ids", []))
@@ -1275,18 +1294,9 @@ def main() -> None:
                 media_sources()))
         result["private_intake"] = intake_status
         result["submissions_only"] = args.submissions_only
-        async def feedback() -> dict[str, Any]:
-            async with httpx.AsyncClient(timeout=25, trust_env=False) as feedback_client:
-                return await reply_to_submissions(engine,
-                    TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], feedback_client),
-                    enabled=os.environ.get("EDITORIAL_PRIVATE_FEEDBACK_ENABLED") == "true",
-                    only_ids=(set(scope.get("submission_ids", []))
-                              if args.submissions_only else None))
-        try:
-            result["private_feedback"] = asyncio.run(feedback())
-        except Exception as feedback_error:
-            result["private_feedback"] = {"status": "failed",
-                "error_type": type(feedback_error).__name__}
+        if not feedback_status:
+            send_feedback()
+        result["private_feedback"] = feedback_status
         result["fallback_required"] = (result["status"] == "PRIMARY_FAILED"
                                        or bool(result.get("processing_errors"))
                                        or bool(result.get("gpt_deferred_count")))
