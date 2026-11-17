@@ -79,18 +79,22 @@ def _start_text(text: str) -> bool:
             or PRESENCE_CHECK.fullmatch(text) is not None)
 
 
+def _notice_covers_input(notice: dict[str, Any], received_at: datetime) -> bool:
+    if notice.get("status") in {"pending", "sending", "uncertain"}:
+        return True
+    sent_at = notice.get("sent_at")
+    return (notice.get("status") == "sent" and isinstance(sent_at, str)
+            and received_at <= datetime.fromisoformat(sent_at))
+
+
 def _needs_start_notice(row: Submission, stage: str, received_at: datetime) -> bool:
     notices = [notice for key, notice in row.payload.get("reader_notices", {}).items()
                if key.split(":", maxsplit=1)[0] == stage]
     if not notices:
         return True
     latest = max(notices, key=lambda notice: notice["received_at"])
-    if latest["status"] in {"pending", "sending", "uncertain"}:
-        return False
-    sent_at = latest.get("sent_at")
     # These messages were written while the reader was still waiting for this answer.
-    return not (latest["status"] == "sent" and isinstance(sent_at, str)
-                and received_at <= datetime.fromisoformat(sent_at))
+    return not _notice_covers_input(latest, received_at)
 
 
 def _supersede_pending_prompts(row: Submission) -> None:
@@ -362,8 +366,8 @@ def _record_keyboard_choice(
             # Repeated taps in one poll can arrive before Telegram shows the new keyboard.
             return any(
                 case.kind == kind
-                and case.payload.get("reader_notices", {}).get("accepted", {}).get("status")
-                == "pending"
+                and _notice_covers_input(
+                    case.payload.get("reader_notices", {}).get("accepted", {}), received_at)
                 for case in cases
             )
         if draft.status == "collecting":

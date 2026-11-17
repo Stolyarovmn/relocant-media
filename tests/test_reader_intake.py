@@ -425,6 +425,10 @@ async def test_saved_keyboard_choice_before_welcome_is_delivered_is_not_lost(eng
     ]
     await telegram.receive(engine, *updates)
     assert len(telegram.messages) == 1
+    await telegram.receive(engine, telegram.message(6, text="Предложить новость", ago=300))
+    assert len(telegram.messages) == 1
+    with Session(engine) as session:
+        assert len(session.scalars(select(Submission)).all()) == 1
     assert "отправлено в работу" in telegram.messages[0][1]["text"]
     with Session(engine) as session:
         row = session.scalars(select(Submission)).one()
