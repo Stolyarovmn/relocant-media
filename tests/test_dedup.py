@@ -30,6 +30,53 @@ def test_real_published_reprint_is_one_event_in_both_directions() -> None:
     assert same_event(right, left)
 
 
+def single_route_detour_reprint() -> tuple[EventCandidate, EventCandidate]:
+    publication = datetime(2026, 11, 15, 23, tzinfo=UTC)
+    details = (
+        "Radovi se izvode na kolovozu Ulice Gandijeva (u smeru ka Dr Huga Klajna), "
+        "od kućnog broja 4. "
+        "U smeru ka Zemunu vozila će saobraćati ulicama Gandijeva, Egipatska, Tošin bunar "
+        "i dalje redovnom trasom, dok će u suprotnom smeru saobraćati redovnom trasom. "
+        "U smeru ka Zemunu, linija će koristiti sva postojeća stajališta, "
+        "osim stajališta „Generala Nedeljkovića“ (smer ka ulici Marka Čelebonovića)."
+    )
+    original = EventCandidate(
+        1, "city_beograd_news", "https://www.beograd.rs/a116679", "Promena trase linije 82",
+        f"Od sutra do 11. decembra doći će do promene u radu linije 82. {details}",
+        publication,
+    )
+    reprint = EventCandidate(
+        2, "city_beograd_news", "https://www.beograd.rs/a116681", "Radovi u ulici Gandijeva",
+        "Od 17. novembra do 11. decembra 2026. godine doći će do promene u radu linije 82. "
+        + details.replace("vozila će", "će").replace("ka Dr Huga", "ka ulici Dr Huga"),
+        publication,
+    )
+    return original, reprint
+
+
+def test_single_route_detour_reprint_resolves_tomorrow_in_belgrade() -> None:
+    original, reprint = single_route_detour_reprint()
+    assert same_event(original, reprint)
+    assert same_event(reprint, original)
+    assert not same_event(replace(original, published_at=datetime(2026, 11, 14, 23, tzinfo=UTC)),
+                          reprint)
+
+
+@pytest.mark.parametrize(("before", "after"), [
+    ("17. novembra", "18. novembra"),
+    ("11. decembra", "12. decembra"),
+    ("linije 82", "linije 83"),
+    ("broja 4", "broja 5"),
+    ("Zemunu", "Bloku 44"),
+    ("Egipatska, Tošin bunar", "Tošin bunar, Egipatska"),
+    ("Generala Nedeljkovića", "Dr Huga Klajna"),
+])
+def test_single_route_detour_reprint_preserves_material_changes(before: str, after: str) -> None:
+    original, reprint = single_route_detour_reprint()
+    assert before in reprint.body
+    assert not same_event(original, replace(reprint, body=reprint.body.replace(before, after)))
+
+
 @pytest.mark.parametrize(('before', 'after'), [
     ('23. oktobra', '24. oktobra'),
     ('23. oktobra', '23. oktobra 2027.'),
