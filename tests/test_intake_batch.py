@@ -1,5 +1,7 @@
 from contextlib import nullcontext
 from datetime import timedelta
+from pathlib import Path
+from subprocess import CompletedProcess
 
 import pytest
 from sqlalchemy import select
@@ -13,7 +15,7 @@ from test_private_intake import engine as _engine
 from test_venue_runtime import NOW, URL
 from test_venue_runtime import runtime as _runtime
 
-from relocant_media.ops import server_cycle
+from relocant_media.ops import intake_batch, server_cycle
 from relocant_media.ops.candidates_cli import select_candidates
 from relocant_media.ops.intake_batch import collect_batch
 from relocant_media.ops.primary_cycle import begin_window, run_cycle
@@ -22,6 +24,23 @@ from relocant_media.services.submission_queue import batch_submissions
 from relocant_media.storage.models import EditorialRun, RawItem, Submission, TelegramUpdateReceipt
 
 engine, runtime, queue, editorial_session = _engine, _runtime, _queue, _editorial_session
+
+
+def test_actions_intake_gives_editorial_a_fresh_output_directory(engine, tmp_path, monkeypatch):
+    def child(args, **kwargs):
+        output = Path(args[args.index("--output") + 1])
+        assert "--submissions-only" in args
+        assert output.parent == tmp_path / "runs"
+        assert not output.exists()
+        result = run_cycle(
+            engine, city="belgrade", output=output, now=WINDOW_NOW,
+            ingest=ingest_ok, process=lambda _rid: None, submissions_only=True,
+        )
+        assert result["status"] == "PRIMARY_OK"
+        return CompletedProcess(args, 0)
+
+    monkeypatch.setattr(intake_batch.subprocess, "run", child)
+    assert intake_batch._run_actions_submission_pipeline(tmp_path) == 0
 
 
 @pytest.mark.asyncio

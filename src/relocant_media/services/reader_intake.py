@@ -1,5 +1,6 @@
 """Shared, private Telegram submission form and its early replies."""
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -40,6 +41,8 @@ CB_PREFIX = "intake:"
 DRAFT_STATES = ("choosing", "collecting")
 OPEN_STATES = (*DRAFT_STATES, "new", "waiting_primary", "source_linked")
 MEDIA_TYPES = ("photo", "video", "document", "voice")
+NUMBERED_ACTIONS = {"Отправить": "submit", "Сменить тему": "menu", "Отменить": "cancel"}
+NEW_CASE_LABEL = "Новое обращение"
 
 
 def _now() -> datetime:
@@ -110,28 +113,33 @@ def _notice(
 
 def _menu(row: Submission, *, key: str, message_id: int | None, received_at: datetime) -> None:
     buttons = [_button(row, label, f"pick:{kind}") for kind, (label, _) in ROUTES.items()]
-    buttons.append(_button(row, "Отменить", "cancel"))
+    buttons.append(_button(row, f"Отменить №{row.id}", "cancel"))
     keyboard = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     _notice(
         row,
         key,
-        f"Обращение №{row.id}. Выберите тему.",
+        f"Обращение №{row.id}. Выберите тему на клавиатуре.",
         reply_to=message_id,
         keyboard=keyboard,
         received_at=received_at,
     )
 
 
-def _prompt(row: Submission, *, key: str) -> None:
+def _prompt(row: Submission, *, key: str, received_at: datetime | None = None) -> None:
     label, instruction = ROUTES[row.kind]
     _notice(
         row,
         key,
-        f"№{row.id} · {label}\n\n{instruction}\n\nКогда всё пришлёте, нажмите «Отправить заявку».",
+        f"№{row.id} · {label}\n\n{instruction}\n\n"
+        f"Когда всё пришлёте, нажмите «Отправить №{row.id}».",
         keyboard=[
-            [_button(row, "Отправить заявку", "submit")],
-            [_button(row, "Сменить тему", "menu"), _button(row, "Отменить", "cancel")],
+            [_button(row, f"Отправить №{row.id}", "submit")],
+            [
+                _button(row, f"Сменить тему №{row.id}", "menu"),
+                _button(row, f"Отменить №{row.id}", "cancel"),
+            ],
         ],
+        received_at=received_at,
     )
 
 
@@ -257,6 +265,41 @@ def _recent_cases(
     return [row for row in session.scalars(query) if row.payload.get("topic_id") == topic_id]
 
 
+def _record_keyboard_choice(
+    session: Session,
+    cases: list[Submission],
+    label: str,
+    *,
+    message_id: int,
+    received_at: datetime,
+) -> bool:
+    draft = next((case for case in cases if case.status in DRAFT_STATES), None)
+    if match := re.fullmatch(r"(Отправить|Сменить тему|Отменить) №([0-9]{1,18})", label):
+        row = draft if draft is not None and draft.id == int(match[2]) else None
+        action = NUMBERED_ACTIONS[match[1]]
+    else:
+        kind = next((kind for kind, (caption, _) in ROUTES.items() if label == caption), None)
+        if kind is None or draft is None:
+            return False
+        if draft.status == "collecting":
+            return draft.kind == kind
+        row, action = draft, f"pick:{kind}"
+    if row is not None and _source_notice_id(row, action) is not None:
+        notice_count = len(row.payload.get("reader_notices", {}))
+        answer = _apply_action(
+            session,
+            row,
+            action,
+            message_id=message_id,
+            received_at=received_at,
+        )
+        if len(row.payload.get("reader_notices", {})) == notice_count:
+            _notice(
+                row, f"choice:{message_id}", answer, reply_to=message_id, received_at=received_at
+            )
+    return True
+
+
 def record_reader_message(
     session: Session, message: dict[str, Any], *, edited: bool = False
 ) -> bool:
@@ -265,7 +308,9 @@ def record_reader_message(
     if identity is None or items is None:
         return False
     user_id, chat_id, message_id, topic_id = identity
-    start = items["text"].partition(" ")[0].split("@")[0] == "/start"
+    start = not items["attachments"] and (
+        items["text"] == NEW_CASE_LABEL or items["text"].partition(" ")[0].split("@")[0] == "/start"
+    )
     if not (items["text"] or items["attachments"]):
         return False
     received_at = _date(message)
@@ -276,6 +321,18 @@ def record_reader_message(
             None,
         )
         return bool(row and _append(row, message_id, items))
+    if (
+        not start
+        and not items["attachments"]
+        and _record_keyboard_choice(
+            session,
+            cases,
+            items["text"],
+            message_id=message_id,
+            received_at=received_at,
+        )
+    ):
+        return True
     reply = message.get("reply_to_message") or {}
     reply_id = reply.get("message_id")
     row = next((case for case in cases if reply_id in _message_ids(case)), None)
@@ -347,19 +404,33 @@ def record_reader_callback(session: Session, callback: object) -> str | None:
         or source_message_id != _source_notice_id(row, action)
     ):
         return "Эта кнопка не относится к вашему обращению."
+    return _apply_action(session, row, action, message_id=source_message_id, received_at=_now())
+
+
+def _apply_action(
+    session: Session,
+    row: Submission,
+    action: str,
+    *,
+    message_id: int,
+    received_at: datetime,
+) -> str:
     if action == "new":
-        existing = _recent_cases(session, sender["id"], chat["id"], row.payload.get("topic_id"))
+        assert row.telegram_user_id is not None
+        chat_id = row.payload["chat_id"]
+        topic_id = row.payload.get("topic_id")
+        existing = _recent_cases(session, row.telegram_user_id, chat_id, topic_id)
         if any(case.status in DRAFT_STATES for case in existing):
             return "У вас уже есть черновик. Продолжите его в сообщениях выше."
         new_case = _new_case(
             session,
-            sender["id"],
-            chat["id"],
-            row.payload.get("topic_id"),
-            message_id=source_message_id,
-            received_at=_now(),
+            row.telegram_user_id,
+            chat_id,
+            topic_id,
+            message_id=message_id,
+            received_at=received_at,
         )
-        _menu(new_case, key="menu", message_id=None, received_at=_now())
+        _menu(new_case, key="menu", message_id=None, received_at=received_at)
         return "Открываю новое обращение."
     if row.status not in DRAFT_STATES:
         return f"Заявка №{row.id} уже отправлена."
@@ -376,17 +447,17 @@ def record_reader_callback(session: Session, callback: object) -> str | None:
     if action.startswith("pick:") and route in ROUTES and row.status == "choosing":
         row.kind = route
         row.status = "collecting"
-        _prompt(row, key=f"prompt:{len(notices)}")
+        _prompt(row, key=f"prompt:{len(notices)}", received_at=received_at)
         return f"Выбрано: {ROUTES[route][0]}."
     if action == "menu" and row.status == "collecting":
         row.status = "choosing"
-        _menu(row, key=f"menu:{len(notices)}", message_id=None, received_at=_now())
+        _menu(row, key=f"menu:{len(notices)}", message_id=None, received_at=received_at)
         return "Выберите тему."
     if action != "submit" or row.status != "collecting":
         return "Используйте последнее сообщение бота."
     if not row.payload["text"] and not (row.kind == "news_tip" and row.payload["attachments"]):
         return "Добавьте описание или вложение, затем отправьте заявку."
-    accepted_at = _now()
+    accepted_at = received_at
     row.status = "new"
     row.payload = {**row.payload, "accepted_at": accepted_at.isoformat()}
     # The first message can be /start, so reply to the actual description when present.
@@ -406,7 +477,7 @@ def record_reader_callback(session: Session, callback: object) -> str | None:
         "accepted",
         f"Заявка №{row.id} принята. Здесь сообщим результат. "
         "Чтобы добавить к ней фото, видео или уточнение, ответьте на это сообщение.",
-        keyboard=[[_button(row, "Новое обращение", "new")]],
+        keyboard=[[_button(row, NEW_CASE_LABEL, "new")]],
         received_at=accepted_at,
     )
     return f"Заявка №{row.id} принята."
@@ -484,7 +555,14 @@ async def deliver_reader_notices(
                     "link_preview_options": {"is_disabled": True},
                 }
                 if item["keyboard"]:
-                    params["reply_markup"] = {"inline_keyboard": item["keyboard"]}
+                    params["reply_markup"] = {
+                        "keyboard": [
+                            [{"text": button["text"]} for button in line]
+                            for line in item["keyboard"]
+                        ],
+                        "resize_keyboard": True,
+                        "one_time_keyboard": True,
+                    }
                 if item["reply_to"] is not None:
                     params["reply_parameters"] = {
                         "message_id": item["reply_to"],

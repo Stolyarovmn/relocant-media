@@ -144,6 +144,20 @@ def _run_owner_review() -> tuple[int, dict[str, Any]]:
     return completed.returncode, result
 
 
+def _run_actions_submission_pipeline(directory: Path) -> int:
+    output = directory / "runs" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    # server_runtime creates this directory when it begins the cycle.
+    with file_lock(directory / "worker.lock") as locked:
+        if not locked:
+            return 75
+        completed = subprocess.run(
+            [sys.executable, "-m", "relocant_media.ops.server_runtime",
+             "--output", str(output), "--submissions-only"],
+            capture_output=True, timeout=4100, check=False,
+        )
+        return completed.returncode
+
+
 def main() -> None:
     if os.environ.get("EDITORIAL_INTAKE_MODE") != "batch":
         raise SystemExit("Требуется EDITORIAL_INTAKE_MODE=batch")
@@ -171,15 +185,7 @@ def main() -> None:
         def pipeline() -> int:
             # No shell interpolation, no secret output. The child uses the same worker.lock.
             if os.environ.get("RELOCANT_RUNTIME_PLATFORM") == "github-actions":
-                output = directory / "runs" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
-                output.mkdir(parents=True, exist_ok=False)
-                with file_lock(directory / "worker.lock") as locked:
-                    if not locked:
-                        return 75
-                    return subprocess.run(
-                        [sys.executable, "-m", "relocant_media.ops.server_runtime",
-                         "--output", str(output), "--submissions-only"],
-                        capture_output=True, timeout=4100, check=False).returncode
+                return _run_actions_submission_pipeline(directory)
             completed = subprocess.run(
                 ["/opt/relocant-media/app/deploy/server/run-cycle.sh", "--submissions-only"],
                 capture_output=True, timeout=4100, check=False)
