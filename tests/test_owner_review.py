@@ -1049,7 +1049,7 @@ def _store_reviewed_story(engine, *, category="events", ownership="media"):
 
 @pytest.mark.asyncio
 async def test_verified_media_story_publishes_on_the_normal_path_without_the_owner(engine):
-    raw_id, status, reason = _store_reviewed_story(engine)
+    raw_id, status, reason = _store_reviewed_story(engine, category="transport")
     assert (status, reason) == ("ready", "package_independently_reviewed")
     publisher = Publisher()
     with Session(engine) as session:
@@ -1058,6 +1058,19 @@ async def test_verified_media_story_publishes_on_the_normal_path_without_the_own
         )
         assert result.message_id == 777
         assert publisher.calls[0].endswith("Источник: https://www.beograd.rs/example.html")
+
+
+@pytest.mark.asyncio
+async def test_legacy_event_media_package_waits_for_its_place_before_delivery(engine):
+    raw_id, status, reason = _store_reviewed_story(engine)
+    # Старый пакет и его исходные одобрения не переписываются задним числом.
+    assert (status, reason) == ("ready", "package_independently_reviewed")
+    publisher = Publisher()
+    with Session(engine) as session:
+        with pytest.raises(DeliveryBlockedError, match="event_place_requires_verification"):
+            await deliver_reviewed(session, raw_id, publisher,
+                target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
+    assert publisher.calls == []
 
 
 @pytest.mark.asyncio

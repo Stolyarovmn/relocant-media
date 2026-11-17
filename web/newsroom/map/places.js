@@ -1,8 +1,8 @@
 import {
   clusterMapPoints, incidentTimes, placeCountdown, placeStatus, readPlaces,
   straightLineDistance, updateStamp,
-} from "./core.js?v=9";
-import { calendarLink } from "./calendar.js?v=2";
+} from "./core.js?v=10";
+import { calendarLink } from "./calendar.js?v=3";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 
@@ -99,6 +99,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     const venue = make("span", "place-venue", place.venue);
     const parts = place.paidPlace ? [venue] : [countdown, when, venue];
     if (place.visitorHours) parts.push(make("span", "place-when", place.visitorHours));
+    if (place.scheduleNote) parts.push(make("span", "place-when", place.scheduleNote));
     if (place.sponsored) parts.unshift(make("span", "place-ad", "★ Реклама"));
     if (state.origin) parts.push(make("span", "place-distance", distanceLabel(state.origin, place)));
     return parts;
@@ -133,7 +134,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     if (place.post) links.append(link(place.post, "Пост в Telegram ↗"));
     if (place.schedule) links.append(link(place.schedule, "Расписание ↗"));
     links.append(link(place.source, "Источник ↗"));
-    const calendar = place.paidPlace ? null : calendarLink(place, now);
+    const calendar = place.paidPlace || place.scheduleNote ? null : calendarLink(place, now);
     if (calendar) links.append(calendar);
     detail.replaceChildren(close, make("h3", "", place.title), ...describe(place, now));
     if (place.address && place.address !== place.venue) detail.append(make("p", "place-address", place.address));

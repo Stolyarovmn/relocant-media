@@ -255,4 +255,11 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     date_reason=draft_date_reason(draft.title,draft.body)
     if date_reason is not None:
         status,reason=PublicationStatus.HUMAN_REVIEW,date_reason
+    from relocant_media.domain.event_map_policy import event_map_review_reason
+
+    map_reason = event_map_review_reason(
+        package.presentation, outcome.ranking.category, draft.title, draft.body,
+    )
+    if map_reason is not None and status == PublicationStatus.READY:
+        status, reason = PublicationStatus.HUMAN_REVIEW, map_reason
     return outcome.model_copy(update={"status": status, "reason": reason, "confidence": confidence})

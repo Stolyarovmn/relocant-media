@@ -323,7 +323,7 @@ async def test_snapshot_tamper_blocks_before_any_send(session):
 
 
 @pytest.mark.asyncio
-async def test_no_explicit_map_keeps_existing_send_message_path(session):
+async def test_physical_event_without_map_waits_instead_of_using_plain_message(session):
     data, _, _, _ = payload(session, map_enabled=False)
     run = import_package(session, parse(data))
     calls = []
@@ -333,9 +333,11 @@ async def test_no_explicit_map_keeps_existing_send_message_path(session):
             calls.append(text)
             return 12
 
-    result = await deliver_reviewed(session, run.raw_item_id, LegacyPublisher(),
-                                    target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
-    assert result.message_id == 12 and len(calls) == 1
+    assert run.outcome["reason"] == "event_place_requires_verification"
+    with pytest.raises(DeliveryBlockedError, match="event_place_requires_verification"):
+        await deliver_reviewed(session, run.raw_item_id, LegacyPublisher(),
+                               target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
+    assert calls == [] and run.delivery_status == "pending"
     assert "_rich_delivery" not in run.outcome
 
 

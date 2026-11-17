@@ -109,7 +109,7 @@ def build_presentation(
     source_map = (select_source_map(enrichment, source_url=source_url)
                   if native_map is None and event_place is None else None)
     return EditorialPresentation(
-        version=4,
+        version=5,
         profile_sha256=profile.sha256, rubric_id=rubric.id, rubric_name=rubric.name,
         source_map=source_map,
         illustration=plan_illustration(

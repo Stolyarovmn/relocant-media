@@ -80,6 +80,7 @@ class PublicEvent(PublicModel):
     venue_source_url: str
     schedule_source_url: str | None = None
     visitor_hours: Label | None = None
+    schedule_note: Label | None = None
     sponsored: bool = False
 
     @field_validator("source_url", "coordinate_source_url", "venue_source_url")
@@ -125,21 +126,27 @@ class ReviewedMapEvent(PublicModel):
     title: Label
     source_url: str
     starts_at: AwareDatetime
-    ends_at: AwareDatetime
+    ends_at: AwareDatetime | None = None
     venue: Venue
     coordinate_source_url: str
     venue_source_url: str
     schedule_source_url: str
     visitor_hours: Label | None = None
+    schedule_note: Label | None = None
+    evidence_urls: tuple[str, ...] = ()
 
     def card(self, city: str, timezone: str, now: datetime) -> PublicEvent:
         if not 44.2 <= self.venue.latitude <= 45.2 or not 19.8 <= self.venue.longitude <= 21.1:
             raise ValueError("reviewed venue outside the supported Belgrade map")
+        expires = self.ends_at or datetime.combine(
+            self.starts_at.astimezone(ZoneInfo(timezone)).date() + timedelta(days=1),
+            time.min, ZoneInfo(timezone),
+        )
         return PublicEvent(
-            **self.model_dump(exclude={"message_id", "post_title"}),
+            **self.model_dump(exclude={"message_id", "post_title", "evidence_urls"}),
             id=map_event_id(self.source_url),
             post_url=f"https://t.me/{PUBLIC_CHANNELS[city]}/{self.message_id}",
-            expires_at=self.ends_at, timezone=timezone, archived=self.ends_at <= now,
+            expires_at=expires, timezone=timezone, archived=expires <= now,
         )
 
 

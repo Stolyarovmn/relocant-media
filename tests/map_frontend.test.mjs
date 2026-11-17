@@ -91,6 +91,12 @@ test("отсчёт афиши использует только подтверж
   assert.equal(placeCountdown(unknown, now("23:59")), "Началось");
   assert.equal(placeCountdown(unknown, unknown.expires), "Прошедшая дата");
   assert.equal(placeStatus({ ...known, archived: true }, now("20:00")), "closed");
+  const [uncertain] = readPlaces({ version: 1, events: [
+    { ...sample, schedule_note: "В СМИ 24 ноября, в билетах 25 ноября. Уточните дату." },
+  ] });
+  assert.match(uncertain.scheduleNote, /Уточните дату/);
+  assert.equal(placeCountdown(uncertain, now("18:00")), "Дата уточняется");
+  assert.equal(buildCalendar(uncertain, now("18:00")), null);
 });
 
 test("расстояние по прямой считается по двум координатам", () => {

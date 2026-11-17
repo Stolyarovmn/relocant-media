@@ -138,7 +138,8 @@ export function readPlaces(document) {
     const paidPlace = item.kind === "sponsored_place";
     if (paidPlace && (!post || end !== null)) return [];
     return [{ id: item.id, title, source, schedule: schedule === source ? "" : schedule,
-      post, venue, address, visitorHours: textValue(item.visitor_hours), lat, lon,
+      post, venue, address, visitorHours: textValue(item.visitor_hours),
+      scheduleNote: textValue(item.schedule_note), lat, lon,
       paidPlace, sponsored: paidPlace || item.sponsored === true,
       archived: item.archived === true, start, end, expires }];
   });
@@ -151,6 +152,7 @@ export function placeStatus(place, now) {
 
 export function placeCountdown(place, now) {
   if (place.paidPlace) return "";
+  if (place.scheduleNote) return "Дата уточняется";
   const status = placeStatus(place, now);
   if (status === "closed") return place.end === null ? "Прошедшая дата" : "Завершилось";
   if (status === "active" && place.end === null) return "Началось";

@@ -182,6 +182,48 @@ def test_request_and_validation_are_read_only_and_exclude_private_payload(fallba
     assert session.get(EditorialRun, raw.id) is None
 
 
+def test_fallback_builds_the_map_for_each_rubric(fallback_session, monkeypatch):
+    session, _, _ = fallback_session
+    original = gpt_fallback.build_presentation
+    rubrics = []
+
+    def build(*args, **kwargs):
+        rubrics.append(kwargs["rubric_id"])
+        result = original(*args, **kwargs)
+        return result.model_copy(update={"event_place": {"verified": True}}) if (
+            kwargs["rubric_id"] == "weekend") else result
+
+    monkeypatch.setattr(gpt_fallback, "build_presentation", build)
+    request = gpt_fallback.build_request(session, now=NOW)
+    plans = request["candidates"][0]["presentation_by_rubric"]
+    assert rubrics == [row.id for row in load_city_profile("belgrade").rubrics]
+    assert "event_place" not in plans["city_changes"]
+    assert plans["weekend"]["event_place"] == {"verified": True}
+
+
+def test_perfect_reviews_cannot_publish_a_new_physical_event_without_its_map(fallback_session):
+    from relocant_media.ai.package import evaluate_package
+
+    session, _, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    payload = package_for_request(request).model_dump(mode="json")
+    payload["outcome"]["ranking"]["category"] = "events"
+    payload["outcome"]["ranking"]["selection"]["rubric_id"] = "weekend"
+    presentation = EditorialPresentation.model_validate_json(json.dumps(
+        request["candidates"][0]["presentation_by_rubric"]["weekend"]))
+    draft = parse(payload).outcome.draft.model_copy(update={
+        "title": "Концерт в Белграде", "body": "Площадка: Zappa Baza."})
+    draft = present_draft(draft, presentation, category="events")
+    payload["outcome"]["draft"] = draft.model_dump(mode="json")
+    payload["presentation"] = presentation.model_dump(mode="json")
+    for review in payload["reviews"]:
+        review.update(draft_sha256=draft_sha256(draft), score=100)
+    bind_context(payload)
+    outcome = evaluate_package(parse(payload), now=NOW)
+    assert outcome.status == "human_review"
+    assert outcome.reason == "event_place_requires_verification"
+
+
 @pytest.mark.parametrize(
     "error_type", ["GeminiCallTimeout", "GeminiWorkerError", "GeminiQuotaCooldown"]
 )
