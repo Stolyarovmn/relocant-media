@@ -122,8 +122,9 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
                 "rubric": _token(presentation.get("rubric_id")),
                 "has_map": native_map or source_map or has_button,
                 "map_format": map_format,
-                "event_map_needs_review": category == "events" and delivery == "sent"
-                and not has_button,
+                "event_map_needs_review": outcome.get("reason") ==
+                "event_place_requires_verification" or (
+                    category == "events" and delivery == "sent" and not has_button),
                 "illustration": _token((presentation.get("illustration") or {}).get(
                     "illustration_mode")),
                 "delivery": _token(delivery), "telegram_message_id": message_id,

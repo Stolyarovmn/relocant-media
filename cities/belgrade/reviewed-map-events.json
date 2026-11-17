@@ -16,5 +16,27 @@
     "venue_source_url": "https://dragstor.art/kontakt/",
     "schedule_source_url": "https://afisha.rs/sr/festivali/mosthungary-serbia-u-galeriji-stab-madarska-skulptura-i-srpsko-slikars-sr3394",
     "visitor_hours": "Ежедневно 12:00–20:00"
+  },
+  {
+    "message_id": 130,
+    "post_title": "Шотландский дуэт Arab Strap и Ана Чурчин выступят в Zappa Baza",
+    "title": "Arab Strap в Zappa Baza · дату нужно уточнить",
+    "source_url": "https://www.danas.rs/kultura/ana-curcin-i-milena-jancuric-pre-benda-arab-strap-u-zappa-bazi/",
+    "starts_at": "2026-11-25T20:00:00+01:00",
+    "ends_at": null,
+    "venue": {
+      "name": "Zappa Baza",
+      "address": "Bulevar vojvode Bojovića 30a, Beograd",
+      "latitude": 44.8206714,
+      "longitude": 20.4480387
+    },
+    "coordinate_source_url": "https://www.openstreetmap.org/node/11331170476",
+    "venue_source_url": "https://hangtimeagency.com/rs/event/arab-strap-premijerno-u-srbiji-skotski-indie-duo-stize-u-zappa-bazu/",
+    "schedule_source_url": "https://karte.hangtimeagency.com/en/event-detail-eng/6a0cb11b2c5f3438090ed958/",
+    "schedule_note": "В СМИ указано 24 ноября, у организатора и в билетах — 25 ноября, 20:00. Перед покупкой и поездкой уточните дату у организатора.",
+    "evidence_urls": [
+      "https://hangtimeagency.com/rs/event/arab-strap-premijerno-u-srbiji-skotski-indie-duo-stize-u-zappa-bazu/",
+      "https://karte.hangtimeagency.com/en/event-detail-eng/6a0cb11b2c5f3438090ed958/"
+    ]
   }
 ]

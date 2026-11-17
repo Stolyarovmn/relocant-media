@@ -65,7 +65,7 @@ def test_maps_and_rubrics_are_bound_before_review_and_rechecked_from_snapshot(se
         claim_ids=("c1",),
     )
     rendered = present_draft(draft, presentation, category="events")
-    assert presentation.version == 4
+    assert presentation.version == 5
     assert present_draft(rendered, presentation, category="events") == rendered
     assert rendered.title == "Городское событие Белград"
     assert rendered.body == (

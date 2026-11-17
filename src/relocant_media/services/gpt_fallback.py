@@ -248,15 +248,6 @@ def _candidate_request(
     documents = tuple(
         PackageEventDocument.model_validate_json(canonical_json(snapshot)) for snapshot in snapshots
     )
-    first_rubric = profile.rubrics[0]
-    presentation = build_presentation(
-        session,
-        item.id,
-        documents,
-        document_ids=[member.id for member, _ in members],
-        profile=profile,
-        rubric_id=first_rubric.id,
-    )
     return {
         "raw_item_id": item.id,
         "source_id": source.id,
@@ -264,11 +255,10 @@ def _candidate_request(
         "event_key": event_key(_candidate(item)),
         "documents": snapshots,
         "presentation_by_rubric": {
-            rubric.id: presentation.model_copy(
-                update={
-                    "rubric_id": rubric.id,
-                    "rubric_name": rubric.name,
-                }
+            rubric.id: build_presentation(
+                session, item.id, documents,
+                document_ids=[member.id for member, _ in members],
+                profile=profile, rubric_id=rubric.id,
             ).model_dump(mode="json")
             for rubric in profile.rubrics
         },
@@ -431,6 +421,7 @@ def validate_fallback_package(
         if package.outcome.status != PublicationStatus.READY or outcome.reason not in {
             "package_independently_reviewed",
             "package_requires_review",
+            "event_place_requires_verification",
         }:
             raise FallbackValidationError("Пакет не прошёл действующие редакционные проверки")
         existing = session.get(EditorialRun, package.raw_item_id, populate_existing=True)

@@ -111,15 +111,16 @@ def _validate_plan_input(content: bytes, expected_sha: str, now: datetime) -> No
         raise ValueError("Время проверки должно содержать часовой пояс")
 
 
-def _validate_reviews(plan: CorrectionPlan | DigestCorrectionPlan, now: datetime) -> None:
+def _validate_reviews(plan: Any, now: datetime) -> None:
     context = _digest(plan.model_dump(mode="json", exclude={"reviews"}))
-    identities = {review.reviewer_id.strip().casefold() for review in plan.reviews}
+    reviews = plan.reviews
+    identities = {review.reviewer_id.strip().casefold() for review in reviews}
     if (len(identities) != 2 or "" in identities
-            or {review.role for review in plan.reviews} != {"facts", "utility"}
+            or {review.role for review in reviews} != {"facts", "utility"}
             or any(review.verdict != "approve" or review.score < 75 or review.flags
                    or not review.live_source_checked or review.context_sha256 != context
                    or not timedelta(0) <= now - review.reviewed_at <= timedelta(hours=2)
-                   for review in plan.reviews)):
+                   for review in reviews)):
         raise ValueError("Нужны два свежих независимых одобрения точного плана")
 
 
@@ -322,6 +323,10 @@ def execute(
         raise ValueError("Нужен SHA256 приватного плана")
     content = storage.download(plan_sha)
     _validate_plan_input(content, plan_sha, checked_at)
+    if json.loads(content).get("version") == 3:
+        from relocant_media.ops.event_post_correction import execute_event_edit
+
+        return execute_event_edit(storage, content, plan_sha, work, client, token, checked_at)
     if json.loads(content).get("version") == 2:
         digest_plan = DigestCorrectionPlan.model_validate_json(content)
         _validate_reviews(digest_plan, checked_at)

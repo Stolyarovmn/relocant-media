@@ -13,6 +13,7 @@ from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.media_publisher import MediaBot, publish_media
 from relocant_media.bot.publisher import Publisher
+from relocant_media.domain.event_map_policy import event_map_review_reason
 from relocant_media.domain.presentation import valid_title_presentation
 from relocant_media.services.editorial import DeliveryBlockedError, DeliveryResult, EditorialService
 from relocant_media.services.followup import revision_reply_target
@@ -100,6 +101,11 @@ async def deliver_reviewed(
             raise DeliveryBlockedError("two event bundle approvals are required")
         if not valid_title_presentation(post.title):
             raise DeliveryBlockedError("title presentation does not match channel mode")
+        if reason := event_map_review_reason(
+            package.presentation, package.outcome.ranking.category, post.title, post.body,
+            current_delivery=True,
+        ):
+            raise DeliveryBlockedError(reason)
         package_sha256 = hashlib.sha256(
             canonical_json(package.model_dump(mode="json")).encode()
         ).hexdigest()

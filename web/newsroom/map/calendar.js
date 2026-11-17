@@ -15,7 +15,7 @@ function fold(line) {
 }
 
 export function calendarEvents(item, now) {
-  if (item.archived) return [];
+  if (item.archived || item.scheduleNote) return [];
   if (Number.isFinite(item.startDay) && Number.isFinite(item.endDay) && item.end > now) {
     const next = new Date(item.endDay);
     next.setUTCDate(next.getUTCDate() + 1);
