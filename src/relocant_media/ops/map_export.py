@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -14,6 +16,7 @@ from sqlalchemy import create_engine, or_, select
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
+from relocant_media.collectors.bgprevoz_changes import transport_notice_suspended
 from relocant_media.domain.map_links import map_event_id
 from relocant_media.services.local_outage_geometry import (
     AreaIndex,
@@ -51,7 +54,7 @@ from relocant_media.services.water_outage_scope import (
     water_outage_window,
 )
 from relocant_media.storage.media_models import RawItemMediaSnapshot
-from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, SourceRevision
 
 _ZONE = ZoneInfo("Europe/Belgrade")
 _CITY_SOURCE = "city_beograd_news"
@@ -504,9 +507,34 @@ def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
     return snapshot.source_html, snapshot.manifest.get("utility_geography")
 
 
+def _transport_suspended(session: Session, item: RawItem, observed_at: datetime) -> bool:
+    """Скрыть приостановленные работы, сохранив неизменным опубликованный снимок.
+
+    Новая версия собирается официальным адаптером и остаётся в очереди ревью.
+    Она может убрать устаревшее ограничение, но не создать новую активную геометрию.
+    """
+    if transport_notice_suspended(item.body):
+        return True
+    revision = session.scalar(select(SourceRevision).where(
+        SourceRevision.raw_item_id == item.id, SourceRevision.observed_at <= observed_at,
+    ).order_by(SourceRevision.observed_at.desc(), SourceRevision.id.desc()).limit(1))
+    if revision is None:
+        return False
+    evidence = revision.evidence
+    encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return (
+        hashlib.sha256(encoded.encode()).hexdigest() == revision.snapshot_sha256
+        and evidence.get("source_id") == item.source_id
+        and evidence.get("article_id") == item.external_id
+        and evidence.get("url") == item.url
+        and isinstance(evidence.get("body"), str)
+        and transport_notice_suspended(evidence["body"])
+    )
+
+
 def _published_road(
     session: Session, document: EvidenceDocument, run: EditorialRun, post: Post,
-    streets: StreetIndex,
+    streets: StreetIndex, observed_at: datetime,
 ) -> Incident | None:
     native = ((run.outcome.get("_package") or {}).get("presentation") or {}).get("native_map") or {}
     point = native.get("point") or {}
@@ -521,6 +549,7 @@ def _published_road(
         notice = EvidenceDocument.model_validate(item, from_attributes=True)
         geometry = extract_transport_map(notice, _source_html(session, item)[0])
         if (geometry is not None and geometry == reviewed
+                and not _transport_suspended(session, item, observed_at)
                 and matches_transport_notice(document, notice)):
             incident = _road(document, notice, geometry, post.title, streets)
             if incident is not None:
@@ -565,6 +594,8 @@ def export_map(
         sent = run is not None and run.delivery_status == "sent" and post is not None
         title = post.title if sent and post is not None and post.telegram_message_id else None
         if item.source_id == SOURCE_ID:
+            if _transport_suspended(session, item, observed_at):
+                continue
             geometry = extract_transport_map(document, _source_html(session, item)[0])
             incident = _road(document, document, geometry, None, streets or {})
             if incident is not None and incident.ends_at is not None and incident.ends_at < cutoff:
@@ -580,7 +611,7 @@ def export_map(
                   or reported_water_places(document) is not None):
                 incident = _water(document, point, title, streets or {}, areas, water_scopes)
             elif title and run is not None and post is not None:
-                incident = _published_road(session, document, run, post, streets or {})
+                incident = _published_road(session, document, run, post, streets or {}, observed_at)
             else:
                 incident = None
         if incident is None:

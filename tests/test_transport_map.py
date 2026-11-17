@@ -58,6 +58,15 @@ def _notice():
                             body=AUTHORITY)
 
 
+def test_suspended_works_cannot_reuse_the_old_active_transport_map():
+    notice = _notice().model_copy(update={"body": (
+        "Приостановлено. Период на странице: 17/11/2026 - 16/11/2026.\n"
+        "Радови су обустављени до даљег.\n" + AUTHORITY
+    )})
+    assert not matches_transport_notice(_article(), notice)
+    assert transport_point(_article(), notice, _map_html()) is None
+
+
 @pytest.mark.parametrize("change", [
     ("5538", "538"), ("10.11.2026", "11.11.2026"), ("Сремчица", "Жарково"),
 ])

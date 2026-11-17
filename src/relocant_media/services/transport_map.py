@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
+from relocant_media.collectors.bgprevoz_changes import transport_notice_suspended
 from relocant_media.domain.event_facts import event_dates, street_anchors
 from relocant_media.services.media_review_packet import _valid_snapshot
 from relocant_media.services.transport_map_image import render_transport_map
@@ -65,7 +66,8 @@ def is_transport_anchor(document: EvidenceDocument) -> bool:
 
 
 def matches_transport_notice(document: EvidenceDocument, notice: EvidenceDocument) -> bool:
-    if notice.source_id != SOURCE_ID or not is_transport_anchor(document):
+    if (notice.source_id != SOURCE_ID or not is_transport_anchor(document)
+            or transport_notice_suspended(notice.body)):
         return False
     assert document.published_at is not None
     year = document.published_at.year

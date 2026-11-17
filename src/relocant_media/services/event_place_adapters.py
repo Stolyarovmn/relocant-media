@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urljoin, urlsplit
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup, Tag
 
@@ -39,6 +40,10 @@ _CUKARICA_POST_2026 = (
 _CUKARICA_PROGRAM = "https://www.kccukarica.rs/srl/program/dramski-program/vecernja-scena/"
 CUKARICA_STAGE = re.compile(
     r'на великој сцени културног центра\s*[„"«]?чукарица[“"»]?', re.IGNORECASE,
+)
+CUKARICA_GALLERY = re.compile(
+    r'у галерији\s*[„"«]?старт\s*[’\x27]?06[“"»]?\s+културног центра\s*'
+    r'[„"«]?чукарица[“"»]?', re.IGNORECASE,
 )
 _CUKARICA_DATE = re.compile(
     r"(?<!\d)(?P<day>\d{1,2})\.\s+(?P<month>[а-я]+)"
@@ -208,8 +213,15 @@ def _dob_schedule_facts(
 
 def cukarica_stage_start(text: str, *, corroborated_year: int | None = None) -> datetime | None:
     """Время одного события на большой сцене из утверждённого сербского текста."""
+    return cukarica_venue_start(text, CUKARICA_STAGE, corroborated_year=corroborated_year)
+
+
+def cukarica_venue_start(
+    text: str, venue: re.Pattern[str], *, corroborated_year: int | None = None,
+) -> datetime | None:
+    """Одно время и явно указанное помещение, без переноса адреса соседней площадки."""
     text = " ".join(text.casefold().split())
-    if not CUKARICA_STAGE.search(text) or re.search(r"отказан|одложен|премештен", text):
+    if not venue.search(text) or re.search(r"отказан|одложен|премештен", text):
         return None
     dates = list(_CUKARICA_DATE.finditer(text))
     if len(dates) != 1:
@@ -231,19 +243,32 @@ def _cukarica_facts(document: EvidenceDocument) -> dict[str, Any] | None:
         return None
     name = name_match[1]
     confirmed = document.url == _CUKARICA_POST_2026 and name.casefold() == "да, то су били дани"
-    start = cukarica_stage_start(document.body, corroborated_year=2026 if confirmed else None)
+    gallery = CUKARICA_GALLERY.search(" ".join(document.body.split())) is not None
+    published = (document.published_at.astimezone(ZoneInfo("Europe/Belgrade"))
+                 if document.published_at else None)
+    year = (published.year if gallery and published else
+            2026 if confirmed else None)
+    start = cukarica_venue_start(
+        document.body, CUKARICA_GALLERY if gallery else CUKARICA_STAGE,
+        corroborated_year=year,
+    )
     if start is None or (confirmed and start != datetime(2026, 11, 24, 20)):
+        return None
+    if gallery and (published is None or not timedelta(0) <= (
+        start - published.replace(tzinfo=None)
+    ) <= timedelta(days=120)):
         return None
     return {
         "event_name": name,
         "venue": {
-            "name": "Kulturni centar Čukarica · Velika scena",
+            "name": ("Kulturni centar Čukarica · Galerija Start '06" if gallery else
+                     "Kulturni centar Čukarica · Velika scena"),
             "address": "Turgenjevljeva 5, Beograd",
             "latitude": 44.7832396, "longitude": 20.4175165,
         },
         "starts_at": start.isoformat(),
         "ends_at": None,
-        "time_basis": "source_cukarica_main_stage",
+        "time_basis": "source_cukarica_gallery" if gallery else "source_cukarica_main_stage",
         "schedule_source_url": _CUKARICA_PROGRAM if confirmed else document.url,
         "coordinate_source_url": "https://www.openstreetmap.org/node/2567920976",
         "venue_source_url": "https://www.kccukarica.rs/srl/kontakt/",

@@ -8,8 +8,10 @@ import os
 import re
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
 
@@ -18,6 +20,65 @@ _TOKEN = re.compile(r"[a-zA-Z0-9_.:-]{1,80}")
 
 def _token(value: object) -> str | None:
     return value if isinstance(value, str) and _TOKEN.fullmatch(value) else None
+
+
+def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
+    """Аудит календарного дня: только публичные номера, счётчики и коды причин.
+
+    Отсутствие записи о кнопке означает необходимость проверки, а не доказанное
+    отсутствие кнопки: старые кнопки могли быть добавлены отдельным backfill.
+    """
+    if now.tzinfo is None:
+        raise ValueError("audit time must include timezone")
+    local = now.astimezone(ZoneInfo("Europe/Belgrade"))
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    bounds = (start.astimezone(UTC).isoformat(), min(now, end).astimezone(UTC).isoformat())
+    uri = snapshot.resolve(strict=True).as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as db:
+        rows = db.execute(
+            """SELECT post.telegram_message_id, post.category, editorial_run.outcome
+               FROM post JOIN editorial_run ON editorial_run.post_id = post.id
+               WHERE post.city = 'belgrade' AND editorial_run.delivery_status = 'sent'
+                 AND post.telegram_message_id IS NOT NULL
+                 AND julianday(post.published_at) >= julianday(?)
+                 AND julianday(post.published_at) <= julianday(?)
+               ORDER BY post.published_at, post.id""", bounds,
+        ).fetchall()
+        unconfirmed = []
+        for message_id, category, raw in rows:
+            outcome = json.loads(raw)
+            receipt = outcome.get("_rich_delivery") or {}
+            if category in {"events", "transport", "utilities"} and not receipt.get("map_url"):
+                unconfirmed.append(message_id)
+        decisions = db.execute(
+            """SELECT json_extract(editorial_run.outcome, '$.status'),
+                      json_extract(editorial_run.outcome, '$.reason'), COUNT(*)
+               FROM editorial_run JOIN raw_item ON raw_item.id = editorial_run.raw_item_id
+               JOIN source ON source.id = raw_item.source_id
+               WHERE source.city = 'belgrade'
+                 AND julianday(editorial_run.created_at) >= julianday(?)
+                 AND julianday(editorial_run.created_at) <= julianday(?)
+               GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 20""", bounds,
+        ).fetchall()
+        cycle = db.execute(
+            """SELECT status, details FROM scheduler_run
+               WHERE task_key = 'editorial-primary:belgrade'
+                 AND julianday(started_at) <= julianday(?) ORDER BY id DESC LIMIT 1""",
+            (now.astimezone(UTC).isoformat(),),
+        ).fetchone()
+        details = json.loads(cycle[1]) if cycle else {}
+    return {
+        "local_date": local.date().isoformat(), "timezone": "Europe/Belgrade",
+        "standalone_published_count": len(rows),
+        "published_message_ids": [row[0] for row in rows],
+        "map_button_delivery_unconfirmed": unconfirmed,
+        "decisions": [{"status": _token(status), "reason": _token(reason), "count": count}
+                      for status, reason, count in decisions],
+        "latest_cycle_status": _token(cycle[0]) if cycle else None,
+        "gpt_deferred_count": details.get("gpt_deferred_count", 0),
+        "remaining_count": details.get("remaining_count"),
+    }
 
 
 def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
@@ -88,10 +149,12 @@ def main() -> None:
             if hashlib.file_digest(stream, "sha256").hexdigest() != state["snapshot"]["sha256"]:
                 raise ValueError("local snapshot differs from committed state")
         observation = observe_cycle(args.snapshot, state["started_at"])
+        day_observation = observe_day(args.snapshot, datetime.now(UTC))
     except Exception as error:
         print(json.dumps({"cycle_observation_error_type": type(error).__name__}))
         raise SystemExit(1) from None
-    print(json.dumps({"editorial_cycle_observation": observation}))
+    print(json.dumps({"editorial_cycle_observation": observation,
+                      "editorial_day_observation": day_observation}))
 
 
 if __name__ == "__main__":

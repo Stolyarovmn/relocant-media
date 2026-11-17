@@ -19,6 +19,40 @@ editorial_session = _editorial_session
 NOW = datetime(2026, 10, 19, tzinfo=UTC)
 
 
+def test_local_practical_media_precedes_newer_national_news_without_changing_eligibility() -> None:
+    from sqlalchemy import create_engine
+
+    from relocant_media.storage.models import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    for key, kind, title, hour in [
+        ("world", "news_media", "Обсуждение международной политики", 5),
+        ("sport", "news_media", "Матч в Белграде: результат игры", 4),
+        ("local", "news_media", "У Београду изложба отвара врата посетиоцима", 1),
+        ("official", "official", "Радови на градској мрежи", 0),
+    ]:
+        session.add(Source(id=key, city="belgrade", name=key, url=f"https://{key}.example.org",
+                           source_type=kind, trust=1, enabled=True))
+        session.flush()
+        session.add(RawItem(source_id=key, external_id=key, url=f"https://{key}.example.org/1",
+                            title=title, body=title, published_at=NOW + timedelta(hours=hour)))
+    session.commit()
+    result = select_candidates(
+        session, city="belgrade", since=NOW, until=NOW + timedelta(days=1), limit=10,
+        newest_first=True, source_priorities={"official": 2},
+        locality_aliases=("Београд", "Београду", "Белград"), recent_source_counts={"local": 5},
+    )
+    assert [row["article_id"] for row in result["candidates"]] == [
+        "official", "local", "world", "sport",
+    ]
+    assert result["eligible_count"] == 4
+    assert session.scalar(select(func.count()).select_from(EditorialRun)) == 0
+    session.close()
+    engine.dispose()
+
+
 def test_local_interest_changes_order_but_transport_warning_stays_first(
     editorial_session: Session,
 ) -> None:
