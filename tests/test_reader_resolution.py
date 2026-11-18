@@ -46,11 +46,11 @@ class Bot:
             return {"is_direct_messages": True, "parent_chat": {
                 "id": 1 if self.wrong_parent else APPROVED_CHANNEL_ID,
             }}
-        assert method in ("sendMessage", "sendPhoto", "sendVideo")
+        assert method in ("sendMessage", "sendPhoto", "sendVideo", "editMessageText")
         self.sent.append((method, payload))
         if self.fail_send:
             raise httpx.ReadTimeout("network")
-        return {"message_id": 50 + len(self.sent)}
+        return {"message_id": payload.get("message_id", 50 + len(self.sent))}
 
 
 def submission(engine, *, kind="news_tip", status="new", native=False, **extra):
@@ -77,6 +77,62 @@ def submission(engine, *, kind="news_tip", status="new", native=False, **extra):
         row_id = row.id
         session.commit()
         return row_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('legacy', [False, True])
+async def test_late_material_refreshes_same_owner_card_once_and_reply_still_routes(engine, legacy):
+    row_id = submission(engine, kind='question')
+    bot = Bot()
+    owner = {'owner_user_id': OWNER_ID, 'owner_chat_id': OWNER_ID}
+    await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    card_id = 51
+    with Session(engine) as session:
+        row = session.get(Submission, row_id)
+        row.payload = {**row.payload, 'text': 'Уточнение автора',
+                       'updated_at': datetime.now(UTC).isoformat(), 'attachments': [
+            {'kind': 'photo', 'file_id': 'photo'}, {'kind': 'video', 'file_id': 'video'}]}
+        if legacy:
+            resolution = dict(row.payload['reader_resolution'])
+            card = dict(resolution['owner_notice'])
+            card.pop('content_sha256')
+            row.payload = {**row.payload, 'reader_resolution': {**resolution, 'owner_notice': card}}
+        session.commit()
+    await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    assert bot.sent[-1][0] == 'editMessageText'
+    edit = bot.sent[-1][1]
+    assert edit['message_id'] == card_id
+    assert 'Уточнение автора' in edit['text'] and 'Вложений: 2.' in edit['text']
+    assert edit['reply_markup']['inline_keyboard'][0][0]['callback_data'] == f'rr:media:{row_id}'
+    await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    assert len(bot.sent) == 2
+    with Session(engine) as session:
+        result = record_reader_resolution_reply(session, {
+            'from': {'id': OWNER_ID}, 'chat': {'id': OWNER_ID},
+            'reply_to_message': {'message_id': card_id}, 'text': 'Ответ редактора'}, **owner)
+        assert result.accepted
+        session.commit()
+    await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    assert bot.sent[-1][1]['chat_id'] == READER_ID
+    assert 'Ответ редактора' in bot.sent[-1][1]['text']
+
+
+@pytest.mark.asyncio
+async def test_unknown_owner_edit_not_retried_for_same_version(engine):
+    row_id = submission(engine, kind='question')
+    bot = Bot()
+    owner = {'owner_user_id': OWNER_ID, 'owner_chat_id': OWNER_ID}
+    await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    with Session(engine) as session:
+        row = session.get(Submission, row_id)
+        row.payload = {**row.payload, 'text': 'Новая версия',
+                       'updated_at': datetime.now(UTC).isoformat()}
+        session.commit()
+    bot.fail_send = True
+    result = await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    assert result['uncertain'] == 1 and result['unresolved'] == 1
+    await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    assert len(bot.sent) == 2
 
 
 def accepted_tip(engine, *, delivery="sent", native=False, duplicate=False):
