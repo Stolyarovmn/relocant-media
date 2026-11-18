@@ -45,7 +45,7 @@ from relocant_media.services.editorial_products import (
     verify_stored_presentation,
 )
 from relocant_media.services.native_map import bind_native_map_draft
-from relocant_media.services.policy_reassessment import eligible_empty_policy_hold
+from relocant_media.services.policy_reassessment import eligible_policy_reassessment
 from relocant_media.sources.registry import SourceConfig, load_source_registry
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -201,7 +201,7 @@ def pending_gpt_ids(session: Session, *, now: datetime) -> set[int]:
         return {item.id for item, source in unresolved
                 if _registered_public(item, source, registry.get(source.id))
                 and (session.get(EditorialRun, item.id, populate_existing=True) is None
-                     or eligible_empty_policy_hold(session, item.id, now=now))}
+                     or eligible_policy_reassessment(session, item.id, now=now))}
 
 
 def _candidate_request(
@@ -306,7 +306,7 @@ def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
                 raw_id not in urgent, raw_id not in official,
             )):
                 if (session.get(EditorialRun, raw_id, populate_existing=True) is not None
-                        and not eligible_empty_policy_hold(session, raw_id, now=now)):
+                        and not eligible_policy_reassessment(session, raw_id, now=now)):
                     continue
                 try:
                     candidate = _candidate_request(
@@ -425,7 +425,7 @@ def validate_fallback_package(
         }:
             raise FallbackValidationError("Пакет не прошёл действующие редакционные проверки")
         existing = session.get(EditorialRun, package.raw_item_id, populate_existing=True)
-        if existing is not None and not eligible_empty_policy_hold(
+        if existing is not None and not eligible_policy_reassessment(
             session, package.raw_item_id, now=now,
         ):
             fingerprint = hashlib.sha256(

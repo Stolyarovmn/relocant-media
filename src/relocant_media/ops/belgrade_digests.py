@@ -45,7 +45,7 @@ from relocant_media.ops.map_export import (
     export_map,
 )
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
-from relocant_media.services.event_place import resolve_event_place
+from relocant_media.services.event_place import event_occurrences, resolve_event_place
 from relocant_media.services.local_street_geometry import load_street_index
 from relocant_media.services.road_scope import resolve_road_segments
 from relocant_media.services.transport_map import SOURCE_ID, _signature
@@ -514,6 +514,10 @@ async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | 
         place = resolve_event_place(document, live.source_html or "",
                                     profile=load_city_profile(_CITY))
         if place is None or not same:
+            return None
+        place = next((slot for slot in event_occurrences(place)
+                      if slot["id"] == entry.map_id), None)
+        if place is None:
             return None
         starts = datetime.fromisoformat(place["starts_at"]).astimezone(zone)
         end = datetime.fromisoformat(place["ends_at"]) if place["ends_at"] else None

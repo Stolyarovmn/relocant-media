@@ -115,7 +115,7 @@ from relocant_media.services.kpi import record_subscriber_observation
 from relocant_media.services.package_import import import_package
 from relocant_media.services.pin_policy import maintain_pins
 from relocant_media.services.policy_reassessment import (
-    eligible_empty_policy_hold,
+    eligible_policy_reassessment,
     persist_policy_reassessment,
 )
 from relocant_media.services.primary_discovery import (
@@ -911,7 +911,7 @@ def prepare_reviewed(
         profile = load_city_profile(source.city)
         existing = session.get(EditorialRun, raw_id)
         revision = source_revision_lifecycle_context(session, raw_id)
-        reassessing = existing is not None and eligible_empty_policy_hold(session, raw_id)
+        reassessing = existing is not None and eligible_policy_reassessment(session, raw_id)
         if existing is not None and not reassessing:
             return {"raw_item_id": raw_id, "status": existing.outcome["status"],
                     "reason": existing.outcome.get("reason", "already_processed")}
@@ -1042,7 +1042,8 @@ def prepare_reviewed(
             return {"raw_item_id": raw_id, "status": run.outcome["status"],
                     "reason": run.outcome["reason"], "resolution": "rejected"}
     with Session(engine) as session:
-        run = import_package(session, package, replace_empty_hold=reassessing)
+        run = import_package(session, package, replace_empty_hold=reassessing,
+                             replace_map_hold=reassessing)
         media_plan = build_media_preparation_packet(session, raw_id)
         (output / f"media-plan-{raw_id}.json").write_text(
             json.dumps(media_plan, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1062,15 +1063,17 @@ def policy_reassessment_ids(engine: Engine) -> tuple[list[int], list[int]]:
         reason = EditorialRun.outcome["reason"].as_string()
         correction_cutoff = datetime.now(UTC) - timedelta(days=8)
         rows = session.scalars(select(EditorialRun).join(RawItem).join(Source)
-            .where(Source.city == "belgrade", EditorialRun.post_id.is_(None),
+            .where(Source.city == "belgrade", (EditorialRun.post_id.is_(None)
+                   | (reason == "event_place_requires_verification")),
                    EditorialRun.delivery_status == "pending",
-                   (reason == "source_auto_publish_disabled") | (
+                   reason.in_(("source_auto_publish_disabled",
+                               "event_place_requires_verification")) | (
                        reason.in_(("selection_ungrounded_evidence", "ranking_rejected"))
                        & (RawItem.published_at >= correction_cutoff)
                    ))
             .order_by(RawItem.published_at.desc())).all()
         for run in rows:
-            if eligible_empty_policy_hold(session, run.raw_item_id):
+            if eligible_policy_reassessment(session, run.raw_item_id):
                 target = (policy_holds if run.outcome["reason"] == "source_auto_publish_disabled"
                           else corrections)
                 target.append(run.raw_item_id)

@@ -22,6 +22,14 @@ def map_event_id(source_url: str) -> str:
     return f"event_{digest[:20]}"
 
 
+def map_occurrence_id(source_url: str, key: str) -> str:
+    """Сеанс имеет свой ID; ссылка поста сохраняет общий ID события."""
+    if not re.fullmatch(r"[a-z0-9_-]{1,100}", key):
+        raise ValueError("invalid event occurrence key")
+    digest = hashlib.sha256((canonicalize_url(source_url) + "\n" + key).encode()).hexdigest()
+    return f"event_{digest[:20]}"
+
+
 def map_event_url(
     source_url: str, *, telegram_app: str | None = None, places: bool = False,
 ) -> str:

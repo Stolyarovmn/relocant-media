@@ -34,10 +34,10 @@ from relocant_media.ai.package import (
 from relocant_media.ai.pipeline import _citations_are_grounded
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import canonicalize_url
-from relocant_media.domain.map_links import map_event_id
+from relocant_media.domain.map_links import map_event_id, map_occurrence_id
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.ops.newsroom_export import public_article_url
-from relocant_media.services.event_place import resolve_saved_event_place
+from relocant_media.services.event_place import event_occurrences, resolve_saved_event_place
 from relocant_media.services.event_place_adapters import (
     CUKARICA_GALLERY,
     CUKARICA_STAGE,
@@ -82,6 +82,9 @@ class PublicEvent(PublicModel):
     visitor_hours: Label | None = None
     schedule_note: Label | None = None
     sponsored: bool = False
+    group_id: str | None = Field(default=None, pattern=r"^event_[0-9a-f]{20}$")
+    occurrence_key: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,100}$")
+    venue_note: Label | None = None
 
     @field_validator("source_url", "coordinate_source_url", "venue_source_url")
     @classmethod
@@ -106,7 +109,14 @@ class PublicEvent(PublicModel):
     @model_validator(mode="after")
     def consistent(self) -> PublicEvent:
         zone = ZoneInfo(self.timezone)
-        if self.id != map_event_id(self.source_url):
+        expected = map_event_id(self.source_url)
+        if self.group_id is not None:
+            if self.group_id != expected or self.occurrence_key is None:
+                raise ValueError("event occurrence requires its source group and key")
+            expected = map_occurrence_id(self.source_url, self.occurrence_key)
+        elif self.occurrence_key is not None:
+            raise ValueError("event occurrence requires a group")
+        if self.id != expected:
             raise ValueError("event identifier does not match source")
         if self.ends_at is not None:
             if self.ends_at <= self.starts_at or self.expires_at != self.ends_at:
@@ -475,23 +485,32 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                         continue
                 elif not _backfill_claimed(package, document, place):
                     continue
-                event = PublicEvent(
-                    id=place["id"],
-                    title=post.title,
-                    source_url=document.url,
-                    post_url=post_url,
-                    starts_at=place["starts_at"],
-                    ends_at=place["ends_at"],
-                    expires_at=place["expires_at"],
-                    timezone=place["timezone"],
-                    archived=datetime.fromisoformat(place["expires_at"]) <= observed_at,
-                    venue=Venue.model_validate(place["venue"]),
-                    coordinate_source_url=place["coordinate_source_url"],
-                    venue_source_url=place["venue_source_url"],
-                    schedule_source_url=place.get("schedule_source_url"),
-                    sponsored=active_map_ad(policy, post.telegram_message_id or 0, observed_at),
-                )
-                events.setdefault(event.id, event)
+                cards = []
+                for slot in event_occurrences(place):
+                    cards.append(PublicEvent(
+                        id=slot["id"],
+                        group_id=slot.get("group_id"),
+                        occurrence_key=slot.get("occurrence_key"),
+                        title=post.title,
+                        source_url=document.url,
+                        post_url=post_url,
+                        starts_at=slot["starts_at"],
+                        ends_at=slot["ends_at"],
+                        expires_at=slot["expires_at"],
+                        timezone=slot["timezone"],
+                        archived=datetime.fromisoformat(slot["expires_at"]) <= observed_at,
+                        venue=Venue.model_validate(slot["venue"]),
+                        coordinate_source_url=slot["coordinate_source_url"],
+                        venue_source_url=slot["venue_source_url"],
+                        schedule_source_url=slot.get("schedule_source_url"),
+                        venue_note=slot.get("venue_note"),
+                        sponsored=active_map_ad(policy, post.telegram_message_id or 0, observed_at),
+                    ))
+                # Неполная программа не должна попадать в фид при ограничении размера.
+                if len(events) + len(cards) > MAX_EVENTS:
+                    continue
+                for event in cards:
+                    events.setdefault(event.id, event)
                 break
         except (ValueError, TypeError, KeyError, OverflowError):
             # Повреждённый исторический пакет не раскрывается и не ломает публичный фид.

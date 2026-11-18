@@ -178,6 +178,44 @@ def callback(row_id, which, message_id=51, owner=OWNER_ID):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delivery,reason,final,expected", [
+    ("sent", "event_place_requires_verification", "sent", 1),
+    ("sending", "event_place_requires_verification", "sent", 0),
+    ("uncertain", "event_place_requires_verification", "sent", 0),
+    ("sent", "source_auto_publish_disabled", "sent", 0),
+    ("sent", "event_place_requires_verification", "uncertain", 0),
+])
+async def test_publication_after_map_hold_sends_one_link_without_losing_previous_reply(
+    engine, delivery, reason, final, expected,
+):
+    sid = accepted_tip(engine, delivery=delivery)
+    previous = {"status": final, "text": "Ожидаем карту пяти площадок"}
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        raw_id = row.payload["raw_item_ids"][0]
+        row.status = "closed"
+        row.payload = {**row.payload, "reader_resolution": {
+            "outcome": "owner_replied", "final": previous,
+        }}
+        run = session.get(EditorialRun, raw_id)
+        run.outcome = {**run.outcome, "_previous_policy_hold": {
+            "outcome": {"reason": reason},
+        }}
+        session.commit()
+    bot = Bot()
+    result = await process_reader_resolutions(engine, bot, enabled=True)
+    assert result["sent"] == expected
+    await process_reader_resolutions(engine, bot, enabled=True)
+    assert len(bot.sent) == expected
+    if expected:
+        assert "https://t.me/eduvbelgrad/90" in bot.sent[0][1]["text"]
+        with Session(engine) as session:
+            resolution = session.get(Submission, sid).payload["reader_resolution"]
+            assert resolution["outcome"] == "published"
+            assert resolution["previous_final"] == previous
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("native", "duplicate"), [(False, False), (True, False), (True, True)])
 async def test_final_news_has_link_from_confirmed_receipt(engine, native, duplicate):
     row_id = accepted_tip(engine, native=native, duplicate=duplicate)

@@ -309,7 +309,9 @@ def extract_event_adapter(
         except CukaricaExtractionError:
             return None
         if (item.url, item.title, item.body) == (document.url, document.title, document.body):
-            return _cukarica_facts(document)
+            from relocant_media.services.event_program import festival_program
+
+            return _cukarica_facts(document) or festival_program(document, profile=profile)
         return None
     if document.source_id != "venue_youth_centre" or not _dob_url(document.url):
         return None

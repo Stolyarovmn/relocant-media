@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "checked_at": "2026-11-19",
+  "venues": [
+    {
+      "id": "vox",
+      "aliases": ["у vox blues clubu"],
+      "venue": {"name": "Vox Blues Club", "address": "Lješka 26, Beograd", "latitude": 44.7842182, "longitude": 20.41605365},
+      "coordinate_source_url": "https://www.openstreetmap.org/way/1193757513",
+      "venue_source_url": "https://voxbluesclub.com/"
+    },
+    {
+      "id": "faks",
+      "aliases": ["у факс-у (шећерана)"],
+      "venue": {"name": "FAKS · Stara šećerana", "address": "Stara šećerana, Radnička, Beograd", "latitude": 44.788216, "longitude": 20.4209581},
+      "coordinate_source_url": "https://bambamkolektiv.org/faks",
+      "venue_source_url": "https://bambamkolektiv.org/faks",
+      "note": "Ориентир — площадка FAKS на старом сахарном заводе. В источниках площадки указаны разные номера корпуса: 5H и 5N; точка взята из карты оператора."
+    },
+    {
+      "id": "kcc-small",
+      "aliases": ["у малој сали културног центра „чукарица“"],
+      "venue": {"name": "Kulturni centar Čukarica · Mala sala", "address": "Turgenjevljeva 5, Beograd", "latitude": 44.7832396, "longitude": 20.4175165},
+      "coordinate_source_url": "https://www.openstreetmap.org/node/2567920976",
+      "venue_source_url": "https://www.kccukarica.rs/srl/kontakt/"
+    },
+    {
+      "id": "sveta-petka",
+      "aliases": ["у храму свете петке на чукаричкој падини"],
+      "venue": {"name": "Hram Svete Petke · Čukarička padina", "address": "Obalskih radnika / Lazarevački drum, Beograd", "latitude": 44.77546645, "longitude": 20.40680575},
+      "coordinate_source_url": "https://www.openstreetmap.org/way/182032525",
+      "venue_source_url": "https://cukarica.info/portfolio/crkva-svete-petke/"
+    },
+    {
+      "id": "galerija73",
+      "aliases": ["у галерији 73 на бановом брду"],
+      "venue": {"name": "Galerija '73", "address": "Požeška 83a, Beograd", "latitude": 44.7739888, "longitude": 20.4144289},
+      "coordinate_source_url": "https://www.galerija73.com/js/galerija73.js",
+      "venue_source_url": "https://www.galerija73.com/kontakt"
+    }
+  ]
+}

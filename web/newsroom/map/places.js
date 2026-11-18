@@ -1,8 +1,8 @@
 import {
-  clusterMapPoints, incidentTimes, placeCountdown, placeStatus, readPlaces,
+  clusterMapPoints, incidentTimes, launchPlaces, placeCountdown, placeOptionLabel, placeStatus, readPlaces,
   straightLineDistance, updateStamp,
-} from "./core.js?v=10";
-import { calendarLink } from "./calendar.js?v=3";
+} from "./core.js?v=11";
+import { calendarLink } from "./calendar.js?v=4";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 
@@ -69,7 +69,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   const leaflet = globalThis.L;
   const layer = map ? leaflet.layerGroup().addTo(map) : null;
   const state = {
-    entries: [], selected: "", pending: "", enabled: false, loading: false,
+    entries: [], selected: "", pending: "", group: "", enabled: false, loading: false,
     loaded: false, failed: false, stamp: "", origin: null,
   };
   let clock;
@@ -77,7 +77,8 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   let attempts = 0;
 
   function visiblePlaces(now) {
-    return state.entries.filter((place) => place.paidPlace
+    return state.entries.filter((place) => !state.group || place.group === state.group)
+      .filter((place) => place.paidPlace
       ? placeStatus(place, now) === "active"
       : place.id === state.selected || placeStatus(place, now) !== "closed");
   }
@@ -138,6 +139,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     if (calendar) links.append(calendar);
     detail.replaceChildren(close, make("h3", "", place.title), ...describe(place, now));
     if (place.address && place.address !== place.venue) detail.append(make("p", "place-address", place.address));
+    if (place.venueNote) detail.append(make("p", "place-address", place.venueNote));
     detail.append(links);
   }
 
@@ -170,7 +172,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       const options = make("ul");
       for (const place of places) {
         const row = make("li");
-        const button = make("button", "", place.title);
+        const button = make("button", "", `${place.title} · ${placeOptionLabel(place)}`);
         button.type = "button";
         button.addEventListener("click", () => openPlace(place));
         row.append(button);
@@ -207,8 +209,19 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       ? state.loaded ? "Афиша не обновилась. Показана предыдущая версия." : "Афиша не загрузилась. Попробуйте обновить."
       : !state.loaded ? "Загружаем события."
         : state.pending ? "Событие из ссылки пока отсутствует в афише."
-          : !entries.length ? "В афише пока нет предстоящих событий." : "";
+          : !entries.length ? "В афише пока нет предстоящих событий."
+            : state.group ? `Площадок: ${new Set(entries.map((place) => `${place.lat},${place.lon}`)).size}. Выберите концерт в списке или на карте.` : "";
     feedback.textContent = message;
+    if (state.group && !state.failed && !state.pending) {
+      const reset = make("button", "", "Все события");
+      reset.type = "button";
+      reset.addEventListener("click", () => {
+        state.group = "";
+        state.selected = "";
+        render();
+      });
+      feedback.append(document.createTextNode(" "), reset);
+    }
     feedback.hidden = !message;
     renderMarkers();
   }
@@ -273,8 +286,19 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
 
   function show() {
     const selected = state.pending && state.entries.find((place) => place.id === state.pending);
-    if (selected) openPlace(selected);
-    else render();
+    const group = launchPlaces(state.entries, state.pending);
+    if (selected) {
+      state.group = selected.group;
+      openPlace(selected);
+    } else if (group?.length) {
+      state.group = state.pending;
+      state.pending = "";
+      state.selected = "";
+      render();
+      showList(true);
+      map?.fitBounds(leaflet.latLngBounds(group.map(({ lat, lon }) => [lat, lon])),
+        { padding: [35, 35], maxZoom: 15, animate });
+    } else render();
     onSync(state);
     scheduleClock();
   }
@@ -323,6 +347,8 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   return {
     enter(id = "") {
       state.enabled = true;
+      state.group = "";
+      state.selected = "";
       if (id) state.pending = id;
       show();
       if (!state.loaded || state.pending) void load();
