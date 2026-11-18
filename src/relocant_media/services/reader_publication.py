@@ -48,7 +48,10 @@ def publication_prompt(payload: dict[str, Any], reference: str) -> tuple[str, li
     if stage == "credit_confirm":
         return (f"В публикации будет показана подпись: {r['signature']['label']}\n\n"
                 "Разрешаете открыто показать именно эту подпись читателям «Еду в Белград»? "
-                "Для @username будет доступен переход в профиль. Другие сведения не добавляются.",
+                + ("Подпись будет ссылкой на ваш Telegram-профиль. "
+                   if r["signature"]["mode"] == "username"
+                   else "Имя будет показано обычным текстом без ссылки на профиль. ")
+                + "Другие сведения не добавляются.",
                 [labels["credit"], labels["back"], labels["anonymous"]])
     if stage == "materials":
         return ("Дополните материалы, затем нажмите «Отправить». "
