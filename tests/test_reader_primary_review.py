@@ -2,6 +2,9 @@ from copy import deepcopy
 
 import pytest
 from sqlalchemy.orm import Session
+from test_reader_publication import POLICY, material
+from test_reader_resolution import OWNER_ID, Bot, callback, submission
+from test_reader_resolution import engine as source_engine
 
 from relocant_media.services.reader_publication import material_fingerprint, permission_reason
 from relocant_media.services.reader_resolution import (
@@ -10,10 +13,8 @@ from relocant_media.services.reader_resolution import (
 )
 from relocant_media.services.submission_queue import batch_submissions, tip_urls
 from relocant_media.storage.models import Submission
-from tests.test_reader_publication import POLICY, material
-from tests.test_reader_resolution import OWNER_ID, Bot, callback, submission
 
-pytest_plugins = ["tests.test_reader_resolution"]
+engine = source_engine
 
 
 @pytest.mark.asyncio
