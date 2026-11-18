@@ -18,8 +18,10 @@ from sqlalchemy.orm import Session
 
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
+from relocant_media.ops.vercel_inbox import ingress_config, peek_inbox, sequence_cursor
 from relocant_media.services.private_intake import receive_private_tips
 from relocant_media.services.reader_resolution import process_reader_resolutions
+from relocant_media.services.serverless_intake import import_inbox
 from relocant_media.services.submission_queue import batch_submissions
 from relocant_media.storage.file_lock import file_lock
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
@@ -34,18 +36,41 @@ async def collect_batch(
     owner_user_id: int | None = None,
     owner_chat_id: int | None = None,
     reader_feedback_enabled: bool = False,
+    ingress_token: str | None = None,
 ) -> dict[str, Any]:
-    intake = await receive_private_tips(
-        engine,
-        bot,
-        enabled=enabled,
-        poll_timeout=1,
-        store_guard=store_guard,
-        accept_private_tips=accept_private_tips,
-        owner_user_id=owner_user_id,
-        owner_chat_id=owner_chat_id,
-        reader_feedback_enabled=reader_feedback_enabled,
-    )
+    source = ingress_config(state)
+    if source is not None and source["phase"] == "prepared":
+        intake = {"status": "blocked_ingress_prepared", "received": 0, "inspected": 0}
+    elif source is not None:
+        if not ingress_token:
+            raise ValueError("ingress authentication required")
+        after = sequence_cursor(state.get("serverless_sequence", 0))
+        events = await asyncio.to_thread(peek_inbox, source["url"], ingress_token, after)
+        with store_guard() as acquired:
+            if not acquired:
+                intake = {"status": "busy", "received": 0, "inspected": 0}
+            else:
+                through = await import_inbox(
+                    engine, bot, events, owner_user_id=owner_user_id,
+                    owner_chat_id=owner_chat_id, after=after,
+                )
+                if through is not None:
+                    state["serverless_sequence"] = through
+                if checkpoint is not None:
+                    checkpoint()
+                intake = {"status": "ready", "received": len(events), "inspected": len(events)}
+    else:
+        intake = await receive_private_tips(
+            engine,
+            bot,
+            enabled=enabled,
+            poll_timeout=1,
+            store_guard=store_guard,
+            accept_private_tips=accept_private_tips,
+            owner_user_id=owner_user_id,
+            owner_chat_id=owner_chat_id,
+            reader_feedback_enabled=reader_feedback_enabled,
+        )
     result: dict[str, Any] = dict(status=intake["status"],intake=intake,pipeline_started=False)
     if intake["status"] not in {"ready", "busy"}:
         return result
@@ -109,10 +134,13 @@ def _owner_review_changed(result: dict[str, Any]) -> bool:
 
 
 def _run_owner_review() -> tuple[int, dict[str, Any]]:
+    environment = {key: value for key, value in os.environ.items()
+                   if key != "EDITORIAL_INGRESS_TOKEN"}
     child = subprocess.Popen(
         [sys.executable, "-m", "relocant_media.ops.owner_review_cycle"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         start_new_session=True,
+        env=environment,
     )
     try:
         stdout, _ = child.communicate(timeout=900)
@@ -154,6 +182,8 @@ def _run_actions_submission_pipeline(directory: Path) -> int:
             [sys.executable, "-m", "relocant_media.ops.server_runtime",
              "--output", str(output), "--submissions-only"],
             capture_output=True, timeout=4100, check=False,
+            env={key: value for key, value in os.environ.items()
+                 if key != "EDITORIAL_INGRESS_TOKEN"},
         )
         return completed.returncode
 
@@ -188,7 +218,9 @@ def main() -> None:
                 return _run_actions_submission_pipeline(directory)
             completed = subprocess.run(
                 ["/opt/relocant-media/app/deploy/server/run-cycle.sh", "--submissions-only"],
-                capture_output=True, timeout=4100, check=False)
+                capture_output=True, timeout=4100, check=False,
+                env={key: value for key, value in os.environ.items()
+                     if key != "EDITORIAL_INGRESS_TOKEN"})
             return completed.returncode
         async def run() -> dict[str, Any]:
             async with httpx.AsyncClient(timeout=25,trust_env=False) as client:
@@ -200,7 +232,8 @@ def main() -> None:
                     owner_chat_id=owner_chat_id,
                     store_guard=lambda: file_lock(directory/"worker.lock"),
                     run_pipeline=pipeline,state=state,checkpoint=checkpoint,
-                    reader_feedback_enabled=reader_feedback_enabled)
+                    reader_feedback_enabled=reader_feedback_enabled,
+                    ingress_token=os.environ.get("EDITORIAL_INGRESS_TOKEN"))
         try:
             result = asyncio.run(run())
             if owner_enabled and result.get("status") in {

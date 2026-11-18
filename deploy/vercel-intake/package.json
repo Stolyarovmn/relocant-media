@@ -1,0 +1,9 @@
+{
+  "name": "relocant-reader-ingress",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": { "test": "node --test test/*.test.js", "check": "node --check api/telegram.js && node --check api/transfer.js && node --check api/health.js && node --check lib/engine.js" },
+  "dependencies": { "@vercel/blob": "2.9.0" }
+}

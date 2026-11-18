@@ -17,6 +17,24 @@ verified final snapshot plus read-only Actions preflight before enabling the new
 writer. Do not stop a working legacy writer before replacement storage/authentication
 is ready; never run it alongside the Actions writer.
 
+### Уточнение владельца18ноября2026: быстрый приём Vercel
+
+Владелец выбрал Vercel для немедленной инструкции и номера обращения, пока
+Telegram Serverless находится в листе ожидания. Это разрешает подготовку отдельного
+входного обработчика и закрытого транспортного хранилища Vercel. Каноническая
+редакционная БД и обработка материалов остаются в Actions. Существующий сервер
+остаётся только хранилищем. Новые ключи и передача токена бота в Vercel требуют
+явного подтверждения точных назначений после отклонения автоматической проверкой;
+до него рабочий webhook и секреты не переключать.
+
+Переключение выполняется только `ingress-cutover.yml` на main с зелёным CI и общей
+блокировкой состояния. Сначала сохраняется точный снимок черновиков, затем marker
+`ingress.phase=prepared` запрещает прежний polling; после bootstrap, setWebhook
+без сброса ожидающих updates и проверки Telegram marker становится `active`.
+Копии заявок в Vercel удаляются только после подтверждённого канонического снимка
+и сохранения позиции очереди. Открытые черновики сохраняются, неизвестный результат
+отправки не повторяется автоматически. Preview не вызывает рабочий Bot API.
+
 ## Hard boundaries
 
 Never:
