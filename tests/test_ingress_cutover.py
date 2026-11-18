@@ -1,10 +1,13 @@
 import copy
 import hashlib
 import json
+import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from relocant_media.ai.package import canonical_json
 from relocant_media.ops import ingress_cutover as cutover
@@ -49,7 +52,7 @@ class Storage:
             assert self.state["status"] == "busy" and state["status"] == "ready"
             assert state.get("attempt") == self.state["attempt"]
             assert state["generation"] == self.state["attempt"]
-            phase = state["intake_state"]["ingress"]["phase"]
+            phase = state["intake_state"].get("ingress", {}).get("phase", "polling")
             label = phase
         if state["status"] == "ready" and self.fail_phase == phase:
             raise ValueError("conditional write failed")
@@ -59,11 +62,12 @@ class Storage:
         return self.sha
 
     def upload(self, path, folder):
-        assert folder == "intake-seed"
+        assert folder in {"intake-seed", "ingress-rollback-audit"}
         data = path.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         self.files[digest] = data
-        self.trace.append("upload")
+        self.trace.append("upload" if folder == "intake-seed" else
+                          f"audit:{json.loads(data)['phase']}")
         return digest
 
     def download(self, digest):
@@ -116,12 +120,35 @@ def scenario(monkeypatch):
             assert storage.state["status"] == "ready"
             assert request.headers["Authorization"] == f"Bearer {BRIDGE}"
             assert storage.state["intake_state"]["ingress"]["phase"] in {"prepared", "active"}
+            if payload["operation"] == "metadata":
+                if fail.get("metadata_error"):
+                    return httpx.Response(503)
+                metadata = {
+                    "status": "ready",
+                    "state": {"etag_sha256": "d" * 64, "uploaded_at": AT.isoformat(),
+                              "size": 7060},
+                    "config": {"etag_sha256": "e" * 64, "uploaded_at": AT.isoformat(),
+                               "size": 259},
+                }
+                updates = fail.get("metadata_responses", [])
+                if updates:
+                    for key, changes in updates.pop(0).items():
+                        metadata[key].update(changes)
+                return httpx.Response(200, json=metadata)
             assert payload["operation"] == "bootstrap"
             assert payload["seed_sha256"] in storage.files
             result = {"status": "ready", "can_send": True,
                       "seed_sha256": payload["seed_sha256"]}
             result.update(fail.get("receiver", {}))
             return httpx.Response(200, json=result)
+        elif operation == "deleteWebhook":
+            assert payload == {"drop_pending_updates": False}
+            assert storage.state["status"] == "ready"
+            assert storage.state["intake_state"]["ingress"]["phase"] == "prepared"
+            assert storage.state["ingress_rollback"]["phase"] == "prepared"
+            config["url"] = ""
+            config.update(fail.get("verified_webhook", {}))
+            result = True
         else:
             pytest.fail("Неизвестная операция фальшивого API")
         return httpx.Response(200, json={"ok": True, "result": result})
@@ -319,3 +346,207 @@ def test_cli_hides_exception_urls_and_tokens(monkeypatch, tmp_path, capsys):
     assert json.loads(output.out) == {"status": "blocked", "error_type": "RuntimeError"}
     assert output.err == ""
     assert all(secret not in output.out for secret in (TOKEN, BRIDGE, SECRET))
+
+
+@pytest.fixture
+def rollback_scenario(scenario, tmp_path, monkeypatch):
+    run(scenario, tmp_path, activate=True, name="activation")
+    storage = scenario[0]
+    evidence_state = copy.deepcopy(storage.state)
+    evidence_state["run_id"] = "123456789"
+    evidence_state["started_at"] = (AT + timedelta(seconds=2)).isoformat()
+    evidence = canonical_json({"version": 1, "expected_busy_sha256": "b" * 64,
+                               "state": evidence_state}).encode()
+    checkpoint = hashlib.sha256(evidence).hexdigest()
+    storage.files[checkpoint] = evidence
+    scenario[2].clear()
+    scenario[5].clear()
+
+    def quiesce(seconds):
+        assert seconds == 45
+        assert storage.state["status"] == "ready"
+        assert storage.state["intake_state"]["ingress"]["phase"] == "prepared"
+        assert storage.state["ingress_rollback"]["phase"] == "prepared"
+        scenario[2].append("quiesced")
+
+    monkeypatch.setattr(cutover.time, "sleep", quiesce)
+    return scenario, checkpoint
+
+
+def rollback(fixture, tmp_path, name="rollback", **kwargs):
+    scenario, checkpoint = fixture
+    return cutover.rollback_empty(
+        scenario[0], cutover.PRODUCTION_ORIGIN, tmp_path / name, scenario[1], TOKEN, BRIDGE,
+        kwargs.pop("expected_state_sha256", "d" * 64),
+        kwargs.pop("activation_checkpoint_sha256", checkpoint),
+        kwargs.pop("activation_run_id", "123456789"), now=AT + timedelta(hours=1), **kwargs,
+    )
+
+
+def test_rollback_empty_preserves_updates_and_fences_until_quiescent(rollback_scenario, tmp_path):
+    scenario, checkpoint = rollback_scenario
+    storage, _, trace, *_ = scenario
+    before = copy.deepcopy(storage.state)
+    previous_files = set(storage.files)
+    result = rollback(rollback_scenario, tmp_path)
+    assert result["status"] == "polling_restored"
+    assert "ingress" not in storage.state["intake_state"]
+    assert storage.state["intake_state"] == {
+        key: value for key, value in before["intake_state"].items() if key != "ingress"
+    }
+    assert storage.state["snapshot"] == before["snapshot"]
+    assert storage.state["ingress_rollback"]["phase"] == "complete"
+    assert storage.state["ingress_rollback"]["activation_checkpoint_sha256"] == checkpoint
+    assert previous_files <= set(storage.files)
+    assert trace == ["getMe", "download", "getWebhookInfo", "transfer", "audit:prepared",
+                     "busy:active", "prepared", "deleteWebhook", "getWebhookInfo", "quiesced",
+                     "transfer", "audit:complete", "busy:prepared", "polling"]
+    audits = [json.loads(value) for key, value in storage.files.items()
+              if key not in previous_files]
+    assert {value["phase"] for value in audits} == {"prepared", "complete"}
+    assert all(secret not in json.dumps(audits) for secret in (TOKEN, BRIDGE, SECRET))
+
+
+@pytest.mark.parametrize("problem", [
+    "cursor", "wrong_etag", "new_upload", "different_uploads", "metadata_unavailable",
+    "checkpoint_hash", "checkpoint_run", "activation_prepared", "different_snapshot",
+])
+def test_rollback_empty_rejects_unproven_state_before_mutation(
+    rollback_scenario, tmp_path, problem,
+):
+    scenario, _ = rollback_scenario
+    storage, _, trace, _, _, _, fail, _ = scenario
+    args = {}
+    if problem == "cursor":
+        storage.state["intake_state"]["serverless_sequence"] = 1
+    elif problem == "wrong_etag":
+        args["expected_state_sha256"] = "f" * 64
+    elif problem == "new_upload":
+        fail["metadata_responses"] = [{"state": {
+            "uploaded_at": (AT + timedelta(minutes=5)).isoformat()}}]
+    elif problem == "different_uploads":
+        fail["metadata_responses"] = [{"config": {
+            "uploaded_at": (AT - timedelta(seconds=1)).isoformat()}}]
+    elif problem == "metadata_unavailable":
+        fail["metadata_error"] = True
+    elif problem == "checkpoint_hash":
+        storage.files[rollback_scenario[1]] += b"corrupt"
+    elif problem == "checkpoint_run":
+        args["activation_run_id"] = "999999999"
+    elif problem == "activation_prepared":
+        storage.state["intake_state"]["ingress"]["phase"] = "prepared"
+    else:
+        storage.state["intake_state"]["ingress"]["seed_snapshot_sha256"] = "f" * 64
+    before = storage.read()
+    files = copy.deepcopy(storage.files)
+    with pytest.raises((ValueError, httpx.HTTPStatusError)):
+        rollback(rollback_scenario, tmp_path, **args)
+    assert storage.read() == before and storage.files == files
+    assert "deleteWebhook" not in trace and "busy:active" not in trace
+
+
+@pytest.mark.parametrize("failure", ["deleteWebhook", "changed_state", "changed_config"])
+def test_rollback_failure_keeps_prepared_marker_and_blocks_activation(
+    rollback_scenario, tmp_path, failure,
+):
+    scenario = rollback_scenario[0]
+    storage, _, trace, _, _, _, fail, _ = scenario
+    if failure == "deleteWebhook":
+        fail["operation"] = "deleteWebhook"
+    else:
+        name = "state" if failure == "changed_state" else "config"
+        fail["metadata_responses"] = [{}, {name: {"etag_sha256": "f" * 64}}]
+    with pytest.raises((ValueError, httpx.HTTPStatusError)):
+        rollback(rollback_scenario, tmp_path)
+    assert storage.state["status"] == "ready"
+    assert storage.state["ingress_rollback"]["phase"] == "prepared"
+    assert storage.state["intake_state"]["ingress"]["phase"] == "prepared"
+    trace.clear()
+    fail.clear()
+    with pytest.raises(ValueError, match="требует отдельной миграции"):
+        run(scenario, tmp_path, activate=True, name="wrong-activation")
+    assert "setWebhook" not in trace
+
+
+def test_prepared_rollback_retry_uses_stored_evidence(rollback_scenario, tmp_path):
+    scenario = rollback_scenario[0]
+    scenario[6]["operation"] = "deleteWebhook"
+    with pytest.raises(httpx.HTTPStatusError):
+        rollback(rollback_scenario, tmp_path)
+    marker = copy.deepcopy(scenario[0].state["ingress_rollback"])
+    scenario[6].clear()
+    scenario[2].clear()
+    assert rollback(rollback_scenario, tmp_path, name="retry")["status"] == "polling_restored"
+    assert "busy:active" not in scenario[2]
+    assert scenario[0].state["ingress_rollback"]["request_audit_sha256"] == marker[
+        "request_audit_sha256"]
+    scenario[2].clear()
+    assert rollback(rollback_scenario, tmp_path, name="completed")["already_complete"] is True
+    assert scenario[2] == ["getMe", "getWebhookInfo"]
+    with pytest.raises(ValueError, match="требует отдельной миграции"):
+        run(scenario, tmp_path, activate=True, name="reactivation-blocked")
+    assert "setWebhook" not in scenario[2]
+
+
+def test_rollback_final_ready_failure_never_clears_busy_fence(rollback_scenario, tmp_path):
+    storage = rollback_scenario[0][0]
+    storage.fail_phase = "polling"
+    with pytest.raises(ValueError):
+        rollback(rollback_scenario, tmp_path)
+    assert storage.state["status"] == "busy"
+    assert storage.state["ingress_rollback"]["phase"] == "prepared"
+    assert storage.state["intake_state"]["ingress"]["phase"] == "prepared"
+    before = storage.read()
+    with pytest.raises(ValueError, match="canonical state not ready"):
+        rollback(rollback_scenario, tmp_path, name="busy-retry")
+    assert storage.read() == before
+
+
+@pytest.mark.parametrize("invalid", [None, "status", "conclusion", "event", "head_branch", "path"])
+def test_rollback_workflow_checks_successful_manual_main_activation(monkeypatch, invalid):
+    workflow = yaml.safe_load((Path(__file__).parents[1] /
+                               ".github/workflows/ingress-cutover.yml").read_text())
+    job = workflow["jobs"]["cutover"]
+    assert job["concurrency"] == {
+        "group": "canonical-editorial-state", "cancel-in-progress": False, "queue": "max",
+    }
+    steps = job["steps"]
+    verify = next(step for step in steps if "EXPECTED_SHA" in step.get("env", {}))
+    runtime = next(step for step in steps if "STORAGE_PRIVATE_KEY" in step.get("env", {}))
+    assert steps.index(verify) < steps.index(runtime)
+    assert "github.event_name == 'workflow_dispatch'" in job["if"]
+    assert "github.ref == 'refs/heads/main'" in job["if"]
+    for key, value in {
+        "EXPECTED_SHA": "f" * 40, "CUTOVER_OPERATION": "rollback-empty",
+        "EXPECTED_STATE_SHA256": "d" * 64, "ACTIVATION_CHECKPOINT_SHA256": "a" * 64,
+        "ACTIVATION_RUN_ID": "123456789",
+    }.items():
+        monkeypatch.setenv(key, value)
+    activation = {
+        "id": 123456789, "status": "completed", "conclusion": "success",
+        "event": "workflow_dispatch", "head_branch": "main",
+        "path": ".github/workflows/ingress-cutover.yml",
+    }
+    if invalid is not None:
+        activation[invalid] = "untrusted"
+
+    def api(command):
+        assert command[:2] == ["gh", "api"]
+        if command[-1].endswith("git/ref/heads/main"):
+            value = {"object": {"sha": "f" * 40}}
+        elif "head_sha=" in command[-1]:
+            value = {"workflow_runs": [{"path": ".github/workflows/ci.yml", "head_branch": "main",
+                                       "event": "push", "status": "completed",
+                                       "conclusion": "success"}]}
+        else:
+            assert command[-1].endswith("actions/runs/123456789")
+            value = activation
+        return json.dumps(value).encode()
+
+    monkeypatch.setattr(subprocess, "check_output", api)
+    script = verify["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    if invalid is None:
+        exec(compile(script, "<rollback-workflow-test>", "exec"), {})
+    else:
+        with pytest.raises(AssertionError, match="unverified activation"):
+            exec(compile(script, "<rollback-workflow-test>", "exec"), {})

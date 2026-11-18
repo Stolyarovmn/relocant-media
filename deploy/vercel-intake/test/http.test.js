@@ -102,6 +102,10 @@ test("ошибки storage sanitised и не утекли URL, token или сы
 
 test("диагностика обоих endpoints фиксирует commit и разрешённый SDK класс без текста исключения", async () => {
   const f = await fixture();
+  await f.receive(message(0, "/tip Начальная заявка"));
+  const before = await f.state();
+  assert.equal(before.events.length, 1);
+  assert.equal(before.exported_through, 0);
   const secret = "FAKE_SECRET_EXCEPTION_MESSAGE_HEADER_RAW_UPDATE";
   const error = new BlobAccessError();
   error.name = `injected-name-${secret}`;
@@ -128,7 +132,7 @@ test("диагностика обоих endpoints фиксирует commit и �
   assert.ok(!logs.join("").includes(secret));
   assert.ok(!logs.join("").includes(f.config.webhook_secret));
   assert.equal(f.calls.length, 0);
-  assert.equal((await f.state()).events.length, 0);
+  assert.deepEqual(await f.state(), before);
 });
 
 test("console.error получает только JSON whitelist; неизвестные имена и коды заменяются", async () => {

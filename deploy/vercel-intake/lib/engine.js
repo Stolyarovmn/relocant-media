@@ -418,6 +418,13 @@ export class Ingress {
 
   async transfer(input) {
     this.onPhase("plan");
+    if (input.operation === "metadata") {
+      this.onPhase("read_state");
+      const [state, config] = await Promise.all([
+        this.store.metadata(this.paths.state), this.store.metadata(this.paths.config),
+      ]);
+      return { status: "ready", state, config };
+    }
     if (input.operation === "bootstrap") return this.bootstrap(input);
     if (input.operation === "status") {
       this.onPhase("read_state");
@@ -441,8 +448,11 @@ export class Ingress {
           if (events.length >= limit || bytes({ status: "ready", events: [...events, event] }) > LIMITS.exportBytes) break;
           events.push(event);
         }
-        if (events.length) state.exported_through = Math.max(state.exported_through, events.at(-1).sequence);
-        return { status: "ready", events: clone(events) };
+        const result = { status: "ready", events: clone(events) };
+        const through = events.at(-1)?.sequence ?? state.exported_through;
+        if (through <= state.exported_through) return { unchanged: true, value: result };
+        state.exported_through = through;
+        return result;
       });
     }
     if (input.operation === "ack") {
