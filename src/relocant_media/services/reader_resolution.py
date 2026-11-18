@@ -454,6 +454,44 @@ async def _owner_media(
     return sent, uncertain
 
 
+async def _clear_closed_reader_keyboard(
+    session: Session, row: Submission, bot: TelegramBotAPI, *, owner_chat_id: int,
+) -> bool:
+    state = _resolution(row)
+    card, receipt = state.get("owner_notice", {}), state.get("owner_keyboard", {})
+    now = datetime.now(UTC)
+    retry = _when(receipt, "retry_at")
+    if (row.status != "closed" or not row.payload.get("reader_publication")
+            or card.get("status") != "sent" or card.get("chat_id") != owner_chat_id
+            or not _positive(card.get("telegram_message_id"))
+            or receipt.get("status") == "cleared" or (retry is not None and retry > now)):
+        return False
+    record = {"status": "clearing", "attempted_at": now.isoformat()}
+    _set_resolution(row, owner_keyboard=record)
+    session.commit()
+    try:
+        result = await bot._call("editMessageReplyMarkup", {
+            "chat_id": owner_chat_id, "message_id": card["telegram_message_id"],
+            "reply_markup": {"inline_keyboard": []},
+        })
+        if not (result is True or isinstance(result, dict)
+                and result.get("message_id") == card["telegram_message_id"]):
+            raise ValueError("invalid keyboard edit receipt")
+    except Exception as error:
+        # Empty markup is an idempotent projection, not a new message.
+        # An interrupted edit may be repeated; final reader answers never are.
+        if isinstance(error, TelegramAPIError) and "message is not modified" in str(error).lower():
+            record["status"] = "cleared"
+        else:
+            record.update(status="retry", error_type=type(error).__name__,
+                          retry_at=(now + timedelta(minutes=2)).isoformat())
+    else:
+        record["status"] = "cleared"
+    _set_resolution(row, owner_keyboard=record)
+    session.commit()
+    return True
+
+
 async def process_reader_resolutions(
     engine: Engine, bot: TelegramBotAPI, *, enabled: bool,
     owner_user_id: int | None = None, owner_chat_id: int | None = None, limit: int = 20,
@@ -472,6 +510,14 @@ async def process_reader_resolutions(
             and_(Submission.status == "closed",
                  Submission.payload["reader_resolution"]["final"]["status"].as_string()
                  == "pending"),
+            and_(Submission.status == "closed",
+                 Submission.payload["reader_publication"]["version"].as_string().is_not(None),
+                 Submission.payload["reader_resolution"]["owner_notice"]["status"].as_string()
+                 == "sent",
+                 func.coalesce(
+                     Submission.payload["reader_resolution"]["owner_keyboard"]["status"].as_string(),
+                     "",
+                 ) != "cleared"),
             and_(Submission.kind == "news_tip",
                  Submission.status.in_(("expired", "waiting_primary", "source_linked"))),
             and_(Submission.kind == "news_tip", Submission.status == "reader_review",
@@ -561,6 +607,11 @@ async def process_reader_resolutions(
                 stats["media_sent"] += sent
                 stats["uncertain"] += uncertain
                 stats["changed"] += sent + uncertain
+            if _owner_enabled(owner_user_id, owner_chat_id):
+                assert owner_chat_id is not None
+                stats["changed"] += int(await _clear_closed_reader_keyboard(
+                    session, row, bot, owner_chat_id=owner_chat_id,
+                ))
     with Session(engine) as session:
         resolution = Submission.payload["reader_resolution"]
         uncertain_delivery = [
