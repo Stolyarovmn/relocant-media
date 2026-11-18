@@ -280,6 +280,7 @@ def record_reader_resolution_callback(
         if not _primary_review_available(row):
             return OwnerUpdateResult(True, False, "Нет подтверждённого сигнала с исходной ссылкой.")
         row.payload = {**row.payload, "public_source_review": {
+            "retry_budget_version": 1,
             "owner_user_id": owner_user_id, "at": datetime.now(UTC).isoformat(),
             "urls": tip_urls(row.payload),
             "material_sha256": material_fingerprint(row.payload),

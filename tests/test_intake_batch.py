@@ -163,6 +163,7 @@ async def test_explicit_owner_decision_gets_three_attempts_but_reader_edits_do_n
     with Session(engine) as session:
         row = session.get(Submission, sid)
         row.payload = {**row.payload, 'public_source_review': {
+            'retry_budget_version': 1,
             'owner_user_id': owner + 1, 'at': datetime.now(UTC).isoformat(),
             'material_sha256': 'a' * 64,
         }}
@@ -171,7 +172,17 @@ async def test_explicit_owner_decision_gets_three_attempts_but_reader_edits_do_n
     with Session(engine) as session:
         row = session.get(Submission, sid)
         row.payload = {**row.payload, 'public_source_review': {
+            'owner_user_id': owner, 'at': datetime.now(UTC).isoformat(),
+            'material_sha256': 'a' * 64,
+        }}
+        session.commit()
+    # Deploying the new protocol does not reset a legacy exhausted budget.
+    assert (await collect_batch(engine, Bot(), **options))['status'] == 'blocked_retry_budget'
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        row.payload = {**row.payload, 'public_source_review': {
             **row.payload['public_source_review'], 'owner_user_id': owner,
+            'retry_budget_version': 1,
         }}
         session.commit()
     for _ in range(4):

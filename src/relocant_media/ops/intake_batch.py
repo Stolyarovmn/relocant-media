@@ -37,6 +37,7 @@ def _batch_signature(rows: list[Submission], owner_user_id: int | None) -> str:
         review = row.payload.get("public_source_review", {})
         if (not isinstance(review, dict)
                 or row.payload.get("reader_intake") is not True or not owner_user_id
+                or review.get("retry_budget_version") != 1
                 or review.get("owner_user_id") != owner_user_id
                 or not isinstance(review.get("material_sha256"), str)
                 or not re.fullmatch(r"[a-f0-9]{64}", review["material_sha256"])):
