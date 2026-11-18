@@ -534,10 +534,24 @@ def record_reader_callback(session: Session, callback: object) -> str | None:
         or chat.get("id") != row.payload.get("chat_id")
         or (topic_id is not None and topic_id != row.payload.get("topic_id"))
         or type(source_message_id) is not int
-        or source_message_id != _source_notice_id(row, action)
     ):
         return "Эта кнопка не относится к вашему обращению."
+    if source_message_id not in _message_ids(row):
+        return "Меню устарело. Используйте актуальные кнопки внизу чата."
+    if row.status not in DRAFT_STATES and action != "new":
+        return _terminal_status(row)
+    if source_message_id != _source_notice_id(row, action):
+        return "Меню устарело. Используйте актуальные кнопки внизу чата."
     return _apply_action(session, row, action, message_id=source_message_id, received_at=_now())
+
+
+def _terminal_status(row: Submission) -> str:
+    reference = submission_reference(row)
+    if row.status == "cancelled":
+        return f"Черновик №{reference} уже отменён."
+    if row.status == "closed":
+        return f"Обращение №{reference} уже закрыто."
+    return f"Обращение №{reference} уже отправлено в работу."
 
 
 def _apply_action(
@@ -568,7 +582,7 @@ def _apply_action(
         _menu(new_case, key="menu", message_id=None, received_at=received_at)
         return "Открываю новое обращение."
     if row.status not in DRAFT_STATES:
-        return f"Заявка №{reference} уже отправлена."
+        return _terminal_status(row)
     if action == "cancel":
         row.status = "cancelled"
         _supersede_pending_prompts(row)
