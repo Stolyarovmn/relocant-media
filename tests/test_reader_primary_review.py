@@ -12,13 +12,13 @@ from relocant_media.services.reader_resolution import (
     record_reader_resolution_callback,
 )
 from relocant_media.services.submission_queue import batch_submissions, tip_urls
-from relocant_media.storage.models import Submission
+from relocant_media.storage.models import EditorialRun, RawItem, Source, Submission
 
 engine = source_engine
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('initial_status', ['reader_review', 'waiting_primary'])
+@pytest.mark.parametrize('initial_status', ['reader_review', 'waiting_primary', 'source_linked'])
 async def test_source_lead_enters_public_pipeline_without_grant_or_media_approval(
     engine, initial_status,
 ):
@@ -27,15 +27,27 @@ async def test_source_lead_enters_public_pipeline_without_grant_or_media_approva
     payload["reader_publication"].update(
         ownership="source", material_sha256=material_fingerprint(payload),
     )
+    if initial_status == 'source_linked':
+        with Session(engine) as session:
+            session.add(Source(id='public', city='belgrade', name='Источник',
+                               url='https://www.cukarica.rs', source_type='official', trust=1))
+            session.flush()
+            raw = RawItem(source_id='public', external_id='123',
+                          url='https://www.cukarica.rs/vest/123-event/',
+                          title='Публичная новость', body='Проверяемый текст')
+            session.add(raw)
+            session.flush()
+            payload['raw_item_ids'] = [raw.id]
+            session.commit()
     sid = submission(engine, status=initial_status, **payload)
     bot = Bot()
     owner = {"owner_user_id": OWNER_ID, "owner_chat_id": OWNER_ID}
     await process_reader_resolutions(engine, bot, enabled=True, **owner)
     buttons = bot.sent[-1][1]["reply_markup"]["inline_keyboard"]
     assert buttons[0][0]["callback_data"] == f"rr:primary:{sid}"
-    assert ('Повторить' in buttons[0][0]['text']) == (initial_status == 'waiting_primary')
+    assert ('Повторить' in buttons[0][0]['text']) == (initial_status != 'reader_review')
     with Session(engine) as session:
-        assert not batch_submissions(session)
+        assert bool(batch_submissions(session)) == (initial_status == 'source_linked')
         action = record_reader_resolution_callback(session, callback(sid, "primary"), **owner)
         assert action.accepted
         session.commit()
@@ -52,6 +64,39 @@ async def test_source_lead_enters_public_pipeline_without_grant_or_media_approva
         changed = deepcopy(row.payload)
         changed["text"] += " https://other.example/new-private-link"
         assert not tip_urls(changed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delivery', ['pending', 'sending', 'uncertain', 'sent'])
+async def test_stale_retry_button_does_not_restart_an_existing_editorial_run(engine, delivery):
+    payload = material(permission='private', mode='anonymous')
+    payload['text'] = 'https://www.cukarica.rs/vest/123-event/'
+    payload['reader_publication'].update(
+        ownership='source', material_sha256=material_fingerprint(payload),
+    )
+    with Session(engine) as session:
+        session.add(Source(id='public', city='belgrade', name='Источник',
+                           url='https://www.cukarica.rs', source_type='official', trust=1))
+        session.flush()
+        raw = RawItem(source_id='public', external_id='123',
+                      url='https://www.cukarica.rs/vest/123-event/', title='Анонс', body='Текст')
+        session.add(raw)
+        session.flush()
+        payload.update(raw_item_ids=[raw.id], reader_resolution={
+            'primary_processing_retryable': True,
+            'owner_notice': {'status': 'sent', 'chat_id': OWNER_ID, 'telegram_message_id': 51},
+        })
+        session.add(EditorialRun(raw_item_id=raw.id, outcome={'status': 'human_review'},
+                                 evidence={}, delivery_status=delivery))
+        session.commit()
+    sid = submission(engine, status='source_linked', **payload)
+    with Session(engine) as session:
+        result = record_reader_resolution_callback(
+            session, callback(sid, 'primary'), owner_user_id=OWNER_ID, owner_chat_id=OWNER_ID,
+        )
+        assert not result.accepted
+        row = session.get(Submission, sid)
+        assert row.status == 'source_linked' and 'public_source_review' not in row.payload
 
 
 @pytest.mark.asyncio
