@@ -27,6 +27,7 @@ Node ESM, Node 24, закреплённый `@vercel/blob@2.9.0`. В этой д
 {"operation":"peek","after":0,"limit":30}
 {"operation":"ack","through":12,"snapshot_sha256":"<SHA-256 сохранённого канонического checkpoint>","open_drafts":[]}
 {"operation":"status"}
+{"operation":"metadata"}
 ```
 
 Bootstrap требует `seed.bot_id` с положительным целым ID бота, совпадающим
@@ -64,6 +65,13 @@ ACK не вызывает Bot API и не восстанавливает нез�
 `open_draft_count`, `busy`, `next_sequence`, `ack_sequence`, `can_send`.
 `seed_sha256` служит маркером непрерывности с исходным снимком.
 
+`metadata` требует той же авторизации и получает только метаданные двух
+фиксированных Blob через SDK `head`, без скачивания config/state и без Bot API:
+`{status:"ready",state:{etag_sha256,uploaded_at,size},config:{etag_sha256,uploaded_at,size}}`.
+ETag возвращается только как SHA-256; URL, исходный ETag, токены и содержимое
+Blob в ответ не включаются. Ошибки авторизации и отсутствие корректных метаданных
+не заменяются пустым успешным результатом.
+
 ## Хранение и аварии
 
 Все Blob закрытые. В production используются `production/config.json` и
@@ -78,6 +86,8 @@ checkpoint; их тексты и вложения сюда повторно не
 `put(access:'private',allowOverwrite:true,ifMatch:etag)`. CDN-кэш не участвует
 в принятии решений. Требование `max_connections:1` при регистрации webhook
 снижает конкуренцию; CAS остаётся обязательным даже при этой настройке.
+При наличии `BLOB_READ_WRITE_TOKEN` адаптер явно передаёт его в `get`/`put`/`head`,
+чтобы SDK не предпочёл неявную OIDC-авторизацию. Токен не выводится в диагностику.
 
 Перед `sendMessage` сохраняются исходный update, запланированный draft,
 намерение отправки и уникальная попытка. Следующим CAS фиксируется `sending`.

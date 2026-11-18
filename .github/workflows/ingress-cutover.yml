@@ -3,10 +3,22 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Read-only preflight or explicitly approved Vercel cutover
+        description: Preflight, approved cutover, or rollback of an untouched empty ingress
         type: choice
-        options: [preflight, activate]
+        options: [preflight, activate, rollback-empty]
         default: preflight
+      expected_state_sha256:
+        description: Independently verified bootstrap state ETag SHA256; required for rollback-empty
+        type: string
+        required: false
+      activation_checkpoint_sha256:
+        description: Immutable active checkpoint from the successful original cutover
+        type: string
+        required: false
+      activation_run_id:
+        description: Successful manual main ingress-cutover run that created the checkpoint
+        type: string
+        required: false
 permissions:
   contents: read
   actions: read
@@ -31,9 +43,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ github.sha }}
+          CUTOVER_OPERATION: ${{ inputs.operation }}
+          EXPECTED_STATE_SHA256: ${{ inputs.expected_state_sha256 }}
+          ACTIVATION_CHECKPOINT_SHA256: ${{ inputs.activation_checkpoint_sha256 }}
+          ACTIVATION_RUN_ID: ${{ inputs.activation_run_id }}
         run: |
           python - <<'PY'
-          import json, os, subprocess
+          import json, os, re, subprocess
           repo = 'Stolyarovmn/relocant-media'
           sha = os.environ['EXPECTED_SHA']
           def api(path):
@@ -43,6 +59,16 @@ jobs:
           ci = [r for r in runs if r['path'] == '.github/workflows/ci.yml'
                 and r['head_branch'] == 'main' and r['event'] == 'push']
           assert ci and ci[0]['status'] == 'completed' and ci[0]['conclusion'] == 'success'
+          if os.environ['CUTOVER_OPERATION'] == 'rollback-empty':
+              for key in ('EXPECTED_STATE_SHA256', 'ACTIVATION_CHECKPOINT_SHA256'):
+                  assert re.fullmatch(r'[0-9a-f]{64}', os.environ[key]), 'verified digest required'
+              run_id = os.environ['ACTIVATION_RUN_ID']
+              assert re.fullmatch(r'[1-9][0-9]{0,19}', run_id), 'activation run required'
+              run = api(f'actions/runs/{run_id}')
+              assert (str(run['id']) == run_id and run['status'] == 'completed'
+                      and run['conclusion'] == 'success' and run['event'] == 'workflow_dispatch'
+                      and run['head_branch'] == 'main'
+                      and run['path'] == '.github/workflows/ingress-cutover.yml'), 'unverified activation'
           PY
       - name: Verify snapshot and transfer private intake
         env:
@@ -57,6 +83,9 @@ jobs:
           EDITORIAL_INGRESS_TOKEN: ${{ secrets.EDITORIAL_INGRESS_TOKEN }}
           EDITORIAL_INGRESS_WEBHOOK_SECRET: ${{ secrets.EDITORIAL_INGRESS_WEBHOOK_SECRET }}
           CUTOVER_OPERATION: ${{ inputs.operation }}
+          EXPECTED_STATE_SHA256: ${{ inputs.expected_state_sha256 }}
+          ACTIVATION_CHECKPOINT_SHA256: ${{ inputs.activation_checkpoint_sha256 }}
+          ACTIVATION_RUN_ID: ${{ inputs.activation_run_id }}
         run: |
           set -euo pipefail
           test "$EDITORIAL_STORAGE_BACKEND" = ssh
@@ -72,7 +101,10 @@ jobs:
           EDITORIAL_SSH_KEY_PATH="$identity/key" \
           EDITORIAL_SSH_KNOWN_HOSTS_PATH="$identity/known_hosts" \
             python -m relocant_media.ops.ingress_cutover \
-              --operation "$CUTOVER_OPERATION" --work "$RUNNER_TEMP/intake-cutover"
+              --operation "$CUTOVER_OPERATION" --work "$RUNNER_TEMP/intake-cutover" \
+              --expected-state-sha256 "$EXPECTED_STATE_SHA256" \
+              --activation-checkpoint-sha256 "$ACTIVATION_CHECKPOINT_SHA256" \
+              --activation-run-id "$ACTIVATION_RUN_ID"
       - name: Remove private runner files
         if: always()
         run: rm -rf "$RUNNER_TEMP/intake-cutover" "$RUNNER_TEMP/intake-cutover-identity"

@@ -15,7 +15,7 @@ export function handler(dependencies = {}) {
       }
       diagnostics.setPhase("plan");
       const input = await bodyJSON(req, LIMITS.bootstrapBytes);
-      const ingress = new Ingress({ store: new PrivateBlobStore(), ...dependencies, onPhase: diagnostics.setPhase });
+      const ingress = new Ingress({ store: new PrivateBlobStore(undefined, env), ...dependencies, onPhase: diagnostics.setPhase });
       send(res, 200, await ingress.transfer(input));
     } catch (error) { failure(res, error, diagnostics); }
   };

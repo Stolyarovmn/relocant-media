@@ -9,7 +9,10 @@ export function handler(dependencies = {}) {
     const diagnostics = createDiagnostics("/api/telegram", dependencies.logger);
     try {
       if (req.method !== "POST") throw new HttpError(405, "post_required");
-      const ingress = new Ingress({ store: new PrivateBlobStore(), ...dependencies, onPhase: diagnostics.setPhase });
+      const ingress = new Ingress({
+        store: new PrivateBlobStore(undefined, dependencies.env ?? process.env),
+        ...dependencies, onPhase: diagnostics.setPhase,
+      });
       const settings = await ingress.config();
       if (!equalSecret(req.headers?.["x-telegram-bot-api-secret-token"], settings.webhook_secret)) {
         throw new HttpError(401, "unauthorized");

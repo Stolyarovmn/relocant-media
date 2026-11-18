@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -19,11 +20,13 @@ from relocant_media.ai.package import canonical_json
 from relocant_media.ops.actions_runtime import REPO, _commit_republication, restored, validate_ready
 from relocant_media.ops.serverless_snapshot import export_intake_state
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
+from relocant_media.ops.vercel_inbox import ingress_config, sequence_cursor
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 
 PRODUCTION_ORIGIN = "https://relocant-reader-intake.vercel.app"
 BOT_USERNAME = "relocant_media_belgrade_bot"
 MAX_SEED_BYTES = 512 * 1024
+ROLLBACK_QUIESCE_SECONDS = 45
 
 
 def _phase(name: str) -> None:
@@ -31,7 +34,7 @@ def _phase(name: str) -> None:
 
 
 def _api(client: httpx.Client, token: str, method: str, payload: dict[str, Any]) -> Any:
-    if (method not in {"getMe", "getChatMember", "getWebhookInfo", "setWebhook"}
+    if (method not in {"getMe", "getChatMember", "getWebhookInfo", "setWebhook", "deleteWebhook"}
             or not re.fullmatch(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,100}", token)):
         raise ValueError("Недопустимый вызов Bot API при переносе")
     response = client.post(f"https://api.telegram.org/bot{token}/{method}", json=payload,
@@ -75,6 +78,184 @@ def _transfer(client: httpx.Client, url: str, bridge: str,
     return cast(dict[str, Any], body)
 
 
+def _timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("Не указано проверяемое время состояния приёмника")
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("Некорректное время состояния приёмника") from None
+    if result.tzinfo is None:
+        raise ValueError("Время состояния приёмника должно содержать часовой пояс")
+    return result
+
+
+def _activation_evidence(storage: SSHStateClient, digest: str, run_id: str,
+                         source: dict[str, Any]) -> datetime:
+    if (not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)):
+        raise ValueError("Нужен проверенный checkpoint успешного ручного переключения")
+    content = storage.download(digest)
+    if len(content) > MAX_SEED_BYTES or hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError("Checkpoint переключения повреждён")
+    evidence = json.loads(content)
+    if (not isinstance(evidence, dict)
+            or set(evidence) != {"version", "expected_busy_sha256", "state"}
+            or type(evidence.get("version")) is not int or evidence["version"] != 1
+            or not isinstance(evidence.get("expected_busy_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", evidence["expected_busy_sha256"])
+            or not isinstance(evidence.get("state"), dict)):
+        raise ValueError("Неподходящий checkpoint переключения")
+    state = evidence["state"]
+    validate_ready(state)
+    if (state.get("run_id") != run_id or state.get("generation") != state.get("attempt")
+            or ingress_config(state.get("intake_state", {})) != {**source, "phase": "active"}
+            or sequence_cursor(state.get("intake_state", {}).get("serverless_sequence", 0)) != 0
+            or state["snapshot"]["sha256"] != source.get("seed_snapshot_sha256")):
+        raise ValueError("Checkpoint не подтверждает исходное переключение приёмника")
+    return _timestamp(state.get("started_at"))
+
+
+def _metadata(client: httpx.Client, url: str, bridge: str,
+              activation_cutoff: datetime, expected_sha256: str) -> dict[str, Any]:
+    result = _transfer(client, url, bridge, {"operation": "metadata"})
+    if set(result) != {"status", "state", "config"} or result["status"] != "ready":
+        raise ValueError("Нет подтверждённых метаданных приёмника")
+    for name in ("state", "config"):
+        item = result[name]
+        if (not isinstance(item, dict) or set(item) != {"etag_sha256", "uploaded_at", "size"}
+                or not isinstance(item["etag_sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", item["etag_sha256"])
+                or type(item["size"]) is not int or not 0 < item["size"] <= 8 * 1024 * 1024
+                or _timestamp(item["uploaded_at"]) > activation_cutoff):
+            raise ValueError("Приёмник изменялся после активации или метаданные неполны")
+    if _timestamp(result["state"]["uploaded_at"]) != _timestamp(result["config"]["uploaded_at"]):
+        raise ValueError("Состояние и настройки приёмника созданы не одним bootstrap")
+    if result["state"]["etag_sha256"] != expected_sha256:
+        raise ValueError("Состояние приёмника не совпадает с проверенным пустым снимком")
+    return {"state": result["state"], "config": result["config"]}
+
+
+def _audit(storage: SSHStateClient, work: Path, name: str, value: dict[str, Any]) -> str:
+    content = canonical_json(value).encode()
+    path = work / name
+    path.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    if storage.upload(path, "ingress-rollback-audit") != digest:
+        raise ValueError("Хранилище не подтвердило журнал отката")
+    return digest
+
+
+def rollback_empty(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
+                   token: str, bridge_token: str, expected_state_sha256: str,
+                   activation_checkpoint_sha256: str, activation_run_id: str, *,
+                   now: datetime | None = None) -> dict[str, Any]:
+    """Restore polling only for the independently verified, untouched bootstrap state."""
+    if (url != PRODUCTION_ORIGIN
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_state_sha256)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", bridge_token)):
+        raise ValueError("Для отката нужен рабочий приёмник и проверенный хеш пустого состояния")
+    at = now or datetime.now(UTC)
+    if at.tzinfo is None:
+        raise ValueError("Время отката должно содержать часовой пояс")
+    _phase("verify_rollback_bot")
+    me = _api(client, token, "getMe", {})
+    if (not isinstance(me, dict) or me.get("is_bot") is not True
+            or me.get("username") != BOT_USERNAME or type(me.get("id")) is not int):
+        raise ValueError("Токен не относится к рабочему редакционному боту")
+    state, sha = storage.read()
+    validate_ready(state)
+    intake = state.get("intake_state", {})
+    if sequence_cursor(intake.get("serverless_sequence", 0)) != 0:
+        raise ValueError("Непустую очередь приёмника нельзя откатывать без переноса событий")
+    source = ingress_config(intake)
+    marker = state.get("ingress_rollback")
+    if marker is not None:
+        if (not isinstance(marker, dict) or marker.get("version") != 1
+                or marker.get("operation") != "rollback-empty"
+                or marker.get("phase") not in {"prepared", "complete"}
+                or marker.get("url") != url
+                or marker.get("expected_state_sha256") != expected_state_sha256
+                or marker.get("activation_checkpoint_sha256") != activation_checkpoint_sha256
+                or marker.get("activation_run_id") != activation_run_id):
+            raise ValueError("Канонический маркер отката не совпадает с операцией")
+        if marker["phase"] == "complete":
+            if source is not None:
+                raise ValueError("После завершённого отката снова настроен приёмник")
+            webhook = _api(client, token, "getWebhookInfo", {})
+            if not isinstance(webhook, dict) or webhook.get("url") != "":
+                raise ValueError("После завершённого отката снова включён webhook")
+            return {"status": "polling_restored", "already_complete": True}
+    if (source is None or source["url"] != url
+            or source["phase"] != ("prepared" if marker is not None else "active")):
+        raise ValueError("Откат требует активного или подготовленного к откату приёмника")
+    activation_cutoff = _activation_evidence(
+        storage, activation_checkpoint_sha256, activation_run_id, source,
+    )
+    webhook = _api(client, token, "getWebhookInfo", {})
+    destination = f"{url}/api/telegram"
+    if (not isinstance(webhook, dict)
+            or webhook.get("url") not in ({destination, ""} if marker else {destination})):
+        raise ValueError("Webhook не соответствует проверяемому откату")
+    work.mkdir(mode=0o700, parents=True, exist_ok=False)
+    _phase("verify_untouched_ingress_metadata")
+    before = _metadata(client, url, bridge_token, activation_cutoff, expected_state_sha256)
+    if marker is None:
+        request_record = {
+            "version": 1, "operation": "rollback-empty", "phase": "prepared", "url": url,
+            "expected_state_sha256": expected_state_sha256, "metadata": before,
+            "activation_checkpoint_sha256": activation_checkpoint_sha256,
+            "activation_run_id": activation_run_id,
+            "seed_sha256": source["seed_sha256"], "activated_at": source["activated_at"],
+            "requested_at": at.isoformat(), "snapshot_sha256": state["snapshot"]["sha256"],
+        }
+        request_sha = _audit(storage, work, "rollback-empty-request.json", request_record)
+        marker = {**request_record, "request_audit_sha256": request_sha}
+        _phase("fence_polling_for_rollback")
+        state, sha = _commit_republication(storage, storage, state, sha, {
+            "ingress_rollback": marker,
+            "intake_state": {**intake, "ingress": {**source, "phase": "prepared"}},
+        }, os.environ, work)
+    elif (marker.get("metadata") != before or marker.get("seed_sha256") != source["seed_sha256"]
+          or marker.get("activated_at") != source["activated_at"]
+          or not isinstance(marker.get("request_audit_sha256"), str)
+          or not re.fullmatch(r"[0-9a-f]{64}", marker["request_audit_sha256"])):
+        raise ValueError("Метаданные приёмника изменились после подготовки отката")
+    _phase("delete_webhook_preserving_pending_updates")
+    if _api(client, token, "deleteWebhook", {"drop_pending_updates": False}) is not True:
+        raise ValueError("Telegram не подтвердил выключение webhook")
+    verified = _api(client, token, "getWebhookInfo", {})
+    if not isinstance(verified, dict) or verified.get("url") != "":
+        raise ValueError("Webhook всё ещё включён после запроса выключения")
+    # An invocation already dispatched before deleteWebhook can still write.
+    # Polling remains fenced for maxDuration plus the same teardown grace used by ingress.
+    _phase("wait_for_dispatched_webhooks")
+    time.sleep(ROLLBACK_QUIESCE_SECONDS)
+    _phase("verify_unchanged_ingress_after_webhook_removal")
+    after = _metadata(client, url, bridge_token, activation_cutoff, expected_state_sha256)
+    if after != before:
+        raise ValueError("Приёмник изменился во время выключения webhook")
+    fresh, fresh_sha = storage.read()
+    validate_ready(fresh)
+    if (fresh, fresh_sha) != (state, sha):
+        raise ValueError("Каноническое состояние изменилось во время отката")
+    audit_sha = _audit(storage, work, "rollback-empty-complete.json", {
+        **marker, "phase": "complete", "completed_at": at.isoformat(),
+        "metadata_after": after, "webhook_url": "",
+        "quiesce_seconds": ROLLBACK_QUIESCE_SECONDS,
+    })
+    restored_intake = dict(fresh["intake_state"])
+    del restored_intake["ingress"]
+    _phase("restore_canonical_polling")
+    _commit_republication(storage, storage, fresh, fresh_sha, {
+        "intake_state": restored_intake,
+        "ingress_rollback": {**marker, "phase": "complete", "completed_at": at.isoformat(),
+                             "completion_audit_sha256": audit_sha},
+    }, os.environ, work)
+    return {"status": "polling_restored", "state_sha256": expected_state_sha256,
+            "audit_sha256": audit_sha}
+
+
 def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
             token: str, bridge_token: str, webhook_secret: str, *, activate: bool = False,
             now: datetime | None = None) -> dict[str, Any]:
@@ -104,6 +285,11 @@ def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
     _phase("read_canonical_state")
     state, state_sha = storage.read()
     validate_ready(state)
+    rollback = state.get("ingress_rollback")
+    if activate and rollback is not None:
+        raise ValueError("Повторное включение приёмника после отката требует отдельной миграции")
+    if isinstance(rollback, dict) and rollback.get("phase") == "prepared":
+        raise ValueError("Сначала требуется завершить начатый откат приёмника")
     work.mkdir(mode=0o700, parents=True, exist_ok=False)
     existing = state.get("intake_state", {}).get("ingress")
     if existing:
@@ -187,7 +373,11 @@ def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--operation", choices=("preflight", "activate"), default="preflight")
+    parser.add_argument("--operation", choices=("preflight", "activate", "rollback-empty"),
+                        default="preflight")
+    parser.add_argument("--expected-state-sha256", default="")
+    parser.add_argument("--activation-checkpoint-sha256", default="")
+    parser.add_argument("--activation-run-id", default="")
     parser.add_argument("--url", default=PRODUCTION_ORIGIN)
     parser.add_argument("--work", type=Path, required=True)
     args = parser.parse_args()
@@ -201,11 +391,18 @@ def main() -> None:
             raise ValueError("Перенос разрешён только ручным Actions-запуском main")
         storage = SSHStateClient(SSHConfig.from_environment(os.environ))
         with httpx.Client(trust_env=False, transport=httpx.HTTPTransport(retries=0)) as client:
-            result = execute(storage, args.url, args.work, client,
-                             os.environ["TELEGRAM_BOT_TOKEN"],
-                             os.environ.get("EDITORIAL_INGRESS_TOKEN", ""),
-                             os.environ.get("EDITORIAL_INGRESS_WEBHOOK_SECRET", ""),
-                             activate=args.operation == "activate")
+            if args.operation == "rollback-empty":
+                result = rollback_empty(storage, args.url, args.work, client,
+                                        os.environ["TELEGRAM_BOT_TOKEN"],
+                                        os.environ.get("EDITORIAL_INGRESS_TOKEN", ""),
+                                        args.expected_state_sha256,
+                                        args.activation_checkpoint_sha256, args.activation_run_id)
+            else:
+                result = execute(storage, args.url, args.work, client,
+                                 os.environ["TELEGRAM_BOT_TOKEN"],
+                                 os.environ.get("EDITORIAL_INGRESS_TOKEN", ""),
+                                 os.environ.get("EDITORIAL_INGRESS_WEBHOOK_SECRET", ""),
+                                 activate=args.operation == "activate")
     except Exception as error:
         print(json.dumps({"status": "blocked", "error_type": type(error).__name__}))
         raise SystemExit(1) from None

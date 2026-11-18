@@ -4,6 +4,55 @@ import { BlobPreconditionFailedError } from "@vercel/blob";
 import { Conflict, PrivateBlobStore, paths } from "../lib/store.js";
 import { ReplyBot } from "../lib/bot.js";
 
+test("явный RW token одинаково передаётся get, put и head при настроенном OIDC", async () => {
+  const token = "FAKE_EXPLICIT_RW_TOKEN_DO_NOT_PRINT";
+  const env = { BLOB_READ_WRITE_TOKEN: token, VERCEL_OIDC_TOKEN: "FAKE_OIDC", BLOB_STORE_ID: "store_fake" };
+  const seen = [];
+  const check = (method, options) => {
+    assert.equal(options.token, token);
+    assert.equal(options.oidcToken, undefined);
+    assert.equal(options.storeId, undefined);
+    seen.push(method);
+  };
+  const store = new PrivateBlobStore({
+    get: async (_path, options) => {
+      check("get", options);
+      assert.equal(options.access, "private");
+      assert.equal(options.useCache, false);
+      return { statusCode: 200, blob: { etag: '"etag"' }, stream: new Response("{}").body };
+    },
+    put: async (_path, _body, options) => {
+      check("put", options);
+      assert.equal(options.access, "private");
+      assert.equal(options.allowOverwrite, true);
+      assert.equal(options.ifMatch, '"etag"');
+      return { etag: '"next"' };
+    },
+    head: async (_path, options) => {
+      check("head", options);
+      return { etag: '"etag"', size: 2, uploadedAt: new Date("2026-11-18T06:00:00Z"), token };
+    },
+  }, env);
+  await store.read("production/state.json");
+  await store.write("production/state.json", {}, '"etag"');
+  const metadata = await store.metadata("production/state.json");
+  assert.deepEqual(seen, ["get", "put", "head"]);
+  assert.ok(!JSON.stringify(metadata).includes(token));
+});
+
+test("при отсутствии token ошибки SDK авторизации не маскируются", async () => {
+  const authError = new Error("credential_missing_fixture");
+  const reject = async (...args) => {
+    assert.equal(args.at(-1).token, undefined);
+    throw authError;
+  };
+  const store = new PrivateBlobStore({ get: reject, put: reject, head: reject }, {});
+  for (const operation of [() => store.read("production/state.json"),
+    () => store.write("production/state.json", {}), () => store.metadata("production/state.json")]) {
+    await assert.rejects(operation(), (error) => error === authError);
+  }
+});
+
 test("Blob adapter всегда private, origin read, CAS overwrite и immutable create", async () => {
   let value = { revision: 1 };
   let etag = '"one"';

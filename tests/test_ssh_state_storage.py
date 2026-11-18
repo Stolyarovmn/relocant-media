@@ -141,8 +141,10 @@ def ingress_context(context, monkeypatch):
             value = json.loads(body)
             if 'expected_busy_sha256' in value:
                 checkpoints.append(value)
-                phase = value['state']['intake_state']['ingress']['phase']
+                phase = value['state']['intake_state'].get('ingress', {}).get('phase', 'polling')
                 trace.append(f'checkpoint:{phase}')
+            elif value.get('operation') == 'rollback-empty':
+                trace.append(f"audit:{value['phase']}")
             else:
                 trace.append('seed')
         if operation == 'write_state':
@@ -155,7 +157,7 @@ def ingress_context(context, monkeypatch):
                 old_phase = target['intake_state'].get('ingress', {}).get('phase', 'unprepared')
                 label = f'busy:{old_phase}'
             else:
-                phase = target['intake_state']['ingress']['phase']
+                phase = target['intake_state'].get('ingress', {}).get('phase', 'polling')
                 if fault.get('ready_phase') == phase:
                     raise SSHStorageError('storage_error')
                 label = phase
@@ -180,6 +182,24 @@ def ingress_context(context, monkeypatch):
             result = {'can_manage_direct_messages': True}
         elif operation == 'getWebhookInfo':
             result = copy.deepcopy(webhook)
+        elif operation == 'transfer' and payload.get('operation') == 'metadata':
+            assert request.headers['Authorization'] == f'Bearer {bridge}'
+            return httpx.Response(200, json={
+                'status': 'ready',
+                'state': {'etag_sha256': 'd' * 64, 'size': 7060,
+                          'uploaded_at': '2020-01-01T00:00:00.000Z'},
+                'config': {'etag_sha256': 'e' * 64, 'size': 259,
+                           'uploaded_at': '2020-01-01T00:00:00.000Z'},
+            })
+        elif operation == 'deleteWebhook':
+            recorded = backend.read_state()['state']
+            assert recorded['status'] == 'ready'
+            assert recorded['intake_state']['ingress']['phase'] == 'prepared'
+            assert recorded['ingress_rollback']['phase'] == 'prepared'
+            assert len(writes) == 6
+            assert payload == {'drop_pending_updates': False}
+            webhook['url'] = ''
+            result = True
         elif operation in {'transfer', 'setWebhook'}:
             recorded = backend.read_state()['state']
             assert recorded['status'] == 'ready'
@@ -265,6 +285,66 @@ def test_ingress_failed_ssh_ready_commit_preserves_busy_fence(
         execute_ingress(ingress_context, tmp_path / 'blocked-retry')
     assert client.read() == observed
     assert 'transfer' not in trace and 'setWebhook' not in trace
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_empty_ingress_rollback_uses_real_ssh_storage_without_discarding_state(
+    context, ingress_context, tmp_path, monkeypatch, failure,
+):
+    backend, initial, snapshot = context
+    client, http, trace, writes, checkpoints, fault, seed = ingress_context
+    monkeypatch.setenv('GITHUB_RUN_ID', '123456789')
+    execute_ingress(ingress_context, tmp_path / 'activate-for-rollback')
+    activation_checkpoint = hashlib.sha256(storage.encode(checkpoints[-1])).hexdigest()
+    initial_blobs = {path.name for path in backend.blobs.iterdir()}
+    trace.clear()
+
+    def quiesce(seconds):
+        assert seconds == 45
+        recorded = backend.read_state()['state']
+        assert recorded['status'] == 'ready'
+        assert recorded['intake_state']['ingress']['phase'] == 'prepared'
+        assert recorded['ingress_rollback']['phase'] == 'prepared'
+        trace.append('quiesced')
+
+    monkeypatch.setattr(ingress_cutover.time, 'sleep', quiesce)
+    if failure:
+        fault['ready_phase'] = 'polling'
+
+    def rollback():
+        return ingress_cutover.rollback_empty(
+            client, ingress_cutover.PRODUCTION_ORIGIN, tmp_path / 'rollback', http,
+            '123456:FAKE_TOKEN_FOR_TESTING_ONLY_123456', 'b' * 40, 'd' * 64,
+            activation_checkpoint, '123456789', now=datetime(2026, 11, 18, 13, tzinfo=UTC),
+        )
+
+    if failure:
+        with pytest.raises(SSHStorageError):
+            rollback()
+    else:
+        assert rollback()['status'] == 'polling_restored'
+    current, _ = client.read()
+    assert current['status'] == ('busy' if failure else 'ready')
+    assert current['ingress_rollback']['phase'] == ('prepared' if failure else 'complete')
+    assert trace == [
+        'getMe', 'getWebhookInfo', 'transfer', 'audit:prepared', 'checkpoint:prepared',
+        'busy:active', 'prepared', 'deleteWebhook', 'getWebhookInfo', 'quiesced', 'transfer',
+        'audit:complete', 'checkpoint:polling', 'busy:prepared', *([] if failure else ['polling']),
+    ]
+    assert [state['status'] for state in writes[4:]] == (
+        ['busy', 'ready', 'busy'] if failure else ['busy', 'ready', 'busy', 'ready']
+    )
+    if failure:
+        assert current['intake_state']['ingress']['phase'] == 'prepared'
+    else:
+        assert current['intake_state'] == initial['intake_state']
+    assert current['snapshot'] == initial['snapshot']
+    assert current['map_republications'] == initial['map_republications']
+    assert initial_blobs <= {path.name for path in backend.blobs.iterdir()}
+    assert client.download(initial['snapshot']['drive_file_id']) == snapshot
+    assert len(checkpoints) == 4
+    seed_id = current['ingress_rollback']['seed_sha256']
+    assert json.loads(client.download(seed_id))['cases'] == seed['cases']
 
 
 @pytest.mark.parametrize('field,value', [('server_writers_fenced', False),

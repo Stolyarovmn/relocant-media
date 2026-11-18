@@ -3,6 +3,55 @@ import assert from "node:assert/strict";
 import { fixture, message, seed, bootstrap, FakeStore } from "./helpers.js";
 import { Ingress, LIMITS } from "../lib/engine.js";
 
+test("пустой и повторный peek не пишут Blob; новый экспорт сохраняет границу ACK", async () => {
+  const f = await fixture();
+  assert.equal(f.store.revision, 2); // bootstrap: config и state.
+  for (let repeat = 0; repeat < 3; repeat++) {
+    assert.deepEqual(await f.ingress.transfer({ operation: "peek" }), { status: "ready", events: [] });
+  }
+  assert.equal(f.store.revision, 2);
+
+  await f.receive(message(1, "Привет"));
+  assert.equal(f.store.revision, 5); // prepared, sending, затем durable receipt.
+  assert.equal(f.calls.length, 1);
+  assert.equal((await f.state()).exported_through, 0);
+  for (let repeat = 0; repeat < 3; repeat++) {
+    assert.deepEqual((await f.ingress.transfer({ operation: "peek", after: 99 })).events, []);
+  }
+  assert.equal(f.store.revision, 5);
+  await assert.rejects(f.ingress.transfer({ operation: "ack", through: 1,
+    snapshot_sha256: "a".repeat(64) }), { status: 409, code: "ack_conflict" });
+  assert.equal(f.store.revision, 5);
+
+  const first = await f.ingress.transfer({ operation: "peek" });
+  assert.deepEqual(first.events.map((event) => event.sequence), [1]);
+  assert.equal(f.store.revision, 6);
+  for (let repeat = 0; repeat < 3; repeat++) {
+    assert.deepEqual(await f.ingress.transfer({ operation: "peek" }), first);
+  }
+  assert.equal(f.store.revision, 6);
+
+  await f.receive(message(2, "Текст обращения"));
+  assert.equal(f.store.revision, 7);
+  assert.deepEqual(await f.ingress.transfer({ operation: "peek", limit: 1 }), first);
+  assert.equal(f.store.revision, 7);
+  const next = await f.ingress.transfer({ operation: "peek", after: 1 });
+  assert.deepEqual(next.events.map((event) => event.sequence), [2]);
+  assert.equal((await f.state()).exported_through, 2);
+  assert.equal(f.store.revision, 8);
+  await assert.rejects(f.ingress.transfer({ operation: "ack", through: 3,
+    snapshot_sha256: "b".repeat(64) }), { status: 409, code: "ack_conflict" });
+  assert.equal(f.store.revision, 8);
+
+  await f.ingress.transfer({ operation: "ack", through: 2, snapshot_sha256: "b".repeat(64) });
+  assert.equal(f.store.revision, 9);
+  for (let repeat = 0; repeat < 3; repeat++) {
+    assert.deepEqual((await f.ingress.transfer({ operation: "peek" })).events, []);
+  }
+  assert.equal(f.store.revision, 9);
+  assert.equal((await f.state()).ack_sequence, 2);
+});
+
 test("текст, фото, правка и выбор темы формируют один черновик", async () => {
   const f = await fixture();
   await f.receive(message(1, "Привет"));
