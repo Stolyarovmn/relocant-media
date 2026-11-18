@@ -153,6 +153,8 @@ def test_manual_operations_have_separate_workflow_queues_and_shared_state_lock()
                  "&& 'editorial-manual-cycle' "
                  "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'intake' "
                  "&& 'editorial-manual-intake' "
+                 "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'discovery' "
+                 "&& 'editorial-manual-discovery' "
                  "|| 'canonical-editorial-writer' }}",
         "cancel-in-progress": "false",
     }
@@ -160,6 +162,22 @@ def test_manual_operations_have_separate_workflow_queues_and_shared_state_lock()
     assert "inputs.mode != 'fallback-preview'" in _chain()["if"]
     assert "inputs.mode != 'fallback'" in _chain()["if"]
     assert "!startsWith(inputs.mode, 'map-')" in _chain()["if"]
+
+
+@pytest.mark.parametrize('mode', ['intake', 'editorial', 'discovery'])
+def test_manual_workflow_is_not_queued_behind_the_automatic_chain(mode):
+    expression = workflow()['concurrency']['group'].removeprefix('${{').removesuffix('}}').strip()
+    for prefix in ('fallback', 'map-'):
+        expression = expression.replace(
+            f"startsWith(inputs.mode, '{prefix}')", repr(mode.startswith(prefix)),
+        )
+    expression = expression.replace('inputs.mode', repr(mode))
+    expression = expression.replace('github.event_name', repr('workflow_dispatch'))
+    expression = expression.replace('&&', ' and ').replace('||', ' or ')
+    group = eval(expression, {'__builtins__': {}}, {})
+    assert group.startswith('editorial-manual-')
+    assert group != 'canonical-editorial-writer'
+    assert workflow()['jobs']['cycle']['concurrency']['group'] == 'canonical-editorial-state'
 
 
 def test_published_correction_is_manual_main_only_and_shares_state_lock():

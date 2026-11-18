@@ -2,12 +2,14 @@
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,33 @@ from relocant_media.services.reader_resolution import process_reader_resolutions
 from relocant_media.services.serverless_intake import import_inbox
 from relocant_media.services.submission_queue import batch_submissions
 from relocant_media.storage.file_lock import file_lock
+from relocant_media.storage.models import Submission
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
+
+
+def _batch_signature(rows: list[Submission], owner_user_id: int | None) -> str:
+    signature = ",".join(str(row.id) for row in rows)
+    decisions = []
+    for row in rows:
+        review = row.payload.get("public_source_review", {})
+        if (not isinstance(review, dict)
+                or row.payload.get("reader_intake") is not True or not owner_user_id
+                or review.get("retry_budget_version") != 1
+                or review.get("owner_user_id") != owner_user_id
+                or not isinstance(review.get("material_sha256"), str)
+                or not re.fullmatch(r"[a-f0-9]{64}", review["material_sha256"])):
+            continue
+        try:
+            stamp = datetime.fromisoformat(review["at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if stamp.tzinfo is not None:
+            # This canonical owner decision is the retry epoch, not a grant for new content.
+            # Keeping its original hash stable prevents reader edits from resetting attempts.
+            decisions.append((row.id, review["at"], review["material_sha256"]))
+    if decisions:
+        signature += ":" + sha256(json.dumps(decisions).encode()).hexdigest()
+    return signature
 
 
 async def collect_batch(
@@ -87,11 +115,12 @@ async def collect_batch(
 
     await resolve_reader_cases()
     with Session(engine) as session:
-        ids = [row.id for row in batch_submissions(session)]
+        rows = batch_submissions(session)
+        ids = [row.id for row in rows]
+        signature = _batch_signature(rows, owner_user_id)
     result["pending_submissions"] = len(ids)
     if not ids:
         return result
-    signature = ",".join(map(str,ids))
     attempts = state.get("attempts",0) if state.get("signature") == signature else 0
     if attempts >= 3:
         result["status"] = "blocked_retry_budget"

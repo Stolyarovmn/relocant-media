@@ -141,6 +141,61 @@ async def test_unchanged_failed_batch_has_durable_retry_budget(engine):
     assert result['status'] == 'blocked_retry_budget' and not result['pipeline_started']
 
 
+@pytest.mark.asyncio
+async def test_explicit_owner_decision_gets_three_attempts_but_reader_edits_do_not(engine):
+    from datetime import UTC, datetime
+
+    owner = 3002000011
+    with Session(engine) as session:
+        row = Submission(kind='news_tip', status='new', payload={
+            'city': 'belgrade', 'reader_intake': True, 'text': 'Сигнал по публичной ссылке',
+        })
+        session.add(row)
+        session.commit()
+        sid = row.id
+    calls = []
+    state = {}
+    options = dict(enabled=True, store_guard=lambda: nullcontext(True), state=state,
+                   owner_user_id=owner, run_pipeline=lambda: calls.append('attempt') or 1)
+    for _ in range(4):
+        result = await collect_batch(engine, Bot(), **options)
+    assert result['status'] == 'blocked_retry_budget' and len(calls) == 3
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        row.payload = {**row.payload, 'public_source_review': {
+            'retry_budget_version': 1,
+            'owner_user_id': owner + 1, 'at': datetime.now(UTC).isoformat(),
+            'material_sha256': 'a' * 64,
+        }}
+        session.commit()
+    assert (await collect_batch(engine, Bot(), **options))['status'] == 'blocked_retry_budget'
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        row.payload = {**row.payload, 'public_source_review': {
+            'owner_user_id': owner, 'at': datetime.now(UTC).isoformat(),
+            'material_sha256': 'a' * 64,
+        }}
+        session.commit()
+    # Deploying the new protocol does not reset a legacy exhausted budget.
+    assert (await collect_batch(engine, Bot(), **options))['status'] == 'blocked_retry_budget'
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        row.payload = {**row.payload, 'public_source_review': {
+            **row.payload['public_source_review'], 'owner_user_id': owner,
+            'retry_budget_version': 1,
+        }}
+        session.commit()
+    for _ in range(4):
+        result = await collect_batch(engine, Bot(), **options)
+    assert result['status'] == 'blocked_retry_budget' and len(calls) == 6
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        row.payload = {**row.payload, 'text': 'Новое сообщение читателя'}
+        session.commit()
+    assert (await collect_batch(engine, Bot(), **options))['status'] == 'blocked_retry_budget'
+    assert len(calls) == 6
+
+
 def test_scoped_primary_does_not_touch_normal_checkpoint_or_unrelated_items(queue,tmp_path):
     engine, process = queue
     with Session(engine) as s:

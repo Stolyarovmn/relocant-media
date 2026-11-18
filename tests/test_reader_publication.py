@@ -124,6 +124,12 @@ console.log(JSON.stringify((await f.ingress.transfer({operation:'peek'})).events
         capture_output=True, text=True, encoding="utf-8", timeout=30,
     )
     events = json.loads(result.stdout)
+    for entry in events:
+        if isinstance(entry.get('draft'), dict):
+            entry['draft']['payload']['public_source_review'] = {
+                'owner_user_id': OWNER, 'at': '2026-11-18T16:00:00+00:00',
+                'material_sha256': 'a' * 64,
+            }
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     try:
@@ -133,6 +139,7 @@ console.log(JSON.stringify((await f.ingress.transfer({operation:'peek'})).events
         with Session(engine) as session:
             row = session.scalar(select(Submission).where(Submission.kind == "news_tip"))
             assert row.status == "reader_review"
+            assert 'public_source_review' not in row.payload
             assert permission_reason(row.payload, POLICY["channel_id"]) is None
             assert row.payload["reader_publication"]["signature"]["label"] == "@reader_alias"
             assert len(list(session.scalars(select(Submission)))) == 1

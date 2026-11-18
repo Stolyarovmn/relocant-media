@@ -177,6 +177,7 @@ def _news_state(session: Session, row: Submission, now: datetime) -> str | None:
     news_already_sent = any(_confirmed_post(session, run, city) for run in direct_runs)
     related = [] if news_already_sent else _related_runs(session, raw_ids, direct_runs, city=city)
     runs = [*direct_runs, *related]
+    _set_resolution(row, primary_processing_retryable=not runs)
     for run in runs:
         if (post_id := _confirmed_post(session, run, city)) is not None:
             text = ("Материал по вашему обращению опубликован"
@@ -190,6 +191,9 @@ def _news_state(session: Session, row: Submission, now: datetime) -> str | None:
         return "Проверьте квитанцию публикации перед ответом автору."
     if any(run.outcome.get("status") == "human_review" for run in runs):
         return "Новость ждёт редакционной проверки."
+    if not runs and _primary_review_available(row):
+        return ("Первоисточник найден, редакционный разбор ещё не завершён. "
+                "После устранения сбоя можно повторить разбор этой же версии.")
     if len(direct_runs) == len(raw_ids) and all(
         run.delivery_status == "cancelled" or (
             run.outcome.get("status") in {"skipped", "blocked"}
@@ -228,7 +232,11 @@ def _exact_owner_card(
 def _primary_review_available(row: Submission) -> bool:
     publication = row.payload.get("reader_publication")
     return bool(
-        row.kind == "news_tip" and row.status in {"reader_review", "waiting_primary"}
+        row.kind == "news_tip" and (
+            row.status in {"reader_review", "waiting_primary"}
+            or row.status == "source_linked"
+            and _resolution(row).get("primary_processing_retryable") is True
+        )
         and isinstance(publication, dict)
         and publication.get("version") == POLICY["version"]
         and publication.get("stage") == "confirmed"
@@ -265,9 +273,14 @@ def record_reader_resolution_callback(
         return OwnerUpdateResult(True, False, "Карточка обращения не найдена.")
     assert row is not None
     if match.group(1) == "primary":
+        if row.status == "source_linked" and session.scalar(select(EditorialRun.raw_item_id).where(
+            EditorialRun.raw_item_id.in_(row.payload.get("raw_item_ids", [])),
+        ).limit(1)) is not None:
+            return OwnerUpdateResult(True, False, "Материал уже рассмотрен; проверьте его решение.")
         if not _primary_review_available(row):
             return OwnerUpdateResult(True, False, "Нет подтверждённого сигнала с исходной ссылкой.")
         row.payload = {**row.payload, "public_source_review": {
+            "retry_budget_version": 1,
             "owner_user_id": owner_user_id, "at": datetime.now(UTC).isoformat(),
             "urls": tip_urls(row.payload),
             "material_sha256": material_fingerprint(row.payload),
@@ -408,8 +421,8 @@ def _owner_card(row: Submission, reason: str, owner_chat_id: int) -> dict[str, A
             "Ответьте на эту карточку готовым текстом. Он уйдёт автору обращения."
         ),
         "reply_markup": {"inline_keyboard": [
-            *([[{"text": ("Повторить проверку источника" if row.status == "waiting_primary"
-                          else "Проверить первоисточник"),
+            *([[{"text": ("Проверить первоисточник" if row.status == "reader_review"
+                          else "Повторить проверку источника"),
                  "callback_data": f"rr:primary:{row.id}"}]]
               if _primary_review_available(row) else []),
             [{"text": "Вложения", "callback_data": f"rr:media:{row.id}"}],
