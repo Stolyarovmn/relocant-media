@@ -201,6 +201,75 @@ async def test_legacy_seed_id_is_preserved(engine):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("media", [None, "photo", "video", "document"])
+@pytest.mark.parametrize("delivery", ["sent", "uncertain"])
+async def test_fast_followup_receipt_survives_import_without_duplicate_ack(engine, media, delivery):
+    first = envelope()
+    first["draft"]["status"] = "new"
+    first["notice"] = {"key": "accepted", "status": "sent", "telegram_message_id": 201}
+    bot = OwnerBot([])
+    await import_inbox(engine, bot, [first], owner_user_id=None, owner_chat_id=None)
+    message = {"message_id": 102, "from": {"id": 42},
+               "chat": {"id": 42, "type": "private"}, "text": "Уточнение автора",
+               "reply_to_message": {"message_id": 201}}
+    if media:
+        file = {"file_id": "followup-file", "file_unique_id": "followup-unique"}
+        message[media] = [file] if media == "photo" else file
+    receipt = {"key": "received:502", "status": delivery, "telegram_message_id": 202,
+               "text": "Получено и сохранено.", "response_seconds": 0.8}
+    event = {"sequence": 2, "update": {"update_id": 502, "message": message}, "notice": receipt}
+    for _ in range(2):
+        await import_inbox(engine, bot, [event], owner_user_id=None, owner_chat_id=None, after=1)
+    with Session(engine) as session:
+        rows = session.scalars(select(Submission)).all()
+        assert len(rows) == 1
+        assert rows[0].payload["reader_notices"]["added:102"] == receipt
+        assert "Уточнение автора" in rows[0].payload["text"]
+        if media:
+            assert rows[0].payload["attachments"][-1]["file_id"] == "followup-file"
+    assert bot.calls == []
+    if delivery == "sent":
+        # Ответ на быстрое подтверждение тоже остаётся в исходной заявке.
+        next_message = {**message, "message_id": 103, "text": "Ещё уточнение",
+                        "reply_to_message": {"message_id": 202}}
+        await import_inbox(engine, bot, [{"sequence": 3,
+            "update": {"update_id": 503, "message": next_message},
+            "notice": {**receipt, "key": "received:503", "telegram_message_id": 203}}],
+            owner_user_id=None, owner_chat_id=None, after=2)
+        with Session(engine) as session:
+            assert len(session.scalars(select(Submission)).all()) == 1
+        assert bot.calls == []
+
+
+@pytest.mark.asyncio
+async def test_relay_rejects_pending_or_mismatched_receipt_before_import(engine):
+    for notice in [{"key": "received:502", "status": "pending"},
+                   {"key": "received:999", "status": "sent", "telegram_message_id": 202}]:
+        event = {"sequence": 2, "update": {"update_id": 502, "message": {}}, "notice": notice}
+        with pytest.raises(ValueError, match="transport receipt"):
+            await import_inbox(engine, OwnerBot([]), [envelope(), event],
+                               owner_user_id=None, owner_chat_id=None)
+        with Session(engine) as session:
+            assert session.scalar(select(Submission)) is None
+
+
+@pytest.mark.asyncio
+async def test_repeated_terminal_button_never_opens_new_canonical_draft(engine):
+    event = {"sequence": 1, "receipt_only": True,
+             "update": {"update_id": 501, "message": {"message_id": 101,
+                        "from": {"id": 42}, "chat": {"id": 42, "type": "private"},
+                        "text": "Вопрос или идея"}},
+             "notice": {"key": "button:501", "status": "sent", "telegram_message_id": 201}}
+    bot = OwnerBot([])
+    for _ in range(2):
+        await import_inbox(engine, bot, [event], owner_user_id=None, owner_chat_id=None)
+    with Session(engine) as session:
+        assert session.scalar(select(Submission)) is None
+        assert session.get(TelegramUpdateReceipt, 501).status == "ignored"
+    assert bot.calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prepared", "active"])
 async def test_canonical_source_disables_polling_and_checkpoints_cursor(
     engine, monkeypatch, phase,

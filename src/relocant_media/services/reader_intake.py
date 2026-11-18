@@ -420,6 +420,7 @@ def record_reader_message(
     *,
     edited: bool = False,
     channel_id: int = APPROVED_CHANNEL_ID,
+    transport_notice: dict[str, Any] | None = None,
 ) -> bool:
     identity = _identity(message)
     items = _items(message)
@@ -493,13 +494,20 @@ def record_reader_message(
         # Recheck with the added evidence and preserve earlier delivery receipts.
         row.payload = {**row.payload, "last_followup_at": received_at.isoformat()}
     if row.status not in DRAFT_STATES:
-        _notice(
-            row,
-            f"added:{message_id}",
-            f"Добавлено к заявке №{submission_reference(row)}.",
-            reply_to=message_id,
-            received_at=received_at,
-        )
+        if transport_notice and transport_notice.get("key", "").startswith("received:"):
+            # The ingress receipt and attachment commit together. Its message ID
+            # also lets a reply to the fast acknowledgement reach this same case.
+            notices = {**row.payload.get("reader_notices", {}),
+                       f"added:{message_id}": dict(transport_notice)}
+            row.payload = {**row.payload, "reader_notices": notices}
+        else:
+            _notice(
+                row,
+                f"added:{message_id}",
+                f"Добавлено к заявке №{submission_reference(row)}.",
+                reply_to=message_id,
+                received_at=received_at,
+            )
     return True
 
 

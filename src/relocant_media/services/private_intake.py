@@ -249,6 +249,7 @@ async def process_private_updates(
     owner_chat_id: int | None = None,
     reader_feedback_enabled: bool = False,
     channel_id: int = APPROVED_CHANNEL_ID,
+    transport_notice: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Store authenticated Telegram updates, then deliver reader receipts."""
     received = 0
@@ -340,6 +341,7 @@ async def process_private_updates(
                             ):
                                 accepted = record_reader_message(
                                     session, message, edited=edited, channel_id=channel_id,
+                                    transport_notice=transport_notice,
                                 )
                             else:
                                 accepted = save_channel_tip(
@@ -359,7 +361,9 @@ async def process_private_updates(
                                     session, message, city="belgrade",
                                 ).outcome == "submitted"
                             elif not accepted:
-                                accepted = record_reader_message(session, message)
+                                accepted = record_reader_message(
+                                    session, message, transport_notice=transport_notice,
+                                )
                         elif reader_feedback_enabled:
                             accepted = record_reader_message(session, message, edited=True)
                 session.add(
