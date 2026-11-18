@@ -21,6 +21,7 @@ from relocant_media.services.production_media import (
     PreparedProductionMedia,
     prepare_production_media,
 )
+from relocant_media.services.reader_publication import public_reader_material
 from relocant_media.services.rich_delivery import (
     PreparedNativeMessage,
     RichMessageBot,
@@ -29,7 +30,7 @@ from relocant_media.services.rich_delivery import (
     send_native_message,
 )
 from relocant_media.storage.locks import lock_editorial_city
-from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 
 APPROVED_CHANNEL_ID = -1003967014133
 # Production routing is fail-closed per city. Future city channels (for example
@@ -92,6 +93,27 @@ async def deliver_reviewed(
         if (run.delivery_status != "pending" or post.telegram_message_id is not None
                 or run.staging_message_id is not None):
             raise DeliveryBlockedError("delivery outcome requires manual reconciliation")
+        if "_reader_submission_id" in run.outcome:
+            sid = run.outcome["_reader_submission_id"]
+            submission = session.get(Submission, sid) if type(sid) is int and sid > 0 else None
+            if (submission is None or submission.payload.get("reader_intake") is not True
+                    or raw_item_id not in submission.payload.get("raw_item_ids", [])):
+                raise DeliveryBlockedError("reader material provenance is missing")
+            owner = submission.payload.get("reader_resolution", {}).get("owner_notice", {})
+            try:
+                material = public_reader_material(
+                    submission.payload, target_channel_id=target_channel_id,
+                    owner_user_id=owner.get("chat_id"),
+                )
+            except ValueError as error:
+                raise DeliveryBlockedError(str(error)) from error
+            if material["credit"] and material["credit"] not in post.body:
+                raise DeliveryBlockedError("reader-selected credit is missing from reviewed text")
+            r = submission.payload["reader_publication"]
+            if r["signature"]["mode"] == "anonymous" and (
+                r.get("available_username") and r["available_username"] in post.body
+            ):
+                raise DeliveryBlockedError("anonymous reader profile must not appear in the post")
         if "_package" not in run.outcome:
             raise DeliveryBlockedError("reviewed event package is required")
         package = EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))

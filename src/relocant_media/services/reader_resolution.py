@@ -14,6 +14,11 @@ from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
 from relocant_media.domain.dedup import EventCandidate, same_event
 from relocant_media.services.owner_review import OwnerUpdateResult
 from relocant_media.services.reader_intake import reader_destination
+from relocant_media.services.reader_publication import (
+    human_review_reason,
+    material_fingerprint,
+    owner_publication_summary,
+)
 from relocant_media.services.submission_feedback import INCIDENT
 from relocant_media.services.submission_reference import submission_reference
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
@@ -26,9 +31,9 @@ _OWNER_KINDS = {
     "technical": "Проблема с картой или ботом",
     "question": "Вопрос или предложение",
 }
-_OWNER_ACTION = re.compile(r"rr:(close|media):([1-9][0-9]{0,17})")
+_OWNER_ACTION = re.compile(r"rr:(close|media|approve_media|reject_media):([1-9][0-9]{0,17})")
 _MEDIA_METHODS = {"photo": "sendPhoto", "video": "sendVideo",
-                  "document": "sendDocument", "voice": "sendVoice"}
+                  "document": "sendDocument", "voice": "sendVoice", "audio": "sendAudio"}
 _NO_ACTION = "Редакция рассмотрела ваше обращение. Дальнейших действий по нему не планируется."
 _EXPIRED = (
     "Обращение закрыто. За время проверки мы не нашли достаточного подтверждения, "
@@ -134,6 +139,8 @@ def _related_runs(
 
 
 def _news_state(session: Session, row: Submission, now: datetime) -> str | None:
+    if row.status == "reader_review":
+        return "Материал читателя. Проверьте содержание, права и факты перед публикацией."
     if row.status == "expired":
         _close(row, _EXPIRED, "expired", now=now)
         return None
@@ -233,6 +240,35 @@ def record_reader_resolution_callback(
     if not _exact_owner_card(row, owner_chat_id, message_id):
         return OwnerUpdateResult(True, False, "Карточка обращения не найдена.")
     assert row is not None
+    if match.group(1) == "reject_media":
+        if row.status == "closed":
+            return OwnerUpdateResult(True, False, "Обращение уже закрыто.")
+        row.payload = {**row.payload, "reader_media_review": {
+            "decision": "rejected", "owner_user_id": owner_user_id,
+            "material_sha256": material_fingerprint(row.payload),
+            "at": datetime.now(UTC).isoformat(),
+        }, "updated_at": datetime.now(UTC).isoformat()}
+        return OwnerUpdateResult(True, True, "Вложения отклонены. Публикация не запускалась.")
+    if match.group(1) == "approve_media":
+        if row.status == "closed" or not row.payload.get("attachments"):
+            return OwnerUpdateResult(True, False, "Нет открытых вложений для проверки.")
+        # A bot/model cannot approve media; the exact private owner card is required.
+        delivered = _resolution(row)
+        for attachment in row.payload["attachments"]:
+            file_id = attachment.get("file_id", "")
+            key = f"attachment:{sha256(file_id.encode()).hexdigest()}"
+            if delivered.get(key, {}).get("status") != "sent":
+                return OwnerUpdateResult(
+                    True, False, "Сначала получите все файлы кнопкой «Вложения» и просмотрите их.",
+                )
+        row.payload = {**row.payload, "reader_media_review": {
+            "decision": "approved", "owner_user_id": owner_user_id,
+            "material_sha256": material_fingerprint(row.payload),
+            "at": datetime.now(UTC).isoformat(),
+        }, "updated_at": datetime.now(UTC).isoformat()}
+        return OwnerUpdateResult(
+            True, True, "Ручная проверка содержания сохранена. Публикация не запускалась.",
+        )
     if match.group(1) == "media":
         if not _pending_media(row):
             return OwnerUpdateResult(True, False, "Новых вложений нет.")
@@ -319,17 +355,27 @@ def _owner_card(row: Submission, reason: str, owner_chat_id: int) -> dict[str, A
         "укажите в ответе, что изменилось."
         if row.kind == "correction" else reason
     )
+    publication_details = owner_publication_summary(row.payload)
+    if row.payload.get("reader_publication"):
+        publication_details += "Ручной контроль: " + (
+            human_review_reason(row.payload, owner_chat_id) or "пройден для этой версии."
+        ) + "\n"
     return {
         "chat_id": owner_chat_id,
         "text": (
             f"Предложка №{submission_reference(row)}. {_OWNER_KINDS.get(row.kind, 'Новость')}\n\n"
             f"{excerpt or 'Без текста.'}\n\n"
             f"Вложений: {len(row.payload.get('attachments', []))}.\n"
+            f"{publication_details}"
             f"{instructions}\n\n"
             "Ответьте на эту карточку готовым текстом. Он уйдёт автору обращения."
         ),
         "reply_markup": {"inline_keyboard": [
             [{"text": "Вложения", "callback_data": f"rr:media:{row.id}"}],
+            *([[{"text": "Содержание вложений проверено",
+                 "callback_data": f"rr:approve_media:{row.id}"}],
+               [{"text": "Отклонить вложения", "callback_data": f"rr:reject_media:{row.id}"}]]
+              if row.payload.get("attachments") and row.payload.get("reader_publication") else []),
             [{"text": "Закрыть без действий", "callback_data": f"rr:close:{row.id}"}],
         ]},
         "protect_content": True,
@@ -428,6 +474,9 @@ async def process_reader_resolutions(
                  == "pending"),
             and_(Submission.kind == "news_tip",
                  Submission.status.in_(("expired", "waiting_primary", "source_linked"))),
+            and_(Submission.kind == "news_tip", Submission.status == "reader_review",
+                 Submission.payload["reader_resolution"]["owner_notice"]["status"]
+                 .as_string().is_(None)),
             and_(Submission.kind.in_(_OWNER_KINDS), Submission.status == "new",
                  Submission.payload["reader_resolution"]["owner_notice"]["status"]
                  .as_string().is_(None)),

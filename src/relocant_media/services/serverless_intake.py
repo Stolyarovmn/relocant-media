@@ -12,6 +12,7 @@ from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.private_intake import process_private_updates
 from relocant_media.services.reader_intake import DRAFT_STATES, ROUTE_LABELS, ROUTES, _identity
+from relocant_media.services.reader_publication import POLICY
 from relocant_media.services.submission_reference import (
     PUBLIC_REFERENCE_PATTERN,
     submission_reference,
@@ -29,6 +30,8 @@ def _import_draft(session: Session, entry: dict[str, Any], update_id: int) -> No
     if not isinstance(draft, dict) or not isinstance(draft.get("payload"), dict):
         raise ValueError("invalid Serverless reader draft")
     payload = dict(draft["payload"])
+    # Human moderation is written only by the canonical owner action, never cloud intake.
+    payload.pop("reader_media_review", None)
     reference = draft["reference"]
     user_id = draft["telegram_user_id"]
     status = draft["status"]
@@ -102,7 +105,10 @@ def _import_draft(session: Session, entry: dict[str, Any], update_id: int) -> No
         session.add(row)
     row.telegram_message_id = draft["telegram_message_id"]
     row.payload = payload
-    row.status = status
+    row.status = (
+        "reader_review" if status == "new" and kind == "news_tip"
+        and isinstance(payload.get("reader_publication"), dict) else status
+    )
     row.kind = kind
     session.flush()
     if status == "new" and kind == "ad_request":
@@ -159,7 +165,8 @@ async def import_inbox(
             if (entry["receipt_only"] is not True or entry.get("draft") is not None
                     or not isinstance(notice, dict) or not notice["key"].startswith("button:")
                     or _identity(message) is None or not isinstance(label, str)
-                    or not (label in ROUTE_LABELS or re.fullmatch(
+                    or not (label in ROUTE_LABELS or label in POLICY["labels"].values()
+                            or re.fullmatch(
                         rf"(Отправить|Сменить тему|Отменить) №"
                         rf"({PUBLIC_REFERENCE_PATTERN}|[0-9]{{1,18}})",
                         label))):
@@ -188,6 +195,7 @@ async def import_inbox(
                 engine, bot, [update], reader_feedback_enabled=True,
                 owner_user_id=owner_user_id, owner_chat_id=owner_chat_id,
                 transport_notice=entry.get("notice"),
+                publication_enabled=True,
             )
         else:
             with Session(engine) as session:

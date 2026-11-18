@@ -1,4 +1,5 @@
 import { isStartMessage } from "./intake.js";
+import { isPublicationControl } from "./reader-publication.js";
 
 const command = /^(Отправить|Сменить тему|Отменить) №(RM-[A-Z0-9]{4}-[A-Z0-9]{4}|[0-9]{1,18})$/u;
 
@@ -19,6 +20,10 @@ export function relayNotice(state, actor, message, updateId, now) {
   const labels = !hasDraft
     ? { reply_markup: { keyboard: [[{ text: state.form.new_case }]], resize_keyboard: true,
       is_persistent: true, one_time_keyboard: false } } : {};
+  if (isPublicationControl(text)) return {
+    key: "button:" + updateId, ...labels, receipt_only: true,
+    text: "Это кнопка прежнего шага. Используйте актуальное меню. Повторное обращение не создано.",
+  };
   if (button) return {
     key: `button:${updateId}`, ...labels,
     ...(["cancelled", "new"].includes(known?.status) && { receipt_only: true }),
@@ -35,7 +40,7 @@ export function relayNotice(state, actor, message, updateId, now) {
     text: `Обращение №${current.reference} уже отправлено в работу.`,
   };
   const content = typeof text === "string" && text.trim() ||
-    ["photo", "video", "document", "voice"].some(k => message[k]);
+    ["photo", "video", "document", "voice", "audio"].some(k => message[k]);
   if (!content || text.startsWith("/")) return null;
   const reply = message.reply_to_message;
   const reference = reply?.from?.id === state.bot_id &&

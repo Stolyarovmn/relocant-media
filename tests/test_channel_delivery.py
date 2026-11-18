@@ -19,7 +19,7 @@ from relocant_media.services.channel_delivery import (
 from relocant_media.services.editorial import DeliveryBlockedError, _candidate, _snapshot_member
 from relocant_media.services.package_import import import_package
 from relocant_media.services.rich_delivery import PreparedNativeMessage
-from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
 
@@ -75,6 +75,25 @@ class FakePublisher:
 async def send(session, run, publisher, **kwargs):
     return await deliver_reviewed(session, run.raw_item_id, publisher,
                                   target_channel_id=APPROVED_CHANNEL_ID, enabled=True, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_reader_files_cannot_be_published_without_human_moderation(reviewed):
+    from test_reader_publication import material
+
+    session, run = reviewed
+    payload = material()
+    payload["raw_item_ids"] = [run.raw_item_id]
+    row = Submission(kind="news_tip", status="reader_review", payload=payload)
+    session.add(row)
+    session.flush()
+    run.outcome = {**run.outcome, "_reader_submission_id": row.id}
+    session.commit()
+    publisher = FakePublisher()
+    with pytest.raises(DeliveryBlockedError, match="ручной"):
+        await send(session, run, publisher)
+    assert publisher.calls == []
+    assert run.delivery_status == "pending"
 
 
 @pytest.mark.asyncio

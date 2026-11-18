@@ -62,7 +62,7 @@ dev = [
 
 [tool.setuptools.package-data]
 "relocant_media.ai" = ["writing_matrix.yaml"]
-"relocant_media.domain" = ["publication_tags_v*.yaml"]
+"relocant_media.domain" = ["publication_tags_v*.yaml", "reader_publication_v*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
