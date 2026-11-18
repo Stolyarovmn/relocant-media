@@ -28,16 +28,32 @@ class Storage:
         self.files = {}
         self.trace = trace
         self.fail_phase = None
+        self.fail_claim = False
 
     def read(self):
         return copy.deepcopy(self.state), self.sha
 
     def write(self, state, previous):
-        phase = state["intake_state"]["ingress"]["phase"]
         assert previous == self.sha
-        if self.fail_phase == phase:
+        assert state["cutover"] == self.state["cutover"]
+        if self.state["status"] == "ready":
+            assert state["status"] == "busy"
+            assert state["snapshot"] == self.state["snapshot"]
+            assert state["generation"] == self.state["generation"]
+            assert isinstance(state.get("attempt"), str) and state["attempt"]
+            if self.fail_claim:
+                raise ValueError("conditional claim failed")
+            phase = self.state["intake_state"].get("ingress", {}).get("phase", "unprepared")
+            label = f"busy:{phase}"
+        else:
+            assert self.state["status"] == "busy" and state["status"] == "ready"
+            assert state.get("attempt") == self.state["attempt"]
+            assert state["generation"] == self.state["attempt"]
+            phase = state["intake_state"]["ingress"]["phase"]
+            label = phase
+        if state["status"] == "ready" and self.fail_phase == phase:
             raise ValueError("conditional write failed")
-        self.trace.append(phase)
+        self.trace.append(label)
         self.state = copy.deepcopy(state)
         self.sha += "x"
         return self.sha
@@ -88,6 +104,7 @@ def scenario(monkeypatch):
         elif operation == "getWebhookInfo":
             result = dict(config)
         elif operation == "setWebhook":
+            assert storage.state["status"] == "ready"
             assert storage.state["intake_state"]["ingress"]["phase"] in {"prepared", "active"}
             assert payload == {"url": cutover.PRODUCTION_ORIGIN + "/api/telegram",
                                "secret_token": SECRET, "max_connections": 1,
@@ -96,6 +113,7 @@ def scenario(monkeypatch):
             config.update(fail.get("verified_webhook", {}))
             result = True
         elif operation == "transfer":
+            assert storage.state["status"] == "ready"
             assert request.headers["Authorization"] == f"Bearer {BRIDGE}"
             assert storage.state["intake_state"]["ingress"]["phase"] in {"prepared", "active"}
             assert payload["operation"] == "bootstrap"
@@ -133,8 +151,9 @@ def test_activation_fences_before_bootstrap_and_verifies_before_active(scenario,
     storage, _, trace, _, _, requests, _, _ = scenario
     result = run(scenario, tmp_path, activate=True)
     assert result["status"] == "active"
-    assert trace == ["getMe", "getChatMember", "getWebhookInfo", "upload", "prepared",
-                     "transfer", "setWebhook", "getWebhookInfo", "active"]
+    assert trace == ["getMe", "getChatMember", "getWebhookInfo", "upload", "busy:unprepared",
+                     "prepared", "transfer", "setWebhook", "getWebhookInfo",
+                     "busy:prepared", "active"]
     assert storage.state["intake_state"]["attempts"] == 1
     marker = storage.state["intake_state"]["ingress"]
     assert marker["seed_snapshot_sha256"] == "a" * 64
@@ -142,17 +161,14 @@ def test_activation_fences_before_bootstrap_and_verifies_before_active(scenario,
     assert all("allowed_updates" not in payload for _, payload in requests)
 
 
-@pytest.mark.parametrize("failure", ["transfer", "setWebhook", "active"])
+@pytest.mark.parametrize("failure", ["transfer", "setWebhook"])
 def test_failure_leaves_prepared_fence_and_retry_reuses_exact_seed(scenario, tmp_path, failure):
     storage, _, trace, exports, config, _, fail, _ = scenario
-    if failure == "active":
-        storage.fail_phase = "active"
-    else:
-        fail["operation"] = failure
+    fail["operation"] = failure
     with pytest.raises((ValueError, httpx.HTTPStatusError)):
         run(scenario, tmp_path, activate=True)
     marker = copy.deepcopy(storage.state["intake_state"]["ingress"])
-    assert marker["phase"] == "prepared"
+    assert marker["phase"] == "prepared" and storage.state["status"] == "ready"
     assert len(storage.files) == 1 and len(exports) == 1
     fail.clear()
     storage.fail_phase = None
@@ -177,11 +193,46 @@ def test_existing_active_bootstrap_uses_saved_seed_without_reset(scenario, tmp_p
 
 def test_failed_prepared_cas_never_bootstraps_or_sets_webhook(scenario, tmp_path):
     storage, _, trace, *_ = scenario
-    storage.fail_phase = "prepared"
+    storage.fail_claim = True
     with pytest.raises(ValueError):
         run(scenario, tmp_path, activate=True)
     assert "ingress" not in storage.state["intake_state"]
+    assert storage.state["status"] == "ready"
     assert "transfer" not in trace and "setWebhook" not in trace
+
+
+@pytest.mark.parametrize("failure", ["prepared", "active"])
+def test_failed_ready_commit_keeps_busy_and_cannot_automatically_retry(
+    scenario, tmp_path, failure,
+):
+    storage, _, trace, exports, _, _, _, _ = scenario
+    storage.fail_phase = failure
+    with pytest.raises(ValueError):
+        run(scenario, tmp_path, activate=True)
+    before = storage.read()
+    assert storage.state["status"] == "busy"
+    assert len(exports) == 1 and len(storage.files) == 1
+    if failure == "prepared":
+        assert "ingress" not in storage.state["intake_state"]
+        assert "transfer" not in trace and "setWebhook" not in trace
+    else:
+        assert storage.state["intake_state"]["ingress"]["phase"] == "prepared"
+    trace.clear()
+    storage.fail_phase = None
+    with pytest.raises(ValueError):
+        run(scenario, tmp_path, activate=True, name="blocked-retry")
+    assert storage.read() == before
+    assert "transfer" not in trace and "setWebhook" not in trace
+
+
+def test_storage_fake_rejects_direct_ready_metadata_write(scenario):
+    storage = scenario[0]
+    state, sha = storage.read()
+    state["generation"] = "illegal-shortcut"
+    state["intake_state"]["ingress"] = {"phase": "prepared"}
+    with pytest.raises(AssertionError):
+        storage.write(state, sha)
+    assert storage.read()[0]["generation"] == "initial"
 
 
 @pytest.mark.parametrize("receiver", [

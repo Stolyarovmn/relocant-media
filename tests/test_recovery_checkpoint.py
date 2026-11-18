@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from subprocess import CompletedProcess
 
 import pytest
 
@@ -81,8 +82,9 @@ def test_prepare_refuses_inconsistent_recovery(recovery_fixture, tmp_path, misma
 
 
 @pytest.mark.parametrize("stopped", [True, False])
+@pytest.mark.parametrize("workflow", ["editorial-actions.yml", "ingress-cutover.yml"])
 def test_actions_recovery_applies_only_verified_stopped_attempt(
-    recovery_fixture, tmp_path, monkeypatch, stopped,
+    recovery_fixture, tmp_path, monkeypatch, stopped, workflow,
 ):
     from relocant_media.ops import actions_recovery
     from relocant_media.ops.ssh_state_client import _state_digest
@@ -112,12 +114,16 @@ def test_actions_recovery_applies_only_verified_stopped_attempt(
             self.current = value
             return _state_digest(value)
 
-    def verify(run_id, attempt):
-        assert (run_id, attempt) == ("123", "1")
-        if not stopped:
-            raise ValueError("writer still running")
+    def stopped_run(command, **options):
+        assert command == ["gh", "api", f"repos/{actions_recovery.REPO}/actions/runs/123"]
+        assert options == {"check": True, "capture_output": True, "timeout": 30}
+        return CompletedProcess(command, 0, json.dumps({
+            "id": 123, "run_attempt": 1, "status": "completed" if stopped else "in_progress",
+            "head_branch": "main", "path": f".github/workflows/{workflow}",
+            "event": "workflow_dispatch",
+        }).encode())
 
-    monkeypatch.setattr(actions_recovery, "verify_stopped_run", verify)
+    monkeypatch.setattr(actions_recovery.subprocess, "run", stopped_run)
     storage = Storage()
     if stopped:
         report = actions_recovery.recover(storage, "123", digest, tmp_path / "actions")
@@ -125,7 +131,45 @@ def test_actions_recovery_applies_only_verified_stopped_attempt(
         assert storage.current == state
         assert storage.writes == 1
     else:
-        with pytest.raises(ValueError, match="writer still running"):
+        with pytest.raises(ValueError, match="verified as stopped"):
             actions_recovery.recover(storage, "123", digest, tmp_path / "actions")
         assert storage.current == busy
         assert storage.writes == 0
+
+
+@pytest.mark.parametrize(("workflow", "event"), [
+    ("editorial-actions.yml", "schedule"),
+    ("editorial-actions.yml", "workflow_dispatch"),
+    ("ingress-cutover.yml", "workflow_dispatch"),
+])
+def test_stopped_writer_workflow_allowlist_preserves_editorial_events(
+    monkeypatch, workflow, event,
+):
+    from relocant_media.ops import actions_recovery
+
+    run = {"id": 123, "run_attempt": 2, "status": "completed", "head_branch": "main",
+           "path": f".github/workflows/{workflow}", "event": event}
+    monkeypatch.setattr(actions_recovery.subprocess, "run",
+                        lambda command, **options: CompletedProcess(command, 0, json.dumps(run)))
+    actions_recovery.verify_stopped_run("123", "2")
+
+
+@pytest.mark.parametrize("change", [
+    {"path": ".github/workflows/other.yml"},
+    {"event": "schedule"},
+    {"event": "push"},
+    {"head_branch": "feature"},
+    {"status": "in_progress"},
+    {"status": "queued"},
+    {"id": 999},
+    {"run_attempt": 3},
+])
+def test_cutover_recovery_rejects_unverified_writer_identity(monkeypatch, change):
+    from relocant_media.ops import actions_recovery
+
+    run = {"id": 123, "run_attempt": 2, "status": "completed", "head_branch": "main",
+           "path": ".github/workflows/ingress-cutover.yml", "event": "workflow_dispatch", **change}
+    monkeypatch.setattr(actions_recovery.subprocess, "run",
+                        lambda command, **options: CompletedProcess(command, 0, json.dumps(run)))
+    with pytest.raises(ValueError, match="verified as stopped"):
+        actions_recovery.verify_stopped_run("123", "2")
