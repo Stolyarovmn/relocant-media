@@ -79,6 +79,46 @@ def _chain():
     return workflow()["jobs"]["chain"]
 
 
+def chain_enabled(*, event, mode="", result="success", enabled=True, branch="main"):
+    """Evaluate the actual job gate with bounded literal contexts, without a runner."""
+    gate = _chain()["if"]
+    replacements = {
+        "!startsWith(inputs.mode, 'map-')": repr(not mode.startswith("map-")),
+        "always()": "True",
+        "github.ref": repr(f"refs/heads/{branch}"),
+        "github.event_name": repr(event),
+        "needs.cycle.result": repr(result),
+        "needs.cycle.outputs.worker_mode": repr(mode),
+        "vars.ACTIONS_EDITORIAL_ENABLED": repr("true" if enabled else "false"),
+        "vars.ACTIONS_CHAIN_ENABLED": repr("true" if enabled else "false"),
+        "inputs.mode": repr(mode),
+    }
+    for source, value in replacements.items():
+        gate = gate.replace(source, value)
+    gate = gate.replace("&&", " and ").replace("||", " or ")
+    return eval(gate, {"__builtins__": {}}, {})
+
+
+@pytest.mark.parametrize("result", ["success", "failure"])
+@pytest.mark.parametrize("mode", ["intake", "editorial", "discovery", "preview", "recovery",
+                                  "digest", "digest-preview", "fallback", "map-backfill"])
+def test_manual_operations_never_hold_their_queue_for_chain_sleep(mode, result):
+    assert chain_enabled(event="workflow_dispatch", mode=mode, result=result) is False
+
+
+@pytest.mark.parametrize("result", ["success", "failure"])
+@pytest.mark.parametrize("event,mode", [("schedule", ""), ("workflow_dispatch", "auto")])
+def test_automatic_runs_keep_success_and_failure_continuation(event, mode, result):
+    assert chain_enabled(event=event, mode=mode, result=result) is True
+
+
+@pytest.mark.parametrize("context", [
+    {"result": "cancelled"}, {"result": "skipped"}, {"enabled": False}, {"branch": "feature"},
+])
+def test_automatic_chain_still_respects_stop_conditions(context):
+    assert chain_enabled(event="workflow_dispatch", mode="auto", **context) is False
+
+
 def test_chain_survives_a_failed_cycle_but_backs_off():
     """The exact-main-CI guard fails right after every merge; that must pause the chain
     for ten minutes, not end it. Cancelled or skipped cycles still do not chain."""
