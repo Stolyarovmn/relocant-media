@@ -203,6 +203,16 @@ def verify_stored_presentation(
             raise ValueError("Площадка афиши изменилась после проверки")
 
 
+def _live_place_facts(value: Any) -> Any:
+    """HTML может поменять счётчик; сравниваем те же факты на любой глубине программы."""
+    if isinstance(value, dict):
+        return {key: _live_place_facts(item) for key, item in value.items()
+                if key not in {"source_html_sha256", "document_sha256"}}
+    if isinstance(value, list):
+        return [_live_place_facts(item) for item in value]
+    return value
+
+
 def verify_live_map(
     presentation: EditorialPresentation | None, document: EvidenceDocument,
     source_html: str | None,
@@ -215,10 +225,7 @@ def verify_live_map(
             actual = resolve_event_place(
                 document, source_html or "", profile=load_city_profile("belgrade"),
             )
-            if actual is None or any(
-                actual.get(key) != value for key, value in place.items()
-                if key not in {"source_html_sha256", "document_sha256"}
-            ):
+            if actual is None or _live_place_facts(actual) != _live_place_facts(place):
                 raise ValueError("Площадка или расписание изменились в живом источнике")
     if presentation is None or presentation.source_map is None:
         return
