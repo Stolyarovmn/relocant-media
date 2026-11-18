@@ -338,6 +338,39 @@ def _owner_card(row: Submission, reason: str, owner_chat_id: int) -> dict[str, A
     }
 
 
+def _owner_card_hash(params: dict[str, Any]) -> str:
+    return sha256(str(params["text"]).encode()).hexdigest()
+
+
+async def _refresh_owner_card(
+    session: Session, row: Submission, bot: TelegramBotAPI, reason: str, owner_chat_id: int,
+) -> str | None:
+    state = _resolution(row)
+    card = state.get("owner_notice", {})
+    if (card.get("status") != "sent" or card.get("chat_id") != owner_chat_id
+            or not _positive(card.get("telegram_message_id"))):
+        return None
+    if not card.get("content_sha256") and not state.get("owner_update"):
+        updated, sent = _when(row.payload, "updated_at"), _when(card, "sent_at")
+        if updated is None or sent is None or updated <= sent:
+            return None
+    params = _owner_card(row, reason, owner_chat_id)
+    digest = _owner_card_hash(params)
+    current = state.get("owner_update", {})
+    if current.get("content_sha256", card.get("content_sha256")) == digest:
+        _set_resolution(row, owner_update={**current, "content_sha256": digest,
+                        "source_updated_at": row.payload.get("updated_at")})
+        session.commit()
+        return "unchanged"
+    # Editing the same card keeps reply routing and media buttons intact.
+    # An unknown edit is not retried for the same content; a newer version may replace it.
+    _set_resolution(row, owner_update={"content_sha256": digest,
+                    "source_updated_at": row.payload.get("updated_at")})
+    return await _send_receipted(session, row, bot, "owner_update", {
+        **params, "message_id": card["telegram_message_id"],
+    }, method="editMessageText")
+
+
 def _pending_media(row: Submission) -> list[tuple[str, str, str]]:
     resolution = _resolution(row)
     result = []
@@ -399,6 +432,17 @@ async def process_reader_resolutions(
                  Submission.payload["reader_resolution"]["owner_notice"]["status"]
                  .as_string().is_(None)),
             Submission.payload["reader_resolution"]["media_requested"].as_boolean().is_(True),
+            and_(
+                Submission.status != "closed",
+                Submission.payload["reader_resolution"]["owner_notice"]["status"]
+                .as_string() == "sent",
+                Submission.payload["updated_at"].as_string() > func.coalesce(
+                    Submission.payload["reader_resolution"]["owner_update"]["source_updated_at"]
+                    .as_string(),
+                    Submission.payload["reader_resolution"]["owner_notice"]["sent_at"]
+                    .as_string(),
+                ),
+            ),
         ),
     ).order_by(Submission.id)
     with Session(engine) as session:
@@ -450,9 +494,18 @@ async def process_reader_resolutions(
             ):
                 assert owner_chat_id is not None
                 params = _owner_card(row, reason or "Рассмотрите обращение.", owner_chat_id)
+                _set_resolution(row, owner_notice={"content_sha256": _owner_card_hash(params)})
                 outcome = await _send_receipted(session, row, bot, "owner_notice", params)
                 stats["owner_sent" if outcome == "sent" else outcome] += 1
                 stats["changed"] += 1
+            elif row.status != "closed" and _owner_enabled(owner_user_id, owner_chat_id):
+                assert owner_chat_id is not None
+                refresh_outcome = await _refresh_owner_card(
+                    session, row, bot, reason or "Рассмотрите обращение.", owner_chat_id,
+                )
+                if refresh_outcome is not None:
+                    stats["uncertain"] += int(refresh_outcome == "uncertain")
+                    stats["changed"] += 1
             if state.get("media_requested") and _owner_enabled(owner_user_id, owner_chat_id):
                 assert owner_chat_id is not None
                 sent, uncertain = await _owner_media(session, row, bot, owner_chat_id=owner_chat_id)
@@ -463,7 +516,7 @@ async def process_reader_resolutions(
         resolution = Submission.payload["reader_resolution"]
         uncertain_delivery = [
             resolution[key]["status"].as_string().in_(("sending", "blocked", "uncertain"))
-            for key in ("final", "owner_notice")
+            for key in ("final", "owner_notice", "owner_update")
         ]
         unresolved = select(func.count()).select_from(Submission).where(
             Submission.payload["reader_intake"].as_boolean().is_(True),
