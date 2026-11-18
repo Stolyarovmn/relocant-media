@@ -32,6 +32,7 @@ def _import_draft(session: Session, entry: dict[str, Any], update_id: int) -> No
     payload = dict(draft["payload"])
     # Human moderation is written only by the canonical owner action, never cloud intake.
     payload.pop("reader_media_review", None)
+    payload.pop("public_source_review", None)
     reference = draft["reference"]
     user_id = draft["telegram_user_id"]
     status = draft["status"]

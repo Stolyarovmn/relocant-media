@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from relocant_media.domain.dedup import EventCandidate, same_event
+from relocant_media.services.reader_publication import material_fingerprint
 from relocant_media.storage.models import EditorialRun, RawItem, Source, Submission
 
 NEWS_KINDS = ("correction", "news_tip", "event", "question")
@@ -65,8 +66,14 @@ def tip_urls(payload: dict[str, Any]) -> list[str]:
     text = payload.get("text", "")
     if not isinstance(text, str):
         return []
-    return list(dict.fromkeys(url.rstrip(').,;!?]}»') for url in
+    urls = list(dict.fromkeys(url.rstrip(').,;!?]}»') for url in
         re.findall(r"https://[^\s<>\"']+", text)))[:5]
+    review = payload.get("public_source_review")
+    if isinstance(review, dict):
+        if review.get("material_sha256") != material_fingerprint(payload):
+            return []
+        return [url for url in urls if url in review.get("urls", [])]
+    return urls
 
 
 def priority_raw_ids(session: Session) -> set[int]:

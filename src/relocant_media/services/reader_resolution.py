@@ -15,11 +15,13 @@ from relocant_media.domain.dedup import EventCandidate, same_event
 from relocant_media.services.owner_review import OwnerUpdateResult
 from relocant_media.services.reader_intake import reader_destination
 from relocant_media.services.reader_publication import (
+    POLICY,
     human_review_reason,
     material_fingerprint,
     owner_publication_summary,
 )
 from relocant_media.services.submission_feedback import INCIDENT
+from relocant_media.services.submission_queue import tip_urls
 from relocant_media.services.submission_reference import submission_reference
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 
@@ -31,7 +33,9 @@ _OWNER_KINDS = {
     "technical": "Проблема с картой или ботом",
     "question": "Вопрос или предложение",
 }
-_OWNER_ACTION = re.compile(r"rr:(close|media|approve_media|reject_media):([1-9][0-9]{0,17})")
+_OWNER_ACTION = re.compile(
+    r"rr:(close|media|approve_media|reject_media|primary):([1-9][0-9]{0,17})",
+)
 _MEDIA_METHODS = {"photo": "sendPhoto", "video": "sendVideo",
                   "document": "sendDocument", "voice": "sendVoice", "audio": "sendAudio"}
 _NO_ACTION = "Редакция рассмотрела ваше обращение. Дальнейших действий по нему не планируется."
@@ -215,6 +219,20 @@ def _exact_owner_card(
     )
 
 
+def _primary_review_available(row: Submission) -> bool:
+    publication = row.payload.get("reader_publication")
+    return bool(
+        row.kind == "news_tip" and row.status == "reader_review"
+        and isinstance(publication, dict)
+        and publication.get("version") == POLICY["version"]
+        and publication.get("stage") == "confirmed"
+        and publication.get("ownership") == "source"
+        and publication.get("permission") == "private"
+        and publication.get("material_sha256") == material_fingerprint(row.payload)
+        and tip_urls(row.payload)
+    )
+
+
 def record_reader_resolution_callback(
     session: Session, callback: object, *, owner_user_id: int | None, owner_chat_id: int | None,
 ) -> OwnerUpdateResult | None:
@@ -240,6 +258,19 @@ def record_reader_resolution_callback(
     if not _exact_owner_card(row, owner_chat_id, message_id):
         return OwnerUpdateResult(True, False, "Карточка обращения не найдена.")
     assert row is not None
+    if match.group(1) == "primary":
+        if not _primary_review_available(row):
+            return OwnerUpdateResult(True, False, "Нет подтверждённого сигнала с исходной ссылкой.")
+        row.payload = {**row.payload, "public_source_review": {
+            "owner_user_id": owner_user_id, "at": datetime.now(UTC).isoformat(),
+            "urls": tip_urls(row.payload),
+            "material_sha256": material_fingerprint(row.payload),
+        }, "updated_at": datetime.now(UTC).isoformat()}
+        row.status = "new"
+        return OwnerUpdateResult(
+            True, True, "Первоисточник отправлен на проверку. Текст и вложения обращения "
+            "остаются закрытыми; публикация ещё не разрешена.",
+        )
     if match.group(1) == "reject_media":
         if row.status == "closed":
             return OwnerUpdateResult(True, False, "Обращение уже закрыто.")
@@ -371,6 +402,9 @@ def _owner_card(row: Submission, reason: str, owner_chat_id: int) -> dict[str, A
             "Ответьте на эту карточку готовым текстом. Он уйдёт автору обращения."
         ),
         "reply_markup": {"inline_keyboard": [
+            *([[{"text": "Проверить первоисточник",
+                 "callback_data": f"rr:primary:{row.id}"}]]
+              if _primary_review_available(row) else []),
             [{"text": "Вложения", "callback_data": f"rr:media:{row.id}"}],
             *([[{"text": "Содержание вложений проверено",
                  "callback_data": f"rr:approve_media:{row.id}"}],
