@@ -1,4 +1,13 @@
 const mediaTypes = ["photo", "video", "document", "voice"];
+export const READER_INTRO = "Напишите, о чем хотите сообщить. Можно отправить несколько сообщений и приложить фото или видео.\n\n" +
+  "Перепроверьте детали, при необходимости дополните или исправьте сообщения, затем выберите действие ниже. " +
+  "Весь текст и вложения отправятся одним обращением.";
+
+export function updateFormCopy(form) {
+  // Update only the known old public copy; preserve seeded routes and draft receipts.
+  return form.menu === READER_INTRO.replace("о чем хотите", "что хотите")
+    ? { ...form, menu: READER_INTRO } : form;
+}
 const greeting = /^(?:здравствуйте|здравствуй|привет|приветствую|доброе утро|добрый день|добрый вечер)[\s.!?,…👋]*$/iu;
 const presence = /^(?:есть\s+кто(?:[- ]нибудь)?|кто(?:[- ]нибудь)?\s+(?:есть|тут|здесь)|(?:вы|ты)\s+(?:тут|здесь)|алло|ау)[\s.!?,…]*$/iu;
 

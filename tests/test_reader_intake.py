@@ -616,7 +616,7 @@ async def test_webhook_sends_menu_and_durable_ack_in_the_request(engine, direct,
         opened = await client.post(path, json=first, headers=secret)
         assert opened.status_code == 200
         assert len(telegram.messages) == 1
-        assert telegram.messages[0][1]["text"].startswith("Напишите, что хотите сообщить.")
+        assert telegram.messages[0][1]["text"].startswith("Напишите, о чем хотите сообщить.")
 
         details = telegram.message(2, text="Место работ")
         photo = telegram.message(3, caption="Уточняющее фото", photo=[{"file_id": "reader-photo"}])

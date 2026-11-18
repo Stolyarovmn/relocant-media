@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Conflict, namespace, paths } from "./store.js";
 import { HttpError, equalSecret } from "./http.js";
 import { ReplyBot } from "./bot.js";
-import { isStartMessage, planDraft, readerIdentity } from "./intake.js";
+import { isStartMessage, planDraft, readerIdentity, updateFormCopy } from "./intake.js";
 import { relayNotice } from "./relay-notice.js";
 
 export const LIMITS = Object.freeze({
@@ -390,6 +390,7 @@ export class Ingress {
     }
     if (actor) actor.channel = current.channel_id;
     const prepared = await this.transaction((state) => {
+      state.form = updateFormCopy(state.form);
       pruneReceipts(state, this.now());
       const duplicate = state.receipts[update.update_id];
       if (duplicate) {
