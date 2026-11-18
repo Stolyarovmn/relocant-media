@@ -65,6 +65,7 @@ export async function fixture(options = {}) {
     if (method === "getChat") return { is_direct_messages: true, parent_chat: { id: -1001234 } };
     const state = (await store.read("production/state.json"))?.value;
     if (state && state.busy?.phase !== "sending") throw new Error("send_without_durable_claim");
+    if (method === "answerCallbackQuery") return true;
     return { message_id: 9000 + calls.length };
   } }));
   const deps = { store, env, now: () => time, botFactory, hooks: options.hooks ?? {} };

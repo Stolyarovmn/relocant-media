@@ -130,11 +130,12 @@ test("повтор update и повтор выбора темы не созда�
   assert.equal(state.cases[0].status, "new");
   assert.equal(state.events.length, 3);
   assert.equal(state.events.at(-1).draft, undefined);
-  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls.length, 3);
+  assert.match(f.calls.at(-1).params.text, /уже отправлено/);
   await assert.rejects(f.receive(message(2, "Другая нагрузка")), { status: 409 });
 });
 
-test("все callbacks, старые диалоги, команды и неизвестные ответы идут в Actions без изменений", async () => {
+test("relay сохраняет исходные updates и подтверждает получение без выполнения действия", async () => {
   const f = await fixture({ seed: seed({ legacy_conversations: [99] }) });
   const callbacks = ["intake:10:submit", "owner:approve:12", "arbitrary"];
   const updates = callbacks.map((data, index) => ({ update_id: index + 1, callback_query: {
@@ -145,9 +146,11 @@ test("все callbacks, старые диалоги, команды и неиз�
   updates.push(message(10, "Старый диалог", { from: { id: 99 }, chat: { id: 99, type: "private" } }));
   for (const update of updates) await f.receive(update);
   const state = await f.state();
-  assert.equal(f.calls.length, 0);
+  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls[0].method, "answerCallbackQuery");
+  assert.equal(state.events[0].notice.status, "sent");
   assert.deepEqual(state.events.map((event) => event.update), updates);
-  assert.ok(state.events.every((event) => !event.draft && !event.notice));
+  assert.ok(state.events.every((event) => !event.draft));
 });
 
 test("callback fence переживает более ранний ACK и снимается только после закрытия канонического черновика", async () => {
@@ -261,8 +264,8 @@ test("ответ старой заявке и последующий старт 
   assert.equal(state.relay_actors["42:42:"], 2);
   assert.equal(state.cases.length, 0);
   assert.deepEqual(state.events[0].update, reply);
-  assert.ok(state.events.every((event) => !event.draft && !event.notice));
-  assert.equal(f.calls.length, 0);
+  assert.ok(state.events.every((event) => !event.draft && event.notice.status === "sent"));
+  assert.equal(f.calls.length, 2);
 });
 
 test("динамический inline callback fence не снимается новым приветствием", async () => {
@@ -274,21 +277,30 @@ test("динамический inline callback fence не снимается н�
   const state = await f.state();
   assert.equal(state.relay_actors["42:42:"], 2);
   assert.equal(state.cases.length, 0);
-  assert.ok(state.events.every((event) => !event.draft && !event.notice));
-  assert.equal(f.calls.length, 0);
+  assert.ok(state.events.every((event) => !event.draft));
+  assert.equal(f.calls.length, 1);
 });
 
 test("конкурентный ответ старой заявке устанавливает fence до повторного планирования старта", async () => {
   const f = await fixture({ seed: seed({ cases: [canonicalSeedCase()] }) });
-  await Promise.all([
+  const updates = [
+    message(1, "Дополнение", { reply_to_message: { message_id: 100 } }), message(2, "Привет"),
+  ];
+  const attempts = await Promise.allSettled([
     f.receive(message(1, "Дополнение", { reply_to_message: { message_id: 100 } })),
     f.receive(message(2, "Привет")),
   ]);
+  for (let i = 0; i < attempts.length; i++) {
+    if (attempts[i].status === "rejected") {
+      assert.equal(attempts[i].reason.code, "attempt_busy");
+      await f.receive(updates[i]);
+    }
+  }
   const state = await f.state();
   assert.equal(state.relay_actors["42:42:"], 2);
   assert.equal(state.cases.length, 0);
-  assert.ok(state.events.every((event) => !event.draft && !event.notice));
-  assert.equal(f.calls.length, 0);
+  assert.ok(state.events.every((event) => !event.draft && event.notice.status === "sent"));
+  assert.equal(f.calls.length, 2);
 });
 
 test("пока другой prepared update занимает очередь, нулевой seed fence не снимается", async () => {
@@ -319,7 +331,7 @@ test("правка и приветствие с вложением не сним
     assert.equal(state.cases.length, 0);
     assert.deepEqual(state.events[0].update, update);
     assert.equal(state.events[0].draft, undefined);
-    assert.equal(f.calls.length, 0);
+    assert.equal(f.calls.length, kind === "edited" ? 0 : 1);
   }
 });
 
@@ -335,7 +347,7 @@ test("нулевой fence при существующем локальном ч
   assert.equal(saved.cases.length, 1);
   assert.equal(saved.cases[0].id, 114);
   assert.equal(saved.events[0].draft, undefined);
-  assert.equal(f.calls.length, 0);
+  assert.equal(f.calls.length, 1);
 });
 
 test("проверка parent DM разрешает только родительский канал", async () => {

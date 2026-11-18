@@ -3,6 +3,7 @@ import { Conflict, namespace, paths } from "./store.js";
 import { HttpError, equalSecret } from "./http.js";
 import { ReplyBot } from "./bot.js";
 import { isStartMessage, planDraft, readerIdentity } from "./intake.js";
+import { relayNotice } from "./relay-notice.js";
 
 export const LIMITS = Object.freeze({
   updateBytes: 512 * 1024, bootstrapBytes: 4 * 1024 * 1024,
@@ -96,6 +97,7 @@ function checkCapacity(state, reserve = 0) {
 }
 
 function pruneReceipts(state, now) {
+  state.button_receipts = (state.button_receipts ?? []).filter(item => item.expires_at > now).slice(-1000);
   for (const [id, receipt] of Object.entries(state.receipts)) {
     if (receipt.at < now - LIMITS.receiptMs && receipt.sequence <= state.ack_sequence) {
       delete state.receipts[id];
@@ -105,9 +107,9 @@ function pruneReceipts(state, now) {
 
 function finish(state, busy, notice) {
   const event = clone(busy.event);
+  if (notice) event.notice = notice;
   if (event.draft) {
     if (notice) {
-      event.notice = notice;
       event.draft.payload.reader_notices ??= {};
       event.draft.payload.reader_notices[notice.key] = notice;
     }
@@ -116,6 +118,15 @@ function finish(state, busy, notice) {
     if (index === -1) state.cases.push(clone(event.draft));
     else state.cases[index] = clone(event.draft);
     state.case_sequences[event.draft.reference] = event.sequence;
+    if (terminal.has(event.draft.status)) {
+      const item = event.draft;
+      state.button_receipts = (state.button_receipts ?? []).filter(c =>
+        !(c.reference === item.reference && c.user === item.telegram_user_id));
+      state.button_receipts.push({ user: item.telegram_user_id, chat: item.payload.chat_id,
+        topic: item.payload.topic_id ?? null, reference: item.reference, status: item.status,
+        expires_at: busy.expires_at + LIMITS.receiptMs });
+      state.button_receipts = state.button_receipts.slice(-1000);
+    }
     // Pending seed prompts are retained internally for early keyboard input
     // and coalescing; Actions owns no send attempts for these historical prompts.
     cleanNotices(event.draft);
@@ -308,11 +319,15 @@ export class Ingress {
     await this.hooks.afterSending?.();
     let notice = { ...sending.busy.notice, status: "uncertain" };
     try {
-      const result = await this.botFactory(config, sending.enabled).call("sendMessage", sending.busy.params);
-      if (!validId(result?.message_id)) throw new Error("invalid_receipt");
+      const method = sending.busy.method ?? "sendMessage";
+      const result = await this.botFactory(config, sending.enabled).call(method, sending.busy.params);
+      if (method === "answerCallbackQuery" ? result !== true : !validId(result?.message_id)) {
+        throw new Error("invalid_receipt");
+      }
       const sentAt = new Date(this.now()).toISOString();
       notice = {
-        ...notice, status: "sent", telegram_message_id: result.message_id, sent_at: sentAt,
+        ...notice, status: "sent", sent_at: sentAt,
+        ...(method === "sendMessage" && { telegram_message_id: result.message_id }),
         response_seconds: Math.max(0, (this.now() - Date.parse(notice.received_at)) / 1000),
       };
     } catch { notice.error_type = "BotAPIUncertain"; }
@@ -345,6 +360,7 @@ export class Ingress {
     this.onPhase("plan");
     const message = update.callback_query ? null : (update.message ?? update.edited_message);
     let actor = message && readerIdentity(message);
+    const transportActor = actor;
     if (actor && current.legacy_conversations.includes(actor.user)) actor = null;
     if (actor?.topic !== null && actor) {
       if (!this.canSend(current)) actor = null;
@@ -394,13 +410,23 @@ export class Ingress {
       if (planned) event.draft = clone(planned.draft);
       let notice = planned?.notice;
       if (notice && Object.hasOwn(event.draft.payload.reader_notices ?? {}, notice.key)) notice = null;
+      // A relay still owns the receipt for receiving the update, never its action.
+      const destination = actor ?? (transportActor?.topic === null ? transportActor : null);
+      if (!planned && destination && message && !update.edited_message) {
+        notice = relayNotice(state, destination, message, update.update_id, this.now());
+      }
+      const callbackNotice = callback && typeof update.callback_query.id === "string";
+      if (callbackNotice) notice = { key: `callback:${update.update_id}`,
+        text: "Нажатие получено. Проверяем состояние обращения." };
+      if (notice?.receipt_only) event.receipt_only = true;
       const pending = notice && this.canSend(state);
       const busy = {
         id: randomUUID(), phase: "prepared", expires_at: this.now() + LIMITS.attemptMs, event,
         ...(pending && {
-          notice: { ...notice, received_at: receivedAt(message, this.now()), status: "pending", reply_to: message.message_id },
-          params: {
-            chat_id: actor.chat, ...(actor.topic !== null && { direct_messages_topic_id: actor.topic }),
+          method: callbackNotice ? "answerCallbackQuery" : "sendMessage",
+          notice: { ...notice, received_at: receivedAt(message, this.now()), status: "pending", reply_to: message?.message_id ?? null },
+          params: callbackNotice ? { callback_query_id: update.callback_query.id, text: notice.text } : {
+            chat_id: destination.chat, ...(destination.topic !== null && { direct_messages_topic_id: destination.topic }),
             text: notice.text, protect_content: true, allow_paid_broadcast: false,
             link_preview_options: { is_disabled: true },
             ...(notice.reply_markup && { reply_markup: notice.reply_markup }),
@@ -416,8 +442,10 @@ export class Ingress {
           sent_at: new Date(this.now()).toISOString(), telegram_message_id: Number.MAX_SAFE_INTEGER,
           response_seconds: Number.MAX_SAFE_INTEGER, error_type: "InterruptedSend" };
         exported.notice = receipt;
-        exported.draft.payload.reader_notices ??= {};
-        exported.draft.payload.reader_notices[receipt.key] = receipt;
+        if (exported.draft) {
+          exported.draft.payload.reader_notices ??= {};
+          exported.draft.payload.reader_notices[receipt.key] = receipt;
+        }
       }
       if (bytes({ status: "ready", events: [exported] }) > LIMITS.exportBytes) {
         throw new HttpError(413, "event_too_large");

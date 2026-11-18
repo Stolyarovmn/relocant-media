@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.private_intake import process_private_updates
-from relocant_media.services.reader_intake import DRAFT_STATES, ROUTES, _identity
+from relocant_media.services.reader_intake import DRAFT_STATES, ROUTE_LABELS, ROUTES, _identity
 from relocant_media.services.submission_reference import (
     PUBLIC_REFERENCE_PATTERN,
     submission_reference,
@@ -141,6 +141,29 @@ async def import_inbox(
                 or (index > 0 and sequence != events[index - 1]["sequence"] + 1)
                 or (index == 0 and after is not None and sequence != after + 1)):
             raise ValueError("invalid sequence in the Serverless inbox")
+        if entry.get("draft") is None and (notice := entry.get("notice")) is not None:
+            update = entry.get("update", {})
+            uid = update.get("update_id") if isinstance(update, dict) else None
+            if (not isinstance(notice, dict)
+                    or notice.get("key") not in {f"received:{uid}", f"button:{uid}",
+                                                f"callback:{uid}"}
+                    or notice.get("status") not in {"sent", "uncertain"}
+                    or (notice.get("status") == "sent" and not notice["key"].startswith("callback:")
+                        and (type(notice.get("telegram_message_id")) is not int
+                             or notice["telegram_message_id"] <= 0))):
+                raise ValueError("invalid ingress transport receipt")
+        if entry.get("receipt_only") is not None:
+            notice = entry.get("notice")
+            message = entry.get("update", {}).get("message", {})
+            label = message.get("text", "")
+            if (entry["receipt_only"] is not True or entry.get("draft") is not None
+                    or not isinstance(notice, dict) or not notice["key"].startswith("button:")
+                    or _identity(message) is None or not isinstance(label, str)
+                    or not (label in ROUTE_LABELS or re.fullmatch(
+                        rf"(Отправить|Сменить тему|Отменить) №"
+                        rf"({PUBLIC_REFERENCE_PATTERN}|[0-9]{{1,18}})",
+                        label))):
+                raise ValueError("invalid ingress control receipt")
     for entry in events:
         sequence = entry.get("sequence")
         update = entry.get("update", {})
@@ -152,10 +175,19 @@ async def import_inbox(
         ):
             raise ValueError("invalid sequence in the Serverless inbox")
         previous = sequence
-        if entry.get("draft") is None:
+        if entry.get("receipt_only") is True:
+            with Session(engine) as session:
+                if session.get(TelegramUpdateReceipt, update_id) is None:
+                    session.add(TelegramUpdateReceipt(
+                        update_id=update_id, kind="reader_intake", status="ignored",
+                        processed_at=datetime.now(UTC),
+                    ))
+                    session.commit()
+        elif entry.get("draft") is None:
             await process_private_updates(
                 engine, bot, [update], reader_feedback_enabled=True,
                 owner_user_id=owner_user_id, owner_chat_id=owner_chat_id,
+                transport_notice=entry.get("notice"),
             )
         else:
             with Session(engine) as session:

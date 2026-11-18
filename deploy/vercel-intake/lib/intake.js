@@ -171,7 +171,7 @@ export function planDraft(form, current, message, edited, allocateReference, act
   draft.payload.public_reference ??= draft.reference;
   const unchanged = { draft, notice: null };
   if (command && !edited) {
-    if (draft.reference !== command[2]) return unchanged;
+    if (draft.reference !== command[2]) return null;
     if (command[1] === "Отменить") {
       draft.status = "cancelled";
       return { draft, notice: reply(`Черновик №${draft.reference} отменён.`,
