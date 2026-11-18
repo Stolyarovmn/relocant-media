@@ -17,7 +17,11 @@ from relocant_media.ops.events_export import export_events, read_events_feed
 from relocant_media.ops.map_backfill import plan_event_buttons
 from relocant_media.ops.server_cycle import policy_reassessment_ids
 from relocant_media.services.editorial import _candidate, _snapshot_member
-from relocant_media.services.editorial_products import build_presentation, present_draft
+from relocant_media.services.editorial_products import (
+    build_presentation,
+    present_draft,
+    verify_live_map,
+)
 from relocant_media.services.event_place import resolve_event_place
 from relocant_media.services.package_import import PackageConflictError, import_package
 from relocant_media.services.policy_reassessment import eligible_map_hold
@@ -128,6 +132,35 @@ def test_published_program_exports_all_slots_and_hides_only_finished_dates(state
     later = export_events(session, observed_at=datetime(2026, 12, 5, 0, tzinfo=UTC))
     assert sum(event.archived for event in later.events) == 3
     assert len({event.id for event in later.events}) == 6
+
+
+def test_live_program_tolerates_changed_page_wrapper_without_relaxing_review_hashes(state):
+    _, _, _, _, _, payload = state
+    package = EditorialPackage.model_validate_json(canonical_json(payload))
+    doc, page = article()
+    fresh = page + "<!-- изменился служебный счётчик страницы -->"
+    assert resolve_event_place(doc, page, profile=PROFILE) != resolve_event_place(
+        doc, fresh, profile=PROFILE,
+    )
+    verify_live_map(package.presentation, doc, fresh)
+
+
+@pytest.mark.parametrize("change", ["coordinate", "time", "quote", "missing_slot"])
+def test_live_program_still_blocks_any_changed_child_fact(state, change):
+    _, _, _, _, _, payload = state
+    package = EditorialPackage.model_validate_json(canonical_json(payload))
+    place = copy.deepcopy(package.presentation.event_place)
+    if change == "coordinate":
+        place["occurrences"][1]["venue"]["latitude"] += 0.01
+    elif change == "time":
+        place["occurrences"][2]["starts_at"] = "2026-12-04T22:00:00+01:00"
+    elif change == "quote":
+        place["occurrences"][0]["source_quote"] = "Другая программа"
+    else:
+        place["occurrences"].pop()
+    doc, page = article()
+    with pytest.raises(ValueError, match="Площадка или расписание"):
+        verify_live_map(package.presentation.model_copy(update={"event_place": place}), doc, page)
 
 
 def test_group_button_requires_complete_matching_public_feed(state, monkeypatch):

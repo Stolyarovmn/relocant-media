@@ -170,8 +170,10 @@ def select_candidates(
         ) if locality_aliases else None
         practical = re.compile(
             r"saobrać|prevoz|isklju|bez vode|bez struje|grejanj|letov|otkaz|"
+            r"avio|aerodrom|kašnjen|poremećaj|poplav|kiš|vremensk|nevrem|"
             r"izložb|koncert|festival|vaučer|радов|превоз|искључ|грејањ|"
-            r"изложб|концерт|фестивал|отключ|перекры|выставк|рейс", re.I,
+            r"изложб|концерт|фестивал|отключ|перекры|выставк|рейс|"
+            r"авио|аеродром|кашњењ|поплав|киш|непогод|временск|затоп|погод", re.I,
         )
 
         def queue_order(group: list[EventCandidate]) -> tuple[int, int, int, datetime | None, int]:
@@ -182,11 +184,17 @@ def select_candidates(
             private_priority = any(member.raw_item_id in (priority_raw_ids or set())
                                    for member in group)
             guide = source.source_type == GUIDE_SOURCE_TYPE
-            band = (4 if private_priority or guide else 3 if disruption
-                    else priorities.get(source.id, 0))
             lead = item.title + "\n" + item.body[:500]
-            local_practical = bool(source.source_type == "news_media" and locality
-                                   and locality.search(lead) and practical.search(lead))
+            media = source.source_type == "news_media"
+            local = bool(locality and locality.search(lead))
+            local_practical = bool(media and local and practical.search(lead))
+            # Национальный поток не получает транспортный приоритет только из-за
+            # слова «отмена» о чужом городе. Локальная практическая новость СМИ
+            # не остаётся навечно ниже любой общей официальной заметки.
+            band = (4 if private_priority or guide else
+                    3 if disruption and (not media or local) else
+                    max(0, priorities.get(source.id, 0)) if local_practical else
+                    priorities.get(source.id, 0))
             return (band, int(local_practical), -(recent_source_counts or {}).get(source.id, 0),
                     item.published_at or item.ingested_at, item.id)
         clusters.sort(key=queue_order, reverse=True)

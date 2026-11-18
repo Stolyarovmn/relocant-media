@@ -285,10 +285,10 @@ PROCESS_LIMIT = 5
 
 
 def queue_priorities(attention: dict[str, int], media: Iterable[str]) -> dict[str, int]:
-    """Official sources keep their band; verified media always queue behind every one of them.
+    """Общие ленты СМИ идут ниже официальных; местные предупреждения повышает selector.
 
-    National feeds add dozens of items an hour; without this they take the few processing
-    slots from the city news that matters to relocants.
+    Национальные потоки добавляют десятки сообщений в час. Исключение для местной
+    практической темы меняет только порядок, не редакционное решение или допуск.
     """
     floor = min([0, *attention.values()]) - 1
     return {**attention, **{source_id: floor for source_id in media}}

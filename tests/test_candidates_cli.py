@@ -78,6 +78,40 @@ def test_local_interest_changes_order_but_transport_warning_stays_first(
     assert session.scalar(select(func.count()).select_from(EditorialRun)) == 0
 
 
+def test_weather_and_airport_disruptions_do_not_wait_behind_foreign_cancellations(
+    editorial_session: Session,
+) -> None:
+    from relocant_media.ops.server_cycle import queue_priorities
+
+    session = editorial_session
+    fixtures = [
+        ("foreign", "Obustava saobraćaja u Zagrebu", 5),
+        ("national", "Американские выборы: новый опрос", 4),
+        ("flood", "Ulice u Beogradu pod vodom zbog kiše", 2),
+        ("flight", "Air Serbia: Poremećaji u avio-saobraćaju u Beogradu", 1),
+        ("official", "Новая общая городская заметка", 0),
+    ]
+    for key, title, hour in fixtures:
+        session.add(Source(id=key, city="belgrade", name=key,
+                           url=f"https://{key}.example.org", trust=1, enabled=True,
+                           source_type="official" if key == "official" else "news_media"))
+        session.flush()
+        session.add(RawItem(source_id=key, external_id=key,
+                            url=f"https://{key}.example.org/1", title=title,
+                            body=title, published_at=NOW + timedelta(hours=hour)))
+    session.commit()
+    options = dict(city="belgrade", since=NOW, until=NOW + timedelta(days=1),
+                   newest_first=True, locality_aliases=("Београд", "Beograd"),
+                   source_priorities=queue_priorities({}, [key for key, _, _ in fixtures
+                                                          if key != "official"]))
+    first = select_candidates(session, **options, limit=2)
+    assert [row["article_id"] for row in first["candidates"]] == ["flood", "flight"]
+    all_rows = select_candidates(session, **options, limit=10)
+    assert all_rows["eligible_count"] == 5
+    assert {row["article_id"] for row in all_rows["candidates"]} == {key for key, _, _ in fixtures}
+    assert session.scalar(select(func.count()).select_from(EditorialRun)) == 0
+
+
 def seed(session: Session) -> None:
     session.add_all([
         Source(id=key, city=city, name=key, url=f"https://example.org/{key}",
