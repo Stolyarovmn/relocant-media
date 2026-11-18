@@ -14,6 +14,7 @@ class ExtractionConfig(BaseModel):
     article_lead_selectors: tuple[str, ...] = ()
     page_text: bool = False  # feed carries only a teaser: fetch the article page
     approved_hosts: tuple[str, ...] = ()
+    excluded_path_prefixes: tuple[str, ...] = ()
 
 
 class SourcePolicy(BaseModel):

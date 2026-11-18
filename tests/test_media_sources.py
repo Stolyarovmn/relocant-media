@@ -43,7 +43,7 @@ def test_media_never_enter_the_official_venue_paths() -> None:
     assert not set(MEDIA) & set(discovery_venue_sources())
 
 
-PAGE_TEXT = {"media_nova", "media_danas"}  # feed carries a teaser; the article page is fetched
+PAGE_TEXT = {"media_nova", "media_danas", "media_n1_srbija"}
 
 
 @pytest.mark.parametrize(("source_id", "fixture"), MEDIA.items())
@@ -100,3 +100,59 @@ def test_teaser_only_feeds_fetch_the_article_page_for_evidence() -> None:
 
     assert len(items) == 1 and "Pun tekst clanka" in items[0].body
     assert teaser.strip() not in items[0].body
+
+
+@pytest.mark.asyncio
+async def test_n1_uses_full_main_article_even_when_feed_and_jsonld_have_only_teasers():
+    import json
+    from datetime import UTC, datetime
+
+    import httpx
+
+    from relocant_media.collectors.venue_feed import VenueFeedCollector
+
+    source = _registry()['media_n1_srbija']
+    assert source.extraction.page_text
+    url = 'https://n1info.rs/vesti/flight-delays/'
+    date = datetime.now(UTC).replace(microsecond=0).isoformat()
+    teaser = 'Teaser without the operational details. ' * 5
+    feed = (f'<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>'
+            f'<title>Flight delays</title><link>{url}</link><pubDate>{date}</pubDate>'
+            f'<content:encoded><![CDATA[<p>{teaser}</p>]]></content:encoded>'
+            '</item></channel></rss>')
+    ld = json.dumps({'@type': 'NewsArticle', 'headline': 'Flight delays',
+                     'datePublished': date, 'articleBody': teaser})
+    full = 'Full operational details and verified contact information. ' * 5
+    page = (f'<script type="application/ld+json">{ld}</script>'
+            '<article class="article-wrapper"><p>Air Serbia statement.</p>'
+            f'<div class="article-content-wrapper"><div class="rich-text-block"><p>{full}</p>'
+            '</div></div><div class="article-content-wrapper"><article>'
+            '<p>Unrelated recommended story.</p></article></div></article>')
+    requested = []
+
+    def handle(request):
+        requested.append(str(request.url))
+        return httpx.Response(200, text=feed if request.url.path == '/feed/' else page)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        item = await VenueFeedCollector(source, client).collect_url(url)
+    assert requested == [source.extraction.feed_url, url]
+    assert full.strip() in item.body and 'Air Serbia statement.' in item.body
+    assert teaser.strip() not in item.body and 'Unrelated recommended' not in item.body
+
+
+def test_n1_video_programmes_are_not_treated_as_text_articles():
+    from datetime import UTC, datetime
+
+    from relocant_media.collectors.venue_feed import _allowed
+
+    source = _registry()['media_n1_srbija']
+    date = datetime.now(UTC).isoformat()
+    base = 'https://n1info.rs/'
+    xml = '<rss><channel>' + ''.join(
+        f'<item><title>Test</title><link>{base}{path}</link><pubDate>{date}</pubDate></item>'
+        for path in ('video/dnevnik/example/', 'vesti/flight-delays/')
+    ) + '</channel></rss>'
+    assert [item.url for item in parse_venue_feed(xml, source)] == [base + 'vesti/flight-delays/']
+    with pytest.raises(ValueError, match='content path'):
+        _allowed(base + 'video/dnevnik/example/', source)

@@ -18,18 +18,22 @@ engine = source_engine
 
 
 @pytest.mark.asyncio
-async def test_source_lead_enters_public_pipeline_without_grant_or_media_approval(engine):
+@pytest.mark.parametrize('initial_status', ['reader_review', 'waiting_primary'])
+async def test_source_lead_enters_public_pipeline_without_grant_or_media_approval(
+    engine, initial_status,
+):
     payload = material(permission="private", mode="anonymous")
     payload["text"] = "Редакционный сигнал https://www.cukarica.rs/vest/123-event/"
     payload["reader_publication"].update(
         ownership="source", material_sha256=material_fingerprint(payload),
     )
-    sid = submission(engine, status="reader_review", **payload)
+    sid = submission(engine, status=initial_status, **payload)
     bot = Bot()
     owner = {"owner_user_id": OWNER_ID, "owner_chat_id": OWNER_ID}
     await process_reader_resolutions(engine, bot, enabled=True, **owner)
     buttons = bot.sent[-1][1]["reply_markup"]["inline_keyboard"]
     assert buttons[0][0]["callback_data"] == f"rr:primary:{sid}"
+    assert ('Повторить' in buttons[0][0]['text']) == (initial_status == 'waiting_primary')
     with Session(engine) as session:
         assert not batch_submissions(session)
         action = record_reader_resolution_callback(session, callback(sid, "primary"), **owner)

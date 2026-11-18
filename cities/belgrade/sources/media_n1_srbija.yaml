@@ -16,6 +16,8 @@ categories:
 - schools
 extraction:
   strategy: venue_feed
+  page_text: true
+  excluded_path_prefixes: [/video/]
   status: active
   feed_url: https://n1info.rs/feed/
   article_selectors:
@@ -27,5 +29,5 @@ policy:
   auto_publish: true
   high_risk: false
 verification:
-  checked_at: '2026-10-27'
-  note: Независимое СМИ. RSS отдаёт полный content:encoded и настоящую pubDate. Источник media; идёт обычным путём новости (две независимые проверки, не высокорисковые темы, ссылка на оригинал и собственный пересказ); к владельцу попадает то, что не вышло, с пояснением.
+  checked_at: '2026-11-18'
+  note: Независимое СМИ. RSS и JSONLD могут содержать только тизер; полный текст берётся из основного блока статьи без соседних карточек, дата публикации проверяется отдельно. Источник media; обычный путь новости с двумя проверками, атрибуцией и ограничением высокорисковых тем.

@@ -87,3 +87,43 @@ async def test_later_successful_feed_resolves_tip_after_transient_direct_fetch_f
     assert stats['priority_submissions'] == 1
     with Session(engine) as session:
         assert session.scalar(select(Submission)).status == 'source_linked'
+
+
+@pytest.mark.asyncio
+async def test_intake_resolves_explicit_media_link_without_collecting_any_feeds(
+    runtime, monkeypatch,
+):
+    from unittest.mock import AsyncMock
+
+    from relocant_media.collectors.base import RawItem as CollectedItem
+
+    engine, venue, venues, _, _ = runtime
+    venues.clear()
+    media = venue.model_copy(update={
+        'id': 'media_tip', 'source_type': 'news_media', 'ownership': 'media',
+    })
+    url = 'https://museum.example/news/flight-delays/'
+    public_body = 'Air Serbia najavljuje kasnjenja letova u Beogradu. ' * 8
+    direct = AsyncMock(return_value=CollectedItem(
+        media.id, url, url, 'Air Serbia: kasnjenja letova', public_body, NOW,
+    ))
+    monkeypatch.setattr(server_cycle, 'media_sources', lambda: {media.id: media})
+    monkeypatch.setattr(VenueFeedCollector, 'collect_url', direct)
+
+    async def no_feed(*args, **kwargs):
+        pytest.fail('Предложка не должна собирать массовые ленты')
+
+    monkeypatch.setattr(VenueFeedCollector, 'collect', no_feed)
+    with Session(engine) as session:
+        session.add(Submission(kind='news_tip', status='new', payload={
+            'city': 'belgrade', 'text': 'Частные слова автора не доказательство. ' + url,
+        }))
+        session.commit()
+    stats = await server_cycle.collect_sources(engine, submissions_only=True)
+    assert stats['private_link_fetches'] == 1 and stats['media_items'] == 0
+    direct.assert_awaited_once_with(url)
+    with Session(engine) as session:
+        row = session.scalar(select(Submission))
+        raw = session.scalar(select(RawItem))
+        assert row.status == 'source_linked' and row.payload['raw_item_ids'] == [raw.id]
+        assert raw.body == public_body and 'Частные слова' not in raw.body

@@ -55,6 +55,8 @@ def _allowed(url: str, source: SourceConfig) -> str:
         raise ValueError("IP venue host forbidden")
     if parts.hostname in {"localhost", "metadata.google.internal"}:
         raise ValueError("private venue host forbidden")
+    if any(parts.path.startswith(prefix) for prefix in source.extraction.excluded_path_prefixes):
+        raise ValueError("unsupported source content path")
     return url
 
 
@@ -146,6 +148,19 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
     if published is None:
         meta = soup.select_one('meta[property="article:published_time"]')
         published = _date(str(meta.get("content", ""))) if meta else None
+    if source.id == "media_n1_srbija" and source.extraction.page_text:
+        roots = soup.select("article.article-wrapper")
+        if len(roots) != 1:
+            raise ValueError("N1 main article missing or ambiguous")
+        root = roots[0]
+        blocks = root.select(
+            ":scope > .article-content-wrapper > .rich-text-block",
+        )
+        if not any(block.get_text(strip=True) for block in blocks):
+            raise ValueError("N1 full article text missing")
+        body = " ".join(block.get_text(" ", strip=True) for block in root.select(
+            ":scope > p, :scope > .article-content-wrapper > .rich-text-block",
+        ))
     if not body:
         for selector in source.extraction.article_selectors:
             article = soup.select_one(selector)
