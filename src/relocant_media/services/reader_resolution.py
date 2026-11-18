@@ -144,6 +144,9 @@ def _related_runs(
 
 def _news_state(session: Session, row: Submission, now: datetime) -> str | None:
     if row.status == "reader_review":
+        if _primary_review_available(row):
+            return ("Сигнал из чужого источника. Можно проверить первоисточник отдельной кнопкой. "
+                    "Присланные текст и файлы остаются только редакции.")
         return "Материал читателя. Проверьте содержание, права и факты перед публикацией."
     if row.status == "expired":
         _close(row, _EXPIRED, "expired", now=now)
@@ -557,6 +560,10 @@ async def process_reader_resolutions(
             and_(Submission.kind == "news_tip", Submission.status == "reader_review",
                  Submission.payload["reader_resolution"]["owner_notice"]["status"]
                  .as_string().is_(None)),
+            and_(Submission.kind == "news_tip", Submission.status == "reader_review",
+                 Submission.payload["reader_publication"]["ownership"].as_string() == "source",
+                 func.coalesce(Submission.payload["reader_resolution"]
+                               ["primary_review_offered"].as_boolean(), False).is_(False)),
             and_(Submission.kind.in_(_OWNER_KINDS), Submission.status == "new",
                  Submission.payload["reader_resolution"]["owner_notice"]["status"]
                  .as_string().is_(None)),
@@ -646,6 +653,10 @@ async def process_reader_resolutions(
                 stats["changed"] += int(await _clear_closed_reader_keyboard(
                     session, row, bot, owner_chat_id=owner_chat_id,
                 ))
+                if (_primary_review_available(row)
+                        and not _resolution(row).get("primary_review_offered")):
+                    _set_resolution(row, primary_review_offered=True)
+                    session.commit()
     with Session(engine) as session:
         resolution = Submission.payload["reader_resolution"]
         uncertain_delivery = [

@@ -85,3 +85,26 @@ async def test_primary_review_cannot_be_forged_or_used_for_other_material(engine
         assert result is None or not result.accepted
         assert "public_source_review" not in row.payload
         assert row.payload.get("reader_media_review") == original.get("reader_media_review")
+
+
+@pytest.mark.asyncio
+async def test_existing_source_card_gets_new_action_without_new_reader_message(engine):
+    payload = material(permission="private", mode="anonymous")
+    payload["text"] = "https://www.cukarica.rs/vest/123-event/"
+    payload["reader_publication"].update(
+        ownership="source", material_sha256=material_fingerprint(payload),
+    )
+    payload["reader_resolution"] = {"owner_notice": {
+        "status": "sent", "chat_id": OWNER_ID, "telegram_message_id": 51,
+        "content_sha256": "legacy-card", "sent_at": "2026-11-18T16:00:00+00:00",
+    }}
+    sid = submission(engine, status="reader_review", **payload)
+    owner = {"owner_user_id": OWNER_ID, "owner_chat_id": OWNER_ID}
+    bot = Bot()
+    await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    assert len(bot.sent) == 1 and bot.sent[0][0] == "editMessageText"
+    edited = bot.sent[0][1]
+    assert edited["message_id"] == 51
+    assert edited["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == f"rr:primary:{sid}"
+    await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    assert len(bot.sent) == 1
