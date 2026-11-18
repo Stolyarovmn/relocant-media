@@ -158,6 +158,9 @@ def _news_state(session: Session, row: Submission, now: datetime) -> str | None:
         incident = INCIDENT.search(str(row.payload.get("text", ""))) is not None
         if now - receipt_at >= timedelta(hours=1 if incident else 48):
             _close(row, _EXPIRED, "expired", now=now)
+        elif _primary_review_available(row):
+            return ("Первоисточник пока не связан. После устранения причины можно повторить "
+                    "проверку этой же версии отдельной кнопкой; публикация не запускается.")
         return None
     if row.status != "source_linked":
         return None
@@ -225,7 +228,7 @@ def _exact_owner_card(
 def _primary_review_available(row: Submission) -> bool:
     publication = row.payload.get("reader_publication")
     return bool(
-        row.kind == "news_tip" and row.status == "reader_review"
+        row.kind == "news_tip" and row.status in {"reader_review", "waiting_primary"}
         and isinstance(publication, dict)
         and publication.get("version") == POLICY["version"]
         and publication.get("stage") == "confirmed"
@@ -405,7 +408,8 @@ def _owner_card(row: Submission, reason: str, owner_chat_id: int) -> dict[str, A
             "Ответьте на эту карточку готовым текстом. Он уйдёт автору обращения."
         ),
         "reply_markup": {"inline_keyboard": [
-            *([[{"text": "Проверить первоисточник",
+            *([[{"text": ("Повторить проверку источника" if row.status == "waiting_primary"
+                          else "Проверить первоисточник"),
                  "callback_data": f"rr:primary:{row.id}"}]]
               if _primary_review_available(row) else []),
             [{"text": "Вложения", "callback_data": f"rr:media:{row.id}"}],
