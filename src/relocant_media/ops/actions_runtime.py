@@ -43,9 +43,11 @@ from relocant_media.ops.map_republication import apply as apply_map_republicatio
 from relocant_media.ops.map_republication import resolve_previous as resolve_map_republication
 from relocant_media.ops.map_republication import review_request as map_review_request
 from relocant_media.ops.newsroom_merge import merge
+from relocant_media.ops.serverless_snapshot import open_draft_routes
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.ops.sqlite_restore import restore
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient, _state_digest
+from relocant_media.ops.vercel_inbox import acknowledge_inbox, ingress_config, sequence_cursor
 from relocant_media.services.cloud_discovery import batch_receipt, ingest_batch, parse_batch
 
 REPO = "Stolyarovmn/relocant-media"
@@ -556,6 +558,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             _gpt_digest(gpt_input)
     state, sha = store.read()
     validate_ready(state)
+    ingress_config(state.get("intake_state", {}))
     if mode == "auto":
         mode = "editorial" if editorial_due(state, datetime.now(UTC)) else "intake"
     slot = (due_digest_slot(datetime.now(UTC)) if mode in {"digest", "editorial", "intake"}
@@ -705,6 +708,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         code = 0
     else:
         _runtime_phase("worker_started")
+        if mode != "intake":
+            env.pop("EDITORIAL_INGRESS_TOKEN", None)
         code = run_child(command, env)
         _runtime_phase("worker_completed")
     report_failure(run_dir, code)
@@ -719,8 +724,16 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     _runtime_phase("snapshot_verified")
     saved_intake = json.loads(intake_state.read_text())
     # Retry budget lives outside SQLite; preserve it across ephemeral runners.
-    budget = {key: saved_intake[key] for key in ("signature", "attempts", "backup_pending")
+    budget = {key: saved_intake[key] for key in (
+        "signature", "attempts", "backup_pending", "ingress", "serverless_sequence")
               if key in saved_intake}
+    ingress_config(budget)
+    canonical_intake = state.get("intake_state", {})
+    if budget.get("ingress") != canonical_intake.get("ingress"):
+        raise ValueError("worker cannot change canonical ingress configuration")
+    if (sequence_cursor(budget.get("serverless_sequence", 0))
+            < sequence_cursor(canonical_intake.get("serverless_sequence", 0))):
+        raise ValueError("ingress cursor cannot move backwards")
     has_cycle_report = mode in {"editorial", "fallback"} or (mode == "discovery" and created)
     observed_run = run_dir if has_cycle_report else next(
         iter(sorted((directory / "runs").glob("*/server-report.json"), reverse=True)), None)
@@ -806,6 +819,17 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     _runtime_phase("state_commit_started")
     store.write(ready, busy_sha)
     _runtime_phase("state_committed")
+    # Purge ingress copies only after snapshot verification and successful canonical CAS.
+    # A lost ACK leaves harmless private copies; the next ready checkpoint retries it.
+    source = ingress_config(budget)
+    through = sequence_cursor(budget.get("serverless_sequence", 0))
+    if source is not None and source["phase"] == "active" and through > 0:
+        try:
+            acknowledge_inbox(source["url"], environment.get("EDITORIAL_INGRESS_TOKEN", ""),
+                              through, manifest["sha256"],
+                              open_drafts=open_draft_routes(work / "saved" / "editorial.sqlite3"))
+        except Exception as error:
+            print(json.dumps({"ingress_ack_error_type": type(error).__name__}), file=sys.stderr)
     # Publication of this artifact happens only after the canonical checkpoint.
     if provisional.is_file():
         output.parent.mkdir(parents=True, exist_ok=True)

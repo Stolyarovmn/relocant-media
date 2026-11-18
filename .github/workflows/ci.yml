@@ -39,6 +39,13 @@ jobs:
         with:
           node-version: '22'
       - run: node --test tests/map_frontend.test.mjs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify private ingress without live services
+        run: |
+          npm ci --prefix deploy/vercel-intake --ignore-scripts
+          npm test --prefix deploy/vercel-intake
       - name: Validate Alembic migrations
         run: |
           alembic upgrade head

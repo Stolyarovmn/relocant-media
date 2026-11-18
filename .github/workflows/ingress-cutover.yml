@@ -1,0 +1,78 @@
+name: Private intake cutover
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Read-only preflight or explicitly approved Vercel cutover
+        type: choice
+        options: [preflight, activate]
+        default: preflight
+permissions:
+  contents: read
+  actions: read
+jobs:
+  cutover:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: canonical-editorial-state
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e .
+      - name: Verify exact main CI before any runtime side effect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo = 'Stolyarovmn/relocant-media'
+          sha = os.environ['EXPECTED_SHA']
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/{path}']))
+          assert api('git/ref/heads/main')['object']['sha'] == sha, 'main advanced; retry current main'
+          runs = api(f'actions/runs?head_sha={sha}&event=push&per_page=100')['workflow_runs']
+          ci = [r for r in runs if r['path'] == '.github/workflows/ci.yml'
+                and r['head_branch'] == 'main' and r['event'] == 'push']
+          assert ci and ci[0]['status'] == 'completed' and ci[0]['conclusion'] == 'success'
+          PY
+      - name: Verify snapshot and transfer private intake
+        env:
+          EDITORIAL_STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND }}
+          ACTIONS_CUTOVER_CONFIRMED: ${{ vars.ACTIONS_CUTOVER_CONFIRMED }}
+          STORAGE_PRIVATE_KEY: ${{ secrets.EDITORIAL_SSH_PRIVATE_KEY }}
+          STORAGE_KNOWN_HOSTS: ${{ secrets.EDITORIAL_SSH_KNOWN_HOSTS }}
+          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
+          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
+          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          EDITORIAL_INGRESS_TOKEN: ${{ secrets.EDITORIAL_INGRESS_TOKEN }}
+          EDITORIAL_INGRESS_WEBHOOK_SECRET: ${{ secrets.EDITORIAL_INGRESS_WEBHOOK_SECRET }}
+          CUTOVER_OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          test "$EDITORIAL_STORAGE_BACKEND" = ssh
+          test "$ACTIONS_CUTOVER_CONFIRMED" = true
+          test -n "$STORAGE_PRIVATE_KEY"
+          test -n "$STORAGE_KNOWN_HOSTS"
+          umask 077
+          identity="$RUNNER_TEMP/intake-cutover-identity"
+          mkdir "$identity"
+          printf '%s\n' "$STORAGE_PRIVATE_KEY" > "$identity/key"
+          printf '%s\n' "$STORAGE_KNOWN_HOSTS" > "$identity/known_hosts"
+          unset STORAGE_PRIVATE_KEY STORAGE_KNOWN_HOSTS
+          EDITORIAL_SSH_KEY_PATH="$identity/key" \
+          EDITORIAL_SSH_KNOWN_HOSTS_PATH="$identity/known_hosts" \
+            python -m relocant_media.ops.ingress_cutover \
+              --operation "$CUTOVER_OPERATION" --work "$RUNNER_TEMP/intake-cutover"
+      - name: Remove private runner files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/intake-cutover" "$RUNNER_TEMP/intake-cutover-identity"

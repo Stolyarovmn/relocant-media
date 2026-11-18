@@ -1,0 +1,10 @@
+.env*
+.vercel/**
+node_modules/**
+test/**
+*.local.*
+*.sqlite*
+*.db
+*.seed.json
+*snapshot*
+*.log
