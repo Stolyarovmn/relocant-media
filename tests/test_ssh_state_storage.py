@@ -125,7 +125,7 @@ def ingress_context(context, monkeypatch):
     fault = {}
     seed = {
         'version': 1, 'created_at': '2026-11-18T12:00:00+00:00', 'bot_id': 123456,
-        'channel_id': APPROVED_CHANNEL_ID, 'form': form_settings(),
+        'channel_id': APPROVED_CHANNEL_ID, 'form': json.loads(canonical_json(form_settings())),
         'processed_updates': [100], 'legacy_conversations': [],
         'cases': [{'id': 17, 'reference': 'RM-1234-5678', 'kind': 'technical',
                    'status': 'collecting', 'telegram_user_id': 42, 'telegram_message_id': 101,
