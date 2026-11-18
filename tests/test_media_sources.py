@@ -139,3 +139,20 @@ async def test_n1_uses_full_main_article_even_when_feed_and_jsonld_have_only_tea
     assert requested == [source.extraction.feed_url, url]
     assert full.strip() in item.body and 'Air Serbia statement.' in item.body
     assert teaser.strip() not in item.body and 'Unrelated recommended' not in item.body
+
+
+def test_n1_video_programmes_are_not_treated_as_text_articles():
+    from datetime import UTC, datetime
+
+    from relocant_media.collectors.venue_feed import _allowed
+
+    source = _registry()['media_n1_srbija']
+    date = datetime.now(UTC).isoformat()
+    base = 'https://n1info.rs/'
+    xml = '<rss><channel>' + ''.join(
+        f'<item><title>Test</title><link>{base}{path}</link><pubDate>{date}</pubDate></item>'
+        for path in ('video/dnevnik/example/', 'vesti/flight-delays/')
+    ) + '</channel></rss>'
+    assert [item.url for item in parse_venue_feed(xml, source)] == [base + 'vesti/flight-delays/']
+    with pytest.raises(ValueError, match='content path'):
+        _allowed(base + 'video/dnevnik/example/', source)

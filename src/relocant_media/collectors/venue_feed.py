@@ -55,6 +55,8 @@ def _allowed(url: str, source: SourceConfig) -> str:
         raise ValueError("IP venue host forbidden")
     if parts.hostname in {"localhost", "metadata.google.internal"}:
         raise ValueError("private venue host forbidden")
+    if any(parts.path.startswith(prefix) for prefix in source.extraction.excluded_path_prefixes):
+        raise ValueError("unsupported source content path")
     return url
 
 
