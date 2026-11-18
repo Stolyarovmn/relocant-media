@@ -37,6 +37,7 @@ export function buildCalendar(item, now = Date.now()) {
         "DTSTAMP:" + instant(now), "DTSTART" + type + ":" + start,
         ...(end ? ["DTEND" + type + ":" + end] : []),
         "SUMMARY:" + escape(item.title), "DESCRIPTION:" + escape(item.reportedScope || item.venue || ""),
+        ...(item.venue ? ["LOCATION:" + escape([item.venue, item.address].filter(Boolean).join(", "))] : []),
         "URL:" + item.source, "TRANSP:TRANSPARENT", "BEGIN:VALARM", "TRIGGER:-P1D",
         "ACTION:DISPLAY", "DESCRIPTION:" + escape(item.title), "END:VALARM", "END:VEVENT"];
     }), "END:VCALENDAR", ""].map(fold).join("\r\n");

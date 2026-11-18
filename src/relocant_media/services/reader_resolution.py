@@ -143,6 +143,24 @@ def _related_runs(
 
 
 def _news_state(session: Session, row: Submission, now: datetime) -> str | None:
+    if row.status == "closed" and _resolution(row).get("outcome") == "owner_replied":
+        # Ответ о техническом ожидании не теряет позднейшую подтверждённую публикацию.
+        # Отменённые обращения и неясные квитанции этим путём не возобновляются.
+        previous_final = _resolution(row).get("final", {})
+        raw_ids = {value for value in row.payload.get("raw_item_ids", []) if _positive(value)}
+        if previous_final.get("status") != "sent" or not raw_ids:
+            return None
+        for run in session.scalars(select(EditorialRun).where(
+            EditorialRun.raw_item_id.in_(raw_ids), EditorialRun.delivery_status == "sent",
+        )):
+            previous = run.outcome.get("_previous_policy_hold", {}).get("outcome", {})
+            post_id = _confirmed_post(session, run, row.payload["city"])
+            if previous.get("reason") == "event_place_requires_verification" and post_id:
+                _set_resolution(row, previous_final=previous_final)
+                _close(row, "Материал по вашему обращению опубликован. "
+                       f"https://t.me/eduvbelgrad/{post_id}", "published", now=now)
+                break
+        return None
     if row.status == "reader_review":
         if _primary_review_available(row):
             return ("Сигнал из чужого источника. Можно проверить первоисточник отдельной кнопкой. "
@@ -561,6 +579,10 @@ async def process_reader_resolutions(
         Submission.payload["city"].as_string() == "belgrade",
         Submission.payload["test_only"].as_boolean().is_not(True),
         or_(
+            and_(Submission.kind == "news_tip", Submission.status == "closed",
+                 Submission.payload["reader_resolution"]["outcome"].as_string()
+                 == "owner_replied",
+                 Submission.payload["raw_item_ids"].as_string().is_not(None)),
             and_(Submission.status == "closed",
                  Submission.payload["reader_resolution"]["final"]["status"].as_string()
                  == "pending"),

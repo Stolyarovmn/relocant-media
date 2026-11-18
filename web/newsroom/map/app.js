@@ -2,9 +2,9 @@ import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=10";
-import { calendarLink } from "./calendar.js?v=3";
-import { setupPlaces } from "./places.js?v=10";
+} from "./core.js?v=11";
+import { calendarLink } from "./calendar.js?v=4";
+import { setupPlaces } from "./places.js?v=11";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");

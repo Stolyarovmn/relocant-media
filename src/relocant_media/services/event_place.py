@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.domain.city_profile import CityEditorialProfile
-from relocant_media.domain.map_links import map_event_id
+from relocant_media.domain.map_links import map_event_id, map_occurrence_id
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.event_place_adapters import (
     extract_event_adapter,
@@ -228,7 +228,35 @@ def resolve_event_place(
         facts = extract_event_adapter(document, source_html, profile=profile)
     if facts is None:
         return None
+    if "occurrences" in facts:
+        occurrences = []
+        for slot in facts["occurrences"]:
+            place = _verified_place(document, slot, profile, html_sha256=_sha(source_html))
+            if place is None:
+                return None
+            key = slot["occurrence_key"]
+            place.update(id=map_occurrence_id(document.url, key),
+                         group_id=map_event_id(document.url))
+            occurrences.append(place)
+        if not 2 <= len(occurrences) <= 100 or len({p["id"] for p in occurrences}) != len(
+            occurrences
+        ):
+            return None
+        return {
+            "version": 2, "id": map_event_id(document.url),
+            "source_id": document.source_id, "source_url": document.url,
+            "timezone": profile.timezone,
+            "expires_at": max(p["expires_at"] for p in occurrences),
+            "source_html_sha256": _sha(source_html),
+            "document_sha256": _sha(document.model_dump_json()),
+            "occurrences": occurrences,
+        }
     return _verified_place(document, facts, profile, html_sha256=_sha(source_html))
+
+
+def event_occurrences(place: dict[str, Any]) -> list[dict[str, Any]]:
+    """Совместимость одиночных исторических карточек и проверенной программы."""
+    return list(place["occurrences"]) if place.get("version") == 2 else [place]
 
 
 def _verified_place(

@@ -75,10 +75,15 @@ def plan_event_buttons(
     published = {event.id: event for event in feed.events}
     buttons = {}
     for message_id, event_id in targets.items():
-        event = reviewed.get(event_id)
-        if (event is None or event.archived or event != published.get(event_id)
-                or event.post_url != f"https://t.me/eduvbelgrad/{message_id}"):
+        selected = {key: event for key, event in reviewed.items()
+                    if event.id == event_id or event.group_id == event_id}
+        live = {key: event for key, event in published.items()
+                if event.id == event_id or event.group_id == event_id}
+        if (not selected or selected != live or all(event.archived for event in selected.values())
+                or any(event.post_url != f"https://t.me/eduvbelgrad/{message_id}"
+                       for event in selected.values())):
             raise ValueError("published event and confirmed afisha card must match")
+        event = next(iter(selected.values()))
         url = map_event_url(event.source_url, telegram_app=telegram_app, places=True)
         if not url.startswith("https://t.me/"):
             raise ValueError("configured Telegram application is required")

@@ -4,8 +4,8 @@ import { test } from "node:test";
 import { buildCalendar } from "../web/newsroom/map/calendar.js";
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, nextTransition,
-  placeCountdown, placeStatus,
+  incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
+  nextTransition, placeCountdown, placeOptionLabel, placeStatus,
   pointsAtScale, readIncidents, readPlaces, searchAddresses, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
@@ -293,4 +293,27 @@ test("контур дома не скрывает соседний точный 
   const later = { ...matched, window: { start: 3, end: 4 } };
   assert.deepEqual(pointsAtScale([matched, adjacent, later], [], [area], 19, project),
     [adjacent, later]);
+});
+
+
+test("ссылка фестиваля открывает все площадки, повторное место различается датой", () => {
+  const group = "event_aaaaaaaaaaaaaaaaaaaa";
+  const rows = Array.from({ length: 6 }, (_, i) => ({
+    id: "event_" + String(i + 1).padStart(20, "0"), group_id: group, kind: "event",
+    title: "Чукафест", timezone: "Europe/Belgrade", source_url: "https://www.cukarica.rs/",
+    starts_at: `2026-12-0${i + 2}T20:00:00+01:00`, ends_at: null,
+    expires_at: `2026-12-0${i + 3}T00:00:00+01:00`,
+    venue: { name: i === 3 ? "Площадка2" : "Площадка" + i, address: "Адрес", latitude: 44.78, longitude: 20.41 },
+  }));
+  const places = readPlaces({ version: 1, events: rows });
+  assert.equal(launchPlaces(places, group).length, 6);
+  assert.equal(new Set(places.map((place) => place.venue)).size, 5);
+  assert.deepEqual(launchPlaces(places, rows[3].id), [places[3]]);
+  assert.notEqual(placeOptionLabel(places[2]), placeOptionLabel(places[3]));
+  assert.deepEqual(launchPlaces(places, "invalid"), []);
+  const calendar = buildCalendar(places[3], Date.parse("2026-11-19T00:00:00Z"));
+  const unfolded = calendar.replace(/\r\n /g, "");
+  assert.match(unfolded, /LOCATION:Площадка2\\, Адрес/);
+  assert.match(calendar, /DTSTART:20261205T190000Z/);
+  assert.doesNotMatch(calendar, /DTEND/);
 });

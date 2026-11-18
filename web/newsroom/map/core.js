@@ -137,9 +137,10 @@ export function readPlaces(document) {
     seen.add(item.id);
     const paidPlace = item.kind === "sponsored_place";
     if (paidPlace && (!post || end !== null)) return [];
-    return [{ id: item.id, title, source, schedule: schedule === source ? "" : schedule,
+    const group = eventId.test(item.group_id) ? item.group_id : "";
+    return [{ id: item.id, group, title, source, schedule: schedule === source ? "" : schedule,
       post, venue, address, visitorHours: textValue(item.visitor_hours),
-      scheduleNote: textValue(item.schedule_note), lat, lon,
+      scheduleNote: textValue(item.schedule_note), venueNote: textValue(item.venue_note), lat, lon,
       paidPlace, sponsored: paidPlace || item.sponsored === true,
       archived: item.archived === true, start, end, expires }];
   });
@@ -148,6 +149,16 @@ export function readPlaces(document) {
 export function placeStatus(place, now) {
   if (place.archived || now >= place.expires || (place.end !== null && now >= place.end)) return "closed";
   return now < place.start ? "planned" : "active";
+}
+
+export function launchPlaces(entries, id) {
+  if (!eventId.test(id)) return [];
+  const exact = entries.find((place) => place.id === id);
+  return exact ? [exact] : entries.filter((place) => place.group === id);
+}
+
+export function placeOptionLabel(place) {
+  return `${place.venue} · ${day.format(place.start)}, ${hour.format(place.start)}`;
 }
 
 export function placeCountdown(place, now) {

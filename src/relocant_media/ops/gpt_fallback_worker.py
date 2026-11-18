@@ -22,7 +22,7 @@ from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.ops import server_cycle, server_runtime
 from relocant_media.services.gpt_fallback import validate_fallback_package
 from relocant_media.services.package_import import import_package
-from relocant_media.services.policy_reassessment import eligible_empty_policy_hold
+from relocant_media.services.policy_reassessment import eligible_policy_reassessment
 from relocant_media.storage.models import EditorialRun
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -138,7 +138,8 @@ def run_worker(
                     session, payload.request, package, now=now or datetime.now(UTC),
                 )
                 phase = "import"
-                run = import_package(session, package, now=now, replace_empty_hold=True)
+                run = import_package(session, package, now=now, replace_empty_hold=True,
+                                     replace_map_hold=True)
                 imported += 1
                 if run.outcome.get("status") == "ready":
                     ready += 1
@@ -167,7 +168,7 @@ def run_worker(
                 "ready", "human_review", "skipped", "blocked",
             }),
         )).all()
-        resolved = {raw_id for raw_id in saved_ids if not eligible_empty_policy_hold(
+        resolved = {raw_id for raw_id in saved_ids if not eligible_policy_reassessment(
             session, raw_id, now=now,
         )}
     unresolved = len(requested_ids - resolved)

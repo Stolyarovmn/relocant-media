@@ -21,6 +21,7 @@ from relocant_media.services.editorial import (
 )
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
+    eligible_map_hold,
     policy_hold_audit,
 )
 from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
@@ -33,7 +34,7 @@ class PackageConflictError(ValueError):
 
 def import_package(
     session: Session, package: EditorialPackage, *, now: datetime | None = None,
-    replace_empty_hold: bool = False,
+    replace_empty_hold: bool = False, replace_map_hold: bool = False,
 ) -> EditorialRun:
     """Dedicated session required. Matching imports do not reset delivery receipts."""
     outcome = evaluate_package(package, now=now)
@@ -59,9 +60,10 @@ def import_package(
         ):
             raise PackageConflictError("raw evidence changed")
         existing = session.get(EditorialRun, item.id)
-        replacing = bool(existing is not None and replace_empty_hold
-                         and package.version == 2
-                         and eligible_empty_policy_hold(session, item.id, now=now))
+        replacing = bool(existing is not None and package.version == 2 and (
+            (replace_empty_hold and eligible_empty_policy_hold(session, item.id, now=now))
+            or (replace_map_hold and eligible_map_hold(session, item.id, now=now))
+        ))
         if existing is not None and not replacing:
             # Both historical single-document runs and new bundles must keep
             # their original receipt and snapshot on an identical reimport.
