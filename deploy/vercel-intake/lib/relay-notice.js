@@ -15,7 +15,8 @@ export function relayNotice(state, actor, message, updateId, now) {
     reference: c.reference, status: c.status, expires_at: Infinity,
   }))].find(c => c.user === actor.user && c.chat === actor.chat && c.topic === actor.topic &&
     c.reference === button[2] && c.expires_at > now);
-  const labels = !current || !["choosing", "collecting"].includes(current.status)
+  const hasDraft = current && ["choosing", "collecting"].includes(current.status);
+  const labels = !hasDraft
     ? { reply_markup: { keyboard: [[{ text: state.form.new_case }]], resize_keyboard: true,
       is_persistent: true, one_time_keyboard: false } } : {};
   if (button) return {
@@ -23,7 +24,9 @@ export function relayNotice(state, actor, message, updateId, now) {
     ...(["cancelled", "new"].includes(known?.status) && { receipt_only: true }),
     text: known?.status === "cancelled" ? `Черновик №${known.reference} уже отменён.` :
       known?.status === "new" ? `Обращение №${known.reference} уже отправлено в работу.` :
-        "Нажатие получено. Проверяем состояние обращения; результат сообщим здесь.",
+        hasDraft ? "Это кнопка прежнего меню. Продолжите текущий черновик кнопками внизу чата." :
+          "Это кнопка прежнего меню. Для нового обращения нажмите «Новое обращение». " +
+          "Она не создаёт повторную заявку.",
   };
   // A double tap must not become a second case or silently disappear.
   if (routes.includes(text) && current?.status === "new") return {
@@ -41,8 +44,8 @@ export function relayNotice(state, actor, message, updateId, now) {
   return {
     key: `received:${updateId}`,
     text: isStartMessage(state.form, message) ? state.form.menu :
-      (reference ? `Дополнение к обращению №${reference} получено и сохранено. ` :
-        "Сообщение и вложения получены и сохранены. ") + "Передадим их в редакцию. " +
-      "Если это дополнение, оно будет обработано вместе с вашим обращением.",
+      (reference ? `Дополнение к обращению №${reference} получено и сохранено. Передадим его в редакцию.` :
+        "Сообщение и вложения получены и сохранены. Передадим их в редакцию. " +
+        "Дополнение обработаем вместе с вашим обращением."),
   };
 }

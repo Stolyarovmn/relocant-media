@@ -8,6 +8,10 @@ on:
         description: Check state without sending alerts or recovering a snapshot
         type: boolean
         default: true
+      test_intake_notification:
+        description: Send one clearly labelled test notification to the private owner
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -18,9 +22,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  intake:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
+      vars.ACTIONS_CUTOVER_CONFIRMED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e .
+      - uses: actions/cache/restore@v4
+        with:
+          path: .reader-intake-alert-state.json
+          key: reader-intake-alert-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: reader-intake-alert-v1-
+      - name: Проверить доступность предложки и уведомить владельца
+        id: intake
+        env:
+          EDITORIAL_INGRESS_TOKEN: ${{ secrets.EDITORIAL_INGRESS_TOKEN }}
+          EDITORIAL_OWNER_CHAT_ID: ${{ vars.EDITORIAL_OWNER_CHAT_ID }}
+          EDITORIAL_OWNER_USER_ID: ${{ vars.EDITORIAL_OWNER_USER_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          TEST_NOTIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.test_intake_notification }}
+        run: |
+          set -euo pipefail
+          umask 077
+          args=()
+          if [ "$DRY_RUN" = true ]; then args+=(--dry-run); fi
+          if [ "$TEST_NOTIFICATION" = true ]; then args+=(--test-notification); fi
+          python -m relocant_media.ops.intake_watchdog --state .reader-intake-alert-state.json "${args[@]}"
+      - uses: actions/cache/save@v4
+        if: always() && steps.intake.outputs.changed == 'true'
+        with:
+          path: .reader-intake-alert-state.json
+          key: reader-intake-alert-v1-${{ github.run_id }}-${{ github.run_attempt }}
   check:
     if: >-
       github.ref == 'refs/heads/main' &&
+      !(github.event_name == 'workflow_dispatch' && inputs.test_intake_notification) &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
       vars.ACTIONS_CUTOVER_CONFIRMED == 'true' &&
       vars.EDITORIAL_STORAGE_BACKEND == 'ssh'

@@ -289,6 +289,25 @@ export class Ingress {
     };
   }
 
+  health(state) {
+    // Operational incident flags only. No response-time metrics or private data.
+    const now = this.now();
+    const events = [...state.events, ...(state.busy ? [state.busy.event] : [])];
+    const waiting = events.some(e => {
+      const at = state.receipts[e.update.update_id]?.at;
+      return Number.isFinite(at) && now - at >= 20 * 60 * 1000;
+    });
+    return { version: 1,
+      queue_waiting: waiting,
+      uncertain_delivery: events.some(e => e.notice?.status === "uncertain") ||
+        Boolean(state.busy?.phase === "sending" && state.busy.expires_at <= now),
+      storage_near_capacity: bytes(state) >= LIMITS.stateBytes * 0.8 ||
+        bytes(state.events) >= LIMITS.queueBytes * 0.8 ||
+        Object.keys(state.receipts).length >= LIMITS.receiptCount * 0.8,
+      attempt_stuck: Boolean(state.busy && state.busy.expires_at <= now),
+    };
+  }
+
   async recover(config) {
     this.onPhase("recover");
     const busy = await this.transaction((state) => {
@@ -417,7 +436,7 @@ export class Ingress {
       }
       const callbackNotice = callback && typeof update.callback_query.id === "string";
       if (callbackNotice) notice = { key: `callback:${update.update_id}`,
-        text: "Нажатие получено. Проверяем состояние обращения." };
+        text: "Нажатие получено. Это прежнее меню; используйте актуальные кнопки внизу чата." };
       if (notice?.receipt_only) event.receipt_only = true;
       const pending = notice && this.canSend(state);
       const busy = {
@@ -490,7 +509,7 @@ export class Ingress {
       this.onPhase("read_state");
       const state = await this.store.read(this.paths.state);
       if (!state) throw new HttpError(503, "not_bootstrapped");
-      return this.status(state.value);
+      return { ...this.status(state.value), intake_health: this.health(state.value) };
     }
     if (!["peek", "ack"].includes(input.operation)) throw new HttpError(400, "unknown_operation");
     if (input.operation === "peek") {

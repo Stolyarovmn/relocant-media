@@ -120,6 +120,28 @@ def use_legacy_menu(engine, sid):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('direct', [False, True])
+@pytest.mark.parametrize(('status', 'expected'), [
+    ('cancelled', 'уже отменён'), ('closed', 'уже закрыто'), ('new', 'уже отправлено в работу'),
+])
+async def test_legacy_callback_reports_actual_terminal_status(engine, direct, status, expected):
+    telegram = Telegram(direct)
+    await telegram.receive(engine, telegram.message(1, text='Описание тестового обращения'))
+    sid = submission_id(engine)
+    menu = telegram.messages[-1]
+    with Session(engine) as session:
+        session.get(Submission, sid).status = status
+        session.commit()
+    await telegram.receive(engine, telegram.legacy_click(2, sid=sid, action='cancel', message=menu))
+    answer = [params['text'] for method, params in telegram.calls
+              if method == 'answerCallbackQuery'][-1]
+    assert expected in answer
+    with Session(engine) as session:
+        assert session.get(Submission, sid).status == status
+        assert len(session.scalars(select(Submission)).all()) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
 async def test_reader_news_menu_number_and_media_followup(engine, direct):
     telegram = Telegram(direct)

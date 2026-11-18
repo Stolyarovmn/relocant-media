@@ -71,7 +71,8 @@ test("неизвестная старая кнопка подтверждает 
   const f = await fixture();
   await f.receive(message(1, "Отменить №111"));
   assert.equal((await f.state()).cases.length, 0);
-  assert.match(f.calls[0].params.text, /Проверяем состояние/);
+  assert.match(f.calls[0].params.text, /кнопка прежнего меню/);
+  assert.doesNotMatch(f.calls[0].params.text, /результат сообщим/);
   assert.doesNotMatch(f.calls[0].params.text, /отменён/);
 });
 
