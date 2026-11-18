@@ -173,6 +173,9 @@ async def test_fenced_relay_preserves_permission_and_custom_signature():
                      "Мой материал", "Разрешить публикацию", "Имя / псевдоним", "Псевдоним",
                      "Публиковать эту подпись"):
             await send(text)
+            if text == "Псевдоним":
+                assert "обычным текстом без ссылки" in bot.sent[-1][1]["text"]
+                assert "@username" not in bot.sent[-1][1]["text"]
         with Session(engine) as session:
             row = session.scalar(select(Submission))
             ref = row.payload["public_reference"]

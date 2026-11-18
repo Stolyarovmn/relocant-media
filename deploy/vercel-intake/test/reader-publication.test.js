@@ -34,7 +34,11 @@ for (const origin of ["bot","channel_dm"]) for (const signature of ["anonymous",
     await f.send(L.own);
     await f.send(L.allow);
     await f.send(L[signature]);
-    if (signature === "name") await f.send("Софийко");
+    if (signature === "name") {
+      await f.send("Софийко");
+      assert.match(f.calls.at(-1).params.text,/обычным текстом без ссылки/u);
+      assert.ok(!f.calls.at(-1).params.text.includes("@username"));
+    }
     if (signature !== "anonymous") await f.send(L.credit);
     const before = await f.case();
     assert.equal(before.payload.reader_publication.stage,"review");
