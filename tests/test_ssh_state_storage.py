@@ -143,7 +143,7 @@ def ingress_context(context, monkeypatch):
                 checkpoints.append(value)
                 phase = value['state']['intake_state'].get('ingress', {}).get('phase', 'polling')
                 trace.append(f'checkpoint:{phase}')
-            elif value.get('operation') == 'rollback-empty':
+            elif value.get('operation') in {'rollback-empty', 'migrate-redis'}:
                 trace.append(f"audit:{value['phase']}")
             else:
                 trace.append('seed')
@@ -182,6 +182,9 @@ def ingress_context(context, monkeypatch):
             result = {'can_manage_direct_messages': True}
         elif operation == 'getWebhookInfo':
             result = copy.deepcopy(webhook)
+        elif operation == 'transfer' and payload.get('operation') == 'storage-info':
+            assert request.headers['Authorization'] == f'Bearer {bridge}'
+            return httpx.Response(200, json=copy.deepcopy(fault['redis_storage_info']))
         elif operation == 'transfer' and payload.get('operation') == 'metadata':
             assert request.headers['Authorization'] == f'Bearer {bridge}'
             return httpx.Response(200, json={
@@ -204,12 +207,18 @@ def ingress_context(context, monkeypatch):
             recorded = backend.read_state()['state']
             assert recorded['status'] == 'ready'
             assert recorded['intake_state']['ingress']['phase'] == 'prepared'
-            assert len(writes) == 2
+            assert len(writes) == (10 if recorded.get('ingress_migration') else 2)
             if operation == 'transfer':
                 assert request.headers['Authorization'] == f'Bearer {bridge}'
                 assert payload['operation'] == 'bootstrap' and payload['mode'] == 'active'
                 assert json.loads(payload['seed_json']) == seed
                 assert client.download(payload['seed_sha256']) == canonical_json(seed).encode()
+                if 'redis_storage_info' in fault:
+                    fault['redis_storage_info'] = {
+                        'status': 'ready', 'backend': 'redis', 'namespace': 'production',
+                        'initialized': True, 'seed_sha256': payload['seed_sha256'],
+                        'mode': 'active',
+                    }
                 return httpx.Response(200, json={'status': 'ready', 'can_send': True,
                                                 'seed_sha256': payload['seed_sha256']})
             assert payload == {'url': ingress_cutover.PRODUCTION_ORIGIN + '/api/telegram',
@@ -345,6 +354,61 @@ def test_empty_ingress_rollback_uses_real_ssh_storage_without_discarding_state(
     assert len(checkpoints) == 4
     seed_id = current['ingress_rollback']['seed_sha256']
     assert json.loads(client.download(seed_id))['cases'] == seed['cases']
+
+
+def test_redis_migration_after_rollback_preserves_real_storage_protocol_and_audits(
+    context, ingress_context, tmp_path, monkeypatch,
+):
+    backend, initial, snapshot = context
+    client, http, trace, writes, checkpoints, fault, seed = ingress_context
+    monkeypatch.setenv('GITHUB_RUN_ID', '123456789')
+    execute_ingress(ingress_context, tmp_path / 'activation-before-migration')
+    checkpoint_id = hashlib.sha256(storage.encode(checkpoints[-1])).hexdigest()
+    monkeypatch.setattr(ingress_cutover.time, 'sleep', lambda seconds: None)
+    ingress_cutover.rollback_empty(
+        client, ingress_cutover.PRODUCTION_ORIGIN, tmp_path / 'rollback-before-migration', http,
+        '123456:FAKE_TOKEN_FOR_TESTING_ONLY_123456', 'b' * 40, 'd' * 64,
+        checkpoint_id, '123456789', now=datetime(2026, 11, 18, 13, tzinfo=UTC),
+    )
+    rolled_back, _ = client.read()
+    rollback_audit = copy.deepcopy(rolled_back['ingress_rollback'])
+    previous_blobs = {path.name for path in backend.blobs.iterdir()}
+    fault['redis_storage_info'] = {
+        'status': 'ready', 'backend': 'redis', 'namespace': 'production', 'initialized': False,
+    }
+    seed['created_at'] = '2026-11-18T14:00:00+00:00'
+    trace.clear()
+    result = ingress_cutover.execute(
+        client, ingress_cutover.PRODUCTION_ORIGIN, tmp_path / 'redis-migration', http,
+        '123456:FAKE_TOKEN_FOR_TESTING_ONLY_123456', 'b' * 40, 's' * 40,
+        activate=True, migrate_redis=True, now=datetime(2026, 11, 18, 14, tzinfo=UTC),
+    )
+    assert result['status'] == 'active'
+    current, _ = client.read()
+    assert current['status'] == 'ready' and current['generation'] == current['attempt']
+    assert current['ingress_rollback'] == rollback_audit
+    assert current['ingress_migration']['phase'] == 'active'
+    assert current['ingress_migration']['backend'] == 'redis'
+    assert current['ingress_migration']['seed_sha256'] == result['seed_sha256']
+    assert current['ingress_migration']['rollback_audit_sha256'] == rollback_audit[
+        'completion_audit_sha256']
+    assert current['intake_state']['ingress']['phase'] == 'active'
+    assert trace == [
+        'getMe', 'getChatMember', 'getWebhookInfo', 'transfer', 'seed', 'audit:prepared',
+        'checkpoint:prepared', 'busy:unprepared', 'prepared', 'transfer', 'transfer', 'transfer',
+        'setWebhook', 'getWebhookInfo', 'checkpoint:active', 'busy:prepared', 'active',
+    ]
+    assert len(writes) == 12 and len(checkpoints) == 6
+    assert [state['status'] for state in writes[8:]] == ['busy', 'ready', 'busy', 'ready']
+    for state in writes[8:]:
+        assert state['snapshot'] == initial['snapshot']
+        assert state['cutover'] == initial['cutover']
+        assert state['map_republications'] == initial['map_republications']
+        for key, value in initial['intake_state'].items():
+            assert state['intake_state'][key] == value
+    assert previous_blobs < {path.name for path in backend.blobs.iterdir()}
+    assert client.download(initial['snapshot']['drive_file_id']) == snapshot
+    assert json.loads(client.download(result['seed_sha256'])) == seed
 
 
 @pytest.mark.parametrize('field,value', [('server_writers_fenced', False),

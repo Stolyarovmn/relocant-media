@@ -62,7 +62,7 @@ class Storage:
         return self.sha
 
     def upload(self, path, folder):
-        assert folder in {"intake-seed", "ingress-rollback-audit"}
+        assert folder in {"intake-seed", "ingress-rollback-audit", "ingress-migration-audit"}
         data = path.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         self.files[digest] = data
@@ -119,6 +119,10 @@ def scenario(monkeypatch):
         elif operation == "transfer":
             assert storage.state["status"] == "ready"
             assert request.headers["Authorization"] == f"Bearer {BRIDGE}"
+            if payload["operation"] == "storage-info":
+                values = fail.get("storage_info_responses", [])
+                value = values.pop(0) if values else fail["storage_info"]
+                return httpx.Response(200, json=value)
             assert storage.state["intake_state"]["ingress"]["phase"] in {"prepared", "active"}
             if payload["operation"] == "metadata":
                 if fail.get("metadata_error"):
@@ -136,7 +140,13 @@ def scenario(monkeypatch):
                         metadata[key].update(changes)
                 return httpx.Response(200, json=metadata)
             assert payload["operation"] == "bootstrap"
+            if fail.get("bootstrap_error"):
+                return httpx.Response(503)
             assert payload["seed_sha256"] in storage.files
+            if "storage_info" in fail:
+                fail["storage_info"] = {"status": "ready", "backend": "redis",
+                                        "namespace": "production", "initialized": True,
+                                        "seed_sha256": payload["seed_sha256"], "mode": "active"}
             result = {"status": "ready", "can_send": True,
                       "seed_sha256": payload["seed_sha256"]}
             result.update(fail.get("receiver", {}))
@@ -157,10 +167,11 @@ def scenario(monkeypatch):
         yield storage, client, trace, exports, config, requests, fail, seed
 
 
-def run(scenario, tmp_path, *, activate=False, name="work", now=AT, url=None):
+def run(scenario, tmp_path, *, activate=False, name="work", now=AT, url=None, migrate_redis=False):
     storage, client, *_ = scenario
     return cutover.execute(storage, url or cutover.PRODUCTION_ORIGIN, tmp_path / name,
-                           client, TOKEN, BRIDGE, SECRET, activate=activate, now=now)
+                           client, TOKEN, BRIDGE, SECRET, activate=activate, now=now,
+                           migrate_redis=migrate_redis)
 
 
 def test_preflight_only_reads_and_returns_private_free_counts(scenario, tmp_path):
@@ -550,3 +561,218 @@ def test_rollback_workflow_checks_successful_manual_main_activation(monkeypatch,
     else:
         with pytest.raises(AssertionError, match="unverified activation"):
             exec(compile(script, "<rollback-workflow-test>", "exec"), {})
+
+
+@pytest.fixture
+def migration_scenario(rollback_scenario, tmp_path):
+    rollback(rollback_scenario, tmp_path, name="rollback-before-redis")
+    scenario = rollback_scenario[0]
+    scenario[2].clear()
+    scenario[3].clear()
+    scenario[5].clear()
+    scenario[6]["storage_info"] = {
+        "status": "ready", "backend": "redis", "namespace": "production", "initialized": False,
+    }
+    return scenario
+
+
+def migrate(scenario, tmp_path, *, name="redis-migration", now=AT + timedelta(hours=2)):
+    return run(scenario, tmp_path, activate=True, migrate_redis=True, name=name, now=now)
+
+
+def test_redis_migration_binds_fresh_seed_and_preserves_rollback_audit(
+    migration_scenario, tmp_path,
+):
+    scenario = migration_scenario
+    storage, _, trace, exports, _, requests, _, _ = scenario
+    before = copy.deepcopy(storage.state)
+    original_blobs = set(storage.files)
+    assert migrate(scenario, tmp_path)["status"] == "active"
+    marker = storage.state["ingress_migration"]
+    assert marker["phase"] == "active" and marker["backend"] == "redis"
+    assert marker["namespace"] == "production" and marker["url"] == cutover.PRODUCTION_ORIGIN
+    assert storage.state["ingress_rollback"] == before["ingress_rollback"]
+    assert marker["rollback_audit_sha256"] == before["ingress_rollback"]["completion_audit_sha256"]
+    assert marker["seed_sha256"] == storage.state["intake_state"]["ingress"]["seed_sha256"]
+    assert storage.state["snapshot"] == before["snapshot"]
+    assert original_blobs < set(storage.files) and len(exports) == 1
+    assert trace == ["getMe", "getChatMember", "getWebhookInfo", "transfer", "upload",
+                     "audit:prepared", "busy:unprepared", "prepared", "transfer", "transfer",
+                     "transfer", "setWebhook", "getWebhookInfo", "busy:prepared", "active"]
+    assert [payload["operation"] for method, payload in requests if method == "transfer"] == [
+        "storage-info", "storage-info", "bootstrap", "storage-info",
+    ]
+    with pytest.raises(ValueError, match="требует отдельной миграции"):
+        run(scenario, tmp_path, activate=True, name="ordinary-activation-still-blocked")
+
+
+@pytest.mark.parametrize("info", [
+    {"status": "ready", "backend": "blob", "namespace": "production", "initialized": False},
+    {"status": "ready", "backend": "redis", "namespace": "preview/one", "initialized": False},
+    {"status": "ready", "backend": "redis", "namespace": "production", "initialized": 0},
+    {"status": "ready", "backend": "redis", "namespace": "production", "initialized": True,
+     "seed_sha256": "f" * 64, "mode": "active"},
+    {"status": "ready", "backend": "redis", "namespace": "production", "initialized": True,
+     "seed_sha256": "f" * 64, "mode": "incomplete"},
+])
+def test_redis_migration_rejects_wrong_or_initialized_storage_before_fence(
+    migration_scenario, tmp_path, info,
+):
+    storage = migration_scenario[0]
+    migration_scenario[6]["storage_info"] = info
+    before = storage.read()
+    previous_files = set(storage.files)
+    with pytest.raises(ValueError):
+        migrate(migration_scenario, tmp_path)
+    assert storage.read() == before and set(storage.files) == previous_files
+    assert migration_scenario[3] == []
+    assert "setWebhook" not in migration_scenario[2]
+
+
+@pytest.mark.parametrize("problem", [
+    "missing_rollback", "unfinished_rollback", "cursor", "webhook", "null_marker", "empty_marker",
+])
+def test_redis_migration_requires_completed_rollback_and_existing_polling(
+    migration_scenario, tmp_path, problem,
+):
+    scenario = migration_scenario
+    if problem == "missing_rollback":
+        del scenario[0].state["ingress_rollback"]
+    elif problem == "unfinished_rollback":
+        scenario[0].state["ingress_rollback"]["phase"] = "prepared"
+    elif problem == "cursor":
+        scenario[0].state["intake_state"]["serverless_sequence"] = 1
+    elif problem == "webhook":
+        scenario[4]["url"] = cutover.PRODUCTION_ORIGIN + "/api/telegram"
+    else:
+        scenario[0].state["ingress_migration"] = None if problem == "null_marker" else {}
+    before = scenario[0].read()
+    with pytest.raises(ValueError):
+        migrate(scenario, tmp_path)
+    assert scenario[0].read() == before
+    assert scenario[3] == [] and "setWebhook" not in scenario[2]
+
+
+@pytest.mark.parametrize("mode", ["empty", "config_only", "state_only", "active"])
+def test_prepared_redis_retry_uses_saved_seed_without_overwriting_transport(
+    migration_scenario, tmp_path, mode,
+):
+    scenario = migration_scenario
+    scenario[6]["bootstrap_error"] = True
+    with pytest.raises(httpx.HTTPStatusError):
+        migrate(scenario, tmp_path)
+    marker = copy.deepcopy(scenario[0].state["ingress_migration"])
+    assert marker["phase"] == "prepared"
+    scenario[6].pop("bootstrap_error")
+    if mode != "empty":
+        scenario[6]["storage_info"].update(
+            initialized=True, seed_sha256=marker["seed_sha256"],
+            mode="incomplete" if mode in {"config_only", "state_only"} else mode,
+        )
+    scenario[2].clear()
+    result = migrate(scenario, tmp_path, name="retry", now=AT + timedelta(days=1))
+    assert result["status"] == "active"
+    assert len(scenario[3]) == 1 and "upload" not in scenario[2]
+    assert scenario[0].state["ingress_migration"]["seed_sha256"] == marker["seed_sha256"]
+
+
+def test_active_redis_retry_preserves_nonempty_queue_and_requires_exact_seed(
+    migration_scenario, tmp_path,
+):
+    scenario = migration_scenario
+    migrate(scenario, tmp_path)
+    source = copy.deepcopy(scenario[0].state["ingress_migration"])
+    scenario[0].state["intake_state"]["serverless_sequence"] = 5
+    scenario[2].clear()
+    assert migrate(scenario, tmp_path, name="active-retry")["status"] == "active"
+    assert scenario[0].state["intake_state"]["serverless_sequence"] == 5
+    assert "upload" not in scenario[2] and len(scenario[3]) == 1
+    scenario[6]["storage_info"]["seed_sha256"] = "f" * 64
+    before = scenario[0].read()
+    with pytest.raises(ValueError):
+        migrate(scenario, tmp_path, name="wrong-active-seed")
+    assert scenario[0].read() == before
+    scenario[6]["storage_info"].update(seed_sha256=source["seed_sha256"], mode="incomplete")
+    with pytest.raises(ValueError):
+        migrate(scenario, tmp_path, name="incomplete-active-state")
+    assert scenario[0].read() == before
+    scenario[6]["storage_info"] = {
+        "status": "ready", "backend": "redis", "namespace": "production", "initialized": False,
+    }
+    with pytest.raises(ValueError):
+        migrate(scenario, tmp_path, name="lost-active-state")
+    assert scenario[0].state["ingress_migration"]["request_audit_sha256"] == source[
+        "request_audit_sha256"]
+
+
+def test_prepared_redis_retry_rejects_foreign_partial_seed(migration_scenario, tmp_path):
+    scenario = migration_scenario
+    scenario[6]["bootstrap_error"] = True
+    with pytest.raises(httpx.HTTPStatusError):
+        migrate(scenario, tmp_path)
+    scenario[6]["storage_info"].update(
+        initialized=True, seed_sha256="f" * 64, mode="incomplete",
+    )
+    before = scenario[0].read()
+    scenario[2].clear()
+    with pytest.raises(ValueError):
+        migrate(scenario, tmp_path, name="foreign-partial-retry")
+    assert scenario[0].read() == before
+    assert "setWebhook" not in scenario[2] and "upload" not in scenario[2]
+
+
+@pytest.mark.parametrize("problem", [
+    "backend", "url", "seed_sha256", "rollback_audit_sha256", "extra",
+])
+def test_redis_migration_rejects_unexpected_or_mismatched_marker(
+    migration_scenario, tmp_path, problem,
+):
+    scenario = migration_scenario
+    scenario[6]["bootstrap_error"] = True
+    with pytest.raises(httpx.HTTPStatusError):
+        migrate(scenario, tmp_path)
+    marker = scenario[0].state["ingress_migration"]
+    marker[problem] = "unexpected"
+    before = scenario[0].read()
+    scenario[2].clear()
+    with pytest.raises(ValueError):
+        migrate(scenario, tmp_path, name="mismatched-marker")
+    assert scenario[0].read() == before
+    assert "setWebhook" not in scenario[2] and "transfer" not in scenario[2]
+
+
+@pytest.mark.parametrize("stage", ["before_bootstrap", "after_bootstrap"])
+def test_redis_migration_rechecks_storage_before_enabling_webhook(
+    migration_scenario, tmp_path, stage,
+):
+    scenario = migration_scenario
+    empty = copy.deepcopy(scenario[6]["storage_info"])
+    foreign = {"status": "ready", "backend": "blob", "namespace": "production",
+               "initialized": False}
+    scenario[6]["storage_info_responses"] = [empty, foreign] if stage == "before_bootstrap" else [
+        empty, empty, foreign,
+    ]
+    with pytest.raises(ValueError):
+        migrate(scenario, tmp_path)
+    assert scenario[0].state["status"] == "ready"
+    assert scenario[0].state["ingress_migration"]["phase"] == "prepared"
+    assert scenario[0].state["intake_state"]["ingress"]["phase"] == "prepared"
+    assert "setWebhook" not in scenario[2]
+
+
+def test_redis_migration_ready_failure_keeps_busy_without_automatic_reset(
+    migration_scenario, tmp_path,
+):
+    scenario = migration_scenario
+    scenario[0].fail_phase = "active"
+    with pytest.raises(ValueError):
+        migrate(scenario, tmp_path)
+    before = scenario[0].read()
+    assert scenario[0].state["status"] == "busy"
+    assert scenario[0].state["ingress_migration"]["phase"] == "prepared"
+    scenario[0].fail_phase = None
+    scenario[2].clear()
+    with pytest.raises(ValueError, match="canonical state not ready"):
+        migrate(scenario, tmp_path, name="busy-retry")
+    assert scenario[0].read() == before
+    assert "setWebhook" not in scenario[2]

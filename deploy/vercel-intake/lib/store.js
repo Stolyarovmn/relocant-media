@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
 import { get, put, head, BlobPreconditionFailedError } from "@vercel/blob";
+import { Conflict } from "./store-errors.js";
+import { RedisRestStore } from "./redis-store.js";
 
-export class Conflict extends Error {}
+export { Conflict } from "./store-errors.js";
+export { paths, namespace } from "./store-paths.js";
 
 // The adapter never lists stores or constructs public download URLs. All state
 // reads bypass the CDN; every replacement is conditional on the origin ETag.
 export class PrivateBlobStore {
+  kind = "blob";
   constructor(sdk = { get, put, head }, env = process.env) { this.sdk = sdk; this.env = env; }
 
   credentials() {
@@ -58,16 +62,17 @@ export class PrivateBlobStore {
   }
 }
 
-export function namespace(env) {
-  if (env.VERCEL_ENV === "production") return "production";
-  const id = env.VERCEL_DEPLOYMENT_ID;
-  if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,100}$/u.test(id)) {
-    throw new Error("deployment_namespace_missing");
-  }
-  return `preview/${id}`;
+export function createStore(env = process.env, options = {}) {
+  const backend = env.INGRESS_STORAGE_BACKEND ?? "blob";
+  if (backend === "blob") return new PrivateBlobStore(options.sdk, env);
+  if (backend === "redis") return new RedisRestStore({ env, fetcher: options.fetcher, now: options.now });
+  throw new Error("storage_backend_invalid");
 }
 
-export function paths(env) {
-  const prefix = namespace(env);
-  return { state: `${prefix}/state.json`, config: `${prefix}/config.json` };
+export function storageConfigured(env) {
+  if (!env.INGRESS_BRIDGE_TOKEN) return false;
+  const backend = env.INGRESS_STORAGE_BACKEND ?? "blob";
+  if (backend === "blob") return Boolean(env.BLOB_READ_WRITE_TOKEN || env.BLOB_STORE_ID);
+  if (backend !== "redis") return false;
+  try { new RedisRestStore({ env }); return true; } catch { return false; }
 }

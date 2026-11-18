@@ -206,6 +206,138 @@ test("seed non-draft не копирует личный текст; seed choosin
   assert.equal((await mixed.state()).events[0].draft.id, 114);
 });
 
+function canonicalSeedCase(status = "new") {
+  return {
+    id: 114, reference: "RM-AAAA-BBBB", kind: "question", status, telegram_user_id: 42,
+    telegram_message_id: 100, payload: {
+      reader_intake: true, public_reference: "RM-AAAA-BBBB", chat_id: 42,
+      text: "Историческая каноническая заявка", attachments: [],
+    },
+  };
+}
+
+test("новый старт после seed non-draft сразу получает меню и принятие через fake Bot", async () => {
+  for (const status of ["new", "waiting_primary", "source_linked"]) {
+    const f = await fixture({ seed: seed({ cases: [canonicalSeedCase(status)] }) });
+    assert.equal((await f.state()).relay_actors["42:42:"], 0);
+    await f.receive(message(1, "Привет"));
+    let state = await f.state();
+    assert.equal(state.relay_actors["42:42:"], undefined);
+    assert.equal(state.cases.length, 1);
+    assert.equal(state.cases[0].status, "choosing");
+    assert.equal(state.cases[0].id, undefined);
+    assert.notEqual(state.cases[0].reference, "RM-AAAA-BBBB");
+    assert.equal(f.calls.length, 1);
+    assert.equal(state.events[0].notice.status, "sent");
+    await f.receive(message(2, "Новый вопрос читателя"));
+    await f.receive(message(3, "Вопрос или идея"));
+    state = await f.state();
+    assert.equal(state.cases[0].status, "new");
+    assert.equal(state.cases[0].kind, "question");
+    assert.equal(state.cases[0].payload.text, "Новый вопрос читателя");
+    assert.equal(state.events.at(-1).notice.status, "sent");
+    assert.equal(f.calls.length, 2);
+    assert.ok(!JSON.stringify(state).includes("Историческая каноническая заявка"));
+  }
+});
+
+test("все формы нового старта снимают только нулевой seed fence", async () => {
+  for (const start of ["Привет!", "Вы тут?", "Новое обращение", "/start", "/start@reader_bot payload"]) {
+    const f = await fixture({ seed: seed({ cases: [canonicalSeedCase()] }) });
+    await f.receive(message(1, start));
+    assert.equal((await f.state()).relay_actors["42:42:"], undefined);
+    assert.equal((await f.state()).cases[0].status, "choosing");
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test("ответ старой заявке и последующий старт остаются raw до канонического ACK", async () => {
+  const f = await fixture({ seed: seed({ cases: [canonicalSeedCase()] }) });
+  const reply = message(1, "Привет", { reply_to_message: { message_id: 100 } });
+  await f.receive(reply);
+  assert.equal((await f.state()).relay_actors["42:42:"], 1);
+  await f.receive(message(2, "Привет"));
+  const state = await f.state();
+  assert.equal(state.relay_actors["42:42:"], 2);
+  assert.equal(state.cases.length, 0);
+  assert.deepEqual(state.events[0].update, reply);
+  assert.ok(state.events.every((event) => !event.draft && !event.notice));
+  assert.equal(f.calls.length, 0);
+});
+
+test("динамический inline callback fence не снимается новым приветствием", async () => {
+  const f = await fixture({ seed: seed({ cases: [canonicalSeedCase()] }) });
+  await f.receive({ update_id: 1, callback_query: {
+    data: "intake:114:new", from: { id: 42 }, message: { chat: { id: 42 }, message_id: 100 },
+  } });
+  await f.receive(message(2, "Привет"));
+  const state = await f.state();
+  assert.equal(state.relay_actors["42:42:"], 2);
+  assert.equal(state.cases.length, 0);
+  assert.ok(state.events.every((event) => !event.draft && !event.notice));
+  assert.equal(f.calls.length, 0);
+});
+
+test("конкурентный ответ старой заявке устанавливает fence до повторного планирования старта", async () => {
+  const f = await fixture({ seed: seed({ cases: [canonicalSeedCase()] }) });
+  await Promise.all([
+    f.receive(message(1, "Дополнение", { reply_to_message: { message_id: 100 } })),
+    f.receive(message(2, "Привет")),
+  ]);
+  const state = await f.state();
+  assert.equal(state.relay_actors["42:42:"], 2);
+  assert.equal(state.cases.length, 0);
+  assert.ok(state.events.every((event) => !event.draft && !event.notice));
+  assert.equal(f.calls.length, 0);
+});
+
+test("пока другой prepared update занимает очередь, нулевой seed fence не снимается", async () => {
+  const f = await fixture({ seed: seed({ cases: [canonicalSeedCase()] }),
+    hooks: { afterPrepared: () => { throw new Error("simulated_interruption"); } } });
+  await assert.rejects(f.receive(message(1, "Привет", {
+    from: { id: 43 }, chat: { id: 43, type: "private" },
+  })), /simulated_interruption/u);
+  await assert.rejects(f.receive(message(2, "Привет")), { status: 503, code: "attempt_busy" });
+  const state = await f.state();
+  assert.equal(state.relay_actors["42:42:"], 0);
+  assert.equal(state.busy.event.update.update_id, 1);
+  assert.equal(state.receipts[2], undefined);
+  assert.equal(f.calls.length, 0);
+});
+
+test("правка и приветствие с вложением не снимают нулевой seed fence", async () => {
+  for (const kind of ["edited", "media"]) {
+    const f = await fixture({ seed: seed({ cases: [canonicalSeedCase()] }) });
+    const update = message(1, "Привет");
+    if (kind === "edited") {
+      update.edited_message = update.message;
+      delete update.message;
+    } else update.message.photo = [{ file_id: "private-photo" }];
+    await f.receive(update);
+    const state = await f.state();
+    assert.equal(state.relay_actors["42:42:"], 1);
+    assert.equal(state.cases.length, 0);
+    assert.deepEqual(state.events[0].update, update);
+    assert.equal(state.events[0].draft, undefined);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("нулевой fence при существующем локальном черновике не открывает второй черновик", async () => {
+  const f = await fixture({ seed: seed({ cases: [canonicalSeedCase("collecting")] }) });
+  const state = await f.state();
+  state.relay_actors["42:42:"] = 0;
+  const before = await f.store.read(f.ingress.paths.state);
+  await f.store.write(f.ingress.paths.state, state, before.etag);
+  await f.receive(message(1, "Привет"));
+  const saved = await f.state();
+  assert.equal(saved.relay_actors["42:42:"], 1);
+  assert.equal(saved.cases.length, 1);
+  assert.equal(saved.cases[0].id, 114);
+  assert.equal(saved.events[0].draft, undefined);
+  assert.equal(f.calls.length, 0);
+});
+
 test("проверка parent DM разрешает только родительский канал", async () => {
   const f = await fixture();
   const dm = message(1, "Новость", {

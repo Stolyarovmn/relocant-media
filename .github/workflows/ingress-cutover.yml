@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Preflight, approved cutover, or rollback of an untouched empty ingress
+        description: Preflight, approved cutover, empty rollback, or explicit fresh Redis migration
         type: choice
-        options: [preflight, activate, rollback-empty]
+        options: [preflight, activate, rollback-empty, migrate-redis]
         default: preflight
       expected_state_sha256:
         description: Independently verified bootstrap state ETag SHA256; required for rollback-empty

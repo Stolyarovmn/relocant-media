@@ -1,4 +1,4 @@
-import { PrivateBlobStore } from "../lib/store.js";
+import { createStore } from "../lib/store.js";
 import { Ingress, LIMITS } from "../lib/engine.js";
 import { bodyJSON, createDiagnostics, equalSecret, failure, HttpError, send } from "../lib/http.js";
 
@@ -15,7 +15,10 @@ export function handler(dependencies = {}) {
       }
       diagnostics.setPhase("plan");
       const input = await bodyJSON(req, LIMITS.bootstrapBytes);
-      const ingress = new Ingress({ store: new PrivateBlobStore(undefined, env), ...dependencies, onPhase: diagnostics.setPhase });
+      const ingress = new Ingress({
+        store: dependencies.store ?? createStore(env, { fetcher: dependencies.fetcher, now: dependencies.now }),
+        ...dependencies, onPhase: diagnostics.setPhase,
+      });
       send(res, 200, await ingress.transfer(input));
     } catch (error) { failure(res, error, diagnostics); }
   };
