@@ -55,6 +55,11 @@ function getParts(message) {
   return { text: (message.text ?? message.caption ?? "").trim(), attachments };
 }
 
+export function isStartMessage(form, message) {
+  const part = getParts(message);
+  return Boolean(part && !part.attachments.length && starts(form, part.text));
+}
+
 function combineParts(form, parts) {
   const contents = Object.entries(parts).sort(([a], [b]) => Number(a) - Number(b));
   const attachments = new Map();
@@ -123,7 +128,7 @@ export function planDraft(form, current, message, edited, allocateReference, act
   const mid = message.message_id;
   const part = getParts(message);
   if (!part) return null;
-  const start = !edited && !part.attachments.length && starts(form, part.text);
+  const start = !edited && isStartMessage(form, message);
   const active = ["choosing", "collecting"].includes(current?.status);
   const known = { Сотрудничество: "partnership", Реклама: "ad_request" };
   for (const [kind, [label]] of Object.entries(form.routes)) known[label] = kind;

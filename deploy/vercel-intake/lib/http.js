@@ -15,6 +15,11 @@ const diagnosticCodes = new Set([
   ...httpCodes, "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT",
   "precondition_failed", "forbidden", "bad_request", "store_not_found", "store_suspended",
   "service_unavailable", "rate_limited", "oidc_environment_not_allowed", "not_found",
+  "redis_invalid_key", "redis_invalid_endpoint", "redis_invalid_ciphertext", "redis_invalid_record",
+  "redis_invalid_response", "redis_response_too_large", "redis_http_failed", "redis_command_failed",
+  "redis_missing_credentials", "redis_invalid_path", "redis_request_too_large", "redis_transport_failed",
+  "redis_invalid_value", "redis_value_too_large", "redis_decryption_failed", "redis_invalid_etag",
+  "redis_credentials_conflict",
 ]);
 const diagnosticTypes = new Set([
   "Error", "TypeError", "SyntaxError", "RangeError", "ReferenceError", "URIError", "EvalError",
@@ -24,6 +29,7 @@ const diagnosticTypes = new Set([
   "BlobRequestAbortedError", "BlobServiceNotAvailable", "BlobServiceRateLimited",
   "BlobStoreNotFoundError", "BlobStoreSuspendedError", "BlobUnknownError",
   "BlobOidcEnvironmentNotAllowedError",
+  "RedisStoreError",
 ]);
 const diagnosticPhases = new Set(["config", "read_state", "recover", "plan", "commit", "send"]);
 const diagnosticRoutes = new Set(["/api/telegram", "/api/transfer"]);

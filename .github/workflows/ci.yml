@@ -11,6 +11,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     services:
+      redis:
+        image: redis:7.4-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
       postgres:
         image: postgres:17
         env:
@@ -46,6 +53,12 @@ jobs:
         run: |
           npm ci --prefix deploy/vercel-intake --ignore-scripts
           npm test --prefix deploy/vercel-intake
+      - name: Проверить Lua CAS и зашифрованный приём на настоящем Redis
+        env:
+          REDIS_TEST_CONTAINER: ${{ job.services.redis.id }}
+        run: |
+          test -n "$REDIS_TEST_CONTAINER"
+          node --test deploy/vercel-intake/test/redis-live.test.js
       - name: Validate Alembic migrations
         run: |
           alembic upgrade head

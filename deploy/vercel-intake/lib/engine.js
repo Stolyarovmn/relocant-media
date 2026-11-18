@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { Conflict, paths } from "./store.js";
+import { Conflict, namespace, paths } from "./store.js";
 import { HttpError, equalSecret } from "./http.js";
 import { ReplyBot } from "./bot.js";
-import { planDraft, readerIdentity } from "./intake.js";
+import { isStartMessage, planDraft, readerIdentity } from "./intake.js";
 
 export const LIMITS = Object.freeze({
   updateBytes: 512 * 1024, bootstrapBytes: 4 * 1024 * 1024,
@@ -177,6 +177,11 @@ export class Ingress {
 
   canSend(state) { return this.env.VERCEL_ENV === "production" && state.mode === "active"; }
 
+  checkCapacity(state, reserve = 0) {
+    checkCapacity(state, reserve);
+    this.store.assertCapacity?.(state, reserve);
+  }
+
   async transaction(change) {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       this.onPhase("read_state");
@@ -186,7 +191,7 @@ export class Ingress {
       this.onPhase("plan");
       const result = change(state);
       if (result?.unchanged) return result.value;
-      checkCapacity(state);
+      this.checkCapacity(state);
       try {
         this.onPhase("commit");
         await this.store.write(this.paths.state, state, current.etag);
@@ -212,22 +217,6 @@ export class Ingress {
       version: 1, seed_sha256: input.seed_sha256, bot_id: seed.bot_id,
       bot_token: input.bot_token, webhook_secret: input.webhook_secret,
     };
-    this.onPhase("config");
-    let existing = await this.store.read(this.paths.config);
-    if (!existing) {
-      try {
-        this.onPhase("commit");
-        await this.store.write(this.paths.config, config);
-      }
-      catch (error) { if (!(error instanceof Conflict)) throw error; }
-      this.onPhase("config");
-      existing = await this.store.read(this.paths.config);
-    }
-    if (!existing || existing.value.seed_sha256 !== config.seed_sha256 ||
-        !equalSecret(existing.value.bot_token, config.bot_token) ||
-        !equalSecret(existing.value.webhook_secret, config.webhook_secret)) {
-      throw new HttpError(409, "bootstrap_conflict");
-    }
     const now = this.now();
     const activeCases = seed.cases.filter((item) => ["choosing", "collecting"].includes(item.status));
     const activeActors = new Set(activeCases.map((item) => actorKey(caseActor(item))));
@@ -245,7 +234,23 @@ export class Ingress {
       case_sequences: {}, events: [], next_sequence: 1, ack_sequence: 0,
       exported_through: 0, checkpoint_sha256: null, busy: null,
     };
-    checkCapacity(state, LIMITS.reserveBytes);
+    this.checkCapacity(state, LIMITS.reserveBytes);
+    this.onPhase("config");
+    let existing = await this.store.read(this.paths.config);
+    if (!existing) {
+      try {
+        this.onPhase("commit");
+        await this.store.write(this.paths.config, config);
+      }
+      catch (error) { if (!(error instanceof Conflict)) throw error; }
+      this.onPhase("config");
+      existing = await this.store.read(this.paths.config);
+    }
+    if (!existing || existing.value.seed_sha256 !== config.seed_sha256 ||
+        !equalSecret(existing.value.bot_token, config.bot_token) ||
+        !equalSecret(existing.value.webhook_secret, config.webhook_secret)) {
+      throw new HttpError(409, "bootstrap_conflict");
+    }
     this.onPhase("read_state");
     const previous = await this.store.read(this.paths.state);
     if (!previous) {
@@ -369,7 +374,18 @@ export class Ingress {
         state.cases = state.cases.filter((item) => !actorMatches(item, callback));
       }
       if (actor && Object.hasOwn(state.relay_actors, actorKey(actor))) {
-        state.relay_actors[actorKey(actor)] = event.sequence;
+        const key = actorKey(actor);
+        // A zero fence only routes historical non-drafts from the seed. An
+        // explicit fresh start can open a new local case, unless an update has
+        // already been relayed or this actor still has an open local draft.
+        // Decide under the same CAS as the prepared send; callbacks and pending
+        // relays with a positive sequence always remain canonical-owned.
+        if (state.relay_actors[key] === 0 && !update.edited_message &&
+            message.reply_to_message === undefined && isStartMessage(state.form, message) &&
+            !state.cases.some((item) => actorMatches(item, actor) &&
+              ["choosing", "collecting"].includes(item.status))) {
+          delete state.relay_actors[key];
+        } else state.relay_actors[key] = event.sequence;
       }
       const planned = actor && !Object.hasOwn(state.relay_actors, actorKey(actor)) &&
         planDraft(state.form, locateCase(state, actor, message, Boolean(update.edited_message)),
@@ -408,7 +424,7 @@ export class Ingress {
       }
       if (pending) state.busy = busy;
       else finish(state, busy, null);
-      checkCapacity(state, LIMITS.reserveBytes);
+      this.checkCapacity(state, LIMITS.reserveBytes);
       return pending ? clone(busy) : null;
     });
     await this.hooks.afterPrepared?.();
@@ -418,6 +434,22 @@ export class Ingress {
 
   async transfer(input) {
     this.onPhase("plan");
+    if (input.operation === "storage-info") {
+      this.onPhase("read_state");
+      const [state, config] = await Promise.all([
+        this.store.read(this.paths.state), this.store.read(this.paths.config),
+      ]);
+      if (!["blob", "redis"].includes(this.store.kind)) throw new Error("storage_info_invalid");
+      const result = {
+        status: "ready", backend: this.store.kind, namespace: namespace(this.env), initialized: Boolean(state || config),
+      };
+      if (!result.initialized) return result;
+      const seed = state?.value.seed_sha256 ?? config?.value.seed_sha256;
+      if (!/^[a-f0-9]{64}$/u.test(seed ?? "") ||
+          (state && state.value.seed_sha256 !== seed) || (config && config.value.seed_sha256 !== seed) ||
+          (state && !["active", "preview"].includes(state.value.mode))) throw new Error("storage_info_invalid");
+      return { ...result, seed_sha256: seed, mode: state && config ? state.value.mode : "incomplete" };
+    }
     if (input.operation === "metadata") {
       this.onPhase("read_state");
       const [state, config] = await Promise.all([

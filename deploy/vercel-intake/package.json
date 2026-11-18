@@ -5,5 +5,6 @@
   "type": "module",
   "engines": { "node": "24.x" },
   "scripts": { "test": "node --test test/*.test.js", "check": "node --check api/telegram.js && node --check api/transfer.js && node --check api/health.js && node --check lib/engine.js" },
-  "dependencies": { "@vercel/blob": "2.9.0" }
+  "dependencies": { "@vercel/blob": "2.9.0" },
+  "overrides": { "@vercel/cli-config": { "zod": "4.6.6" } }
 }

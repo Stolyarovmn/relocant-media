@@ -136,14 +136,73 @@ def _metadata(client: httpx.Client, url: str, bridge: str,
     return {"state": result["state"], "config": result["config"]}
 
 
-def _audit(storage: SSHStateClient, work: Path, name: str, value: dict[str, Any]) -> str:
+def _audit(storage: SSHStateClient, work: Path, name: str, value: dict[str, Any], *,
+           folder: str = "ingress-rollback-audit") -> str:
     content = canonical_json(value).encode()
     path = work / name
     path.write_bytes(content)
     digest = hashlib.sha256(content).hexdigest()
-    if storage.upload(path, "ingress-rollback-audit") != digest:
+    if storage.upload(path, folder) != digest:
         raise ValueError("Хранилище не подтвердило журнал отката")
     return digest
+
+
+def _redis_storage_info(client: httpx.Client, url: str, bridge: str, *,
+                        seed_sha256: str | None = None, allow_empty: bool) -> None:
+    info = _transfer(client, url, bridge, {"operation": "storage-info"})
+    base = {"status", "backend", "namespace", "initialized"}
+    if (not base <= set(info) or info.get("status") != "ready"
+            or info.get("backend") != "redis" or info.get("namespace") != "production"
+            or type(info.get("initialized")) is not bool):
+        raise ValueError("Не подтверждён отдельный рабочий Redis приёмника")
+    if info["initialized"] is False:
+        if not allow_empty or set(info) != base:
+            raise ValueError("Redis приёмника не соответствует этапу миграции")
+    elif (seed_sha256 is None or set(info) != base | {"seed_sha256", "mode"}
+          or info.get("seed_sha256") != seed_sha256
+          or info.get("mode") not in ({"active", "incomplete"} if allow_empty else {"active"})):
+        raise ValueError("Redis уже содержит другое состояние приёмника")
+
+
+def _redis_migration(state: dict[str, Any], url: str) -> dict[str, Any] | None:
+    rollback = state.get("ingress_rollback")
+    if (not isinstance(rollback, dict) or type(rollback.get("version")) is not int
+            or rollback["version"] != 1 or rollback.get("operation") != "rollback-empty"
+            or rollback.get("phase") != "complete" or rollback.get("url") != url
+            or not isinstance(rollback.get("completion_audit_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", rollback["completion_audit_sha256"])):
+        raise ValueError("Миграция Redis требует завершённого проверяемого отката")
+    intake = state.get("intake_state", {})
+    source = ingress_config(intake)
+    if "ingress_migration" not in state:
+        if source is not None or sequence_cursor(intake.get("serverless_sequence", 0)) != 0:
+            raise ValueError("Новая миграция требует polling и нулевой позиции приёмника")
+        return None
+    marker = state["ingress_migration"]
+    keys = {"version", "operation", "backend", "namespace", "phase", "url", "seed_sha256",
+            "seed_snapshot_sha256", "rollback_audit_sha256", "created_at", "request_audit_sha256"}
+    if (not isinstance(marker, dict) or type(marker.get("version")) is not int
+            or marker["version"] != 1 or marker.get("operation") != "migrate-redis"
+            or marker.get("backend") != "redis" or marker.get("namespace") != "production"
+            or marker.get("phase") not in {"prepared", "active"} or marker.get("url") != url
+            or set(marker) != keys | (
+                {"activated_at"} if marker.get("phase") == "active" else set())
+            or marker.get("rollback_audit_sha256") != rollback["completion_audit_sha256"]
+            or any(not isinstance(marker.get(key), str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", marker[key])
+                   for key in ("seed_sha256", "seed_snapshot_sha256", "request_audit_sha256"))
+            or source is None or source.get("url") != url
+            or any(source.get(key) != marker.get(key) for key in (
+                "phase", "seed_sha256", "seed_snapshot_sha256", "created_at"))
+            or (marker["phase"] == "active"
+                and source.get("activated_at") != marker.get("activated_at"))
+            or (marker["phase"] == "prepared"
+                and sequence_cursor(intake.get("serverless_sequence", 0)) != 0)):
+        raise ValueError("Канонический маркер миграции Redis не совпадает с приёмником")
+    _timestamp(marker["created_at"])
+    if marker["phase"] == "active":
+        _timestamp(marker["activated_at"])
+    return marker
 
 
 def rollback_empty(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
@@ -258,12 +317,15 @@ def rollback_empty(storage: SSHStateClient, url: str, work: Path, client: httpx.
 
 def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
             token: str, bridge_token: str, webhook_secret: str, *, activate: bool = False,
+            migrate_redis: bool = False,
             now: datetime | None = None) -> dict[str, Any]:
     if url != PRODUCTION_ORIGIN:
         raise ValueError("Перенос разрешён только в отдельный проект приёмника")
     at = now or datetime.now(UTC)
     if at.tzinfo is None:
         raise ValueError("Время переноса должно содержать часовой пояс")
+    if migrate_redis and not activate:
+        raise ValueError("Миграция Redis является отдельной операцией переключения")
     if activate and not all(re.fullmatch(r"[A-Za-z0-9_-]{32,256}", value)
                             for value in (bridge_token, webhook_secret)):
         raise ValueError("Требуются отдельные служебные ключи приёмника")
@@ -286,12 +348,24 @@ def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
     state, state_sha = storage.read()
     validate_ready(state)
     rollback = state.get("ingress_rollback")
-    if activate and rollback is not None:
+    migration = None
+    if migrate_redis:
+        migration = _redis_migration(state, url)
+        if migration is None and current_webhook.get("url") != "":
+            raise ValueError("Новая миграция Redis требует выключенного webhook")
+        _phase("verify_redis_migration_storage")
+        _redis_storage_info(
+            client, url, bridge_token,
+            seed_sha256=migration["seed_sha256"] if migration else None,
+            allow_empty=migration is None or migration["phase"] == "prepared",
+        )
+    if activate and not migrate_redis and (rollback is not None
+                                          or state.get("ingress_migration") is not None):
         raise ValueError("Повторное включение приёмника после отката требует отдельной миграции")
     if isinstance(rollback, dict) and rollback.get("phase") == "prepared":
         raise ValueError("Сначала требуется завершить начатый откат приёмника")
     work.mkdir(mode=0o700, parents=True, exist_ok=False)
-    existing = state.get("intake_state", {}).get("ingress")
+    existing = ingress_config(state.get("intake_state", {}))
     if existing:
         if (existing.get("backend") != "vercel" or existing.get("url") != url
                 or existing.get("phase") not in {"prepared", "active"}):
@@ -333,11 +407,27 @@ def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
         metadata = {"version": 1, "backend": "vercel", "phase": "prepared", "url": url,
                     "seed_sha256": seed_sha, "seed_snapshot_sha256": state["snapshot"]["sha256"],
                     "created_at": at.isoformat()}
+        updates: dict[str, Any] = {
+            "intake_state": {**state.get("intake_state", {}), "ingress": metadata},
+        }
+        if migrate_redis:
+            migration_record = {
+                "version": 1, "operation": "migrate-redis", "backend": "redis",
+                "namespace": "production", "phase": "prepared", "url": url,
+                "seed_sha256": seed_sha, "seed_snapshot_sha256": state["snapshot"]["sha256"],
+                "rollback_audit_sha256": cast(dict[str, Any], rollback)["completion_audit_sha256"],
+                "created_at": at.isoformat(),
+            }
+            audit_sha = _audit(storage, work, "redis-migration-request.json", migration_record,
+                               folder="ingress-migration-audit")
+            migration = {**migration_record, "request_audit_sha256": audit_sha}
+            updates["ingress_migration"] = migration
         state, state_sha = _commit_republication(
-            storage, storage, state, state_sha,
-            {"intake_state": {**state.get("intake_state", {}), "ingress": metadata}},
-            os.environ, work,
+            storage, storage, state, state_sha, updates, os.environ, work,
         )
+    if migrate_redis:
+        _redis_storage_info(client, url, bridge_token, seed_sha256=seed_sha,
+                            allow_empty=migration is not None and migration["phase"] == "prepared")
     _phase("bootstrap_private_ingress")
     result = _transfer(client, url, bridge_token, {
         "operation": "bootstrap", "seed_json": seed_bytes.decode(), "seed_sha256": seed_sha,
@@ -346,6 +436,8 @@ def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
     if (result.get("status") != "ready" or result.get("seed_sha256") != seed_sha
             or result.get("can_send") is not True):
         raise ValueError("Приёмник не подтвердил готовность рабочего режима")
+    if migrate_redis:
+        _redis_storage_info(client, url, bridge_token, seed_sha256=seed_sha, allow_empty=False)
     _phase("configure_webhook")
     if _api(client, token, "setWebhook", {
         "url": destination, "secret_token": webhook_secret,
@@ -365,6 +457,9 @@ def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
         **fresh["intake_state"], "ingress": {**fresh["intake_state"]["ingress"],
             "phase": "active", "activated_at": at.isoformat()},
     }}
+    if migrate_redis:
+        updates["ingress_migration"] = {**cast(dict[str, Any], migration), "phase": "active",
+                                        "activated_at": at.isoformat()}
     _phase("activate_canonical_ingress")
     _commit_republication(storage, storage, fresh, fresh_sha, updates, os.environ, work)
     return {"status": "active", **summary, "origin": url,
@@ -373,7 +468,8 @@ def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--operation", choices=("preflight", "activate", "rollback-empty"),
+    parser.add_argument("--operation", choices=("preflight", "activate", "rollback-empty",
+                                               "migrate-redis"),
                         default="preflight")
     parser.add_argument("--expected-state-sha256", default="")
     parser.add_argument("--activation-checkpoint-sha256", default="")
@@ -402,7 +498,8 @@ def main() -> None:
                                  os.environ["TELEGRAM_BOT_TOKEN"],
                                  os.environ.get("EDITORIAL_INGRESS_TOKEN", ""),
                                  os.environ.get("EDITORIAL_INGRESS_WEBHOOK_SECRET", ""),
-                                 activate=args.operation == "activate")
+                                 activate=args.operation in {"activate", "migrate-redis"},
+                                 migrate_redis=args.operation == "migrate-redis")
     except Exception as error:
         print(json.dumps({"status": "blocked", "error_type": type(error).__name__}))
         raise SystemExit(1) from None

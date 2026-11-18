@@ -51,7 +51,8 @@ permissions:
 concurrency:
   # Keep explicit editorial retries, map edits and subscription runs out of the auto queue.
   # All modes use the same state lock below.
-  group: ${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || startsWith(inputs.mode, 'map-') && 'editorial-map-operations' || inputs.mode == 'preview' && 'editorial-preview' || github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' && 'editorial-manual-cycle' || 'canonical-editorial-writer' }}
+  # Manual intake must not wait for an automatic run's chain sleep or be replaced by its next auto.
+  group: ${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || startsWith(inputs.mode, 'map-') && 'editorial-map-operations' || inputs.mode == 'preview' && 'editorial-preview' || github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' && 'editorial-manual-cycle' || github.event_name == 'workflow_dispatch' && inputs.mode == 'intake' && 'editorial-manual-intake' || 'canonical-editorial-writer' }}
   cancel-in-progress: false
 jobs:
   cycle:

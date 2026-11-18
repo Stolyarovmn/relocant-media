@@ -1,4 +1,4 @@
-import { PrivateBlobStore } from "../lib/store.js";
+import { createStore } from "../lib/store.js";
 import { Ingress, LIMITS } from "../lib/engine.js";
 import { bodyJSON, createDiagnostics, equalSecret, failure, HttpError, send } from "../lib/http.js";
 
@@ -9,8 +9,9 @@ export function handler(dependencies = {}) {
     const diagnostics = createDiagnostics("/api/telegram", dependencies.logger);
     try {
       if (req.method !== "POST") throw new HttpError(405, "post_required");
+      const env = dependencies.env ?? process.env;
       const ingress = new Ingress({
-        store: new PrivateBlobStore(undefined, dependencies.env ?? process.env),
+        store: dependencies.store ?? createStore(env, { fetcher: dependencies.fetcher, now: dependencies.now }),
         ...dependencies, onPhase: diagnostics.setPhase,
       });
       const settings = await ingress.config();

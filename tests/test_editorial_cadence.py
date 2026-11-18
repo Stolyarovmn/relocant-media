@@ -111,6 +111,8 @@ def test_manual_operations_have_separate_workflow_queues_and_shared_state_lock()
                  "|| inputs.mode == 'preview' && 'editorial-preview' "
                  "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' "
                  "&& 'editorial-manual-cycle' "
+                 "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'intake' "
+                 "&& 'editorial-manual-intake' "
                  "|| 'canonical-editorial-writer' }}",
         "cancel-in-progress": "false",
     }
