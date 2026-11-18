@@ -38,6 +38,12 @@ later; the concurrency group keeps one pending run, so nothing piles up). `auto`
 older than 30 minutes, otherwise intake. A failed cycle (for example the exact-main-CI guard right after a merge) pauses the chain for ten minutes
 and it continues; cron slots are the extra restart path. Set the variable to anything else to stop chaining. Still one canonical writer.
 
+Разовые ручные операции (включая intake, editorial и discovery) завершаются без
+таймера продолжения: они не удерживают свою workflow-очередь ещё120/600секунд
+после окончания рабочего этапа. Цепочка остаётся только у расписаний и mode=auto.
+Общая блокировка канонического состояния, запрет параллельных писателей и
+проверка точного зелёного main сохраняются.
+
 ## Storage guarantees
 
 The standalone `ssh_state_storage.py` helper uses only Python's standard library.

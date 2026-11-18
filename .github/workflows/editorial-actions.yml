@@ -247,6 +247,8 @@ jobs:
         if: always()
         run: rm -rf "$RUNNER_TEMP/editorial-work" "$RUNNER_TEMP/editorial-storage-identity"
   chain:
+    # One-shot manual operations must release their workflow queue immediately.
+    # Only scheduled runs and the explicit auto loop book another cycle.
     # Scheduled runs are best effort. A finished cycle books the next one, so the newsroom
     # keeps running; a failed cycle (for example the exact-main-CI guard right after a merge)
     # backs off for ten minutes instead of ending the chain. Cron slots remain the restart
@@ -254,6 +256,7 @@ jobs:
     # serializes the single canonical writer.
     if: >-
       always() && github.ref == 'refs/heads/main' &&
+      (github.event_name != 'workflow_dispatch' || inputs.mode == 'auto') &&
       (needs.cycle.result == 'success' || needs.cycle.result == 'failure') &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true' &&
       inputs.mode != 'preview' && inputs.mode != 'recovery' &&
