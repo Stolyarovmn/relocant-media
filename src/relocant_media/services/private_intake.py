@@ -138,6 +138,15 @@ async def _ack_owner_action(
             return await _send_notice(
                 bot, result.clear_chat_id, result.answer_text, reply_to=result.clear_message_id,
             )
+    if isinstance(callback, dict) and str(callback.get("data", "")).startswith(
+        ("rr:approve_media:", "rr:reject_media:"),
+    ) and result.answer_text:
+        message = callback.get("message", {})
+        cid = message.get("chat", {}).get("id")
+        if type(cid) is int and cid > 0 and callback.get("from", {}).get("id") == cid:
+            return await _send_notice(
+                bot, cid, result.answer_text, reply_to=message.get("message_id"),
+            )
     return False
 
 
@@ -250,6 +259,7 @@ async def process_private_updates(
     reader_feedback_enabled: bool = False,
     channel_id: int = APPROVED_CHANNEL_ID,
     transport_notice: dict[str, Any] | None = None,
+    publication_enabled: bool = False,
 ) -> dict[str, Any]:
     """Store authenticated Telegram updates, then deliver reader receipts."""
     received = 0
@@ -278,7 +288,9 @@ async def process_private_updates(
                         session, callback, owner_user_id=owner_user_id, owner_chat_id=owner_chat_id,
                     )
                     if owner_result is None:
-                        reader_answer = record_reader_callback(session, callback)
+                        reader_answer = record_reader_callback(
+                            session, callback, publication_enabled=publication_enabled,
+                        )
                 if owner_result is not None and owner_result.handled:
                     session.add(
                         TelegramUpdateReceipt(
@@ -342,6 +354,7 @@ async def process_private_updates(
                                 accepted = record_reader_message(
                                     session, message, edited=edited, channel_id=channel_id,
                                     transport_notice=transport_notice,
+                                    publication_enabled=publication_enabled,
                                 )
                             else:
                                 accepted = save_channel_tip(
@@ -363,9 +376,13 @@ async def process_private_updates(
                             elif not accepted:
                                 accepted = record_reader_message(
                                     session, message, transport_notice=transport_notice,
+                                    publication_enabled=publication_enabled,
                                 )
                         elif reader_feedback_enabled:
-                            accepted = record_reader_message(session, message, edited=True)
+                            accepted = record_reader_message(
+                                session, message, edited=True,
+                                publication_enabled=publication_enabled,
+                            )
                 session.add(
                     TelegramUpdateReceipt(
                         update_id=uid,

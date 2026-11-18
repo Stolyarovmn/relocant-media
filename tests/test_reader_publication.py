@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from relocant_media.services.private_intake import process_private_updates
 from relocant_media.services.reader_publication import (
     POLICY,
     TERMS_SHA256,
@@ -144,9 +145,74 @@ class Bot:
         self.sent = []
 
     async def _call(self, method, payload):
+        if method == "answerCallbackQuery":
+            return True
         assert method in {"sendMessage", "sendPhoto", "editMessageText"}
         self.sent.append((method, deepcopy(payload)))
         return {"message_id": payload.get("message_id", 50 + len(self.sent))}
+
+
+@pytest.mark.asyncio
+async def test_fenced_relay_preserves_permission_and_custom_signature():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    bot = Bot()
+    mid = 0
+
+    async def send(text):
+        nonlocal mid
+        mid += 1
+        await process_private_updates(engine, bot, [{"update_id": mid, "message": {
+            "message_id": mid, "date": int(datetime.now(UTC).timestamp()), "text": text,
+            "from": {"id": 42, "username": "reader_alias"},
+            "chat": {"id": 42, "type": "private"},
+        }}], reader_feedback_enabled=True, publication_enabled=True)
+
+    try:
+        for text in ("/start", "Тест резервного пути, не публиковать", "Предложить новость",
+                     "Мой материал", "Разрешить публикацию", "Имя / псевдоним", "Псевдоним",
+                     "Публиковать эту подпись"):
+            await send(text)
+        with Session(engine) as session:
+            row = session.scalar(select(Submission))
+            ref = row.payload["public_reference"]
+            assert row.status == "collecting"
+        await send(f"Отправить №{ref}")
+        with Session(engine) as session:
+            row = session.scalar(select(Submission))
+            assert row.status == "reader_review"
+            assert permission_reason(row.payload, POLICY["channel_id"]) is None
+            assert row.payload["reader_publication"]["signature"]["label"] == "Псевдоним"
+            assert row.payload["text"] == "Тест резервного пути, не публиковать"
+        assert ref in bot.sent[-1][1]["text"]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_moderation_error_is_a_persistent_message_without_removing_buttons():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            row = Submission(kind="news_tip", status="reader_review", telegram_user_id=42,
+                             telegram_message_id=7, payload=material())
+            session.add(row)
+            session.commit()
+            sid = row.id
+        bot = Bot()
+        owner = {"owner_user_id": OWNER, "owner_chat_id": OWNER}
+        await process_reader_resolutions(engine, bot, enabled=True, **owner)
+        await process_private_updates(engine, bot, [{"update_id": 90, "callback_query": {
+            "id": "expired-callback", "data": f"rr:approve_media:{sid}",
+            "from": {"id": OWNER}, "message": {"message_id": 51, "chat": {"id": OWNER}},
+        }}], reader_feedback_enabled=True, **owner)
+        assert "Сначала получите" in bot.sent[-1][1]["text"]
+        assert not any(method == "editMessageReplyMarkup" for method, _ in bot.sent)
+        with Session(engine) as session:
+            assert not session.get(Submission, sid).payload.get("reader_media_review")
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.asyncio

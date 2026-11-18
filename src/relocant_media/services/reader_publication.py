@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from copy import deepcopy
 from datetime import datetime
 from importlib.resources import files
 from typing import Any
@@ -11,6 +12,131 @@ POLICY: dict[str, Any] = json.loads(
     files("relocant_media.domain").joinpath("reader_publication_v1.json").read_text("utf-8"),
 )
 TERMS_SHA256 = hashlib.sha256(POLICY["terms"].encode()).hexdigest()
+LABELS: dict[str, str] = POLICY["labels"]
+
+
+def begin_publication(payload: dict[str, Any], username: object) -> dict[str, Any]:
+    result = deepcopy(payload)
+    result["reader_publication"] = {
+        "version": POLICY["version"], "stage": "ownership",
+        "material_sha256": material_fingerprint(payload),
+        "available_username": f"@{username}" if isinstance(username, str)
+        and re.fullmatch(r"[A-Za-z0-9_]{5,32}", username) else None,
+        "scope": {"channel_id": POLICY["channel_id"], "channel_url": POLICY["channel_url"]},
+        "terms": POLICY["terms"], "terms_sha256": TERMS_SHA256,
+    }
+    return result
+
+
+def publication_prompt(payload: dict[str, Any], reference: str) -> tuple[str, list[str]]:
+    r, labels = payload["reader_publication"], LABELS
+    stage = r["stage"]
+    if stage == "ownership":
+        return ("Чьи материалы вы прислали? Выбор относится ко всем сообщениям и вложениям. "
+                "Если авторы разные, укажите это в тексте.",
+                [labels["own"], labels["authorized"], labels["source"]])
+    if stage == "permission":
+        return POLICY["terms"], [labels["allow"], labels["private"]]
+    if stage == "signature":
+        return ("Как подписать материал? Имя и фото профиля автоматически не публикуются. "
+                "Без подписи — без имени и ссылки в посте; контакт для ответа остаётся закрытым.",
+                [labels["anonymous"],
+                 *([labels["username"]] if r.get("available_username") else []), labels["name"]])
+    if stage == "name":
+        return ("Напишите имя или псевдоним до 40 знаков. Фамилия, почта и телефон не нужны. "
+                "Это сообщение станет только подписью.", [labels["anonymous"], labels["back"]])
+    if stage == "credit_confirm":
+        return (f"В публикации будет показана подпись: {r['signature']['label']}\n\n"
+                "Разрешаете открыто показать именно эту подпись читателям «Еду в Белград»? "
+                "Для @username будет доступен переход в профиль. Другие сведения не добавляются.",
+                [labels["credit"], labels["back"], labels["anonymous"]])
+    if stage == "materials":
+        return ("Дополните материалы, затем нажмите «Отправить». "
+                "Новое содержимое нужно подтвердить заново.", [f"Отправить №{reference}"])
+    return (
+        f"Проверьте обращение №{reference}\n\n"
+        f"Вложений: {len(payload.get('attachments', []))}.\n"
+        f"Использование: {'разрешена публикация в «Еду в Белград»' if r['permission'] == 'allow'
+                         else 'только для редакции'}.\n"
+        f"Подпись: {r['signature']['label'] or 'без подписи'}.\n\n"
+        "Материал проверит редактор. Согласие не означает автоматическую публикацию.",
+        [f"Отправить №{reference}", *([labels["editCredit"]] if r["permission"] == "allow" else []),
+         labels["editPermission"], labels["more"]],
+    )
+
+
+def advance_publication(
+    payload: dict[str, Any], reference: str, message: dict[str, Any], at: datetime,
+) -> tuple[dict[str, Any], bool] | None:
+    """Canonical relay uses the same stages; no queue path may infer a grant."""
+    if not isinstance(payload.get("reader_publication"), dict):
+        return None
+    result = deepcopy(payload)
+    r, labels, text = result["reader_publication"], LABELS, message.get("text", "")
+    stage = r["stage"]
+    evidence = {"message_id": message["message_id"], "at": at.isoformat()}
+    submit = text == f"Отправить №{reference}"
+    next_stage: str | None = None
+    if text in (f"Отменить №{reference}", f"Сменить тему №{reference}"):
+        return None
+    if stage == "materials" and submit:
+        return begin_publication(payload, payload.get("reader_username")), False
+    if stage == "ownership" and text in (labels["own"], labels["authorized"], labels["source"]):
+        r["ownership"] = next(k for k in ("own", "authorized", "source") if text == labels[k])
+        r["ownership_evidence"] = evidence
+        next_stage = "permission"
+        if r["ownership"] == "source":
+            r.update(permission="private", permission_evidence=evidence,
+                     signature={"mode": "anonymous", "label": "", "evidence": evidence})
+            next_stage = "review"
+    elif stage == "permission" and text in (labels["allow"], labels["private"]):
+        r["permission"] = "allow" if text == labels["allow"] else "private"
+        r["permission_evidence"] = evidence
+        next_stage = "signature"
+        if r["permission"] == "private":
+            r["signature"] = {"mode": "anonymous", "label": "", "evidence": evidence}
+            next_stage = "review"
+    elif stage in ("signature", "name", "credit_confirm") and text == labels["anonymous"]:
+        r["signature"] = {"mode": "anonymous", "label": "", "evidence": evidence}
+        next_stage = "review"
+    elif stage in ("name", "credit_confirm") and text == labels["back"]:
+        next_stage = "signature"
+    elif stage == "signature" and text == labels["username"] and r.get("available_username"):
+        r["signature"] = {"mode": "username", "label": r["available_username"]}
+        next_stage = "credit_confirm"
+    elif stage == "signature" and text == labels["name"]:
+        next_stage = "name"
+    elif (stage == "name" and isinstance(text, str) and text not in labels.values()
+          and not any(message.get(k) for k in ("photo", "video", "voice", "document", "audio"))):
+        name = text.strip()
+        if (name and len(name) <= 40 and not re.search(r"\d{5}", name)
+                and all(c.isalnum() or c in " ._'’-" for c in name)):
+            r["signature"] = {"mode": "name", "label": name}
+            next_stage = "credit_confirm"
+        else:
+            return result, False
+    elif stage == "credit_confirm" and text == labels["credit"]:
+        r["signature"].update(evidence=evidence, disclosure={
+            **evidence, "channel_id": POLICY["channel_id"], "label": r["signature"]["label"],
+        })
+        next_stage = "review"
+    elif stage == "review" and text == labels["editCredit"] and r["permission"] == "allow":
+        next_stage = "signature"
+    elif stage == "review" and text == labels["editPermission"]:
+        next_stage = "ownership"
+    elif stage == "review" and text == labels["more"]:
+        next_stage = "materials"
+    elif stage == "review" and submit:
+        if r["material_sha256"] != material_fingerprint(result):
+            return begin_publication(payload, payload.get("reader_username")), False
+        r.update(stage="confirmed", confirmed=evidence)
+        return result, True
+    elif submit or text in labels.values() or text.startswith("/"):
+        return result, False
+    else:
+        return None
+    r["stage"] = next_stage
+    return result, False
 
 
 def material_fingerprint(payload: dict[str, Any]) -> str:

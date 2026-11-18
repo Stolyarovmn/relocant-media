@@ -195,6 +195,7 @@ async def import_inbox(
                 engine, bot, [update], reader_feedback_enabled=True,
                 owner_user_id=owner_user_id, owner_chat_id=owner_chat_id,
                 transport_notice=entry.get("notice"),
+                publication_enabled=True,
             )
         else:
             with Session(engine) as session:

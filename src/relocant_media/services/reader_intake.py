@@ -11,6 +11,12 @@ from sqlalchemy.orm import Session
 
 from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
+from relocant_media.services.reader_publication import (
+    advance_publication,
+    begin_publication,
+    material_fingerprint,
+    publication_prompt,
+)
 from relocant_media.services.submission_reference import (
     PUBLIC_REFERENCE_PATTERN,
     new_submission_reference,
@@ -100,7 +106,7 @@ def _needs_start_notice(row: Submission, stage: str, received_at: datetime) -> b
 
 def _supersede_pending_prompts(row: Submission) -> None:
     for key, notice in row.payload.get("reader_notices", {}).items():
-        if (key.split(":", maxsplit=1)[0] in {"menu", "prompt", "choice"}
+        if (key.split(":", maxsplit=1)[0] in {"menu", "prompt", "choice", "publication"}
                 and notice["status"] == "pending"):
             _save_notice(row, key, status="superseded", superseded_at=_now().isoformat())
 
@@ -246,6 +252,21 @@ def _new_case(
     session.add(row)
     session.flush()
     return row
+
+
+def _publication_notice(row: Submission, mid: int, at: datetime) -> None:
+    text, labels = publication_prompt(row.payload, submission_reference(row))
+    labels.append(f"Отменить №{submission_reference(row)}")
+    _notice(row, f"publication:{mid}", text, received_at=at,
+            keyboard=[[_button(row, label, "publication")] for label in labels])
+
+
+def _reset_publication(row: Submission, mid: int, at: datetime) -> None:
+    r = row.payload.get("reader_publication")
+    if (row.status in DRAFT_STATES and isinstance(r, dict)
+            and r.get("material_sha256") != material_fingerprint(row.payload)):
+        row.payload = begin_publication(row.payload, row.payload.get("reader_username"))
+        _publication_notice(row, mid, at)
 
 
 def _items(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -422,6 +443,7 @@ def record_reader_message(
     edited: bool = False,
     channel_id: int = APPROVED_CHANNEL_ID,
     transport_notice: dict[str, Any] | None = None,
+    publication_enabled: bool = False,
 ) -> bool:
     identity = _identity(message)
     items = _items(message)
@@ -434,12 +456,41 @@ def record_reader_message(
         return False
     received_at = _date(message)
     cases = _recent_cases(session, user_id, chat_id, topic_id)
+    draft = next((case for case in cases if case.status in DRAFT_STATES), None)
+    if draft is not None and publication_enabled:
+        draft.payload = {**draft.payload, "reader_publication_enabled": True}
+        if draft.payload.get("reader_publication") or ROUTE_LABELS.get(text) == "news_tip":
+            draft.payload = {**draft.payload,
+                             "reader_username": message.get("from", {}).get("username")}
     if edited:
         row = next(
             (case for case in cases if str(message_id) in case.payload.get("reader_parts", {})),
             None,
         )
-        return bool(row and _append(row, message_id, items))
+        changed = bool(row and _append(row, message_id, items))
+        if changed and row is not None:
+            _reset_publication(row, message_id, received_at)
+        return changed
+    if draft is not None and draft.payload.get("reader_publication") and not start:
+        if text in ROUTE_LABELS:
+            _publication_notice(draft, message_id, received_at)
+            return True
+        if text in (f"Отменить №{submission_reference(draft)}",
+                    f"Сменить тему №{submission_reference(draft)}"):
+            action = "cancel" if text.startswith("Отменить") else "menu"
+            _apply_action(session, draft, action, message_id=message_id, received_at=received_at)
+            return True
+        planned = advance_publication(
+            draft.payload, submission_reference(draft), message, received_at,
+        )
+        if planned is not None:
+            draft.payload, ready = planned
+            if ready:
+                _apply_action(session, draft, "submit", message_id=message_id,
+                              received_at=received_at)
+            else:
+                _publication_notice(draft, message_id, received_at)
+            return True
     if (
         not start
         and not items["attachments"]
@@ -478,7 +529,12 @@ def record_reader_message(
         _menu(row, key=f"menu:{message_id}", message_id=message_id, received_at=received_at)
     elif (start and row.status == "collecting"
           and _needs_start_notice(row, "prompt", received_at)):
-        _prompt(row, key=f"prompt:{message_id}", received_at=received_at)
+        if row.payload.get("reader_publication"):
+            _publication_notice(row, message_id, received_at)
+        else:
+            _prompt(row, key=f"prompt:{message_id}", received_at=received_at)
+    if publication_enabled:
+        row.payload = {**row.payload, "reader_publication_enabled": True}
     if start:
         return True
     if not _append(row, message_id, items):
@@ -490,6 +546,7 @@ def record_reader_message(
             reply_to=message_id,
         )
         return True
+    _reset_publication(row, message_id, received_at)
     if row.status == "waiting_primary":
         row.status = "new"
         # Recheck with the added evidence and preserve earlier delivery receipts.
@@ -512,7 +569,9 @@ def record_reader_message(
     return True
 
 
-def record_reader_callback(session: Session, callback: object) -> str | None:
+def record_reader_callback(
+    session: Session, callback: object, *, publication_enabled: bool = False,
+) -> str | None:
     if not isinstance(callback, dict) or not isinstance(callback.get("data"), str):
         return None
     data = callback["data"]
@@ -543,6 +602,9 @@ def record_reader_callback(session: Session, callback: object) -> str | None:
         return _terminal_status(row)
     if source_message_id != _source_notice_id(row, action):
         return "Меню устарело. Используйте актуальные кнопки внизу чата."
+    if publication_enabled and row.status in DRAFT_STATES:
+        row.payload = {**row.payload, "reader_publication_enabled": True,
+                       "reader_username": sender.get("username")}
     return _apply_action(session, row, action, message_id=source_message_id, received_at=_now())
 
 
@@ -616,7 +678,14 @@ def _apply_action(
     elif not _has_submission_content(row, row.kind):
         return "Добавьте описание или вложение, затем отправьте заявку."
     accepted_at = received_at
-    row.status = "new"
+    if (row.kind == "news_tip" and row.payload.get("reader_publication_enabled")
+            and row.payload.get("reader_publication", {}).get("stage") != "confirmed"):
+        row.status = "collecting"
+        row.payload = begin_publication(row.payload, row.payload.get("reader_username"))
+        _publication_notice(row, message_id, received_at)
+        return "Выберите разрешение и подпись."
+    row.status = ("reader_review" if row.kind == "news_tip"
+                  and row.payload.get("reader_publication") else "new")
     _supersede_pending_prompts(row)
     row.payload = {**row.payload, "accepted_at": accepted_at.isoformat()}
     # The first message can be /start, so reply to the actual description when present.
