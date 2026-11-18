@@ -156,7 +156,7 @@ function validateSeed(seed) {
   for (const item of seed.cases) {
     if (!validId(item.id) || !validId(item.telegram_user_id) || !validId(item.telegram_message_id) ||
         typeof item.reference !== "string" || references.has(item.reference) ||
-        !["choosing", "collecting", "new", "waiting_primary", "source_linked"].includes(item.status) ||
+        !["choosing", "collecting", "new", "waiting_primary", "source_linked", "reader_review"].includes(item.status) ||
         ![...kinds, "reader_unclassified"].includes(item.kind) ||
         item.payload?.reader_intake !== true || !Number.isSafeInteger(item.payload.chat_id) ||
         (item.payload.public_reference !== undefined && item.payload.public_reference !== item.reference)) {
@@ -390,7 +390,7 @@ export class Ingress {
     }
     if (actor) actor.channel = current.channel_id;
     const prepared = await this.transaction((state) => {
-      state.form = updateFormCopy(state.form);
+      state.form = updateFormCopy(state.form, state.channel_id);
       pruneReceipts(state, this.now());
       const duplicate = state.receipts[update.update_id];
       if (duplicate) {

@@ -68,11 +68,11 @@ def save_channel_tip(
         "channel_id": channel_id,
         "edited": edited,
         "media_present": any(
-            key in message for key in ("photo", "video", "document", "voice")
+            key in message for key in ("photo", "video", "document", "voice", "audio")
         ),
     }
     attachments: list[dict[str, object]] = []
-    for key in ("photo", "video", "document", "voice"):
+    for key in ("photo", "video", "document", "voice", "audio"):
         value = message.get(key)
         if key == "photo" and isinstance(value, list) and value:
             value = value[-1]

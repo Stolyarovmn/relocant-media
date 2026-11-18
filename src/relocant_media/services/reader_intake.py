@@ -48,8 +48,8 @@ ROUTES = {
 }
 CB_PREFIX = "intake:"
 DRAFT_STATES = ("choosing", "collecting")
-OPEN_STATES = (*DRAFT_STATES, "new", "waiting_primary", "source_linked")
-MEDIA_TYPES = ("photo", "video", "document", "voice")
+OPEN_STATES = (*DRAFT_STATES, "new", "waiting_primary", "source_linked", "reader_review")
+MEDIA_TYPES = ("photo", "video", "document", "voice", "audio")
 NUMBERED_ACTIONS = {"Отправить": "submit", "Сменить тему": "menu", "Отменить": "cancel"}
 ROUTE_LABELS = {
     "Сотрудничество": "partnership",

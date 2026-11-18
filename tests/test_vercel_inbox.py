@@ -146,6 +146,26 @@ async def test_new_draft_matches_reference_instead_of_local_sqlite_id(engine):
 
 
 @pytest.mark.asyncio
+async def test_publication_choices_survive_import_and_cloud_cannot_approve_media(engine):
+    from test_reader_publication import material
+
+    event = envelope()
+    event["draft"].update(kind="news_tip", status="new")
+    event["draft"]["payload"].update(material())
+    event["draft"]["payload"]["public_reference"] = event["draft"]["reference"]
+    event["draft"]["payload"]["reader_media_review"] = {
+        "decision": "approved", "owner_user_id": OWNER,
+    }
+    event["notice"] = {"key": "accepted", "status": "sent", "telegram_message_id": 201}
+    await import_inbox(engine, OwnerBot([]), [event], owner_user_id=OWNER, owner_chat_id=OWNER_CHAT)
+    with Session(engine) as session:
+        row = session.scalar(select(Submission).where(Submission.kind == "news_tip"))
+        assert row.status == "reader_review"
+        assert row.payload["reader_publication"] == material()["reader_publication"]
+        assert "reader_media_review" not in row.payload
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["user", "chat", "topic", "source", "reference", "id"])
 async def test_draft_cannot_impersonate_another_identity_or_source(engine, change):
     event = envelope()

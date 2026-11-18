@@ -1,12 +1,19 @@
-const mediaTypes = ["photo", "video", "document", "voice"];
+import {
+  PUBLICATION_POLICY, beginPublication, isPublicationControl, planPublication,
+  publicationChanged, publicationEnabled,
+} from "./reader-publication.js";
+
+const mediaTypes = ["photo", "video", "document", "voice", "audio"];
 export const READER_INTRO = "Напишите, о чем хотите сообщить. Можно отправить несколько сообщений и приложить фото или видео.\n\n" +
   "Перепроверьте детали, при необходимости дополните или исправьте сообщения, затем выберите действие ниже. " +
   "Весь текст и вложения отправятся одним обращением.";
 
-export function updateFormCopy(form) {
+export function updateFormCopy(form, channelId) {
   // Update only the known old public copy; preserve seeded routes and draft receipts.
-  return form.menu === READER_INTRO.replace("о чем хотите", "что хотите")
+  const result = form.menu === READER_INTRO.replace("о чем хотите", "что хотите")
     ? { ...form, menu: READER_INTRO } : form;
+  return channelId === PUBLICATION_POLICY.channel_id
+    ? { ...result, publication_version: PUBLICATION_POLICY.version } : result;
 }
 const greeting = /^(?:здравствуйте|здравствуй|привет|приветствую|доброе утро|добрый день|добрый вечер)[\s.!?,…👋]*$/iu;
 const presence = /^(?:есть\s+кто(?:[- ]нибудь)?|кто(?:[- ]нибудь)?\s+(?:есть|тут|здесь)|(?:вы|ты)\s+(?:тут|здесь)|алло|ау)[\s.!?,…]*$/iu;
@@ -139,6 +146,7 @@ export function planDraft(form, current, message, edited, allocateReference, act
   if (!part) return null;
   const start = !edited && isStartMessage(form, message);
   const active = ["choosing", "collecting"].includes(current?.status);
+  if (!active && !edited && isPublicationControl(part.text)) return null;
   const known = { Сотрудничество: "partnership", Реклама: "ad_request" };
   for (const [kind, [label]] of Object.entries(form.routes)) known[label] = kind;
   const kind = !part.attachments.length && Object.hasOwn(known, part.text) ? known[part.text] : null;
@@ -179,6 +187,12 @@ export function planDraft(form, current, message, edited, allocateReference, act
   };
   draft.payload.public_reference ??= draft.reference;
   const unchanged = { draft, notice: null };
+  if (!draft.payload.reader_publication && isPublicationControl(part.text)) {
+    return { draft, notice: menu(form, draft, mid) };
+  }
+  const publication = planPublication(draft,
+    start || kind ? { ...message, text: "/start" } : message, edited, receivedAt);
+  if (publication && !publication.ready) return publication;
   if (command && !edited) {
     if (draft.reference !== command[2]) return null;
     if (command[1] === "Отменить") {
@@ -229,9 +243,14 @@ export function planDraft(form, current, message, edited, allocateReference, act
       return { draft, notice };
     }
     Object.assign(draft.payload, combined, {
-      reader_parts: parts, media_present: combined.attachments.length > 0,
+      reader_parts: parts, media_present: combined.attachments.length > 0, updated_at: receivedAt,
     });
+    const changed = publicationChanged(draft, mid, message);
+    if (changed) return changed;
     return { draft, notice };
+  }
+  if (draft.kind === "news_tip" && publicationEnabled(form) && !publication?.ready) {
+    return beginPublication(draft, mid, message);
   }
   draft.status = "new";
   for (const [key, notice] of Object.entries(draft.payload.reader_notices ?? {})) {
