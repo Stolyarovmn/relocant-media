@@ -472,7 +472,8 @@ async def collect_sources(
     venues = venue_sources()
     review_venues = review_only_venue_sources()
     runtime_venues = {**venues, **review_venues}
-    media = {} if submissions_only else media_sources()
+    # Intake still resolves explicit links to registered media; it skips feed discovery below.
+    media = media_sources()
     guides = {} if submissions_only else guide_sources()
     discovery_venues = discovery_venue_sources()
     news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY)
@@ -711,7 +712,7 @@ async def collect_sources(
                 result["venue_article_failures"] += len(item_failures)
                 venue_errors.extend({"source_id": source_id, **error}
                                     for error in item_failures)
-        for source_id in media:
+        for source_id in (() if submissions_only else media):
             try:
                 for item in await collectors[source_id].collect():
                     result["media_items"] += 1
