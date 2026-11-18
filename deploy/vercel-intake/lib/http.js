@@ -4,6 +4,54 @@ export class HttpError extends Error {
   constructor(status, code) { super(code); this.status = status; this.code = code; }
 }
 
+const httpCodes = new Set([
+  "body_too_large", "invalid_json", "post_required", "get_required", "unauthorized",
+  "reference_exhausted", "queue_capacity", "invalid_seed", "invalid_form", "invalid_seed_case",
+  "not_bootstrapped", "concurrent_update", "invalid_bootstrap", "bot_identity", "bootstrap_conflict",
+  "attempt_lost", "invalid_update", "update_conflict", "attempt_busy", "event_too_large",
+  "unknown_operation", "invalid_peek", "invalid_ack", "invalid_open_drafts", "ack_conflict",
+]);
+const diagnosticCodes = new Set([
+  ...httpCodes, "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT",
+  "precondition_failed", "forbidden", "bad_request", "store_not_found", "store_suspended",
+  "service_unavailable", "rate_limited", "oidc_environment_not_allowed", "not_found",
+]);
+const diagnosticTypes = new Set([
+  "Error", "TypeError", "SyntaxError", "RangeError", "ReferenceError", "URIError", "EvalError",
+  "AggregateError", "DOMException", "HttpError", "Conflict", "BlobError", "BlobAccessError",
+  "BlobClientTokenExpiredError", "BlobContentTypeNotAllowedError", "BlobFileTooLargeError",
+  "BlobNotFoundError", "BlobPathnameMismatchError", "BlobPreconditionFailedError",
+  "BlobRequestAbortedError", "BlobServiceNotAvailable", "BlobServiceRateLimited",
+  "BlobStoreNotFoundError", "BlobStoreSuspendedError", "BlobUnknownError",
+  "BlobOidcEnvironmentNotAllowedError",
+]);
+const diagnosticPhases = new Set(["config", "read_state", "recover", "plan", "commit", "send"]);
+const diagnosticRoutes = new Set(["/api/telegram", "/api/transfer"]);
+
+function safeProperty(value, key) {
+  try { return value?.[key]; } catch { return undefined; }
+}
+
+export function createDiagnostics(route, logger = (entry) => console.error(entry)) {
+  let phase = "config";
+  return {
+    setPhase(value) { phase = diagnosticPhases.has(value) ? value : "config"; },
+    report(error) {
+      // BlobError subclasses retain Error.name='Error'; constructor.name is
+      // useful only after exact allowlist matching. No arbitrary exception
+      // property, message, stack, cause or toJSON is serialized.
+      const type = safeProperty(safeProperty(error, "constructor"), "name");
+      const code = safeProperty(error, "code");
+      const entry = {
+        route: diagnosticRoutes.has(route) ? route : "UnknownError", phase,
+        error_type: diagnosticTypes.has(type) ? type : "UnknownError",
+        error_code: diagnosticCodes.has(code) ? code : "UnknownError",
+      };
+      try { logger(JSON.stringify(entry)); } catch { /* Diagnostics cannot interrupt the response. */ }
+    },
+  };
+}
+
 export function equalSecret(actual, expected) {
   // Digest before comparing to keep the comparison constant length, including
   // missing or differently sized headers. Never include either input in errors.
@@ -48,10 +96,13 @@ export function send(res, status, value) {
   res.end(JSON.stringify(value));
 }
 
-export function failure(res, error) {
+export function failure(res, error, diagnostics) {
+  diagnostics?.report(error);
   // SDK/HTTP exceptions can contain URLs, credentials and raw Telegram text.
-  // Deliberately do not log, stringify or return those exceptions.
-  send(res, error instanceof HttpError ? error.status : 503, {
-    status: "error", error: error instanceof HttpError ? error.code : "temporarily_unavailable",
+  // Return only locally registered error codes, including for HttpError.
+  const known = error instanceof HttpError && httpCodes.has(error.code);
+  const status = known && [400, 401, 405, 409, 413, 503].includes(error.status) ? error.status : 503;
+  send(res, status, {
+    status: "error", error: known ? error.code : "temporarily_unavailable",
   });
 }

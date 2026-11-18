@@ -158,16 +158,18 @@ function validateSeed(seed) {
 
 export class Ingress {
   constructor({ store, env = process.env, now = Date.now, botFactory = (config, enabled) =>
-    new ReplyBot(config, enabled), hooks = {} }) {
+    new ReplyBot(config, enabled), hooks = {}, onPhase = () => {} }) {
     this.store = store;
     this.env = env;
     this.now = now;
     this.botFactory = botFactory;
     this.hooks = hooks;
+    this.onPhase = onPhase;
     this.paths = paths(env);
   }
 
   async config() {
+    this.onPhase("config");
     const result = await this.store.read(this.paths.config);
     if (!result) throw new HttpError(503, "not_bootstrapped");
     return result.value;
@@ -177,13 +179,16 @@ export class Ingress {
 
   async transaction(change) {
     for (let attempt = 0; attempt < 8; attempt += 1) {
+      this.onPhase("read_state");
       const current = await this.store.read(this.paths.state);
       if (!current) throw new HttpError(503, "not_bootstrapped");
       const state = clone(current.value);
+      this.onPhase("plan");
       const result = change(state);
       if (result?.unchanged) return result.value;
       checkCapacity(state);
       try {
+        this.onPhase("commit");
         await this.store.write(this.paths.state, state, current.etag);
         return result;
       } catch (error) { if (!(error instanceof Conflict)) throw error; }
@@ -192,6 +197,7 @@ export class Ingress {
   }
 
   async bootstrap(input) {
+    this.onPhase("plan");
     if (typeof input.seed_json !== "string" || !/^[a-f0-9]{64}$/u.test(input.seed_sha256 ?? "") ||
         sha(input.seed_json) !== input.seed_sha256 || !["active", "preview"].includes(input.mode) ||
         typeof input.bot_token !== "string" || !/^\d{5,}:[A-Za-z0-9_-]{20,}$/u.test(input.bot_token) ||
@@ -206,10 +212,15 @@ export class Ingress {
       version: 1, seed_sha256: input.seed_sha256, bot_id: seed.bot_id,
       bot_token: input.bot_token, webhook_secret: input.webhook_secret,
     };
+    this.onPhase("config");
     let existing = await this.store.read(this.paths.config);
     if (!existing) {
-      try { await this.store.write(this.paths.config, config); }
+      try {
+        this.onPhase("commit");
+        await this.store.write(this.paths.config, config);
+      }
       catch (error) { if (!(error instanceof Conflict)) throw error; }
+      this.onPhase("config");
       existing = await this.store.read(this.paths.config);
     }
     if (!existing || existing.value.seed_sha256 !== config.seed_sha256 ||
@@ -235,11 +246,16 @@ export class Ingress {
       exported_through: 0, checkpoint_sha256: null, busy: null,
     };
     checkCapacity(state, LIMITS.reserveBytes);
+    this.onPhase("read_state");
     const previous = await this.store.read(this.paths.state);
     if (!previous) {
-      try { await this.store.write(this.paths.state, state); }
+      try {
+        this.onPhase("commit");
+        await this.store.write(this.paths.state, state);
+      }
       catch (error) { if (!(error instanceof Conflict)) throw error; }
     }
+    this.onPhase("read_state");
     const actual = (await this.store.read(this.paths.state))?.value;
     if (!actual || actual.seed_sha256 !== input.seed_sha256 || actual.mode !== input.mode) {
       throw new HttpError(409, "bootstrap_conflict");
@@ -258,6 +274,7 @@ export class Ingress {
   }
 
   async recover(config) {
+    this.onPhase("recover");
     const busy = await this.transaction((state) => {
       if (!state.busy || state.busy.expires_at > this.now()) return { unchanged: true, value: null };
       if (state.busy.phase === "sending") {
@@ -282,6 +299,7 @@ export class Ingress {
       state.busy.notice.attempted_at = new Date(this.now()).toISOString();
       return { busy: clone(state.busy), enabled: this.canSend(state) };
     });
+    this.onPhase("send");
     await this.hooks.afterSending?.();
     let notice = { ...sending.busy.notice, status: "uncertain" };
     try {
@@ -304,11 +322,13 @@ export class Ingress {
   }
 
   async receive(update, config) {
+    this.onPhase("plan");
     if (!Number.isSafeInteger(update.update_id) || update.update_id < 0) throw new HttpError(400, "invalid_update");
     const hash = sha(stable(update));
     await this.recover(config);
     // Parent DM verification is a read-only BotAPI call. It precedes planning;
     // the final state/duplicate decision is repeated inside the CAS transaction.
+    this.onPhase("read_state");
     const current = (await this.store.read(this.paths.state))?.value;
     if (!current) throw new HttpError(503, "not_bootstrapped");
     const existing = current.receipts[update.update_id];
@@ -317,6 +337,7 @@ export class Ingress {
       if (current.busy?.event.update.update_id === update.update_id) throw new HttpError(503, "attempt_busy");
       return { status: "ready" };
     }
+    this.onPhase("plan");
     const message = update.callback_query ? null : (update.message ?? update.edited_message);
     let actor = message && readerIdentity(message);
     if (actor && current.legacy_conversations.includes(actor.user)) actor = null;
@@ -396,8 +417,10 @@ export class Ingress {
   }
 
   async transfer(input) {
+    this.onPhase("plan");
     if (input.operation === "bootstrap") return this.bootstrap(input);
     if (input.operation === "status") {
+      this.onPhase("read_state");
       const state = await this.store.read(this.paths.state);
       if (!state) throw new HttpError(503, "not_bootstrapped");
       return this.status(state.value);
