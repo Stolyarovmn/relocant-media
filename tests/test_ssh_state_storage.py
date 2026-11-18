@@ -7,13 +7,19 @@ import os
 import stat
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 
+from relocant_media.ai.package import canonical_json
+from relocant_media.ops import ingress_cutover
 from relocant_media.ops import ssh_state_storage as storage
 from relocant_media.ops.actions_runtime import _commit_republication
-from relocant_media.ops.ssh_state_client import SSHStateClient
+from relocant_media.ops.serverless_snapshot import form_settings
+from relocant_media.ops.ssh_state_client import SSHStateClient, SSHStorageError
+from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 
 
 @pytest.fixture
@@ -107,6 +113,158 @@ def test_republication_receipts_commit_through_ssh_storage(context, tmp_path, mo
         assert state['intake_state'] == context[1]['intake_state']
         envelope = json.loads((tmp_path / f"republication-{state['attempt']}.json").read_text())
         assert envelope['state'] == state
+
+
+@pytest.fixture
+def ingress_context(context, monkeypatch):
+    backend, state, _ = context
+    state['intake_state'].update(signature='17,18', backup_pending=True, serverless_sequence=0)
+    state['map_republications'] = {'97': {'state': 'sent'}}
+    initialize(context)
+    trace, writes, checkpoints = [], [], []
+    fault = {}
+    seed = {
+        'version': 1, 'created_at': '2026-11-18T12:00:00+00:00', 'bot_id': 123456,
+        'channel_id': APPROVED_CHANNEL_ID, 'form': json.loads(canonical_json(form_settings())),
+        'processed_updates': [100], 'legacy_conversations': [],
+        'cases': [{'id': 17, 'reference': 'RM-1234-5678', 'kind': 'technical',
+                   'status': 'collecting', 'telegram_user_id': 42, 'telegram_message_id': 101,
+                   'payload': {'reader_intake': True, 'public_reference': 'RM-1234-5678',
+                               'chat_id': 42, 'text': 'Закрытый текст открытого черновика',
+                               'reader_notices': {}}}],
+    }
+    client = SSHStateClient(None)
+
+    def exchange(payload, body=b''):
+        operation = payload['op']
+        if operation == 'put_blob':
+            value = json.loads(body)
+            if 'expected_busy_sha256' in value:
+                checkpoints.append(value)
+                phase = value['state']['intake_state']['ingress']['phase']
+                trace.append(f'checkpoint:{phase}')
+            else:
+                trace.append('seed')
+        if operation == 'write_state':
+            target = payload['state']
+            if target['status'] == 'busy':
+                assert checkpoints
+                assert checkpoints[-1]['expected_busy_sha256'] == hashlib.sha256(
+                    storage.encode(target),
+                ).hexdigest()
+                old_phase = target['intake_state'].get('ingress', {}).get('phase', 'unprepared')
+                label = f'busy:{old_phase}'
+            else:
+                phase = target['intake_state']['ingress']['phase']
+                if fault.get('ready_phase') == phase:
+                    raise SSHStorageError('storage_error')
+                label = phase
+            result = request(backend, payload, body)
+            writes.append(copy.deepcopy(target))
+            trace.append(label)
+            return result
+        return request(backend, payload, body)
+
+    monkeypatch.setattr(client, 'exchange', exchange)
+    monkeypatch.setattr(ingress_cutover, '_export', lambda *args: copy.deepcopy(seed))
+    webhook = {'url': '', 'max_connections': 1}
+    bridge, secret = 'b' * 40, 's' * 40
+
+    def telegram(request):
+        operation = request.url.path.rsplit('/', 1)[-1]
+        trace.append(operation)
+        payload = json.loads(request.content)
+        if operation == 'getMe':
+            result = {'id': 123456, 'is_bot': True, 'username': ingress_cutover.BOT_USERNAME}
+        elif operation == 'getChatMember':
+            result = {'can_manage_direct_messages': True}
+        elif operation == 'getWebhookInfo':
+            result = copy.deepcopy(webhook)
+        elif operation in {'transfer', 'setWebhook'}:
+            recorded = backend.read_state()['state']
+            assert recorded['status'] == 'ready'
+            assert recorded['intake_state']['ingress']['phase'] == 'prepared'
+            assert len(writes) == 2
+            if operation == 'transfer':
+                assert request.headers['Authorization'] == f'Bearer {bridge}'
+                assert payload['operation'] == 'bootstrap' and payload['mode'] == 'active'
+                assert json.loads(payload['seed_json']) == seed
+                assert client.download(payload['seed_sha256']) == canonical_json(seed).encode()
+                return httpx.Response(200, json={'status': 'ready', 'can_send': True,
+                                                'seed_sha256': payload['seed_sha256']})
+            assert payload == {'url': ingress_cutover.PRODUCTION_ORIGIN + '/api/telegram',
+                               'secret_token': secret, 'max_connections': 1,
+                               'drop_pending_updates': False}
+            webhook['url'] = payload['url']
+            result = True
+        else:
+            pytest.fail('Непредусмотренный вызов API в тесте переноса')
+        return httpx.Response(200, json={'ok': True, 'result': result})
+
+    with httpx.Client(transport=httpx.MockTransport(telegram), trust_env=False) as http:
+        yield client, http, trace, writes, checkpoints, fault, seed
+
+
+def execute_ingress(scenario, work):
+    client, http, *_ = scenario
+    return ingress_cutover.execute(
+        client, ingress_cutover.PRODUCTION_ORIGIN, work, http,
+        '123456:FAKE_TOKEN_FOR_TESTING_ONLY_123456', 'b' * 40, 's' * 40,
+        activate=True, now=datetime(2026, 11, 18, 12, tzinfo=UTC),
+    )
+
+
+def test_ingress_cutover_uses_real_ssh_storage_transactions(context, ingress_context, tmp_path):
+    backend, initial, snapshot = context
+    client, _, trace, writes, checkpoints, _, seed = ingress_context
+    result = execute_ingress(ingress_context, tmp_path / 'cutover')
+    assert result['status'] == 'active' and result['open_drafts'] == 1
+    assert trace == ['getMe', 'getChatMember', 'getWebhookInfo', 'seed', 'checkpoint:prepared',
+                     'busy:unprepared', 'prepared', 'transfer', 'setWebhook', 'getWebhookInfo',
+                     'checkpoint:active', 'busy:prepared', 'active']
+    assert [state['status'] for state in writes] == ['busy', 'ready', 'busy', 'ready']
+    assert len(checkpoints) == 2
+    current, digest = client.read()
+    assert backend.read_state() == {'state': current, 'sha': digest}
+    assert current['generation'] == current['attempt']
+    assert current['intake_state']['ingress']['phase'] == 'active'
+    for state in writes:
+        assert state['snapshot'] == initial['snapshot']
+        assert state['cutover'] == initial['cutover']
+        assert state['map_republications'] == initial['map_republications']
+        for key, value in initial['intake_state'].items():
+            assert state['intake_state'][key] == value
+    assert client.download(initial['snapshot']['drive_file_id']) == snapshot
+    seed_id = current['intake_state']['ingress']['seed_sha256']
+    assert json.loads(client.download(seed_id))['cases'] == seed['cases']
+    assert len(list((tmp_path / 'cutover').glob('republication-*.json'))) == 2
+
+
+@pytest.mark.parametrize('phase', ['prepared', 'active'])
+def test_ingress_failed_ssh_ready_commit_preserves_busy_fence(
+    context, ingress_context, tmp_path, phase,
+):
+    backend, initial, _ = context
+    client, _, trace, writes, checkpoints, fault, _ = ingress_context
+    fault['ready_phase'] = phase
+    with pytest.raises(SSHStorageError):
+        execute_ingress(ingress_context, tmp_path / 'failed-cutover')
+    observed = client.read()
+    recorded = backend.read_state()['state']
+    assert recorded['status'] == 'busy' and recorded['snapshot'] == initial['snapshot']
+    assert len(writes) == (1 if phase == 'prepared' else 3)
+    assert checkpoints[-1]['state']['intake_state']['ingress']['phase'] == phase
+    if phase == 'prepared':
+        assert 'ingress' not in recorded['intake_state']
+        assert 'transfer' not in trace and 'setWebhook' not in trace
+    else:
+        assert recorded['intake_state']['ingress']['phase'] == 'prepared'
+    fault.clear()
+    trace.clear()
+    with pytest.raises(ValueError, match='canonical state not ready'):
+        execute_ingress(ingress_context, tmp_path / 'blocked-retry')
+    assert client.read() == observed
+    assert 'transfer' not in trace and 'setWebhook' not in trace
 
 
 @pytest.mark.parametrize('field,value', [('server_writers_fenced', False),

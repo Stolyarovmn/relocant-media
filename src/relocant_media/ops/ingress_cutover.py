@@ -7,7 +7,6 @@ import json
 import os
 import re
 import sys
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -17,7 +16,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.package import canonical_json
-from relocant_media.ops.actions_runtime import REPO, restored, validate_ready
+from relocant_media.ops.actions_runtime import REPO, _commit_republication, restored, validate_ready
 from relocant_media.ops.serverless_snapshot import export_intake_state
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
@@ -148,10 +147,11 @@ def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
         metadata = {"version": 1, "backend": "vercel", "phase": "prepared", "url": url,
                     "seed_sha256": seed_sha, "seed_snapshot_sha256": state["snapshot"]["sha256"],
                     "created_at": at.isoformat()}
-        state = {**state, "generation": uuid.uuid4().hex, "intake_state": {
-            **state.get("intake_state", {}), "ingress": metadata,
-        }}
-        state_sha = storage.write(state, state_sha)
+        state, state_sha = _commit_republication(
+            storage, storage, state, state_sha,
+            {"intake_state": {**state.get("intake_state", {}), "ingress": metadata}},
+            os.environ, work,
+        )
     _phase("bootstrap_private_ingress")
     result = _transfer(client, url, bridge_token, {
         "operation": "bootstrap", "seed_json": seed_bytes.decode(), "seed_sha256": seed_sha,
@@ -175,12 +175,12 @@ def execute(storage: SSHStateClient, url: str, work: Path, client: httpx.Client,
     validate_ready(fresh)
     if (fresh, fresh_sha) != (state, state_sha):
         raise ValueError("Каноническое состояние изменилось во время переключения")
-    active = {**fresh, "generation": uuid.uuid4().hex, "intake_state": {
+    updates = {"intake_state": {
         **fresh["intake_state"], "ingress": {**fresh["intake_state"]["ingress"],
             "phase": "active", "activated_at": at.isoformat()},
     }}
     _phase("activate_canonical_ingress")
-    storage.write(active, fresh_sha)
+    _commit_republication(storage, storage, fresh, fresh_sha, updates, os.environ, work)
     return {"status": "active", **summary, "origin": url,
             "pending_update_count": verified.get("pending_update_count", 0)}
 

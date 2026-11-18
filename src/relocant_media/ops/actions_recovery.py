@@ -21,9 +21,15 @@ def verify_stopped_run(run_id: str, attempt: str) -> None:
         check=True, capture_output=True, timeout=30,
     )
     run = json.loads(result.stdout)
+    workflow = run.get("path")
+    allowed_workflow = (
+        workflow == ".github/workflows/editorial-actions.yml"
+        or (workflow == ".github/workflows/ingress-cutover.yml"
+            and run.get("event") == "workflow_dispatch")
+    )
     if (str(run["id"]) != run_id or str(run["run_attempt"]) != attempt
             or run["status"] != "completed" or run["head_branch"] != "main"
-            or run["path"] != ".github/workflows/editorial-actions.yml"):
+            or not allowed_workflow):
         raise ValueError("interrupted writer has not been verified as stopped")
 
 
