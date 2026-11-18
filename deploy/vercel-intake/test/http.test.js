@@ -4,7 +4,8 @@ import { Readable } from "node:stream";
 import { handler as telegram } from "../api/telegram.js";
 import { handler as transfer } from "../api/transfer.js";
 import { handler as health } from "../api/health.js";
-import { bodyJSON, equalSecret } from "../lib/http.js";
+import { bodyJSON, createDiagnostics, equalSecret, HttpError } from "../lib/http.js";
+import { BlobAccessError } from "@vercel/blob";
 import { LIMITS } from "../lib/engine.js";
 import { fixture, message, invoke, bootstrap, FakeStore } from "./helpers.js";
 
@@ -97,4 +98,80 @@ test("ошибки storage sanitised и не утекли URL, token или сы
   assert.equal(response.statusCode, 503);
   assert.deepEqual(response.data, { status: "error", error: "temporarily_unavailable" });
   assert.equal(response.headers["Retry-After"], "5");
+});
+
+test("диагностика обоих endpoints фиксирует commit и разрешённый SDK класс без текста исключения", async () => {
+  const f = await fixture();
+  const secret = "FAKE_SECRET_EXCEPTION_MESSAGE_HEADER_RAW_UPDATE";
+  const error = new BlobAccessError();
+  error.name = `injected-name-${secret}`;
+  error.code = "ETIMEDOUT";
+  Object.defineProperty(error, "message", { get() { throw new Error(secret); } });
+  Object.defineProperty(error, "stack", { get() { throw new Error(secret); } });
+  error.headers = { authorization: secret };
+  error.toJSON = () => { throw new Error(secret); };
+  f.store.write = async () => { throw error; };
+  const logs = [];
+  const logger = (...args) => { assert.equal(args.length, 1); logs.push(args[0]); };
+  const telegramResponse = await invoke(telegram({ ...f.deps, logger }), message(1, secret), {
+    "x-telegram-bot-api-secret-token": f.config.webhook_secret,
+  });
+  const transferResponse = await invoke(transfer({ ...f.deps, logger }), { operation: "peek" }, {
+    authorization: "Bearer bridge-fixture",
+  });
+  assert.equal(telegramResponse.statusCode, 503);
+  assert.equal(transferResponse.statusCode, 503);
+  assert.deepEqual(logs.map((entry) => JSON.parse(entry)), [
+    { route: "/api/telegram", phase: "commit", error_type: "BlobAccessError", error_code: "ETIMEDOUT" },
+    { route: "/api/transfer", phase: "commit", error_type: "BlobAccessError", error_code: "ETIMEDOUT" },
+  ]);
+  assert.ok(!logs.join("").includes(secret));
+  assert.ok(!logs.join("").includes(f.config.webhook_secret));
+  assert.equal(f.calls.length, 0);
+  assert.equal((await f.state()).events.length, 0);
+});
+
+test("console.error получает только JSON whitelist; неизвестные имена и коды заменяются", async () => {
+  const secret = "FAKE_PRIVATE_DATA_DO_NOT_LOG";
+  class UnregisteredError extends Error {}
+  const error = new UnregisteredError(secret);
+  error.name = `BlobAccessError\n${secret}`;
+  error.code = `ECONNRESET\n${secret}`;
+  error.stack = `${secret} https://private/blob/token`;
+  error.cause = { token: secret };
+  error.headers = { authorization: secret };
+  const store = { read: async () => { throw error; } };
+  const env = { VERCEL_ENV: "production", INGRESS_BRIDGE_TOKEN: secret };
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => { assert.equal(args.length, 1); logs.push(args[0]); };
+  try {
+    await invoke(telegram({ store, env }), message(1, secret), { authorization: secret });
+    await invoke(transfer({ store, env }), { operation: "status", token: secret }, {
+      authorization: `Bearer ${secret}`,
+    });
+  } finally { console.error = original; }
+  assert.deepEqual(logs.map((entry) => JSON.parse(entry)), [
+    { route: "/api/telegram", phase: "config", error_type: "UnknownError", error_code: "UnknownError" },
+    { route: "/api/transfer", phase: "read_state", error_type: "UnknownError", error_code: "UnknownError" },
+  ]);
+  for (const value of [secret, "UnregisteredError", "https://", "authorization", "cause", "stack"]) {
+    assert.ok(!logs.join("").includes(value));
+  }
+});
+
+test("подставные phase, route и HttpError code не выходят в диагностику или HTTP", async () => {
+  const secret = "FAKE_SECRET_NAME_INJECTION";
+  const logs = [];
+  const diagnostics = createDiagnostics(secret, (entry) => logs.push(JSON.parse(entry)));
+  diagnostics.setPhase(secret);
+  diagnostics.report(new HttpError(503, secret));
+  assert.deepEqual(logs, [{ route: "UnknownError", phase: "config", error_type: "HttpError", error_code: "UnknownError" }]);
+  const response = await invoke(telegram({
+    store: { read: async () => { throw new HttpError(503, secret); } },
+    env: { VERCEL_ENV: "production" }, logger: (entry) => logs.push(JSON.parse(entry)),
+  }), message(1, secret));
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.data, { status: "error", error: "temporarily_unavailable" });
+  assert.ok(!JSON.stringify(logs).includes(secret));
 });
