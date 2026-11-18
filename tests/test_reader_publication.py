@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from relocant_media.bot.api import TelegramAPIError
 from relocant_media.services.private_intake import process_private_updates
 from relocant_media.services.reader_publication import (
     POLICY,
@@ -147,9 +148,63 @@ class Bot:
     async def _call(self, method, payload):
         if method == "answerCallbackQuery":
             return True
-        assert method in {"sendMessage", "sendPhoto", "editMessageText"}
+        assert method in {"sendMessage", "sendPhoto", "editMessageText", "editMessageReplyMarkup"}
         self.sent.append((method, deepcopy(payload)))
         return {"message_id": payload.get("message_id", 50 + len(self.sent))}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "not_modified", None])
+async def test_closed_keyboard_reconciles_without_repeating_final_answer(failure):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    class KeyboardBot(Bot):
+        attempts = 0
+
+        async def _call(self, method, payload):
+            if method == "editMessageReplyMarkup":
+                self.attempts += 1
+                if self.attempts == 1 and failure == "timeout":
+                    raise TimeoutError("test")
+                if failure == "not_modified":
+                    raise TelegramAPIError("Bad Request: message is not modified")
+            return await super()._call(method, payload)
+
+    try:
+        with Session(engine) as session:
+            payload = material()
+            payload["reader_resolution"] = {
+                "owner_notice": {"status": "sent", "chat_id": OWNER, "telegram_message_id": 51},
+                "final": {"status": "sent", "telegram_message_id": 60},
+            }
+            row = Submission(kind="news_tip", status="closed", telegram_user_id=42,
+                             telegram_message_id=7, payload=payload)
+            session.add(row)
+            session.commit()
+            sid = row.id
+        bot = KeyboardBot()
+        owner = {"owner_user_id": OWNER, "owner_chat_id": OWNER}
+        await process_reader_resolutions(engine, bot, enabled=True, **owner)
+        if failure == "timeout":
+            await process_reader_resolutions(engine, bot, enabled=True, **owner)
+            assert bot.attempts == 1
+            with Session(engine) as session:
+                row = session.get(Submission, sid)
+                state = deepcopy(row.payload["reader_resolution"])
+                state["owner_keyboard"]["retry_at"] = "2020-01-01T00:00:00+00:00"
+                row.payload = {**row.payload, "reader_resolution": state}
+                session.commit()
+            await process_reader_resolutions(engine, bot, enabled=True, **owner)
+        with Session(engine) as session:
+            row = session.get(Submission, sid)
+            assert row.payload["reader_resolution"]["owner_keyboard"]["status"] == "cleared"
+        before = bot.attempts
+        await process_reader_resolutions(engine, bot, enabled=True, **owner)
+        assert bot.attempts == before
+        assert not any(method == "sendMessage" for method, _ in bot.sent)
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.asyncio
