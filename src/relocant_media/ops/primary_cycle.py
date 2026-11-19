@@ -14,6 +14,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.batch_preselection import provider_handoff
 from relocant_media.ai.jev import jev_enabled, rank_shadow
 from relocant_media.domain.freshness import GUIDE_SOURCE_TYPE
 from relocant_media.ops.candidates_cli import aware_datetime, select_candidates
@@ -135,10 +136,11 @@ def run_cycle(
                              :min(lifecycle_retry_slots, limit)]
             normal_limit = limit - len(retry_ids)
             with Session(engine) as session:
-                deferred = deferred_items(session) if deferred_items else set()
+                gpt_pending = deferred_items(session) if deferred_items else set()
+                gpt_deferred = gpt_pending - set(due_ids)
                 # Просроченные/закрытые материалы и ещё не наступившие повторы
                 # исключаются независимо от наличия резервного обработчика.
-                deferred = (deferred - set(due_ids)) | lifecycle_excluded
+                deferred = gpt_deferred | lifecycle_excluded
                 manifest = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
                     until=aware_datetime(window["until"]),
@@ -172,7 +174,8 @@ def run_cycle(
                         or any(not any(item is original for original in pool)
                                for item in selected)):
                     raise ValueError("preselection returned invalid candidate objects")
-                if defer_failed_batch and audit.get("status") == "fallback" and batch_slots:
+                if (defer_failed_batch and audit.get("status") == "fallback"
+                        and provider_handoff(audit) and batch_slots):
                     # Только исходные кандидаты из того же окна, которые прошли
                     # проверку свежести перед запросом Gemini.
                     order = [row["raw_item_id"] for row in selected] + audit["deferred_ids"]
@@ -294,7 +297,8 @@ def run_cycle(
             heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
                 window_complete=complete, processed_raw_item_ids=processed,
                 processing_errors=processing_errors,
-                gpt_deferred_count=len(deferred.union(gpt_candidate_ids)),
+                gpt_deferred_count=len(gpt_deferred.union(gpt_candidate_ids)),
+                lifecycle_excluded_count=len(lifecycle_excluded),
                 remaining_count=remaining["eligible_count"] + additional_remaining,
                 missing_published_at_count=remaining["missing_published_at_count"],
                 review_required=collection.get("review_required", 0),

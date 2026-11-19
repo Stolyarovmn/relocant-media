@@ -58,6 +58,8 @@ def test_one_batch_orders_thirty_and_sends_five_unchanged_objects_to_full_review
     assert rows == before
     assert len(provider.calls) == 1
     assert provider.calls[0]["task"] == "batch_preselect"
+    schema = provider.calls[0]["response_schema"]["properties"]["ranking"]
+    assert schema["minItems"] == schema["maxItems"] == 30
     assert audit["status"] == "ranked" and audit["scanned_count"] == 30
     assert audit["submitted_count"] == 30 and len(audit["deferred_ids"]) == 25
     assert "approve" not in audit and "ranking" not in selected[0]
@@ -80,6 +82,7 @@ def test_malformed_or_foreign_ids_fall_back_without_decisions(response):
     assert [row["raw_item_id"] for row in selected] == [1, 2, 3, 4, 5]
     assert audit["status"] == "fallback"
     assert audit["error_type"] in {"ValueError", "ValidationError", "JSONDecodeError"}
+    assert audit["error_stage"] == "response"
     assert rows == before
 
 
@@ -88,7 +91,28 @@ def test_provider_error_is_sanitized_and_keeps_current_order():
     selected, audit = choose(candidates(6), provider)
     assert len(selected) == 5 and audit["status"] == "fallback"
     assert audit["error_type"] == "RuntimeError"
+    assert audit["error_stage"] == "provider"
     assert "SECRET" not in json.dumps(audit)
+
+
+def test_provider_value_error_is_not_misclassified_as_response_schema_failure():
+    from relocant_media.ai.batch_preselection import provider_handoff
+
+    _, audit = choose(candidates(6), Provider(error=ValueError("Сбой внутри провайдера")))
+    assert audit["error_type"] == "ValueError" and audit["error_stage"] == "provider"
+    assert provider_handoff(audit)
+
+
+def test_partial_ranking_remains_invalid_but_keeps_safe_full_review_candidates():
+    from relocant_media.ai.batch_preselection import provider_handoff
+
+    rows = candidates(30)
+    provider = Provider(response=json.dumps({"ranking": [
+        {"raw_item_id": i, "reason": "Частичный список"} for i in range(1, 6)]}))
+    selected, audit = choose(rows, provider)
+    assert selected == rows[:5]
+    assert audit["status"] == "fallback" and audit["error_stage"] == "response"
+    assert not provider_handoff(audit)
 
 
 @pytest.mark.parametrize("ids", [[1, 2, 3, 4, 5, 5], [1, 2, 3, 4, 5, 999]])

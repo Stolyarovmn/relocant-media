@@ -1,11 +1,13 @@
 """Persisted editorial processing and conservative, at-most-once staging delivery."""
 
+import hashlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import cast
+from typing import Any, Literal, cast
 
+from pydantic import ValidationError
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
@@ -13,7 +15,16 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.publisher import Publisher
-from relocant_media.domain.dedup import DEFAULT_EVENT_WINDOW, EventCandidate, event_key, same_event
+from relocant_media.domain.dedup import (
+    DEFAULT_EVENT_WINDOW,
+    EventCandidate,
+    canonicalize_url,
+    event_key,
+    normalize_text,
+    same_event,
+    title_similarity,
+)
+from relocant_media.domain.event_facts import conflicting_facts
 from relocant_media.domain.event_programs import linked_event_program
 from relocant_media.domain.originality import copies_source_text
 from relocant_media.domain.policy import (
@@ -21,7 +32,6 @@ from relocant_media.domain.policy import (
     SOURCE_REPLACED_REASON,
     primary_evidence_kind,
 )
-from relocant_media.services.replacement_identity import matches_replacement_event
 from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -68,57 +78,241 @@ def source_replacement_target(session: Session, raw_id: int) -> int | None:
     return target if type(target) is int and target > 0 and target != raw_id else None
 
 
-def _reviewed_event_item(
-    session: Session,
-    *,
-    anchor: RawItem,
-    anchor_source: Source,
-) -> RawItem | None:
-    anchor_candidate = _candidate(anchor)
-    exact_conditions = [
-        RawItem.url == anchor.url,
-        RawItem.canonical_url == anchor_candidate.resolved_canonical_url,
-        RawItem.content_sha256 == anchor_candidate.resolved_content_sha256,
-        # Legacy/directly imported rows may not have persisted fingerprints.
-        # Include them for the exact same_event check rather than skipping them.
-        RawItem.canonical_url.is_(None),
-        RawItem.content_sha256.is_(None),
-    ]
+@dataclass(frozen=True)
+class ReviewedEventProof:
+    """Только основание дедупа; не разрешение публикации и не новый редакционный пакет."""
 
-    match_scope = list(exact_conditions)
-    if anchor.published_at is not None:
-        match_scope.append(
-            and_(
-                RawItem.published_at >= anchor.published_at - DEFAULT_EVENT_WINDOW,
-                RawItem.published_at <= anchor.published_at + DEFAULT_EVENT_WINDOW,
-            )
-        )
+    target_raw_id: int
+    kind: Literal["reviewed", "published", "delivery_reconciliation"]
+    context_sha256: str
 
-    reason = EditorialRun.outcome["reason"].as_string()
-    replacement = EditorialRun.outcome["replacement_raw_item_id"].as_integer()
+
+def _document_candidate(document: EvidenceDocument, raw_id: int) -> EventCandidate:
+    # Хеш и URL вычисляются из снимка; старые materialized поля RawItem не доказательство.
+    return EventCandidate(raw_item_id=raw_id, source_id=document.source_id, url=document.url,
+        title=document.title, body=document.body, published_at=document.published_at)
+
+
+def _same_proven_event(left: EvidenceDocument, right: EvidenceDocument) -> bool:
+    left_body, right_body = normalize_text(left.body), normalize_text(right.body)
+    if min(len(left_body.split()), len(right_body.split())) < 4:
+        return False
+    return bool(same_event(_document_candidate(left, 1), _document_candidate(right, 2))
+        and not conflicting_facts(
+            f"{left.title}\n{left.body}", f"{right.title}\n{right.body}", 0, 0)
+        and (left_body == right_body or title_similarity(left.body, right.body) >= 0.9
+             or min(len(left_body), len(right_body)) >= 80
+             and title_similarity(left.body, right.body) >= 0.8))
+
+
+def _stored_duplicate_documents(run: EditorialRun) -> tuple[tuple[int, EvidenceDocument,
+                                                                  dict[str, Any]], ...]:
+    snapshots = run.evidence.get("documents")
+    if snapshots is None:
+        snapshots = [{**run.evidence, "raw_item_id": run.raw_item_id}]
+    if not isinstance(snapshots, list) or not 1 <= len(snapshots) <= 10:
+        raise ValueError("Нет ограниченного снимка проверенного события")
+    documents, seen = [], set()
+    for snapshot in snapshots:
+        if (not isinstance(snapshot, dict) or type(snapshot.get("raw_item_id")) is not int
+                or snapshot["raw_item_id"] <= 0 or snapshot["raw_item_id"] in seen):
+            raise ValueError("Неверная связь документа с событием")
+        document = EvidenceDocument.model_validate(snapshot)
+        if (document.published_at is not None and (document.published_at.tzinfo is None
+                or document.published_at.utcoffset() is None)):
+            raise ValueError("Неизвестен часовой пояс снимка события")
+        documents.append((snapshot["raw_item_id"], document, snapshot))
+        seen.add(snapshot["raw_item_id"])
+    if sum(len(doc.title)+len(doc.body) for _, doc, _ in documents) > 120_000:
+        raise ValueError("Снимок проверенного события превышает предел")
+    primary = EvidenceDocument.model_validate(run.evidence)
+    if not any(raw_id == run.raw_item_id and document == primary
+               for raw_id, document, _ in documents):
+        raise ValueError("Нет исходного проверенного документа")
+    return tuple(documents)
+
+
+def _possible_saved_package_match(run: EditorialRun, anchor: EvidenceDocument, city: str) -> bool:
+    """Только резерв для сверки transport, без восстановления evidence или нового допуска."""
+    payload = run.outcome.get("_package")
+    expected = run.outcome.get("_package_sha256")
+    if not isinstance(payload, dict) or not isinstance(expected, str) or len(expected) != 64:
+        return False
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode()
+        if len(encoded) > 512*1024 or hashlib.sha256(encoded).hexdigest() != expected:
+            return False
+        from relocant_media.ai.package import EditorialPackage
+
+        package = EditorialPackage.model_validate_json(encoded)
+        if package.raw_item_id != run.raw_item_id or package.city != city:
+            return False
+        saved = package.event.documents if package.event is not None else (package.evidence,)
+        if not 1 <= len(saved) <= 10:
+            return False
+        documents = [EvidenceDocument.model_validate(document.model_dump(
+            include=set(EvidenceDocument.model_fields))) for document in saved]
+        if sum(len(doc.title)+len(doc.body) for doc in documents) > 120_000:
+            return False
+        return any(same_event(_document_candidate(anchor, 1), _document_candidate(doc, 2))
+                   for doc in documents)
+    except (ValueError, TypeError, ValidationError):
+        return False
+
+
+def reviewed_event_proof(
+    session: Session, *, anchor: RawItem, anchor_source: Source, target: RawItem,
+    target_source: Source | None = None, run: EditorialRun | None = None,
+    post: Post | None = None, now: datetime | None = None,
+) -> ReviewedEventProof | None:
+    """Перепроверить источник подавления; ID, заголовок и пустой skipped недостаточны.
+
+    Квитанция привязана к сохранённому событию, а не к изменяемому текущему raw.
+    При неизвестной отправке возможное совпадение требует сверки и не открывает retry.
+    """
+    if target.id == anchor.id:
+        return None
+    target_source = target_source or session.get(Source, target.source_id)
+    run = run or session.get(EditorialRun, target.id)
+    if (target_source is None or target_source.city != anchor_source.city or run is None
+            or run.raw_item_id != target.id):
+        return None
+    post = post or (session.get(Post, run.post_id) if run.post_id else None)
+    anchor_document = _document(anchor)
+    confirmed_send = bool(run.delivery_status == "sent" and post is not None
+                          and type(post.telegram_message_id) is int
+                          and post.telegram_message_id > 0)
+    transport = bool(run.delivery_status in {"sent", "sending", "uncertain"}
+        or run.staging_message_id is not None or post and (
+            post.telegram_message_id is not None or post.published_at is not None))
+    if not transport:
+        created, current = _timestamp(run.created_at), _timestamp(now or datetime.now(UTC))
+        if (run.delivery_status != "pending" or post is None or not target_source.enabled
+                or run.outcome.get("status") not in {"ready", "human_review"}
+                or created is None or current is None
+                or not timedelta() <= current-created <= timedelta(hours=6)):
+            return None
+        from relocant_media.services.material_lifecycle import is_terminal_blocked
+
+        if is_terminal_blocked(session, target.id, now=now or datetime.now(UTC)):
+            return None
+    try:
+        documents = _stored_duplicate_documents(run)
+    except (ValueError, TypeError, ValidationError):
+        documents = ()
+    saved_match = (run.evidence.get("city") == anchor_source.city
+                   and any(_same_proven_event(anchor_document, doc) for _, doc, _ in documents))
+    possible_saved_match = (run.evidence.get("city") == anchor_source.city and any(same_event(
+        _document_candidate(anchor_document, anchor.id), _document_candidate(doc, raw_id),
+    ) for raw_id, doc, _ in documents))
+    kind: Literal["reviewed", "published", "delivery_reconciliation"]
+    if transport:
+        if confirmed_send and saved_match:
+            kind = "published"
+        elif (possible_saved_match or _possible_saved_package_match(
+                  run, anchor_document, anchor_source.city)
+              or canonicalize_url(anchor.url) == canonicalize_url(target.url)
+              or same_event(_document_candidate(anchor_document, anchor.id),
+                            _document_candidate(_document(target), target.id))):
+            kind = "delivery_reconciliation"
+        else:
+            return None
+    else:
+        if (not saved_match or run.delivery_status != "pending" or post is None
+                or not target_source.enabled or run.evidence.get("city") != anchor_source.city):
+            return None
+        try:
+            outcome = EditorialOutcome.model_validate(run.outcome)
+            created = _timestamp(run.created_at)
+            current = _timestamp(now or datetime.now(UTC))
+            if (outcome.status not in {PublicationStatus.READY, PublicationStatus.HUMAN_REVIEW}
+                    or not outcome.ranking.should_process or outcome.claims is None
+                    or outcome.verification is None or outcome.draft is None
+                    or (post.title, post.body) != (outcome.draft.title, outcome.draft.body)
+                    or post.status != outcome.status.value or created is None or current is None
+                    or not timedelta() <= current-created <= timedelta(hours=6)):
+                return None
+            verdicts = {claim.claim_id: claim.supported for claim in outcome.verification.claims}
+            if (len(verdicts) != len(outcome.verification.claims)
+                    or set(verdicts) != {claim.claim_id for claim in outcome.claims.claims}
+                    or len({claim.claim_id for claim in outcome.claims.claims})
+                    != len(outcome.claims.claims)
+                    or any(claim.material and not verdicts.get(claim.claim_id)
+                           for claim in outcome.claims.claims)
+                    or not set(outcome.draft.claim_ids) <= {
+                        key for key, supported in verdicts.items() if supported}):
+                return None
+            for raw_id, document, snapshot in documents:
+                item = session.get(RawItem, raw_id)
+                source = session.get(Source, item.source_id) if item else None
+                if (item is None or source is None or not source.enabled
+                        or source.city != anchor_source.city or _document(item) != document
+                        or any(snapshot.get(key) != getattr(source, key)
+                               for key in ("ownership", "high_risk", "auto_publish"))):
+                    return None
+            for claim in outcome.claims.claims:
+                if any(not any(citation.source_id == doc.source_id and citation.url == doc.url
+                               and citation.quote in doc.body for _, doc, _ in documents)
+                       for citation in claim.citations):
+                    return None
+        except (ValueError, TypeError, ValidationError):
+            return None
+        kind = "reviewed"
+    reviewed_at = _timestamp(run.created_at)
+    context = {"anchor_raw_id": anchor.id, "anchor": anchor_document.model_dump(mode="json"),
+        "target_raw_id": target.id, "post_id": post.id if post else None,
+        "outcome_sha256": hashlib.sha256(json.dumps(
+            run.outcome, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+        "kind": kind, "documents": [snapshot for _, _, snapshot in documents],
+        "delivery_status": run.delivery_status, "staging_message_id": run.staging_message_id,
+        "telegram_message_id": post.telegram_message_id if post else None,
+        "reviewed_at": reviewed_at.isoformat() if reviewed_at else None}
+    digest = hashlib.sha256(json.dumps(
+        context, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return ReviewedEventProof(target.id, kind, digest)
+
+
+def _reviewed_event_candidates(
+    session: Session, city: str,
+) -> list[tuple[RawItem, Source, EditorialRun, Post | None]]:
+    """Один bulk read только потенциального proof; архивные отказы не читаются."""
+    transport_scope = or_(EditorialRun.delivery_status.in_({"sent", "sending", "uncertain"}),
+        EditorialRun.staging_message_id.is_not(None), Post.telegram_message_id.is_not(None),
+        Post.published_at.is_not(None))
+    reviewed_scope = and_(EditorialRun.delivery_status == "pending", Post.id.is_not(None),
+        EditorialRun.outcome["status"].as_string().in_({"ready", "human_review"}))
     reviewed = session.execute(
-        select(RawItem, reason)
+        select(RawItem, Source, EditorialRun, Post)
         .join(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
         .join(Source, Source.id == RawItem.source_id)
-        .where(
-            RawItem.id != anchor.id,
-            Source.city == anchor_source.city,
-            or_(*match_scope),
-            or_(reason.is_(None), reason != SOURCE_REPLACED_REASON,
-                replacement.is_(None), replacement != anchor.id),
-        )
+        .outerjoin(Post, Post.id == EditorialRun.post_id)
+        .where(Source.city == city, or_(transport_scope, reviewed_scope))
         .order_by(RawItem.published_at, RawItem.id)
         .execution_options(populate_existing=True)
     )
-    for row in reviewed:
-        item, reviewed_reason = cast(RawItem, row[0]), row[1]
-        candidate = _candidate(item)
-        if (same_event(anchor_candidate, candidate) or (
-            reviewed_reason == SOURCE_REPLACED_REASON
-            and matches_replacement_event(anchor_candidate, candidate)
-        )):
-            return item
+    return [(row[0], row[1], row[2], row[3]) for row in reviewed]
+
+
+def _reviewed_event_match(
+    session: Session, *, anchor: RawItem, anchor_source: Source, now: datetime | None = None,
+    candidates: list[tuple[RawItem, Source, EditorialRun, Post | None]] | None = None,
+) -> tuple[RawItem, ReviewedEventProof] | None:
+    rows = (_reviewed_event_candidates(session, anchor_source.city)
+            if candidates is None else candidates)
+    for item, source, run, post in rows:
+        proof = reviewed_event_proof(session, anchor=anchor, anchor_source=anchor_source,
+                                    target=item, target_source=source, run=run, post=post, now=now)
+        if proof is not None:
+            return item, proof
     return None
+
+
+def _reviewed_event_item(
+    session: Session, *, anchor: RawItem, anchor_source: Source,
+) -> RawItem | None:
+    match = _reviewed_event_match(session, anchor=anchor, anchor_source=anchor_source)
+    return match[0] if match is not None else None
 
 
 def _event_items(

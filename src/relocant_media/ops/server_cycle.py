@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -290,6 +291,16 @@ def review_only_venue_sources() -> dict[str, SourceConfig]:
 # Candidates fully assessed per cycle. Ranking is one cheap call and most items are rejected
 # there, so five per cycle drains the verified-media backlog without a second queue.
 PROCESS_LIMIT = 5
+
+
+def lifecycle_due_order(audit_ids: Iterable[int], retry_ids: Iterable[int]) -> list[int]:
+    """Чередовать старшие ID повторов и аудита: оба пути получают место из обычных двух."""
+    result: list[int] = []
+    for pair in zip_longest(sorted(set(retry_ids)), sorted(set(audit_ids))):
+        for raw_id in pair:
+            if raw_id is not None and raw_id not in result:
+                result.append(raw_id)
+    return result
 
 
 def queue_priorities(attention: dict[str, int], media: Iterable[str]) -> dict[str, int]:
@@ -1391,7 +1402,8 @@ def main() -> None:
         def lifecycle_due() -> tuple[list[int], set[int]]:
             sweep = lifecycle.reconcile()
             scope["lifecycle_fallback_ids"] = set(sweep.fallback_ids)
-            return [*sweep.rejection_audit_ids, *sweep.due_ids], set(sweep.excluded_ids)
+            return lifecycle_due_order(sweep.rejection_audit_ids, sweep.due_ids), set(
+                sweep.excluded_ids)
 
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=ingest,

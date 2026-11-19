@@ -13,7 +13,7 @@ from relocant_media.ops.candidates_cli import (
     export_candidates,
     select_candidates,
 )
-from relocant_media.storage.models import EditorialRun, RawItem, Source
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 editorial_session = _editorial_session
 NOW = datetime(2026, 10, 19, tzinfo=UTC)
@@ -189,8 +189,13 @@ def seed(session: Session) -> None:
     session.flush()
     reviewed = session.scalar(select(RawItem.id).where(RawItem.external_id == "reviewed"))
     assert reviewed is not None
-    session.add(EditorialRun(raw_item_id=reviewed, outcome={}, evidence={},
-                             delivery_status="pending"))
+    post = Post(city="belgrade", category="city", status="ready", title="Синтетическая квитанция",
+                body="Уже отправленный синтетический материал", confidence=1,
+                telegram_message_id=321)
+    session.add(post)
+    session.flush()
+    session.add(EditorialRun(raw_item_id=reviewed, post_id=post.id,
+                             outcome={"status": "ready"}, evidence={}, delivery_status="sent"))
     session.commit()
 
 

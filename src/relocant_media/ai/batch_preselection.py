@@ -14,7 +14,10 @@ from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.freshness import evidence_freshness
 
 MAX_CANDIDATES = 30
-POLICY_VERSION = "batch-preselection-v1"
+POLICY_VERSION = "batch-preselection-v2"
+_LEGACY_PROVIDER_ERRORS = frozenset({
+    "GeminiWorkerError", "GeminiCallTimeout", "GeminiQuotaCooldown", "StructuredOutputError",
+})
 _SYSTEM = (
     "Ты выполняешь только предварительный порядок тем для местной русскоязычной редакции. "
     "Это не фактчек, не готовый ranking, не одобрение текста и не разрешение публикации. "
@@ -72,6 +75,20 @@ def _unique_object(items: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _short(value: Any, length: int) -> str:
     return value[:length] if isinstance(value, str) else ""
+
+
+def provider_handoff(audit: dict[str, Any]) -> bool:
+    """Новый явный сбой вызова либо известный сбой провайдера старого контракта."""
+    stage = audit.get("error_stage")
+    kind = audit.get("error_type")
+    return (stage == "provider" or stage is None
+            and isinstance(kind, str) and kind in _LEGACY_PROVIDER_ERRORS)
+
+
+def _failure(audit: dict[str, Any], error: Exception, stage: str) -> None:
+    kind = type(error).__name__
+    audit.update(status="fallback", error_stage=stage, error_type=(
+        kind if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", kind) else "Error"))
 
 
 def preselect_candidates(
@@ -161,27 +178,31 @@ def preselect_candidates(
             } for post in (recent_publications or [])[:20]],
         }
         audit["submitted_count"] = len(eligible)
+        schema = _Response.model_json_schema()
+        schema["properties"]["ranking"].update(minItems=len(eligible), maxItems=len(eligible))
+        prompt = json.dumps(payload, ensure_ascii=False)
         try:
             output = provider.generate_json(
                 task="batch_preselect", system_instruction=_SYSTEM,
-                prompt=json.dumps(payload, ensure_ascii=False),
-                response_schema=_Response.model_json_schema(),
+                prompt=prompt,
+                response_schema=schema,
             )
-            if not isinstance(output, str) or len(output.encode()) > 100_000:
-                raise ValueError("invalid batch response size")
-            parsed = json.loads(output, object_pairs_hook=_unique_object)
-            response = _Response.model_validate_json(json.dumps(parsed))
-            supplied = [entry.raw_item_id for entry in response.ranking]
-            if len(supplied) != len(ordered_ids) or set(supplied) != set(ordered_ids):
-                raise ValueError("batch IDs do not match input")
-            ordered_ids = supplied
-            audit["status"] = "ranked"
-            audit["reasons"] = [entry.model_dump() for entry in response.ranking]
         except Exception as error:
-            kind = type(error).__name__
-            audit.update(status="fallback", error_type=(
-                kind if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", kind) else "Error"
-            ))
+            _failure(audit, error, "provider")
+        else:
+            try:
+                if not isinstance(output, str) or len(output.encode()) > 100_000:
+                    raise ValueError("invalid batch response size")
+                parsed = json.loads(output, object_pairs_hook=_unique_object)
+                response = _Response.model_validate_json(json.dumps(parsed))
+                supplied = [entry.raw_item_id for entry in response.ranking]
+                if len(supplied) != len(ordered_ids) or set(supplied) != set(ordered_ids):
+                    raise ValueError("batch IDs do not match input")
+                ordered_ids = supplied
+                audit["status"] = "ranked"
+                audit["reasons"] = [entry.model_dump() for entry in response.ranking]
+            except Exception as error:
+                _failure(audit, error, "response")
     selected_ids = ordered_ids[:limit]
     audit["selected_ids"] = selected_ids
     audit["deferred_ids"] = ordered_ids[limit:]

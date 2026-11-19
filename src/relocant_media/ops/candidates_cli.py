@@ -10,12 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import and_, create_engine, func, or_, select, text
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session
 
 from relocant_media.domain.audience import local_reader_interest
-from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key, same_event
+from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key
 from relocant_media.domain.freshness import GUIDE_MAX_AGE, GUIDE_SOURCE_TYPE
 from relocant_media.domain.publication_time import publication_interval
+from relocant_media.services.editorial import _reviewed_event_item
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -76,15 +77,10 @@ def select_candidates(
     if since >= until:
         raise ValueError("Начало окна должно предшествовать концу")
 
-    reviewed_item = aliased(RawItem)
-    reviewed_url = select(reviewed_item.url).join(
-        EditorialRun, EditorialRun.raw_item_id == reviewed_item.id,
-    )
     base = select(RawItem, Source).join(Source, Source.id == RawItem.source_id).where(
         Source.city == city,
         Source.enabled.is_(True),
         ~select(EditorialRun.raw_item_id).where(EditorialRun.raw_item_id == RawItem.id).exists(),
-        RawItem.url.not_in(reviewed_url),
     )
     if allowed_raw_ids is not None:
         base = base.where(RawItem.id.in_(allowed_raw_ids))
@@ -129,39 +125,17 @@ def select_candidates(
         retained.append((item, source))
     rows = retained
 
-    # Compare against the full previously reviewed evidence, not only exact URLs/hashes.
-    # Otherwise a later report of the same event from a second publisher could re-enter
-    # the queue even though the event was already reviewed.
-    reviewed_items = list(
-        session.scalars(
-            select(RawItem)
-            .join(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
-            .join(Source, Source.id == RawItem.source_id)
-            .where(Source.city == city)
-        )
-    )
-    reviewed_candidates = [_event_candidate(item) for item in reviewed_items]
-    reviewed_urls = {item.url for item in reviewed_items}
-    reviewed_canonical = {
-        candidate.resolved_canonical_url for candidate in reviewed_candidates
-    }
-    reviewed_hashes = {
-        candidate.resolved_content_sha256 for candidate in reviewed_candidates
-    }
-
     by_id: dict[int, tuple[RawItem, Source]] = {}
     event_inputs: list[EventCandidate] = []
     for item, source in rows:
-        candidate = _event_candidate(item)
-        if (
-            item.url in reviewed_urls
-            or candidate.resolved_canonical_url in reviewed_canonical
-            or candidate.resolved_content_sha256 in reviewed_hashes
-            or any(same_event(candidate, reviewed) for reviewed in reviewed_candidates)
-        ):
-            continue
+        # Тот же read-only proof, что и перед полным pipeline. Старый отказ/закрытие
+        # не подавляет свежую тему; реальные квитанции и uncertain остаются защитой.
+        # Helper предварительно сужает SQL до Post/transport, не читая архив skipped.
+        with session.no_autoflush:
+            if _reviewed_event_item(session, anchor=item, anchor_source=source) is not None:
+                continue
         by_id[item.id] = (item, source)
-        event_inputs.append(candidate)
+        event_inputs.append(_event_candidate(item))
 
     clusters = cluster_events(event_inputs)
     if newest_first:
@@ -270,7 +244,8 @@ def select_candidates(
         "candidates": candidates,
         "deduplication": (
             "canonical URL + normalized content SHA256; cross-source title similarity "
-            "within a 48h event window, including already reviewed events"
+            "within a 48h event window; previous events require verified snapshot "
+            "or transport proof"
         ),
         "missing_published_at_count": missing_count,
         "missing_published_at_scope": "all unreviewed enabled city sources, outside dated window",

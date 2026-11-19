@@ -58,6 +58,7 @@ class _SweepCache:
     objects: dict[int, tuple[RawItem, Source, EditorialRun | None, Post | None]]
     records: dict[str, SchedulerRun]
     owner_reviews: list[Submission]
+    reviewed_targets: list[tuple[RawItem, Source, EditorialRun, Post | None]]
 
 
 def _now(now: datetime) -> datetime:
@@ -314,6 +315,24 @@ def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
         _block(session, record, run, post, now=now, reason="separate_publication_approval_required")
         return record
     if run is None:
+        from relocant_media.services.editorial import _reviewed_event_match
+
+        cache = cast(_SweepCache | None, session.info.get("material_lifecycle_cache"))
+        match = _reviewed_event_match(session, anchor=raw, anchor_source=source, now=now,
+                                     candidates=cache.reviewed_targets if cache else None)
+        if match is not None:
+            target, proof = match
+            reason = ("related_delivery_reconciliation_required"
+                      if proof.kind == "delivery_reconciliation" else "event_duplicate_confirmed")
+            record.details = {**record.details, "rejection_review": {
+                "policy_version": "event-duplicate-review-v1", "kind": "deterministic_event",
+                "raw_item_id": raw_id, "duplicate_of_raw_item": target.id,
+                "decision": ("delivery_reconciliation" if proof.kind == "delivery_reconciliation"
+                             else "confirm_rejection"),
+                "basis": proof.kind, "context_sha256": proof.context_sha256,
+                "reviewed_at": now.isoformat()}}
+            _block(session, record, run, post, now=now, reason=reason)
+            return record
         if fresh.action == "hold" and record.details["next_action"] == "prepare":
             _set(record, now=now, state="waiting", action="retry_prepare",
                  reason=fresh.reason, next_at=now+RETRY_DELAY)
@@ -622,7 +641,9 @@ def after_error(session: Session, raw_id: int, error_type: str, *, now: datetime
 
 
 def rejection_reviewed(session: Session, raw_id: int, *, justified: bool,
-                       now: datetime) -> dict[str, Any]:
+                       now: datetime,
+                       confirmed_reason: Literal["rejection_confirmed", "event_duplicate_confirmed"]
+                       = "rejection_confirmed") -> dict[str, Any]:
     now = _now(now)
     raw, source, run, post = _objects(session, raw_id)
     record = _record(session, raw, source, now)
@@ -640,12 +661,27 @@ def rejection_reviewed(session: Session, raw_id: int, *, justified: bool,
     record.details = {**record.details, "rejection_audits": 1,
                       "rejection_justified": justified}
     if justified:
-        _block(session, record, run, post, now=now, reason="rejection_confirmed")
+        _block(session, record, run, post, now=now, reason=confirmed_reason)
     elif record.details["attempts"] < PRIMARY_ATTEMPTS:
         _set(record, now=now, state="waiting", action="retry_prepare",
              reason="rejection_not_justified", next_at=now)
     else:
         _fallback_or_block(session, record, run, post, now)
+    return dict(record.details)
+
+
+def block_related_delivery(session: Session, raw_id: int, *, now: datetime) -> dict[str, Any]:
+    """Неопределённая отправка того же события не разрешает новую отправку другой raw."""
+    now = _now(now)
+    raw, source, run, post = _objects(session, raw_id)
+    record = _record(session, raw, source, now)
+    if record.details.get("state") in TERMINAL_STATES:
+        return dict(record.details)
+    if (record.details.get("state") != "processing"
+            or record.details.get("attempt_kind") != "rejection_audit"):
+        raise LifecycleBlockedError("Сверка дубля не владеет попыткой проверки")
+    record.details = {**record.details, "rejection_audits": 1}
+    _block(session, record, run, post, now=now, reason="related_delivery_reconciliation_required")
     return dict(record.details)
 
 
@@ -803,7 +839,9 @@ def sweep_materials(session: Session, *, city: str, now: datetime,
         row[0].id: (row[0], row[1], row[2], row[3])
         for row in session.execute(query.order_by(RawItem.id))}
     reviews = _owner_reviews(session)
-    cache = _SweepCache(objects, records, reviews)
+    from relocant_media.services.editorial import _reviewed_event_candidates
+
+    cache = _SweepCache(objects, records, reviews, _reviewed_event_candidates(session, city))
     selected_closed = closed_ids if raw_ids is None else closed_ids & raw_ids
     due, audits, fallback, excluded = [], [], [], set(selected_closed)
     blocked = [raw_id for raw_id in selected_closed

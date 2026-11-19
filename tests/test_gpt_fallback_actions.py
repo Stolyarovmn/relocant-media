@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,39 @@ def test_export_only_writes_private_request_blob(context, tmp_path, monkeypatch,
     assert store.state["status"] == "ready"
     assert store.sha == "initial"
     assert not public.exists()
+
+
+@pytest.mark.parametrize("schema_failure", [False, True])
+def test_preview_skips_invalid_ranked_handoff_before_blob_read_and_keeps_other_work(
+    context, tmp_path, monkeypatch, capsys, schema_failure,
+):
+    from relocant_media.scheduler.models import SchedulerRun
+    from relocant_media.services import gpt_fallback
+
+    store, old = context
+    storage = PrivateStore(old.files)
+    now = datetime.now(UTC)
+    finished = now-timedelta(minutes=1 if schema_failure else 31)
+    invalid = SchedulerRun(id=123, task_key="editorial-primary:belgrade", city="belgrade",
+        task_type="editorial_primary", status="partial", scheduled_for=finished,
+        started_at=finished-timedelta(minutes=1), finished_at=finished,
+        details={"batch_preselection": {"status": "gpt_ranked", "gpt_slots": 1,
+            "gpt_candidate_ids": [1], "full_review_ids": [], "gpt_selected_ids": [1],
+            "gpt_rank_sha256": "a"*64, "gpt_request_sha256": "b"*64,
+            "gpt_evidence_sha256": {"1": "c"*64},
+            "error_type": "ValueError" if schema_failure else "GeminiWorkerError"}})
+    monkeypatch.setattr(gpt_fallback, "_recent_runs", lambda *args: [invalid])
+    request = {"version": 1, "candidates": [{"body": "PRIVATE-OTHER-WORK"}]}
+    monkeypatch.setattr(gpt_fallback, "build_request", lambda *args, **kwargs: request)
+    monkeypatch.setattr(runtime, "_gpt_blob",
+                        lambda *args: pytest.fail("Истёкший/schema batch не читает blob"))
+    assert runtime.execute(store, storage, work=tmp_path / "preview",
+        output=tmp_path / "public.json", folder="ssh_blobs", mode="fallback-preview",
+        environment=environment()) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert storage.download(receipt["gpt_fallback_request_sha256"]) == canonical_json(
+        request).encode()
+    assert store.sha == "initial" and store.state["status"] == "ready"
 
 
 @pytest.mark.parametrize("rank_only", [False, True])

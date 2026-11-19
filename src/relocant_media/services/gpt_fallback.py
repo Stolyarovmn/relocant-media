@@ -436,6 +436,10 @@ def validate_fallback_candidate(
         from_batch = (
             parsed.batch_request_sha256 is not None or parsed.batch_result_sha256 is not None
         )
+        if from_batch:
+            from relocant_media.services.gpt_batch_fallback import validate_batch_handoff
+
+            validate_batch_handoff(run, now=now)
         origins = failed_ids | selected_ids if from_batch else failed_ids
         pairs = ([(origin, refresh_target(session, run, origin))
                   for origin in origins] if run is not None else [])
