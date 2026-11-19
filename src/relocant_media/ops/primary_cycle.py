@@ -91,9 +91,13 @@ def run_cycle(
     defer_failed_batch: bool = False,
     lifecycle_due: Callable[[], tuple[list[int], set[int]]] | None = None,
     lifecycle_fallback_items: Callable[[], set[int]] | None = None,
+    lifecycle_retry_slots: int = 2,
+    close_window: bool = True,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
-            or not city.strip() or not 1 <= limit <= 5):
+            or not city.strip() or not 1 <= limit <= 5
+            or type(lifecycle_retry_slots) is not int or not 0 <= lifecycle_retry_slots <= 5
+            or type(close_window) is not bool):
         raise ValueError("supported database, city and limit 1..5 required")
     if output.exists():
         raise ValueError("new output directory required")
@@ -114,6 +118,8 @@ def run_cycle(
             "status": "PRIMARY_FAILED", "city": city, "run_id": run_id,
             "window": window, "window_complete": False, "telegram_transport": "fake",
         }
+        if not close_window:
+            heartbeat["scope_limited"] = True
         try:
             collection = ingest()
             (output / "ingest.json").write_text(json.dumps(collection), encoding="utf-8")
@@ -125,7 +131,8 @@ def run_cycle(
             due_ids, lifecycle_excluded = lifecycle_due() if lifecycle_due else ([], set())
             allowed = allowed_items() if allowed_items else None
             retry_ids = [raw_id for raw_id in dict.fromkeys(due_ids)
-                         if allowed is None or raw_id in allowed][:min(2, limit)]
+                         if allowed is None or raw_id in allowed][
+                             :min(lifecycle_retry_slots, limit)]
             normal_limit = limit - len(retry_ids)
             with Session(engine) as session:
                 deferred = deferred_items(session) if deferred_items else set()
@@ -208,7 +215,7 @@ def run_cycle(
                 manifest["candidate_count"] = len(manifest["candidates"])
                 manifest["reassessment_count"] = len(corrections) + len(policy_holds)
             if due_ids:
-                # Два места для наступивших повторов и проверки отказов. Новый
+                # Места для наступивших повторов и проверки отказов. Новый
                 # поток сохраняет штатный отбор, но не вытесняет старые ошибки.
                 retry_set = set(retry_ids)
                 manifest["candidates"] = [
@@ -282,7 +289,8 @@ def run_cycle(
                 heartbeat["fallback_required"] = True
                 heartbeat["lifecycle_fallback_ids"] = fallback_ids
             complete = (remaining["eligible_count"] + additional_remaining == 0
-                        and not processing_errors and not gpt_waiting and not fallback_ids)
+                        and not processing_errors and not gpt_waiting and not fallback_ids
+                        and close_window)
             heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
                 window_complete=complete, processed_raw_item_ids=processed,
                 processing_errors=processing_errors,

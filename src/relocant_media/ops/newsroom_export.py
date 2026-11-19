@@ -138,7 +138,8 @@ def city_snapshot(root: Path, city: str, session: Session | None) -> dict[str, A
         {"id": run.id, "status": run.status, "started_at": iso(run.started_at),
          "finished_at": iso(run.finished_at), "error_type": run.error_type}
         for run in session.scalars(select(SchedulerRun).where(
-            SchedulerRun.city == city, SchedulerRun.task_type != "material_lifecycle")
+            SchedulerRun.city == city, SchedulerRun.task_type.not_in(
+                ("material_lifecycle", "material_backlog_drain")))
                                   .order_by(SchedulerRun.id.desc()).limit(30))
     ]
     result["ai_usage"] = [

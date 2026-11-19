@@ -103,7 +103,8 @@ def _status(args: argparse.Namespace) -> dict[str, Any]:
             session.scalars(
                 select(SchedulerRun)
                 .where(SchedulerRun.city == args.city,
-                       SchedulerRun.task_type != "material_lifecycle")
+                       SchedulerRun.task_type.not_in(
+                           ("material_lifecycle", "material_backlog_drain")))
                 .order_by(SchedulerRun.started_at.desc(), SchedulerRun.id.desc())
                 .limit(limit)
             )

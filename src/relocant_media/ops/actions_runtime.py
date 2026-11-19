@@ -18,7 +18,9 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from math import ceil
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -63,7 +65,86 @@ BELGRADE_AREAS = Path("cities/belgrade/map/outage-areas.json.gz")
 MODES = {
     "preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback",
     "map-backfill", "map-republish", "map-republish-review", "digest", "digest-preview",
+    "drain",
 }
+
+
+@dataclass(frozen=True)
+class _DrainOptions:
+    before: datetime
+    max_attempts: int
+    max_seconds: int
+    runs_left: int
+
+
+def _drain_options(environment: Mapping[str, str], *, now: datetime) -> _DrainOptions:
+    """Проверить ручные границы до восстановления и CAS-захвата писателя."""
+    value = environment.get("DRAIN_BEFORE", "")
+    if (not isinstance(value, str) or not 1 <= len(value) <= 64 or "T" not in value
+            or not value.endswith(("Z", "+00:00"))):
+        raise ValueError("Нужен ISO cutoff в UTC")
+    try:
+        before = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError("Нужен ISO cutoff в UTC") from None
+    if (before.tzinfo is None or before.utcoffset() != timedelta()
+            or now.tzinfo is None or now.utcoffset() is None or before > now):
+        raise ValueError("Cutoff должен быть UTC и не позднее текущего времени")
+
+    def limit(key: str, default: int, maximum: int) -> int:
+        raw = environment.get(key, "") or str(default)
+        if not isinstance(raw, str) or not re.fullmatch(r"[1-9][0-9]{0,3}", raw):
+            raise ValueError("Неверный лимит drain")
+        number = int(raw)
+        if number > maximum:
+            raise ValueError("Превышен лимит drain")
+        return number
+
+    return _DrainOptions(before.astimezone(UTC), limit("DRAIN_MAX_ATTEMPTS", 10, 30),
+                         limit("DRAIN_MAX_SECONDS", 300, 900),
+                         limit("DRAIN_RUNS_LEFT", 1, 200))
+
+
+def _drain_control(run_dir: Path, options: _DrainOptions, code: int) -> tuple[bool, int]:
+    """Закрытый отчёт не попадает в stdout, публичную проекцию или GITHUB_OUTPUT."""
+    if code != 0:
+        return False, 0
+    path = run_dir / "drain-report.json"
+    if path.stat().st_size > 256 * 1024:
+        raise ValueError("Неверный отчёт drain")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(report, dict) or report.get("status") != "DRAIN_OK"
+            or type(report.get("remaining")) is not int or report["remaining"] < 0
+            or type(report.get("needs_continue")) is not bool
+            or report["needs_continue"] and report["remaining"] == 0
+            or type(report.get("next_delay_seconds")) is not int
+            or not 0 <= report["next_delay_seconds"] <= 60):
+        raise ValueError("Неверный отчёт drain")
+    next_at = report.get("next_at")
+    delay = max(60, report["next_delay_seconds"])
+    if next_at is not None:
+        if not isinstance(next_at, str) or len(next_at) > 64:
+            raise ValueError("Неверный следующий срок drain")
+        instant = datetime.fromisoformat(next_at)
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            raise ValueError("Неверный следующий срок drain")
+        # Job продолжения ограничен шестью часами; оставить десять минут на старт и dispatch.
+        delay = min(21000, max(delay, ceil((instant-datetime.now(UTC)).total_seconds())))
+    should_continue = (report["remaining"] > 0 and report["needs_continue"]
+                       and options.runs_left > 1)
+    return should_continue, delay if should_continue else 0
+
+
+def _write_drain_control(environment: Mapping[str, str], control: tuple[bool, int]) -> None:
+    should_continue, delay = control
+    if (type(should_continue) is not bool or type(delay) is not int
+            or not 0 <= delay <= 21000 or should_continue and delay < 60
+            or not should_continue and delay != 0):
+        raise ValueError("Неверные границы продолжения drain")
+    if output := environment.get("GITHUB_OUTPUT"):
+        with Path(output).open("a", encoding="utf-8") as stream:
+            stream.write(f"drain_continue={str(should_continue).lower()}\n")
+            stream.write(f"drain_next_delay_seconds={delay}\n")
 
 
 def _sweep_material_lifecycle(database: Path, *, now: datetime | None = None) -> None:
@@ -584,6 +665,10 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             map_output: Path | None = None) -> int:
     if mode not in MODES:
         raise ValueError("unsupported runtime mode")
+    drain = _drain_options(environment, now=datetime.now(UTC)) if mode == "drain" else None
+    if drain is not None and (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+                              or environment.get("GITHUB_ACTIONS") != "true"):
+        raise ValueError("Drain доступен только ручному запуску Actions")
     incoming = environment.get("CLOUD_DISCOVERY_BATCH", "")
     batch = parse_batch(incoming) if mode == "discovery" else None
     if incoming and mode != "discovery":
@@ -756,6 +841,19 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     elif mode == "intake":
         env["EDITORIAL_INTAKE_MODE"] = "batch"
         command = [sys.executable, "-m", "relocant_media.ops.intake_batch"]
+    elif drain is not None:
+        # Ни сбор, ни intake, ни предложка не входят в фиксированную старую очередь.
+        env["EDITORIAL_PRIVATE_INTAKE_ENABLED"] = "false"
+        env["EDITORIAL_PRIVATE_FEEDBACK_ENABLED"] = "false"
+        env["EDITORIAL_OWNER_REVIEW_ENABLED"] = "false"
+        env.pop("GITHUB_OUTPUT", None)
+        command = [sys.executable, "-m", "relocant_media.ops.backlog_drain",
+                   "--before", drain.before.isoformat(),
+                   "--max-attempts", str(drain.max_attempts),
+                   "--max-seconds", str(drain.max_seconds),
+                   "--runs-left", str(drain.runs_left), "--output", str(run_dir)]
+        if env.get("EDITORIAL_SEND_ENABLED") == "true":
+            command.append("--send-enabled")
     else:
         # The five-minute batch is the only update consumer; no second getUpdates poller.
         env["EDITORIAL_INTAKE_MODE"] = "batch"
@@ -776,6 +874,13 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             env.pop("EDITORIAL_INGRESS_TOKEN", None)
         code = run_child(command, env)
         _runtime_phase("worker_completed")
+    drain_control = (False, 0)
+    if drain is not None:
+        try:
+            drain_control = _drain_control(run_dir, drain, code)
+        except (OSError, ValueError, TypeError):
+            # Невалидный отчёт не разрешает chain; квитанции всё равно сохраняются.
+            code = code or 1
     report_failure(run_dir, code)
     # A signal/forced termination has uncertain effects: do not unlock even if bytes survived.
     if code < 0:
@@ -884,6 +989,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     _runtime_phase("state_commit_started")
     store.write(ready, busy_sha)
     _runtime_phase("state_committed")
+    if drain is not None:
+        _write_drain_control(environment, drain_control)
     refreshed_request = run_dir / "gpt-refreshed-request.json"
     if mode == "fallback" and code == 0 and refreshed_request.is_file():
         request = json.loads(refreshed_request.read_text(encoding="utf-8"))

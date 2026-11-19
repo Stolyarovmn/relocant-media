@@ -146,7 +146,8 @@ def test_chain_books_the_next_cycle_only_after_a_finished_main_cycle():
 def test_manual_operations_have_separate_workflow_queues_and_shared_state_lock():
     data = workflow()
     assert data["concurrency"] == {
-        "group": "${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' "
+        "group": "${{ inputs.mode == 'drain' && 'editorial-manual-drain' "
+                 "|| startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' "
                  "|| startsWith(inputs.mode, 'map-') && 'editorial-map-operations' "
                  "|| inputs.mode == 'preview' && 'editorial-preview' "
                  "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' "

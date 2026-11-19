@@ -174,7 +174,8 @@ class MaterialLifecycleRuntime:
             session.commit()
         return state.get("next_action") == "retry_prepare"
 
-    def process(self, raw_id: int, delegate: Callable[[int], dict[str, Any]]) -> dict[str, Any]:
+    def process(self, raw_id: int, delegate: Callable[[int], dict[str, Any]], *,
+                retry_refuted: bool = True) -> dict[str, Any]:
         with Session(self.engine) as session:
             state = self._state(session, raw_id)
             session.commit()
@@ -183,7 +184,7 @@ class MaterialLifecycleRuntime:
                 retry = self._audit(raw_id)
             except Exception as error:
                 return self._error(raw_id, error, channel="rejection_audit")
-            if retry:
+            if retry and retry_refuted:
                 return self.process(raw_id, delegate)
             with Session(self.engine) as session:
                 state = self._state(session, raw_id)

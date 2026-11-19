@@ -5,7 +5,7 @@ on:
       mode:
         description: Read-only preview or canonical worker (requires completed cutover)
         type: choice
-        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish, map-republish-review, digest, digest-preview]
+        options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish, map-republish-review, digest, digest-preview, drain]
         default: preview
       digest_preview_at:
         description: 'Digest preview only: timestamp with offset, e.g. 2026-11-14T07:30:00+01:00'
@@ -41,6 +41,26 @@ on:
         description: Latest message and map event JSON for republication or review export
         type: string
         required: false
+      drain_before:
+        description: 'Drain: фиксированный cutoff ISO UTC, не в будущем'
+        type: string
+        required: false
+        default: ''
+      drain_max_attempts:
+        description: 'Drain: предел обработок одного запуска, от 1 до 30'
+        type: number
+        required: false
+        default: 10
+      drain_max_seconds:
+        description: 'Drain: предел времени одного запуска, от 1 до 900 секунд'
+        type: number
+        required: false
+        default: 300
+      drain_runs_left:
+        description: 'Drain: оставшийся предел запусков цепочки, от 1 до 200'
+        type: number
+        required: false
+        default: 1
   schedule:
     # Scheduled runs are best effort; each worker has an independent backup slot.
     - cron: '17 * * * *'
@@ -56,7 +76,7 @@ concurrency:
   # Keep explicit editorial retries, map edits and subscription runs out of the auto queue.
   # All modes use the same state lock below.
   # Manual intake must not wait for an automatic run's chain sleep or be replaced by its next auto.
-  group: ${{ startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || startsWith(inputs.mode, 'map-') && 'editorial-map-operations' || inputs.mode == 'preview' && 'editorial-preview' || github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' && 'editorial-manual-cycle' || github.event_name == 'workflow_dispatch' && inputs.mode == 'intake' && 'editorial-manual-intake' || github.event_name == 'workflow_dispatch' && inputs.mode == 'discovery' && 'editorial-manual-discovery' || 'canonical-editorial-writer' }}
+  group: ${{ inputs.mode == 'drain' && 'editorial-manual-drain' || startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || startsWith(inputs.mode, 'map-') && 'editorial-map-operations' || inputs.mode == 'preview' && 'editorial-preview' || github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' && 'editorial-manual-cycle' || github.event_name == 'workflow_dispatch' && inputs.mode == 'intake' && 'editorial-manual-intake' || github.event_name == 'workflow_dispatch' && inputs.mode == 'discovery' && 'editorial-manual-discovery' || 'canonical-editorial-writer' }}
   cancel-in-progress: false
 jobs:
   cycle:
@@ -76,6 +96,8 @@ jobs:
     outputs:
       projection: ${{ steps.projection.outputs.ready }}
       worker_mode: ${{ steps.mode.outputs.value }}
+      drain_continue: ${{ steps.runtime.outputs.drain_continue }}
+      drain_next_delay_seconds: ${{ steps.runtime.outputs.drain_next_delay_seconds }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -183,6 +205,10 @@ jobs:
           MAP_REPUBLICATION_REQUEST: ${{ inputs.map_republication }}
           GPT_FALLBACK_BLOB_SHA256: ${{ inputs.fallback_blob_sha256 }}
           GPT_FALLBACK_CYCLE_ID: ${{ inputs.fallback_cycle_id }}
+          DRAIN_BEFORE: ${{ inputs.drain_before }}
+          DRAIN_MAX_ATTEMPTS: ${{ inputs.drain_max_attempts }}
+          DRAIN_MAX_SECONDS: ${{ inputs.drain_max_seconds }}
+          DRAIN_RUNS_LEFT: ${{ inputs.drain_runs_left }}
         run: |
           mkdir -p _site
           rm -f _site/data.json
@@ -251,6 +277,55 @@ jobs:
       - name: Remove private working files
         if: always()
         run: rm -rf "$RUNNER_TEMP/editorial-work" "$RUNNER_TEMP/editorial-storage-identity"
+  drain_chain:
+    # Ожидание не занимает job с канонической блокировкой состояния.
+    if: >-
+      github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'drain' && needs.cycle.result == 'success' &&
+      needs.cycle.outputs.drain_continue == 'true' && inputs.drain_runs_left > 1
+    needs: cycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      actions: write
+    steps:
+      - name: Продолжить ограниченную обработку той же очереди
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DRAIN_BEFORE: ${{ inputs.drain_before }}
+          DRAIN_MAX_ATTEMPTS: ${{ inputs.drain_max_attempts }}
+          DRAIN_MAX_SECONDS: ${{ inputs.drain_max_seconds }}
+          DRAIN_RUNS_LEFT: ${{ inputs.drain_runs_left }}
+          DRAIN_DELAY: ${{ needs.cycle.outputs.drain_next_delay_seconds }}
+        run: |
+          python - <<'PY'
+          import os, re, subprocess, time
+          from datetime import UTC, datetime, timedelta
+          def bounded(name, maximum):
+              raw = os.environ[name]
+              if not re.fullmatch(r'[1-9][0-9]{0,3}', raw) or int(raw) > maximum:
+                  raise SystemExit('Неверные границы продолжения drain')
+              return int(raw)
+          left = bounded('DRAIN_RUNS_LEFT', 200)
+          attempts = bounded('DRAIN_MAX_ATTEMPTS', 30)
+          seconds = bounded('DRAIN_MAX_SECONDS', 900)
+          before = os.environ['DRAIN_BEFORE']
+          cutoff = datetime.fromisoformat(before)
+          if (cutoff.tzinfo is None or cutoff.utcoffset() != timedelta()
+                  or cutoff > datetime.now(UTC) or left <= 1):
+              raise SystemExit('Неверный cutoff или исчерпан предел продолжения drain')
+          delay = os.environ['DRAIN_DELAY']
+          if not re.fullmatch(r'[0-9]{1,5}', delay) or not 60 <= int(delay) <= 21000:
+              raise SystemExit('Неверная задержка продолжения drain')
+          until = time.monotonic() + int(delay)
+          while (remaining := until - time.monotonic()) > 0:
+              time.sleep(min(60, remaining))
+          subprocess.run(['gh', 'workflow', 'run', 'editorial-actions.yml', '--ref', 'main',
+              '-f', 'mode=drain', '-f', f'drain_before={before}',
+              '-f', f'drain_max_attempts={attempts}', '-f', f'drain_max_seconds={seconds}',
+              '-f', f'drain_runs_left={left-1}'], check=True, stdout=subprocess.DEVNULL)
+          PY
   chain:
     # One-shot manual operations must release their workflow queue immediately.
     # Only scheduled runs and the explicit auto loop book another cycle.

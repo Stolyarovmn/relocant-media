@@ -51,6 +51,30 @@ def test_worker_receives_only_provider_credentials_via_stdin(monkeypatch):
     assert len(seen) == 1
 
 
+@pytest.mark.parametrize("remaining", [0, -1, float("inf"), float("nan")])
+def test_exhausted_operation_budget_does_not_start_worker(monkeypatch, remaining):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("Бюджет исчерпан"))
+    with pytest.raises(GeminiCallTimeout):
+        IsolatedGeminiProvider("test-key", model="test-model",
+                              remaining_seconds=lambda: remaining).generate_json(**ARGS)
+
+
+def test_operation_budget_bounds_each_call_without_replacing_provider(monkeypatch):
+    remaining = iter([5.0, 1.25])
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append((kwargs["timeout"], json.loads(kwargs["input"])["http_timeout_ms"]))
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"output": '{"ok":true}'}))
+
+    monkeypatch.setattr(subprocess, "run", run)
+    provider = IsolatedGeminiProvider("test-key", model="test-model",
+                                      remaining_seconds=lambda: next(remaining))
+    provider.generate_json(**ARGS)
+    provider.generate_json(**ARGS)
+    assert seen == [(5.0, 5000), (1.25, 1250)]
+
+
 @pytest.mark.parametrize("code,output", [(1, '{"error_type":"ValueError"}'),
                                         (0, "secret-error-message"),
                                         (0, '{"output":""}')])

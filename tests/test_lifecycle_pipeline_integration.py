@@ -51,6 +51,60 @@ def test_closed_queue_is_not_reported_as_perpetually_pending(queue, tmp_path):
     assert result["status"] == "PRIMARY_OK"
 
 
+def test_drain_can_use_all_five_slots_for_due_audits(queue, tmp_path):
+    engine, process = queue
+    with Session(engine) as session:
+        due = list(session.scalars(select(RawItem.id).order_by(RawItem.id)))[-5:]
+    calls = []
+
+    def wrapped(raw_id):
+        calls.append(raw_id)
+        return process(raw_id)
+
+    run_cycle(engine, city="belgrade", output=tmp_path / "due-only", now=NOW,
+        ingest=ingest_ok, process=wrapped,
+        lifecycle_due=lambda: (due, set(due)), lifecycle_retry_slots=5)
+    assert calls == due
+
+
+def test_scoped_drain_does_not_advance_normal_collection_watermark(queue, tmp_path):
+    from relocant_media.scheduler.models import SchedulerRun
+
+    engine, process = queue
+    with Session(engine) as session:
+        ids = list(session.scalars(select(RawItem.id)))
+        source_id = session.get(RawItem, ids[0]).source_id
+    for raw_id in ids:
+        process(raw_id)
+    with Session(engine) as session:
+        session.add(SchedulerRun(task_key="editorial-primary:belgrade", city="belgrade",
+            task_type="editorial_primary", scheduled_for=NOW, started_at=NOW,
+            status="success", details={"window": {"since": (NOW-timedelta(days=1)).isoformat(),
+                                                  "until": NOW.isoformat()}}))
+        session.commit()
+    drained = run_cycle(engine, city="belgrade", output=tmp_path / "scoped", now=NOW+
+        timedelta(minutes=20), ingest=ingest_ok, process=process,
+        allowed_items=set, refresh_until=True, close_window=False)
+    assert drained["scope_limited"] is True and not drained["window_complete"]
+    late_id = []
+
+    def ingest_late():
+        with Session(engine) as session:
+            item = RawItem(source_id=source_id, external_id="late-publication",
+                url="https://example.test/new-late", title="Новое отдельное городское событие",
+                body="Изменение движения с конкретным новым маршрутом жителей.",
+                published_at=NOW+timedelta(minutes=5), published_at_precision="instant",
+                ingested_at=NOW+timedelta(minutes=30))
+            session.add(item)
+            session.commit()
+            late_id.append(item.id)
+        return ingest_ok()
+
+    normal = run_cycle(engine, city="belgrade", output=tmp_path / "normal-after-scoped",
+        now=NOW+timedelta(minutes=30), ingest=ingest_late, process=process, refresh_until=True)
+    assert normal["processed_raw_item_ids"] == late_id
+
+
 def test_batch_reserve_binding_keeps_room_for_lifecycle_retries(queue, tmp_path):
     engine, process = queue
     with Session(engine) as session:
