@@ -44,7 +44,8 @@ def record_attempt(root: Path, output: Path, previous: Path, *, outcome: str,
     if outcome not in {"success", "failure", "cancelled", "skipped"}:
         raise ValueError("unsupported Actions outcome")
     if mode not in {
-        "preview", "editorial", "intake", "discovery", "auto", "fallback", "drain", "not_selected",
+        "preview", "editorial", "intake", "discovery", "auto", "fallback", "drain",
+        "drain-close", "not_selected",
     }:
         raise ValueError("unsupported worker mode")
     if not all(re.fullmatch(r"[0-9]{1,20}", value) for value in (run_id, run_attempt)):

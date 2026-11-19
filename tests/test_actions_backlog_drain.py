@@ -208,6 +208,51 @@ def test_delivery_flag_follows_existing_actions_setting(context, tmp_path, monke
                    environment(tmp_path, EDITORIAL_SEND_ENABLED="false")) == 0
 
 
+def test_owner_close_has_no_send_authority_or_automatic_continuation(
+    context, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(runtime, "_sweep_material_lifecycle",
+                        lambda *args: pytest.fail("Закрытие не запускает общую переоценку"))
+    def child(command, env):
+        assert "--close-existing" in command and "--send-enabled" not in command
+        assert env["EDITORIAL_SEND_ENABLED"] == "false"
+        assert not any(key in env for key in (
+            "GEMINI_API_KEY", "GOOGLE_API_KEY", "TELEGRAM_BOT_TOKEN", "TYPESAFE_API_KEY"))
+        write_report(command, mode="close_existing", closed_by_owner=True,
+                     remaining=0, needs_continue=False, next_delay_seconds=0)
+        return 0
+
+    monkeypatch.setattr(runtime, "run_child", child)
+    env = environment(tmp_path, DRAIN_RUNS_LEFT="200", GEMINI_API_KEY="PRIVATE_AI",
+        GOOGLE_API_KEY="PRIVATE_AI", TELEGRAM_BOT_TOKEN="PRIVATE_BOT",
+        TYPESAFE_API_KEY="PRIVATE_JEV")
+    assert execute(context, tmp_path, monkeypatch, env, mode="drain-close") == 0
+    assert context[0].state["status"] == "ready"
+    assert (tmp_path / "github-output").read_text() == (
+        "drain_continue=false\ndrain_next_delay_seconds=0\n")
+
+
+@pytest.mark.parametrize("changes", [
+    {"mode": "process"}, {"closed_by_owner": False}, {"closed_by_owner": "true"},
+    {"remaining": 1}, {"needs_continue": True},
+])
+def test_owner_close_requires_confirmed_terminal_report(
+    context, tmp_path, monkeypatch, changes,
+):
+    def child(command, env):
+        report = dict(mode="close_existing", closed_by_owner=True, remaining=0,
+                      needs_continue=False, next_delay_seconds=0) | changes
+        write_report(command, **report)
+        return 0
+
+    monkeypatch.setattr(runtime, "run_child", child)
+    assert execute(context, tmp_path, monkeypatch, mode="drain-close") == 1
+    assert context[0].state["status"] == "ready"
+    assert (tmp_path / "work/saved/editorial.sqlite3").is_file()
+    assert (tmp_path / "github-output").read_text() == (
+        "drain_continue=false\ndrain_next_delay_seconds=0\n")
+
+
 def test_preview_remains_read_only_without_sweeps_or_control(context, tmp_path, monkeypatch):
     before = copy.deepcopy(context[0].state)
     monkeypatch.setattr(runtime, "_sweep_material_lifecycle",
@@ -222,6 +267,7 @@ def test_drain_workflow_has_separate_chain_and_same_canonical_lock():
     workflow = yaml.safe_load((ROOT / ".github/workflows/editorial-actions.yml").read_text())
     trigger = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
     assert "drain" in trigger["mode"]["options"]
+    assert "drain-close" in trigger["mode"]["options"]
     assert len(trigger) <= 25
     assert trigger["drain_runs_left"]["default"] == 1
     assert trigger["drain_max_attempts"]["default"] == 10
@@ -245,6 +291,11 @@ def test_drain_workflow_has_separate_chain_and_same_canonical_lock():
     assert "secrets." not in json.dumps(chain)
     assert set(cycle["outputs"]) == {
         "projection", "worker_mode", "drain_continue", "drain_next_delay_seconds"}
+    worker_env = next(step['env'] for step in steps if step.get('id') == 'runtime')
+    for key in ('GEMINI_API_KEY', 'TELEGRAM_BOT_TOKEN', 'TYPESAFE_API_KEY',
+                'EDITORIAL_SEND_ENABLED'):
+        assert "!= 'drain-close'" in worker_env[key]
+    assert "inputs.mode == 'drain'" in chain['if']
 
 
 @pytest.mark.parametrize("delay", ["0", "21001", "1\nPRIVATE", "181", "21000"])

@@ -1,10 +1,12 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.newsroom_control import build_newsroom_inbox
 from relocant_media.storage.models import (
     Base,
@@ -265,3 +267,123 @@ def test_inbox_groups_one_event_across_sources_and_prefers_reviewed_anchor() -> 
         "document_count": 2,
     }
     assert {source["source_id"] for source in item["sources"]} == {"city", "venue"}
+
+
+def _closed(raw_id, now, **details):
+    return SchedulerRun(task_type="material_lifecycle", task_key=f"closed-{raw_id}",
+        city="belgrade", scheduled_for=now, started_at=now, status="blocked", attempt=1,
+        details={"raw_item_id": raw_id, "state": "blocked", "reason": "owner_closed_backlog",
+                 "attempt_records": "PRIVATE", **details})
+
+
+def test_closed_unprocessed_material_is_held_without_retry_or_private_fields():
+    engine, now = _engine(), datetime(2026, 11, 19, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add(_source("city"))
+        session.flush()
+        raw = _raw("city", "a", "A unique notice", now)
+        session.add(raw)
+        session.flush()
+        session.add_all([_closed(raw.id, now), CollectorFailure(source_id="city",
+            strategy="test", error_type="TimeoutError", message="fake", occurred_at=now)])
+        session.commit()
+        result = build_newsroom_inbox(session)
+        item = result["items"][0]
+        assert item["state"] == "held" and item["reason_code"] == "owner_closed_backlog"
+        assert item["retry"] == {"automatic_retry": False, "policy": "none"}
+        assert "PRIVATE" not in str(result) and session.get(EditorialRun, raw.id) is None
+
+
+def test_mixed_cluster_uses_new_active_member_after_old_anchor_is_closed():
+    engine, now = _engine(), datetime(2026, 11, 19, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add_all([_source("city"), _source("venue")])
+        session.flush()
+        old = _raw("city", "a", "Closure on Knez Mihailova tonight", now)
+        new = _raw("venue", "b", old.title, now + timedelta(minutes=5))
+        session.add_all([old, new])
+        session.flush()
+        session.add(_closed(old.id, now))
+        session.commit()
+        item = build_newsroom_inbox(session)["items"][0]
+        assert item["state"] == "evidence_ready" and item["anchor_raw_item_id"] == new.id
+
+
+@pytest.mark.parametrize("delivery", ["sending", "uncertain", "sent"])
+def test_transport_on_another_closed_member_remains_visible(delivery):
+    engine, now = _engine(), datetime(2026, 11, 19, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add_all([_source("city"), _source("venue")])
+        session.flush()
+        old = _raw("city", "a", "Closure on Knez Mihailova tonight", now)
+        sent = _raw("venue", "b", old.title, now + timedelta(minutes=5))
+        session.add_all([old, sent])
+        session.flush()
+        post = _post(old.title)
+        session.add(post)
+        session.flush()
+        if delivery == "sent":
+            post.telegram_message_id = 12
+        session.add_all([_closed(old.id, now), _closed(sent.id, now),
+                         _run(sent, post, delivery=delivery)])
+        session.commit()
+        item = build_newsroom_inbox(session)["items"][0]
+        assert item["state"] == delivery and item["anchor_raw_item_id"] == sent.id
+        assert item["retry"]["automatic_retry"] is False
+
+
+def test_closed_source_alias_uses_root_without_exporting_history():
+    engine, now = _engine(), datetime(2026, 11, 19, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add_all([_source("city"), _source("venue")])
+        session.flush()
+        root = _raw("city", "a", "Closure on Knez Mihailova tonight", now)
+        alias = _raw("venue", "b", root.title, now + timedelta(minutes=5))
+        session.add_all([root, alias])
+        session.flush()
+        session.add_all([_closed(root.id, now), _closed(alias.id, now, state="alias",
+                         lifecycle_root_raw_id=root.id)])
+        session.commit()
+        result = build_newsroom_inbox(session)
+        assert result["items"][0]["state"] == "held"
+        assert "PRIVATE" not in str(result)
+
+
+@pytest.mark.parametrize("message_id", [None, 0, -1])
+def test_sent_without_valid_receipt_stays_visible_for_reconciliation(message_id):
+    engine, now = _engine(), datetime(2026, 11, 19, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add(_source("city"))
+        session.flush()
+        raw = _raw("city", "a", "A unique notice", now)
+        session.add(raw)
+        session.flush()
+        post = _post(raw.title)
+        post.telegram_message_id = message_id
+        session.add(post)
+        session.flush()
+        session.add_all([_closed(raw.id, now), _run(raw, post, delivery="sent")])
+        session.commit()
+        item = build_newsroom_inbox(session)["items"][0]
+        assert item["state"] == "uncertain"
+        assert item["retry"]["policy"] == "manual_reconciliation"
+
+
+def test_uncertain_member_has_priority_over_sent_member_of_closed_cluster():
+    engine, now = _engine(), datetime(2026, 11, 19, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add_all([_source("city"), _source("venue")])
+        session.flush()
+        sent = _raw("city", "a", "Closure on Knez Mihailova tonight", now)
+        uncertain = _raw("venue", "b", sent.title, now + timedelta(minutes=5))
+        session.add_all([sent, uncertain])
+        session.flush()
+        first, second = _post(sent.title), _post(sent.title)
+        first.telegram_message_id = 11
+        session.add_all([first, second])
+        session.flush()
+        session.add_all([_closed(sent.id, now), _closed(uncertain.id, now),
+            _run(sent, first, delivery="sent"), _run(uncertain, second, delivery="uncertain")])
+        session.commit()
+        item = build_newsroom_inbox(session)["items"][0]
+        assert item["state"] == "uncertain" and item["anchor_raw_item_id"] == uncertain.id

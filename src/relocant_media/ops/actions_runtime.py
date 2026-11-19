@@ -65,7 +65,7 @@ BELGRADE_AREAS = Path("cities/belgrade/map/outage-areas.json.gz")
 MODES = {
     "preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback",
     "map-backfill", "map-republish", "map-republish-review", "digest", "digest-preview",
-    "drain",
+    "drain", "drain-close",
 }
 
 
@@ -75,9 +75,11 @@ class _DrainOptions:
     max_attempts: int
     max_seconds: int
     runs_left: int
+    close_existing: bool = False
 
 
-def _drain_options(environment: Mapping[str, str], *, now: datetime) -> _DrainOptions:
+def _drain_options(environment: Mapping[str, str], *, now: datetime,
+                   close_existing: bool = False) -> _DrainOptions:
     """Проверить ручные границы до восстановления и CAS-захвата писателя."""
     value = environment.get("DRAIN_BEFORE", "")
     if (not isinstance(value, str) or not 1 <= len(value) <= 64 or "T" not in value
@@ -102,7 +104,7 @@ def _drain_options(environment: Mapping[str, str], *, now: datetime) -> _DrainOp
 
     return _DrainOptions(before.astimezone(UTC), limit("DRAIN_MAX_ATTEMPTS", 10, 30),
                          limit("DRAIN_MAX_SECONDS", 300, 900),
-                         limit("DRAIN_RUNS_LEFT", 1, 200))
+                         limit("DRAIN_RUNS_LEFT", 1, 200), close_existing)
 
 
 def _drain_control(run_dir: Path, options: _DrainOptions, code: int) -> tuple[bool, int]:
@@ -120,6 +122,11 @@ def _drain_control(run_dir: Path, options: _DrainOptions, code: int) -> tuple[bo
             or type(report.get("next_delay_seconds")) is not int
             or not 0 <= report["next_delay_seconds"] <= 60):
         raise ValueError("Неверный отчёт drain")
+    if options.close_existing:
+        if (report.get("mode") != "close_existing" or report.get("closed_by_owner") is not True
+                or report["remaining"] != 0 or report["needs_continue"]):
+            raise ValueError("Закрытие старой очереди не подтверждено")
+        return False, 0
     next_at = report.get("next_at")
     delay = max(60, report["next_delay_seconds"])
     if next_at is not None:
@@ -665,7 +672,9 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             map_output: Path | None = None) -> int:
     if mode not in MODES:
         raise ValueError("unsupported runtime mode")
-    drain = _drain_options(environment, now=datetime.now(UTC)) if mode == "drain" else None
+    drain = (_drain_options(environment, now=datetime.now(UTC),
+                            close_existing=mode == "drain-close")
+             if mode in {"drain", "drain-close"} else None)
     if drain is not None and (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
                               or environment.get("GITHUB_ACTIONS") != "true"):
         raise ValueError("Drain доступен только ручному запуску Actions")
@@ -799,7 +808,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     busy = _busy_state(state, environment)
     attempt = busy["attempt"]
     busy_sha = store.write(busy, sha)
-    _sweep_material_lifecycle(database)
+    if mode != "drain-close":
+        _sweep_material_lifecycle(database)
     directory = database.parent
     intake_state = directory / "intake-batch-state.json"
     intake_state.write_text(json.dumps(state.get("intake_state", {})), encoding="utf-8")
@@ -852,7 +862,13 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
                    "--max-attempts", str(drain.max_attempts),
                    "--max-seconds", str(drain.max_seconds),
                    "--runs-left", str(drain.runs_left), "--output", str(run_dir)]
-        if env.get("EDITORIAL_SEND_ENABLED") == "true":
+        if drain.close_existing:
+            command.append("--close-existing")
+            env["EDITORIAL_SEND_ENABLED"] = "false"
+            for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "TELEGRAM_BOT_TOKEN",
+                        "TYPESAFE_API_KEY"):
+                env.pop(key, None)
+        elif env.get("EDITORIAL_SEND_ENABLED") == "true":
             command.append("--send-enabled")
     else:
         # The five-minute batch is the only update consumer; no second getUpdates poller.
@@ -885,7 +901,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     # A signal/forced termination has uncertain effects: do not unlock even if bytes survived.
     if code < 0:
         raise RuntimeError("runtime terminated; reconcile busy generation")
-    _sweep_material_lifecycle(database)
+    if mode != "drain-close":
+        _sweep_material_lifecycle(database)
     _runtime_phase("snapshot_started")
     manifest = create_snapshot(database, work / "saved")
     manifest["drive_file_id"] = (state["snapshot"]["drive_file_id"]

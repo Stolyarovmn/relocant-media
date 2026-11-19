@@ -1,14 +1,17 @@
+import copy
 import json
+import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from relocant_media.domain.policy import SOURCE_REPLACED_REASON
 from relocant_media.ops import backlog_drain as drain
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import material_lifecycle as core
-from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
 
@@ -274,3 +277,198 @@ def test_invalid_limits_fail_before_any_processing(state, options):
     engine, now, output = state
     with pytest.raises(ValueError):
         drain.process_existing(engine, now, output / "invalid", Provider(), **options)
+
+
+def test_owner_close_preserves_terminal_decisions_budgets_history_and_frozen_scope(state):
+    engine, now, output = state
+    seed(engine, now, 3)
+    drain._campaign(engine, now, 5)
+    seed(engine, now, 1, first=4, ingested=now+timedelta(seconds=1))
+    with Session(engine) as session:
+        assert core.before_attempt(session, 1, now=now)
+        core.after_error(session, 1, "TimeoutError", now=now)
+        active = session.scalar(select(SchedulerRun).where(
+            SchedulerRun.task_type == core.TASK_TYPE))
+        active.details = {**active.details, "history": [{"step": index} for index in range(20)]}
+        history = copy.deepcopy(active.details["history"])
+        core.block_unsupported_repair(session, 2, now=now)
+        blocked = core.lifecycle_state(session, 2, now=now)
+        post = Post(city="belgrade", category="transport", status="ready",
+                    title="Готово", body="Сохранённый текст", confidence=1,
+                    telegram_message_id=101, published_at=now)
+        session.add(post)
+        session.flush()
+        run = EditorialRun(raw_item_id=3, post_id=post.id, delivery_status="sent",
+                           outcome={"status": "ready", "reason": "original_reason"}, evidence={})
+        session.add(run)
+        core.after_result(session, 3, now=now)
+        published = core.lifecycle_state(session, 3, now=now)
+        session.commit()
+    report = drain.close_existing(engine, now, output / "close")
+    assert report["remaining"] == 0 and not report["needs_continue"]
+    assert report["mode"] == "close_existing" and report["closed_by_owner"]
+    assert report["status_counts"] == {"published": 1, "blocked": 2}
+    assert report["attempts_used"] == report["delivered"] == 0
+    with Session(engine) as session:
+        details = core.lifecycle_state(session, 1, now=now)
+        assert details["reason"] == "owner_closed_backlog" and details["attempts"] == 1
+        assert details["history"][:20] == history and len(details["history"]) == 21
+        assert core.lifecycle_state(session, 2, now=now) == blocked
+        assert core.lifecycle_state(session, 3, now=now) == published
+        assert session.get(EditorialRun, 3).outcome["reason"] == "original_reason"
+        assert session.get(RawItem, 4).body.startswith("PRIVATE_BODY")
+        assert not session.scalar(select(SchedulerRun).where(
+            SchedulerRun.task_key == "material-lifecycle:belgrade:4"))
+    saved = campaign(engine)
+    assert saved["completed_hops"] == [] and saved["initial_run_budget"] == 5
+    assert saved["closed_by_owner"] and saved["cohort_ids"] == [1, 2, 3]
+    repeated = drain.close_existing(engine, now, output / "repeat")
+    assert repeated["replay"] and repeated["closed_count"] == 0
+    with Session(engine) as session:
+        assert core.lifecycle_state(session, 1, now=now)["history"] == details["history"]
+    class Forbidden:
+        def generate_json(self, **kwargs):
+            pytest.fail("После ручной отмены модель не вызывается")
+    stopped = drain.process_existing(engine, now, output / "stopped", Forbidden(), runs_left=200,
+        process=lambda raw_id: pytest.fail("Закрытый cohort не возобновляется"), send_enabled=True)
+    assert stopped["closed_by_owner"] and not stopped["needs_continue"]
+
+
+@pytest.mark.parametrize("transport", ["uncertain", "sending", "staging"])
+def test_owner_close_keeps_uncertain_transport_and_exact_owner_approval(state, transport):
+    engine, now, output = state
+    seed(engine, now, 3)
+    drain._campaign(engine, now, 3)
+    with Session(engine) as session:
+        for raw_id in (1, 2, 3):
+            core.lifecycle_state(session, raw_id, now=now)
+            post = Post(city="belgrade", category="transport", status="human_review",
+                        title="Точный черновик", body="Сохранить", confidence=1)
+            session.add(post)
+            session.flush()
+            run = EditorialRun(raw_item_id=raw_id, post_id=post.id,
+                delivery_status=transport if raw_id == 1 and transport != "staging" else "pending",
+                staging_message_id=77 if raw_id == 1 and transport == "staging" else None,
+                outcome={"status": "human_review", "reason": "requires_approval",
+                         "_package_sha256": "a"*64,
+                         **({"_rich_delivery": {"state": "uncertain"}} if raw_id == 1 else {})},
+                evidence={})
+            session.add(run)
+        review = Submission(kind="owner_editorial_review", status="approved",
+            telegram_user_id=1, telegram_message_id=50, payload={"raw_item_id": 2,
+                "package_sha256": "a"*64, "owner_decision": "publish", "owner_chat_id": 1})
+        session.add(review)
+        session.commit()
+        uncertain = copy.deepcopy(session.get(EditorialRun, 1).outcome)
+        approved = copy.deepcopy(session.get(EditorialRun, 2).outcome)
+        approval = copy.deepcopy(review.payload)
+    report = drain.close_existing(engine, now, output / "close")
+    assert report["remaining"] == 0 and report["requires_reconciliation_count"] == 1
+    with Session(engine) as session:
+        assert session.get(EditorialRun, 1).delivery_status == (
+            "pending" if transport == "staging" else transport)
+        assert session.get(EditorialRun, 1).staging_message_id == (
+            77 if transport == "staging" else None)
+        assert session.get(EditorialRun, 1).outcome == uncertain
+        assert (core.lifecycle_state(session, 1, now=now)["reason"]
+                == "delivery_reconciliation_required")
+        assert session.get(EditorialRun, 2).outcome == approved
+        assert session.get(Post, session.get(EditorialRun, 2).post_id).status == "human_review"
+        saved = session.scalar(select(Submission))
+        assert saved.status == "approved" and saved.payload == approval
+        with pytest.raises(core.LifecycleBlockedError):
+            core.ensure_not_terminal(session, 2, now=now)
+
+
+def test_owner_close_includes_only_proven_post_cutoff_replacement(state):
+    engine, now, output = state
+    seed(engine, now, 1)
+    drain._campaign(engine, now, 3)
+    seed(engine, now, 1, first=2, ingested=now+timedelta(seconds=1))
+    with Session(engine) as session:
+        assert core.before_attempt(session, 1, now=now)
+        session.add(EditorialRun(raw_item_id=1, delivery_status="pending", evidence={}, outcome={
+            "status": "skipped", "reason": SOURCE_REPLACED_REASON, "replacement_raw_item_id": 2}))
+        session.flush()
+        core.inherit_lifecycle(session, 1, 2, now=now)
+        session.commit()
+    report = drain.close_existing(engine, now, output / "close")
+    assert report["remaining"] == 0 and report["cohort_total"] == 1
+    with Session(engine) as session:
+        assert core.lifecycle_state(session, 2, now=now)["reason"] == "owner_closed_backlog"
+        assert core.lifecycle_state(session, 1, now=now)["attempts"] == 1
+        assert session.get(EditorialRun, 1).outcome["reason"] == SOURCE_REPLACED_REASON
+        assert session.get(EditorialRun, 2) is None
+
+
+@pytest.mark.parametrize("damage", ["missing_campaign", "hash", "alias", "replacement"])
+def test_owner_close_validates_every_link_before_mutation(state, damage):
+    engine, now, output = state
+    seed(engine, now, 2)
+    if damage != "missing_campaign":
+        drain._campaign(engine, now, 3)
+    if damage == "replacement":
+        seed(engine, now, 1, first=3, ingested=now+timedelta(seconds=1))
+    with Session(engine) as session:
+        for raw_id in ((1, 2, 3) if damage == "replacement" else (1, 2)):
+            core.lifecycle_state(session, raw_id, now=now)
+        if damage == "hash":
+            row = session.scalar(select(SchedulerRun).where(
+                SchedulerRun.task_type == drain.TASK_TYPE))
+            row.details = {**row.details, "cohort_sha256": "invalid"}
+        elif damage == "alias":
+            row = session.scalar(select(SchedulerRun).where(
+                SchedulerRun.task_key == "material-lifecycle:belgrade:2"))
+            row.details = {**row.details, "lifecycle_root_raw_id": 999}
+        elif damage == "replacement":
+            session.add(EditorialRun(raw_item_id=1, delivery_status="pending", evidence={},
+                outcome={"status": "skipped", "reason": SOURCE_REPLACED_REASON,
+                         "replacement_raw_item_id": 3}))
+        session.commit()
+        prior = {row.id: copy.deepcopy(row.details)
+                 for row in session.scalars(select(SchedulerRun))}
+    with pytest.raises(ValueError):
+        drain.close_existing(engine, now, output / "invalid-close")
+    with Session(engine) as session:
+        assert {row.id: row.details for row in session.scalars(select(SchedulerRun))} == prior
+    assert not (output / "invalid-close" / "drain-report.json").exists()
+
+
+def test_owner_close_cli_does_not_construct_model_or_require_network_keys(state, monkeypatch):
+    engine, now, output = state
+    seed(engine, now, 1)
+    drain._campaign(engine, now, 1)
+    monkeypatch.setenv("DATABASE_URL", str(engine.url))
+    for key in ("GEMINI_API_KEY", "GEMINI_MODEL", "TELEGRAM_BOT_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(drain, "IsolatedGeminiProvider", lambda *a, **k: pytest.fail("Нет модели"))
+    monkeypatch.setattr(drain, "prepare_reviewed", lambda *a, **k: pytest.fail("Нет подготовки"))
+    monkeypatch.setattr(drain, "publish_pending", lambda *a, **k: pytest.fail("Нет отправки"))
+    monkeypatch.setattr(sys, "argv", ["backlog_drain", "--before", now.isoformat(),
+        "--output", str(output / "cli-close"), "--close-existing", "--send-enabled"])
+    drain.main()
+    assert json.loads((output / "cli-close" / "drain-report.json").read_text())["remaining"] == 0
+
+
+def test_owner_close_rolls_back_entire_cohort_if_a_write_fails(state, monkeypatch):
+    engine, now, output = state
+    seed(engine, now, 2)
+    drain._campaign(engine, now, 3)
+    calls = []
+    close = core.close_by_owner
+
+    def interrupted(session, raw_id, **kwargs):
+        calls.append(raw_id)
+        if len(calls) == 2:
+            raise RuntimeError("Синтетическая ошибка сохранения")
+        return close(session, raw_id, **kwargs)
+
+    monkeypatch.setattr(core, "close_by_owner", interrupted)
+    with pytest.raises(RuntimeError):
+        drain.close_existing(engine, now, output / "interrupted-close")
+    with Session(engine) as session:
+        assert not list(session.scalars(select(SchedulerRun).where(
+            SchedulerRun.task_type == core.TASK_TYPE)))
+        row = session.scalar(select(SchedulerRun).where(SchedulerRun.task_type == drain.TASK_TYPE))
+        assert "closed_by_owner" not in row.details
+    assert not (output / "interrupted-close" / "drain-report.json").exists()

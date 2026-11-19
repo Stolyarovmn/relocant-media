@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -11,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key
+from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.storage.models import (
     CollectorFailure,
     EditorialRun,
@@ -100,6 +102,49 @@ def _is_expired(reason: str | None) -> bool:
     return any(token in normalized for token in ("expired", "stale", "past_event", "ended"))
 
 
+def _closed_materials(session: Session, city: str) -> dict[int, str]:
+    """Только разрешённые технические поля, без истории, исходников и кампаний."""
+    details = SchedulerRun.details
+    rows = session.execute(select(
+        details["raw_item_id"].as_integer(), details["lifecycle_root_raw_id"].as_integer(),
+        details["state"].as_string(), details["reason"].as_string(),
+    ).where(SchedulerRun.task_type == "material_lifecycle", SchedulerRun.city == city)
+      .order_by(SchedulerRun.id))
+    records = {row[0]: row[1:] for row in rows if type(row[0]) is int and row[0] > 0}
+    closed = {}
+    for raw_id in records:
+        target, visited = raw_id, set()
+        while target in records and target not in visited:
+            visited.add(target)
+            parent, state, reason = records[target]
+            if parent is None:
+                if state == "blocked":
+                    closed[raw_id] = (reason if isinstance(reason, str)
+                        and re.fullmatch(r"[a-z][a-z0-9_]{0,99}", reason)
+                        else "material_lifecycle_blocked")
+                break
+            if type(parent) is not int or parent <= 0:
+                break
+            target = parent
+    return closed
+
+
+def _delivery_state(run: EditorialRun | None, post: Post | None) -> NewsroomState | None:
+    if run is None:
+        return None
+    if run.delivery_status == "uncertain":
+        return NewsroomState.UNCERTAIN
+    if run.delivery_status == "sending":
+        return NewsroomState.SENDING
+    if (run.delivery_status == "sent" and post is not None
+            and type(post.telegram_message_id) is int and post.telegram_message_id > 0):
+        return NewsroomState.SENT
+    if (run.delivery_status == "sent" or run.staging_message_id is not None or post is not None
+            and (post.telegram_message_id is not None or post.published_at is not None)):
+        return NewsroomState.UNCERTAIN
+    return None
+
+
 def _state(
     *,
     anchor: RawItem,
@@ -107,24 +152,25 @@ def _state(
     run: EditorialRun | None,
     post: Post | None,
     revisions: list[SourceRevision],
+    blocked_reason: str | None = None,
 ) -> tuple[NewsroomState, str]:
     reason = _reason(run)
+    delivery_state = _delivery_state(run, post)
+    if delivery_state == NewsroomState.UNCERTAIN:
+        return NewsroomState.UNCERTAIN, "delivery_reconciliation_required"
+    if delivery_state == NewsroomState.SENDING:
+        return NewsroomState.SENDING, "delivery_reconciliation_required"
+    if blocked_reason and delivery_state != NewsroomState.SENT:
+        return NewsroomState.HELD, blocked_reason
     if run is not None:
         # Delivery reconciliation always outranks editorial re-verification. If Telegram may
         # already have accepted a message, the first operator action must be to reconcile it.
-        if run.delivery_status == "uncertain":
-            return NewsroomState.UNCERTAIN, "delivery_uncertain"
-        if run.delivery_status == "sending":
-            return NewsroomState.SENDING, "delivery_reconciliation_required"
-
         created_at = _utc(run.created_at)
         if created_at is not None and any(
             (_utc(revision.observed_at) or created_at) > created_at for revision in revisions
         ):
             return NewsroomState.NEEDS_REVERIFY, "source_revision_after_review"
-        if run.delivery_status == "sent" or (
-            post is not None and post.telegram_message_id is not None
-        ):
+        if delivery_state == NewsroomState.SENT:
             return NewsroomState.SENT, "sent"
 
         status = _review_status(run, post)
@@ -150,12 +196,15 @@ def _state(
 def _retry_info(
     state: NewsroomState,
     last_failure: dict[str, object] | None,
+    *, terminal_blocked: bool = False,
 ) -> dict[str, object]:
     if state in {NewsroomState.SENDING, NewsroomState.UNCERTAIN}:
         return {
             "automatic_retry": False,
             "policy": "manual_reconciliation",
         }
+    if terminal_blocked:
+        return {"automatic_retry": False, "policy": "none"}
     if state == NewsroomState.NEEDS_REVERIFY:
         return {
             "automatic_retry": False,
@@ -251,14 +300,32 @@ def build_newsroom_inbox(
         last_failure_by_source[failure.source_id] = failure
 
     clusters = cluster_events([_candidate(item) for item, _source in rows])
+    closed_materials = _closed_materials(session, city)
+
+    def delivery_for(candidate: EventCandidate) -> NewsroomState | None:
+        candidate_run = runs.get(candidate.raw_item_id)
+        candidate_post = (posts.get(candidate_run.post_id)
+                          if candidate_run and candidate_run.post_id is not None else None)
+        return _delivery_state(candidate_run, candidate_post)
+
+    transport_priority: dict[NewsroomState | None, int] = {
+        NewsroomState.UNCERTAIN: 0, NewsroomState.SENDING: 1, NewsroomState.SENT: 2,
+    }
     control_items: list[dict[str, Any]] = []
     for cluster in clusters:
         member_ids = [candidate.raw_item_id for candidate in cluster]
+        transport_members = [candidate for candidate in cluster
+                             if delivery_for(candidate) is not None]
+        active_members = [candidate for candidate in cluster
+                          if candidate.raw_item_id not in closed_materials]
+        transport_members.sort(key=lambda candidate: transport_priority.get(
+            delivery_for(candidate), 3))
+        candidates = transport_members or active_members or cluster
         reviewed_member = next(
-            (candidate for candidate in cluster if candidate.raw_item_id in runs),
+            (candidate for candidate in candidates if candidate.raw_item_id in runs),
             None,
         )
-        anchor_candidate = reviewed_member or cluster[0]
+        anchor_candidate = reviewed_member or candidates[0]
         anchor, anchor_source = items_by_id[anchor_candidate.raw_item_id]
         run = runs.get(anchor.id)
         post = posts.get(run.post_id) if run is not None and run.post_id is not None else None
@@ -268,12 +335,14 @@ def build_newsroom_inbox(
             for raw_id in member_ids
             for revision in revisions_by_raw.get(raw_id, [])
         ]
+        terminal_blocked = all(raw_id in closed_materials for raw_id in member_ids)
         state, reason_code = _state(
             anchor=anchor,
             source=anchor_source,
             run=run,
             post=post,
             revisions=revisions,
+            blocked_reason=closed_materials.get(anchor.id) if terminal_blocked else None,
         )
 
         submissions = {
@@ -369,7 +438,7 @@ def build_newsroom_inbox(
                     for submission in sorted(submissions.values(), key=lambda item: item.id)
                 ],
                 "last_error": failure_summary,
-                "retry": _retry_info(state, failure_summary),
+                "retry": _retry_info(state, failure_summary, terminal_blocked=terminal_blocked),
             }
         )
 
