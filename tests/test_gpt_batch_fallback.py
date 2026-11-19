@@ -4,15 +4,22 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import event
-from test_gpt_fallback_service import NOW
+from test_gpt_fallback_service import NOW, _refresh_exchange
 from test_gpt_fallback_service import fallback_session as _fallback_session
 
 from relocant_media.ai.package import canonical_json
+from relocant_media.collectors.base import RawItem as CollectedArticle
+from relocant_media.domain.city_profile import load_city_profile
+from relocant_media.services import gpt_fallback, gpt_refresh
 from relocant_media.services.gpt_batch_fallback import (
     build_batch_request,
     build_ranked_request,
     pending_batch_ids,
     validate_batch_rank,
+)
+from relocant_media.services.source_replacement import (
+    SourceUnavailableError,
+    record_source_replacement,
 )
 from relocant_media.storage.models import EditorialRun, RawItem
 
@@ -90,6 +97,40 @@ def test_ranking_resumes_same_cycle_and_releases_unselected_candidates(batch):
     assert work["candidates"][0]["documents"][0]["body"] == other.body
     assert session.get(EditorialRun, raw.id) is None
     assert session.get(EditorialRun, other.id) is None
+
+
+def test_approved_batch_slot_moves_to_live_source_and_reopens_on_preview(batch, monkeypatch):
+    session, raw, other, run = batch
+    origin_id, other_id = raw.id, other.id
+    run.details = {**run.details, "processing_errors": []}
+    session.commit()
+    brief = build_batch_request(session, now=NOW)
+    rank = _rank(brief, [origin_id])
+    _record_rank(session, run, brief, rank)
+    original = build_ranked_request(session, brief, rank, now=NOW)
+    url = "https://www.cukarica.rs/vesti/a123458/"
+    replacement = CollectedArticle(
+        "cukarica_news", "a123458", url, raw.title, raw.body, raw.published_at,
+        published_at_precision="instant",
+    )
+
+    async def collect(_links):
+        return [SourceUnavailableError("city_beograd_news"), replacement]
+
+    monkeypatch.setattr(gpt_refresh, "_collect", collect)
+    engine = session.get_bind()
+    session.rollback()
+    new = gpt_refresh.refresh_gpt_evidence(
+        engine, _refresh_exchange(original, origin_id, [url]), now=NOW,
+    )
+    candidate, = new["candidates"]
+    target = candidate["raw_item_id"]
+    assert target not in {origin_id, other_id}
+    assert pending_batch_ids(session, now=NOW) == {target}
+    assert build_ranked_request(session, brief, rank, now=NOW) == new
+    gpt_fallback.validate_fallback_candidate(session, new, target, now=NOW)
+    with pytest.raises(ValueError, match="Исходный сбой"):
+        gpt_fallback.validate_fallback_candidate(session, original, origin_id, now=NOW)
 
 
 def test_batch_export_reads_only_public_short_fragments(batch):
@@ -175,8 +216,24 @@ def test_ranked_source_change_releases_only_the_affected_candidate(batch):
         validate_batch_rank(session, request, rank, now=NOW)
 
 
-def test_ranked_request_also_passes_same_cycle_protected_failures(batch):
+@pytest.mark.parametrize("after_primary_replacement", [False, True])
+def test_ranked_request_also_passes_same_cycle_protected_failures(batch, after_primary_replacement):
     session, raw, other, run = batch
+    expected_id = raw.id
+    if after_primary_replacement:
+        url = "https://www.cukarica.rs/vesti/a123459/"
+        replacement = CollectedArticle(
+            "cukarica_news", "a123459", url, raw.title, raw.body, raw.published_at,
+            published_at_precision="instant",
+        )
+        config = gpt_fallback._registry()["cukarica_news"]
+        expected_id = record_source_replacement(
+            session, original=raw, replacement=replacement, config=config, now=NOW,
+            profile=load_city_profile("belgrade"),
+        )
+        run.details = {**run.details, "processing_errors": [
+            {"raw_item_id": expected_id, "error_type": "GeminiWorkerError"},
+        ]}
     run.details = {**run.details, "batch_preselection": {
         **run.details["batch_preselection"],
         "gpt_candidate_ids": [other.id],
@@ -187,7 +244,9 @@ def test_ranked_request_also_passes_same_cycle_protected_failures(batch):
     rank = _rank(request, [other.id])
     _record_rank(session, run, request, rank)
     work = build_ranked_request(session, request, rank, now=NOW)
-    assert [candidate["raw_item_id"] for candidate in work["candidates"]] == [raw.id, other.id]
+    assert [candidate["raw_item_id"] for candidate in work["candidates"]] == [
+        expected_id, other.id,
+    ]
 
 
 def test_empty_accepted_choice_and_expired_runs_release_the_queue(batch):

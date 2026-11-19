@@ -233,16 +233,18 @@ class VenueFeedCollector:
         extraction = self._source.extraction
         return bool(extraction.article_lead_selectors or extraction.page_text)
 
-    async def _collect_article(self, url: str, entry: RawItem | None) -> RawItem:
+    async def _collect_article(
+        self, url: str, entry: RawItem | None, *, require_page: bool = False,
+    ) -> RawItem:
         use_feed = bool(entry and entry.body and not self._needs_page())
         keep_html = self._source.ownership == "official" and "events" in self._source.categories
-        if use_feed and not keep_html:
+        if use_feed and not keep_html and not require_page:
             assert entry is not None
             return entry
         try:
             html = await self._fetch(url)
         except (ValueError, httpx.HTTPError):
-            if use_feed:
+            if use_feed and not require_page:
                 assert entry is not None
                 return entry
             raise
@@ -279,7 +281,12 @@ class VenueFeedCollector:
                 raise ValueError("all fresh venue articles failed extraction")
         return items
 
-    async def collect_url(self, url: str) -> RawItem:
+    async def collect_url(self, url: str, *, require_page: bool = False) -> RawItem:
         _allowed(url, self._source)
-        entry = next((item for item in await self._entries() if item.url == url), None)
-        return await self._collect_article(url, entry)
+        try:
+            entry = next((item for item in await self._entries() if item.url == url), None)
+        except (httpx.HTTPError, ValueError):
+            if not require_page:
+                raise
+            entry = None
+        return await self._collect_article(url, entry, require_page=require_page)

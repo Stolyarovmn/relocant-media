@@ -16,7 +16,12 @@ from relocant_media.bot.publisher import Publisher
 from relocant_media.domain.dedup import DEFAULT_EVENT_WINDOW, EventCandidate, event_key, same_event
 from relocant_media.domain.event_programs import linked_event_program
 from relocant_media.domain.originality import copies_source_text
-from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION, primary_evidence_kind
+from relocant_media.domain.policy import (
+    CURRENT_EDITORIAL_RULE_VERSION,
+    SOURCE_REPLACED_REASON,
+    primary_evidence_kind,
+)
+from relocant_media.services.replacement_identity import matches_replacement_event
 from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -55,6 +60,14 @@ def _document(item: RawItem) -> EvidenceDocument:
     )
 
 
+def source_replacement_target(session: Session, raw_id: int) -> int | None:
+    run = session.get(EditorialRun, raw_id)
+    if run is None or run.outcome.get("reason") != SOURCE_REPLACED_REASON:
+        return None
+    target = run.outcome.get("replacement_raw_item_id")
+    return target if type(target) is int and target > 0 and target != raw_id else None
+
+
 def _reviewed_event_item(
     session: Session,
     *,
@@ -81,20 +94,29 @@ def _reviewed_event_item(
             )
         )
 
-    reviewed = session.scalars(
-        select(RawItem)
+    reason = EditorialRun.outcome["reason"].as_string()
+    replacement = EditorialRun.outcome["replacement_raw_item_id"].as_integer()
+    reviewed = session.execute(
+        select(RawItem, reason)
         .join(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
         .join(Source, Source.id == RawItem.source_id)
         .where(
             RawItem.id != anchor.id,
             Source.city == anchor_source.city,
             or_(*match_scope),
+            or_(reason.is_(None), reason != SOURCE_REPLACED_REASON,
+                replacement.is_(None), replacement != anchor.id),
         )
         .order_by(RawItem.published_at, RawItem.id)
         .execution_options(populate_existing=True)
     )
-    for item in reviewed:
-        if same_event(anchor_candidate, _candidate(item)):
+    for row in reviewed:
+        item, reviewed_reason = cast(RawItem, row[0]), row[1]
+        candidate = _candidate(item)
+        if (same_event(anchor_candidate, candidate) or (
+            reviewed_reason == SOURCE_REPLACED_REASON
+            and matches_replacement_event(anchor_candidate, candidate)
+        )):
             return item
     return None
 
@@ -107,7 +129,11 @@ def _event_items(
 ) -> list[tuple[RawItem, Source]]:
     """Return one evidence item per source for the same bounded event."""
     members: list[tuple[RawItem, Source]] = [(anchor, anchor_source)]
-    if anchor.published_at is None:
+    replaces_unavailable = session.scalar(select(EditorialRun.raw_item_id).where(
+        EditorialRun.outcome["reason"].as_string() == SOURCE_REPLACED_REASON,
+        EditorialRun.outcome["replacement_raw_item_id"].as_integer() == anchor.id,
+    ).limit(1))
+    if anchor.published_at is None or replaces_unavailable is not None:
         return members
 
     lower = anchor.published_at - DEFAULT_EVENT_WINDOW

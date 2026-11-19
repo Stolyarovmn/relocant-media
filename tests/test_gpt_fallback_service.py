@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import httpx
 import pytest
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
@@ -19,6 +20,8 @@ from relocant_media.ai.package import (
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation
+from relocant_media.domain.policy import SOURCE_REPLACED_REASON
+from relocant_media.ops import server_cycle
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import gpt_fallback, gpt_refresh
 from relocant_media.services.editorial_products import present_draft
@@ -120,6 +123,9 @@ def package_for_request(request: dict) -> EditorialPackage:
             {"source_id": primary["source_id"], "url": primary["url"], "quote": primary["body"]}
         ],
     }
+    for claim in payload["outcome"]["claims"]["claims"]:
+        for citation in claim["citations"]:
+            citation.update(source_id=primary["source_id"], url=primary["url"])
     presentation = EditorialPresentation.model_validate_json(
         json.dumps(candidate["presentation_by_rubric"]["city_changes"])
     )
@@ -206,6 +212,95 @@ def test_refresh_recollects_live_evidence_and_leaves_the_story_unresolved(
     gpt_fallback.validate_fallback_candidate(session, refreshed, raw_id, now=refreshed_at)
     with pytest.raises(ValueError, match="Снимок события"):
         gpt_fallback.validate_fallback_candidate(session, request, raw_id, now=refreshed_at)
+
+
+def test_refresh_substitutes_404_with_same_event_and_imports_only_live_evidence(
+    fallback_session, monkeypatch,
+):
+    session, raw, cycle = fallback_session
+    raw_id, cycle_id = raw.id, cycle.id
+    original_url, original_body = raw.url, raw.body
+    original_request = gpt_fallback.build_request(session, now=NOW)
+    assert original_request is not None
+    url = "https://www.cukarica.rs/vesti/a123456/"
+    replacement = CollectedRawItem(
+        "cukarica_news", "a123456", url, raw.title, raw.body, raw.published_at,
+        published_at_precision="instant",
+    )
+    fetches = []
+
+    async def fetch(config, exact_url, _client):
+        fetches.append((config.id, exact_url))
+        if exact_url == original_url:
+            request = httpx.Request("GET", original_url)
+            httpx.Response(404, request=request).raise_for_status()
+        assert config.id == replacement.source_id and exact_url == replacement.url
+        return replacement
+
+    monkeypatch.setattr(server_cycle, "fetch_public_article", fetch)
+    engine = session.get_bind()
+    session.rollback()
+    result = gpt_refresh.refresh_gpt_evidence(
+        engine, _refresh_exchange(original_request, raw_id, [url]), now=NOW,
+    )
+    assert set(fetches) == {("city_beograd_news", original_url), ("cukarica_news", url)}
+    candidate, = result["candidates"]
+    target = candidate["raw_item_id"]
+    assert target != raw_id
+    assert [document["url"] for document in candidate["documents"]] == [url]
+    assert candidate["presentation_by_rubric"]["city_changes"]["illustration"]["source_url"] == url
+    assert session.get(RawItem, raw_id, populate_existing=True).body == original_body
+    marker = session.get(EditorialRun, raw_id, populate_existing=True)
+    assert marker.post_id is None
+    assert marker.outcome["reason"] == SOURCE_REPLACED_REASON
+    assert marker.outcome["replacement_raw_item_id"] == target
+    receipt = session.get(SchedulerRun, cycle_id, populate_existing=True).details[
+        "gpt_evidence_refresh"][str(raw_id)]
+    assert receipt["replacement_raw_item_id"] == target
+    assert gpt_fallback.pending_gpt_ids(session, now=NOW) == {target}
+    assert gpt_fallback.build_request(session, now=NOW) == result
+    with pytest.raises(ValueError, match="Исходный сбой"):
+        gpt_fallback.validate_fallback_candidate(session, original_request, raw_id, now=NOW)
+    package = package_for_request(result)
+    gpt_fallback.validate_fallback_package(session, result, package, now=NOW)
+    assert import_package(session, package, now=NOW).outcome["status"] == "ready"
+    assert gpt_fallback.pending_gpt_ids(session, now=NOW) == set()
+
+
+@pytest.mark.parametrize(("failure", "wrong_event"), [
+    (ValueError("Изменилась разметка страницы"), False),
+    (httpx.ReadTimeout("Не получен ответ"), True),
+])
+def test_refresh_leaves_original_when_absence_or_event_is_unproven(
+    fallback_session, monkeypatch, failure, wrong_event,
+):
+    session, raw, run = fallback_session
+    raw_id, cycle_id, original_url = raw.id, run.id, raw.url
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    url = "https://www.cukarica.rs/vesti/a123457/"
+    replacement = CollectedRawItem(
+        "cukarica_news", "a123457", url,
+        "U Zemunu izložba" if wrong_event else raw.title,
+        "Muzej najavljuje izložbu dela slikara 20. novembra." if wrong_event else raw.body,
+        raw.published_at, published_at_precision="instant",
+    )
+
+    async def fetch(_config, exact_url, _client):
+        if exact_url == original_url:
+            raise failure
+        return replacement
+
+    monkeypatch.setattr(server_cycle, "fetch_public_article", fetch)
+    engine = session.get_bind()
+    session.rollback()
+    with pytest.raises(ValueError if wrong_event else ExceptionGroup):
+        gpt_refresh.refresh_gpt_evidence(
+            engine, _refresh_exchange(request, raw_id, [url]), now=NOW,
+        )
+    assert session.get(EditorialRun, raw_id) is None
+    assert "gpt_evidence_refresh" not in session.get(SchedulerRun, cycle_id).details
+    assert session.scalar(select(RawItem).where(RawItem.url == url)) is None
 
 
 @pytest.mark.parametrize(("url", "error"), [

@@ -16,7 +16,6 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.channel_style import writing_brief
 from relocant_media.ai.package import StrictModel, canonical_json
 from relocant_media.collectors.base import RawItem as CollectedArticle
-from relocant_media.collectors.factory import build_collector
 from relocant_media.domain.dedup import EventCandidate, canonicalize_url, same_event
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
@@ -28,7 +27,15 @@ from relocant_media.services.gpt_fallback import (
     _candidate_request,
     _public_host,
     _registry,
+    refresh_target,
     validate_fallback_candidate,
+)
+from relocant_media.services.primary_discovery import source_for_url
+from relocant_media.services.source_replacement import (
+    SourceUnavailableError,
+    can_replace_source,
+    is_source_unavailable,
+    record_source_replacement,
 )
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.models import EditorialRun, RawItem, Source
@@ -90,6 +97,9 @@ def _registered_alternative(url: str, registry: dict[str, SourceConfig]) -> Sour
         }
     ]
     if len(matching) > 1:
+        match_by_url = source_for_url(url, {config.id: config for config in matching})
+        if match_by_url is not None:
+            return registry[match_by_url]
         path = urlsplit(url).path
         by_root = [
             (len(root), config)
@@ -105,12 +115,21 @@ def _registered_alternative(url: str, registry: dict[str, SourceConfig]) -> Sour
     return matching[0]
 
 
-async def _collect(links: list[tuple[SourceConfig, str]]) -> list[CollectedArticle]:
-    from relocant_media.ops.server_cycle import _collect_exact_url
+async def _collect(
+    links: list[tuple[SourceConfig, str]],
+) -> list[CollectedArticle | SourceUnavailableError]:
+    from relocant_media.ops.server_cycle import fetch_public_article
 
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
-        async def collect(config: SourceConfig, url: str) -> CollectedArticle:
-            result = await _collect_exact_url(build_collector(config, client), url)
+        async def collect(
+            config: SourceConfig, url: str,
+        ) -> CollectedArticle | SourceUnavailableError:
+            try:
+                result = await fetch_public_article(config, url, client)
+            except Exception as error:
+                if is_source_unavailable(error):
+                    return SourceUnavailableError(config.id)
+                raise
             if (not isinstance(result, CollectedArticle) or result.source_id != config.id
                     or canonicalize_url(result.url) != canonicalize_url(url)):
                 raise FallbackValidationError("Сборщик вернул другой источник или адрес")
@@ -145,6 +164,18 @@ def refreshed_anchor_sha256(run: SchedulerRun, raw_id: int) -> str | None:
     return digest
 
 
+def _refresh_origin_id(session: Session, run: SchedulerRun, raw_id: int) -> int:
+    origins = [
+        int(key) for key, receipt in _refreshes(run).items()
+        if key.isdecimal() and isinstance(receipt, dict)
+        and receipt.get("replacement_raw_item_id") == raw_id
+        and refresh_target(session, run, int(key)) == raw_id
+    ]
+    if len(origins) > 1:
+        raise FallbackValidationError("Найдены разные исходные задания замены")
+    return origins[0] if origins else raw_id
+
+
 def _require_unresolved(session: Session, raw_id: int) -> tuple[RawItem, Source]:
     raw = session.get(RawItem, raw_id, populate_existing=True)
     source = session.get(Source, raw.source_id) if raw is not None else None
@@ -167,7 +198,8 @@ def refresh_gpt_evidence(
         raw, _ = _require_unresolved(session, raw_id)
         run = session.get(SchedulerRun, parsed.scheduler_run_id)
         assert run is not None
-        receipt = _refreshes(run).get(str(raw_id), {})
+        origin_id = _refresh_origin_id(session, run, raw_id)
+        receipt = _refreshes(run).get(str(origin_id), {})
         attempts = receipt.get("attempts", 0) if isinstance(receipt, dict) else None
         if (not isinstance(receipt, dict) or type(attempts) is not int
                 or not 0 <= attempts < MAX_REFRESHES):
@@ -186,41 +218,68 @@ def refresh_gpt_evidence(
         anchor = _candidate(raw)
     # Внешнее подпроцессное объявление URL не становится доказательством до сбора.
     # Надёжная связь источников берётся из тех же правил, что и обычная редакционная пачка.
-    articles = asyncio.run(_collect(planned))
-    if len(articles) != len(planned) or any(
-        not same_event(anchor, _collected_candidate(item)) for item in articles
+    collected = asyncio.run(_collect(planned))
+    if len(collected) != len(planned):
+        raise FallbackValidationError("Сборщик не вернул результаты для всех адресов")
+    original_unavailable = isinstance(collected[0], SourceUnavailableError)
+    articles = [item for item in collected if isinstance(item, CollectedArticle)]
+    if not original_unavailable and (
+        len(articles) != len(planned)
+        or any(not same_event(anchor, _collected_candidate(item)) for item in articles)
     ):
-        raise FallbackValidationError("Найденный документ относится к другому событию")
+        raise FallbackValidationError("Снимок события неполный или не совпадает с заданием")
     with Session(engine) as session:
         now = now or datetime.now(UTC)
         validate_fallback_candidate(session, payload.request, raw_id, now=now)
         raw, _ = _require_unresolved(session, raw_id)
-        if (articles[0].source_id, articles[0].external_id) != (raw.source_id, raw.external_id):
-            raise FallbackValidationError("Сборщик вернул новый ID исходного материала")
-        for config, _ in alternatives:
-            sync_source(session, profile.city_id, config)
-        written, revisions = capture_collected_batch(session, articles)
-        if written != len(articles) or revisions:
-            raise FallbackValidationError("Пересъём затронул ранее проверенный снимок")
-        refreshed = _candidate_request(session, raw_id, profile=profile, registry=registry, now=now)
+        target_id = raw_id
+        if original_unavailable:
+            if origin_id != raw_id:
+                raise FallbackValidationError("Ранее выбранный первоисточник недоступен")
+            replacement = next((item for item in articles if can_replace_source(
+                session, original=raw, replacement=item, config=registry[item.source_id],
+                now=now, profile=profile,
+            )), None)
+            if replacement is None:
+                raise FallbackValidationError("Нет доступного проверенного первоисточника события")
+            target_id = record_source_replacement(
+                session, original=raw, replacement=replacement,
+                config=registry[replacement.source_id], now=now, profile=profile,
+            )
+            articles = [replacement]
+        else:
+            if (articles[0].source_id, articles[0].external_id) != (raw.source_id, raw.external_id):
+                raise FallbackValidationError("Сборщик вернул новый ID исходного материала")
+            for config, _ in alternatives:
+                sync_source(session, profile.city_id, config)
+            written, revisions = capture_collected_batch(session, articles)
+            if written != len(articles) or revisions:
+                raise FallbackValidationError("Пересъём затронул ранее проверенный снимок")
+        refreshed = _candidate_request(
+            session, target_id, profile=profile, registry=registry, now=now,
+        )
         all_urls = {canonicalize_url(doc["url"]) for doc in refreshed["documents"]}
         if any(canonicalize_url(item.url) not in all_urls for item in articles):
             raise FallbackValidationError("Сборщик не связал все документы с исходным событием")
         run = session.get(SchedulerRun, parsed.scheduler_run_id)
         assert run is not None
         old = _refreshes(run)
-        current_anchor = next(doc for doc in refreshed["documents"] if doc["raw_item_id"] == raw_id)
-        run.details = {**run.details, "gpt_evidence_refresh": {**old, str(raw_id): {
+        current_anchor = next(doc for doc in refreshed["documents"]
+                              if doc["raw_item_id"] == target_id)
+        replacement_scope = ({"replacement_raw_item_id": target_id}
+                             if target_id != origin_id else {})
+        run.details = {**run.details, "gpt_evidence_refresh": {**old, str(origin_id): {
             "attempts": attempts + 1,
             "request_sha256": payload.result.request_sha256,
             "anchor_sha256": _digest(current_anchor),
             "sources": len(refreshed["documents"]),
+            **replacement_scope,
         }}}
         request = {**payload.request, "candidates": [refreshed], "created_at": now.isoformat(),
                    "writing_brief": writing_brief(profile, now)}
         _bounded_json(request)
         # Прогнать тот же валидатор, который позже примет независимо проверенный пакет.
         session.flush()
-        validate_fallback_candidate(session, request, raw_id, now=now)
+        validate_fallback_candidate(session, request, target_id, now=now)
         session.commit()
     return request

@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from .models import RiskClass
 
 CURRENT_EDITORIAL_RULE_VERSION = "belgrade-editorial-v2"
+SOURCE_REPLACED_REASON = "unavailable_source_replaced"
 
 # Владелец19ноября2026 разрешил низкорисковые культуру, спорт и городские истории.
 # Категории риска и проверка источников применяются независимо от этого списка.

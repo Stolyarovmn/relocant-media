@@ -17,7 +17,11 @@ from relocant_media.ai.package import StrictModel, canonical_json
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.freshness import evidence_freshness
 from relocant_media.scheduler.models import SchedulerRun
-from relocant_media.services.editorial import _reviewed_event_item, _snapshot_member
+from relocant_media.services.editorial import (
+    _reviewed_event_item,
+    _snapshot_member,
+    source_replacement_target,
+)
 from relocant_media.services.gpt_fallback import (
     MAX_CANDIDATES,
     REQUEST_TTL,
@@ -29,6 +33,7 @@ from relocant_media.services.gpt_fallback import (
     _registry,
     _utc,
     build_request,
+    refresh_target,
 )
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.models import EditorialRun, RawItem, Source
@@ -194,7 +199,8 @@ def pending_batch_ids(session: Session, *, now: datetime) -> set[int]:
                 for raw_id in details["gpt_selected_ids"]:
                     digest = (refreshed_anchor_sha256(run, raw_id)
                               or details["gpt_evidence_sha256"][str(raw_id)])
-                    ranked_hashes.setdefault(raw_id, set()).add(digest)
+                    target = refresh_target(session, run, raw_id)
+                    ranked_hashes.setdefault(target, set()).add(digest)
             else:
                 waiting.update(candidates)
         ids = waiting | ranked_hashes.keys()
@@ -319,7 +325,10 @@ def build_ranked_request(
             raise FallbackValidationError("Ранжирование GPT ещё не принято")
         profile = load_city_profile("belgrade")
         registry = _registry()
-        current = _briefs(session, selected, now=now, profile=profile, registry=registry)
+        targets = {origin: refresh_target(session, run, origin) for origin in selected}
+        current = _briefs(
+            session, list(targets.values()), now=now, profile=profile, registry=registry,
+        )
         original = {brief["raw_item_id"]: brief for brief in batch_request["candidates"]}
         candidates: list[dict[str, Any]] = []
         request = {
@@ -335,7 +344,10 @@ def build_ranked_request(
         }
         # Защищённые темы уже заняли часть исходного лимита. Если полный
         # разбор у Gemini тоже упал, дать их GPT вместе с выбранными темами.
-        protected_ids = set(run.details["batch_preselection"].get("full_review_ids", []))
+        protected_ids = {
+            source_replacement_target(session, origin) or refresh_target(session, run, origin)
+            for origin in run.details["batch_preselection"].get("full_review_ids", [])
+        }
         if protected_ids:
             protected = build_request(session, now=now, scheduler_run_id=run.id)
             if protected is not None:
@@ -348,12 +360,15 @@ def build_ranked_request(
                         break
                     except ValueError:
                         candidates.pop()
-        for raw_id in selected:
+        used = {candidate["raw_item_id"] for candidate in candidates}
+        for origin_id, raw_id in targets.items():
+            if raw_id in used:
+                continue
             if raw_id not in current:
                 continue
-            refreshed = refreshed_anchor_sha256(run, raw_id)
+            refreshed = refreshed_anchor_sha256(run, origin_id)
             if (current[raw_id]["evidence_sha256"] != refreshed if refreshed is not None
-                    else current[raw_id] != original[raw_id]):
+                    else current[raw_id] != original[origin_id]):
                 continue
             item = session.get(RawItem, raw_id, populate_existing=True)
             assert item is not None
@@ -372,4 +387,6 @@ def build_ranked_request(
                 _bounded_json(request)
             except ValueError:
                 candidates.pop()
+            else:
+                used.add(raw_id)
         return request if candidates else None

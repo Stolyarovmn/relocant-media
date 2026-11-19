@@ -18,6 +18,7 @@ from relocant_media.ai.jev import jev_enabled, rank_shadow
 from relocant_media.domain.freshness import GUIDE_SOURCE_TYPE
 from relocant_media.ops.candidates_cli import aware_datetime, select_candidates
 from relocant_media.scheduler.models import SchedulerRun
+from relocant_media.services.editorial import source_replacement_target
 from relocant_media.storage.models import EditorialRun, RawItem, Source, SourceRevision
 from relocant_media.storage.primary_lock import primary_lock
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
@@ -225,14 +226,20 @@ def run_cycle(
                     frame = error.__traceback__
                     while frame is not None and frame.tb_next is not None:
                         frame = frame.tb_next
-                    processing_errors.append({"raw_item_id": raw_id,
+                    with Session(engine) as session:
+                        failed_id = source_replacement_target(session, raw_id) or raw_id
+                    processing_errors.append({"raw_item_id": failed_id,
                         "error_type": type(error).__name__,
                         "error_site": (f"{Path(frame.tb_frame.f_code.co_filename).name}:"
                                        f"{frame.tb_lineno}" if frame is not None else "unknown")})
                     continue
                 (output / f"editorial-{raw_id}.json").write_text(
                     json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-                processed.append(raw_id)
+                if result.get("replaced_unavailable_raw_item_id") == raw_id:
+                    with Session(engine) as session:
+                        raw_id = source_replacement_target(session, raw_id) or raw_id
+                if raw_id not in processed:
+                    processed.append(raw_id)
             with Session(engine) as session:
                 remaining = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
