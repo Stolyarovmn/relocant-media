@@ -1,7 +1,7 @@
 """Import independently reviewed packages without AI clients or Telegram effects."""
 
 import hashlib
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -20,6 +20,7 @@ from relocant_media.services.editorial import (
     _snapshot_member,
     _timestamp,
 )
+from relocant_media.services.material_lifecycle import LifecycleBlockedError, ensure_not_terminal
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
     eligible_map_hold,
@@ -62,6 +63,11 @@ def import_package(
         ):
             raise PackageConflictError("raw evidence changed")
         existing = session.get(EditorialRun, item.id)
+        if existing is None or existing.delivery_status != "sent":
+            try:
+                ensure_not_terminal(session, item.id, now=now or datetime.now(UTC))
+            except LifecycleBlockedError as error:
+                raise PackageConflictError(str(error)) from error
         replacing = bool(existing is not None and package.version == 2 and (
             (replace_empty_hold and eligible_empty_policy_hold(session, item.id, now=now))
             or (replace_map_hold and (eligible_map_hold(session, item.id, now=now)

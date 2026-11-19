@@ -12,7 +12,6 @@ from decimal import Decimal
 from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
-import httpx
 from pydantic import ValidationError
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.engine import CursorResult, Engine
@@ -52,6 +51,13 @@ from relocant_media.services.editorial import (
     _snapshot_member,
 )
 from relocant_media.services.followup import revision_reply_target
+from relocant_media.services.material_lifecycle import (
+    LifecycleBlockedError,
+    after_result,
+    before_owner_delivery_attempt,
+    delivery_failure,
+    ensure_not_terminal,
+)
 from relocant_media.services.owner_review_prepare import (
     REVIEWED_STATES,
     assert_primary_evidence,
@@ -199,6 +205,13 @@ def record_owner_callback(
     )
     if review is None:
         return OwnerUpdateResult(True, False, "Эта версия ревью не найдена.")
+    try:
+        raw_id = review.payload.get("raw_item_id")
+        if type(raw_id) is not int:
+            return OwnerUpdateResult(True, False, "Материал ревью не найден.")
+        ensure_not_terminal(session, raw_id, now=datetime.now(UTC))
+    except LifecycleBlockedError:
+        return OwnerUpdateResult(True, False, "Материал закрыт или срок его обработки истёк.")
     if review.status != "pending":
         answer = "Эта версия уже обработана. Используй последнее сообщение ревью."
         if (review.status == "revision_requested" and match.group(1) == "revise"
@@ -261,6 +274,13 @@ def record_owner_reply(
     )
     if review is None or review.payload.get("owner_chat_id") != owner_chat_id:
         return None
+    try:
+        raw_id = review.payload.get("raw_item_id")
+        if type(raw_id) is not int:
+            return OwnerUpdateResult(True, False)
+        ensure_not_terminal(session, raw_id, now=datetime.now(UTC))
+    except LifecycleBlockedError:
+        return OwnerUpdateResult(True, False, "Материал закрыт или срок его обработки истёк.")
     if review.status != "pending":
         return OwnerUpdateResult(True, False)
     body = message.get("text", message.get("caption", ""))
@@ -282,6 +302,10 @@ def _validated_pending_package(
     now: datetime | None = None,
 ) -> tuple[EditorialRun, Post, RawItem, Source, EditorialPackage]:
     now = now or datetime.now(UTC)
+    try:
+        ensure_not_terminal(session, raw_item_id, now=now)
+    except LifecycleBlockedError as error:
+        raise DeliveryBlockedError(str(error)) from error
     run = session.get(EditorialRun, raw_item_id, populate_existing=True)
     if run is None or run.delivery_status != "pending" or "_package" not in run.outcome:
         raise DeliveryBlockedError("pending reviewed package is required")
@@ -1106,7 +1130,12 @@ async def process_owner_actions(
             recovering = review.status == "publish_blocked"
             try:
                 run, post, _, _, package = _validated_pending_package(session, raw_item_id)
-            except (DeliveryBlockedError, ValueError):
+            except (DeliveryBlockedError, ValueError) as error:
+                if (isinstance(error, LifecycleBlockedError)
+                        or isinstance(error.__cause__, LifecycleBlockedError)):
+                    # Реальное решение владельца остаётся в истории после закрытия ledger.
+                    stats["blocked"] += 1
+                    continue
                 if not recovering:
                     _mark_stale(session, review)
                 continue
@@ -1171,9 +1200,20 @@ async def process_owner_actions(
             if not publish_enabled:
                 stats["deferred"] += 1
                 continue
+            claimed = before_owner_delivery_attempt(
+                session, raw_item_id, now=datetime.now(UTC),
+                validated_legacy_review_id=review.id if recovering else None,
+            )
+            # Бюджет и аренда сохраняются до внешней проверки первоисточника.
+            session.commit()
+            if not claimed:
+                stats["deferred"] += 1
+                continue
             try:
                 live = live_document_fetcher(package)
-            except (ValueError, httpx.HTTPError):
+            except Exception as error:
+                delivery_failure(session, raw_item_id, type(error).__name__, now=datetime.now(UTC))
+                session.commit()
                 stats["deferred"] += 1
                 continue
             try:
@@ -1202,7 +1242,8 @@ async def process_owner_actions(
                         "publish_block_reason": "source_changed" if changed else "delivery_guard",
                         "blocked_at": _now_iso(),
                     }
-                    session.commit()
+                delivery_failure(session, raw_item_id, type(error).__name__, now=datetime.now(UTC))
+                session.commit()
                 await _send_notice(
                     bot,
                     owner_chat_id,
@@ -1211,7 +1252,15 @@ async def process_owner_actions(
                     reply_to=review.telegram_message_id,
                 )
                 stats["blocked"] += 1
+            except Exception as error:
+                # deliver_owner_approved уже сохранил uncertain после неясной отправки.
+                session.rollback()
+                delivery_failure(session, raw_item_id, type(error).__name__, now=datetime.now(UTC))
+                session.commit()
+                stats["blocked"] += 1
             else:
+                after_result(session, raw_item_id, now=datetime.now(UTC))
+                session.commit()
                 stats["published"] += 1
                 await _send_notice(
                     bot, owner_chat_id,

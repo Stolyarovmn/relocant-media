@@ -204,6 +204,9 @@ class ServerAI:
                   "Не выдумывай отсутствующие детали, не выдавай медицинские обещания "
                   "и обычные скидки/пакеты проживания за городское событие. ")
         policy += title_instruction()
+        if task == "audit_rejection":
+            policy += ("Исключение для evidence_refs: quote сохраняй дословно на языке "
+                       "источника, иначе доказательство недействительно. Причину пиши по-русски. ")
         if task == "rank":
             profile = load_city_profile("belgrade")
             categories = sorted({category for rubric in profile.rubrics
@@ -1207,6 +1210,11 @@ async def publish_pending(
 ) -> list[int]:
     if not enabled or only_raw_ids == set():
         return []
+    from relocant_media.services.material_lifecycle import (
+        after_result,
+        before_delivery_attempt,
+        delivery_failure,
+    )
     with Session(engine) as session:
         query = select(EditorialRun.raw_item_id).where(
             EditorialRun.delivery_status == "pending",
@@ -1226,14 +1234,25 @@ async def publish_pending(
                 assert run is not None
                 if run.outcome.get("status") != "ready" or "_package" not in run.outcome:
                     continue
+                allowed = before_delivery_attempt(session, raw_id, now=datetime.now(UTC))
+                session.commit()
+                if not allowed:
+                    continue
+
+                def failed(error_type: str, failed_id: int = raw_id) -> None:
+                    delivery_failure(session, failed_id, error_type, now=datetime.now(UTC))
+                    session.commit()
+
                 try:
                     package = EditorialPackage.model_validate_json(
                         json.dumps(run.outcome["_package"]))
                 except ValueError:
+                    failed("InvalidStoredPackage")
                     if blocked is not None:
                         blocked.append({"raw_item_id": raw_id, "reason": "invalid_stored_package"})
                     continue
                 if package.version != 2:
+                    failed("UnsupportedPackageVersion")
                     continue
                 assert package.event is not None
                 item = session.get(RawItem, raw_id)
@@ -1243,6 +1262,7 @@ async def publish_pending(
                     published_at_precision=item.published_at_precision,
                     timezone_name=load_city_profile(package.city).timezone)
                 if fresh.action != "keep":
+                    failed("SourceFreshnessExpired")
                     if blocked is not None:
                         blocked.append({"raw_item_id": raw_id, "reason": fresh.reason})
                     continue
@@ -1255,6 +1275,7 @@ async def publish_pending(
                            for a, b in zip(live, package.event.documents, strict=True)):
                         raise ValueError("live source changed before delivery")
                 except (ValueError, httpx.HTTPError) as error:
+                    failed(type(error).__name__)
                     if blocked is not None:
                         blocked.append({"raw_item_id": raw_id,
                                         "reason": "live_source_check_failed",
@@ -1264,11 +1285,19 @@ async def publish_pending(
                     result = await deliver_reviewed(session, raw_id, publisher,
                         target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
                 except DeliveryBlockedError as error:
+                    failed(type(error).__name__)
                     if blocked is not None:
                         blocked.append({"raw_item_id": raw_id, "reason": "delivery_guard_blocked",
                                         "error_type": type(error).__name__})
                     continue
+                except Exception as error:
+                    # После захвата sending транспорт сам сохраняет uncertain.
+                    # Следующий запуск не имеет права повторять такую отправку.
+                    failed(type(error).__name__)
+                    raise
                 assert result.message_id is not None
+                after_result(session, raw_id, now=datetime.now(UTC))
+                session.commit()
                 sent.append(result.message_id)
     return sent
 
@@ -1355,9 +1384,22 @@ def main() -> None:
         gpt_fallback_enabled = (
             not args.submissions_only and os.environ.get("EDITORIAL_GPT_FALLBACK_ENABLED") == "true"
         )
+        from relocant_media.services.material_lifecycle_runtime import MaterialLifecycleRuntime
+
+        lifecycle = MaterialLifecycleRuntime(engine, "belgrade", provider)
+
+        def lifecycle_due() -> tuple[list[int], set[int]]:
+            sweep = lifecycle.reconcile()
+            scope["lifecycle_fallback_ids"] = set(sweep.fallback_ids)
+            return [*sweep.rejection_audit_ids, *sweep.due_ids], set(sweep.excluded_ids)
+
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=ingest,
-            process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output),
+            process=lambda raw_id: lifecycle.process(raw_id,
+                lambda selected_id: prepare_reviewed(engine, selected_id,
+                    lifecycle.provider_for(selected_id), args.output)),
+            lifecycle_due=lifecycle_due,
+            lifecycle_fallback_items=lambda: set(scope.get("lifecycle_fallback_ids", set())),
             limit=PROCESS_LIMIT,
             preselect=None if args.submissions_only else preselect,
             locality_aliases=load_city_profile("belgrade").geography.city_aliases,

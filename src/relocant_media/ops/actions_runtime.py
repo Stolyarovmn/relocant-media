@@ -49,6 +49,7 @@ from relocant_media.ops.sqlite_restore import restore
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient, _state_digest
 from relocant_media.ops.vercel_inbox import acknowledge_inbox, ingress_config, sequence_cursor
 from relocant_media.services.cloud_discovery import batch_receipt, ingest_batch, parse_batch
+from relocant_media.services.material_lifecycle import sweep_materials
 
 REPO = "Stolyarovmn/relocant-media"
 STATE_BRANCH = "editorial-state"
@@ -63,6 +64,17 @@ MODES = {
     "preview", "editorial", "intake", "discovery", "auto", "fallback-preview", "fallback",
     "map-backfill", "map-republish", "map-republish-review", "digest", "digest-preview",
 }
+
+
+def _sweep_material_lifecycle(database: Path, *, now: datetime | None = None) -> None:
+    """Только канонический писатель, после CAS; без моделей и сетевых действий."""
+    engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
+    try:
+        with Session(engine) as session:
+            sweep_materials(session, city="belgrade", now=now or datetime.now(UTC))
+            session.commit()
+    finally:
+        engine.dispose()
 
 
 def _gpt_digest(value: object) -> str:
@@ -702,6 +714,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     busy = _busy_state(state, environment)
     attempt = busy["attempt"]
     busy_sha = store.write(busy, sha)
+    _sweep_material_lifecycle(database)
     directory = database.parent
     intake_state = directory / "intake-batch-state.json"
     intake_state.write_text(json.dumps(state.get("intake_state", {})), encoding="utf-8")
@@ -767,6 +780,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     # A signal/forced termination has uncertain effects: do not unlock even if bytes survived.
     if code < 0:
         raise RuntimeError("runtime terminated; reconcile busy generation")
+    _sweep_material_lifecycle(database)
     _runtime_phase("snapshot_started")
     manifest = create_snapshot(database, work / "saved")
     manifest["drive_file_id"] = (state["snapshot"]["drive_file_id"]

@@ -38,10 +38,12 @@ def editorial_session() -> Iterator[Session]:
     engine = create_engine(url)
     reset = text("TRUNCATE editorial_run, post, raw_item, source RESTART IDENTITY CASCADE")
     with Session(engine) as session:
+        session.execute(text("DELETE FROM scheduler_run WHERE task_type='material_lifecycle'"))
         session.execute(reset)
         session.commit()
         yield session
         session.rollback()
+        session.execute(text("DELETE FROM scheduler_run WHERE task_type='material_lifecycle'"))
         session.execute(reset)
         session.commit()
     engine.dispose()

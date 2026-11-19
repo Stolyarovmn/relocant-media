@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -5,7 +7,7 @@ from test_private_intake import engine as _engine
 
 from relocant_media.services.owner_review import OWNER_REVIEW_KIND
 from relocant_media.services.private_intake import receive_private_tips
-from relocant_media.storage.models import Submission, TelegramUpdateReceipt
+from relocant_media.storage.models import RawItem, Source, Submission, TelegramUpdateReceipt
 
 engine = _engine
 OWNER = 9001
@@ -40,6 +42,21 @@ class OwnerBot:
 
 
 def _review(session: Session, *, message_id: int = 501) -> Submission:
+    if session.get(RawItem, 777) is None:
+        if session.get(Source, "owner-routing-test") is None:
+            session.add(Source(
+                id="owner-routing-test", city="belgrade", name="Тестовый официальный источник",
+                url="https://example.test", source_type="official", trust=1,
+                ownership="official", auto_publish=False, high_risk=True, enabled=True,
+            ))
+            session.flush()
+        session.add(RawItem(
+            id=777, source_id="owner-routing-test", external_id="owner-routing-777",
+            url="https://example.test/owner-routing-777", title="Материал на согласовании",
+            body="Синтетический материал для проверки маршрутизации действий владельца.",
+            published_at=datetime.now(UTC), published_at_precision="instant",
+        ))
+        session.flush()
     review = Submission(
         kind=OWNER_REVIEW_KIND,
         telegram_user_id=OWNER,
