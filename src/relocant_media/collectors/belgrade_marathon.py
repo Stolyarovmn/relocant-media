@@ -80,10 +80,20 @@ class BelgradeMarathonCollector:
     async def collect_url(self, url: str) -> RawItem:
         if url not in {MARATHON_PAGE_URL, MARATHON_PAGE_URL.rstrip("/")}:
             raise ValueError("Адрес программы полумарафона отсутствует в реестре")
-        async with asyncio.timeout(36), asyncio.TaskGroup() as group:
-            page = group.create_task(self._fetch(MARATHON_PAGE_URL, max_bytes=MAX_HTML_BYTES))
-            map_data = group.create_task(self._fetch(MARATHON_KML_URL, max_bytes=300_000))
-        return parse_marathon_program(page.result(), map_data.result())
+        try:
+            async with asyncio.timeout(36):
+                page, map_data = await asyncio.gather(
+                    self._fetch(MARATHON_PAGE_URL, max_bytes=MAX_HTML_BYTES),
+                    self._fetch(MARATHON_KML_URL, max_bytes=300_000),
+                    return_exceptions=True,
+                )
+        except TimeoutError as error:
+            raise httpx.ReadTimeout("Истёк срок сбора программы и карты") from error
+        if isinstance(page, BaseException):
+            raise page
+        if isinstance(map_data, BaseException):
+            raise map_data
+        return parse_marathon_program(page, map_data)
 
     async def collect(self) -> list[RawItem]:
         return [await self.collect_url(MARATHON_PAGE_URL)]
