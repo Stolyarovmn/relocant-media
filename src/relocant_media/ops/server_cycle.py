@@ -372,7 +372,10 @@ async def fetch_public_article(
                        approved_image_hosts=("static.beograd.rs",))
     if config.id == "cukarica_news":
         return await CukaricaNewsCollector(config, client).collect_url(url)
-    item = await _collect_exact_url(build_collector(config, client), url)
+    collector = build_collector(config, client)
+    if isinstance(collector, VenueFeedCollector):
+        return await collector.collect_url(url, require_page=True)
+    item = await _collect_exact_url(collector, url)
     if not isinstance(item, CollectedRawItem):
         raise ValueError("live collector did not return an article")
     return item

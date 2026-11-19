@@ -1,12 +1,14 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.collectors.beograd_article import parse_beograd_article
+from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.dedup import EventCandidate
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops import server_cycle
@@ -54,6 +56,30 @@ def test_city_arts_parser_preserves_publish_time_and_excludes_calendar_widget():
     assert article.published_at is not None and article.published_at.day == 19
     assert article.published_at_precision == "day"
     assert article.body == "Otvaranje će biti 20. novembra u 19 sati."
+
+
+@pytest.mark.asyncio
+async def test_exact_page_fetch_can_read_live_article_while_rss_is_unavailable():
+    config = next(source for source in server_cycle.load_source_registry(server_cycle.SOURCES)
+                  if source.id == "media_nova")
+    direct = "https://nova.rs/kultura/stara-galerija/"
+    calls = []
+
+    def response(request):
+        calls.append(str(request.url))
+        if str(request.url) != direct:
+            return httpx.Response(503)
+        return httpx.Response(200, text=(
+            '<meta property="article:published_time" content="2026-11-17T13:55:14Z">'
+            '<h1>Gradska galerija otvara novu salu</h1><article><p>'
+            + "Nova sala prikazuje dela iz gradske umetničke zbirke. " * 4
+            + "</p></article>"
+        ))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        item = await VenueFeedCollector(config, client).collect_url(direct, require_page=True)
+    assert calls == [config.extraction.feed_url, direct]
+    assert item.url == direct and item.published_at is not None
 
 
 @pytest.mark.parametrize("failure", [SourceUnavailableError("media_nova"), ValueError("parser")])
