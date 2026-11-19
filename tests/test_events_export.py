@@ -140,6 +140,18 @@ def session():
     engine.dispose()
 
 
+@pytest.mark.parametrize("category", ["events", "culture", "sport"])
+def test_reviewed_attendance_map_does_not_depend_on_old_events_category(session, category):
+    item, run, post, payload = seed(session)
+    payload["outcome"]["ranking"]["category"] = category
+    post.category = category
+    persist_package(run, payload)
+    session.commit()
+    feed = export_events(session, observed_at=NOW)
+    assert len(feed.events) == 1
+    assert feed.events[0].post_url == "https://t.me/eduvbelgrad/100"
+
+
 def test_feed_only_exposes_allowlisted_published_fields_and_keeps_archive_id(session):
     item, run, post, payload = seed(session)
     first = export_events(session, observed_at=NOW)

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import PublicationStatus
 from relocant_media.ai.package import EditorialPackage, canonical_json, evaluate_package
+from relocant_media.domain.audience import READER_VALUE_POLICY_VERSION
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
 from relocant_media.services.editorial import (
@@ -22,6 +23,7 @@ from relocant_media.services.editorial import (
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
     eligible_map_hold,
+    eligible_reader_category_hold,
     policy_hold_audit,
 )
 from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
@@ -62,7 +64,8 @@ def import_package(
         existing = session.get(EditorialRun, item.id)
         replacing = bool(existing is not None and package.version == 2 and (
             (replace_empty_hold and eligible_empty_policy_hold(session, item.id, now=now))
-            or (replace_map_hold and eligible_map_hold(session, item.id, now=now))
+            or (replace_map_hold and (eligible_map_hold(session, item.id, now=now)
+                                     or eligible_reader_category_hold(session, item.id, now=now)))
         ))
         if existing is not None and not replacing:
             # Both historical single-document runs and new bundles must keep
@@ -135,7 +138,8 @@ def import_package(
         if replacing:
             assert existing is not None
             saved_outcome["_previous_policy_hold"] = policy_hold_audit(existing)
-            saved_outcome["_autonomous_assessment"] = {"reviewed_package": True}
+            saved_outcome["_autonomous_assessment"] = {
+                "reviewed_package": True, "reader_value_policy": READER_VALUE_POLICY_VERSION}
             run = existing
             run.evidence = evidence
             run.outcome = saved_outcome

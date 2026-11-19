@@ -29,6 +29,7 @@ from relocant_media.ai.selection import selection_reason
 from relocant_media.domain.audience import (
     audience_relevance_reason,
     local_flight_change,
+    local_reader_interest,
     local_utility_notice,
 )
 from relocant_media.domain.city_profile import CityEditorialProfile
@@ -228,6 +229,19 @@ class EditorialPipeline:
             reason = (selection_reason(ranking, profile, documents, evergreen=evergreen)
                       if ranking.should_process else None)
             corrections = []
+            if not ranking.should_process and any(
+                local_reader_interest(d.title, d.body, profile.geography.city_aliases)
+                for d in documents
+            ):
+                corrections.append(
+                    "Повторно оцени местную культуру, спорт или городскую историю по "
+                    "understanding, experience и connection, а не только action. "
+                    "Результат местного клуба и содержательная история не требуют бытовой "
+                    "инструкции; для city_life проверь совместимые категории профиля. "
+                    "Далёкая дата концерта не исключает актуальную продажу билетов. "
+                    "Дубликат, истёкший повод и отсутствие существенного интереса по-прежнему "
+                    "могут обосновывать отказ. Не выдумывай пользу и не меняй категорию риска."
+                )
             if reason == "selection_ungrounded_evidence":
                 corrections.append(CITATION_RETRY_NOTE)
             if expected_category and (not ranking.should_process

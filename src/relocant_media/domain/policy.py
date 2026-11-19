@@ -4,6 +4,10 @@ from .models import RiskClass
 
 CURRENT_EDITORIAL_RULE_VERSION = "belgrade-editorial-v2"
 
+# Владелец19ноября2026 разрешил низкорисковые культуру, спорт и городские истории.
+# Категории риска и проверка источников применяются независимо от этого списка.
+AUTO_PUBLISH_CATEGORIES = frozenset({"transport", "events", "culture", "sport", "city"})
+
 HIGH_RISK_CATEGORIES = {
     "immigration",
     "law",

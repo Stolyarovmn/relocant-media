@@ -6,6 +6,23 @@ from urllib.parse import urlsplit
 from relocant_media.domain.attention import normalize
 
 AUDIENCE_POLICY_VERSION = "belgrade-audience-v1"
+READER_VALUE_POLICY_VERSION = "reader-value-v2"
+
+
+def local_reader_interest(title: str, body: str, city_aliases: tuple[str, ...]) -> bool:
+    """Повод для повторного рассмотрения, не автоматическое одобрение новости."""
+    text = normalize(title + "\n" + body[:1200])
+    local = any(re.search(r"(?<!\w)" + re.escape(normalize(alias)) + r"\w*", text)
+                for alias in city_aliases)
+    return local and re.search(
+        r"koncert|festival|izlož|muzej|kultur|pozori|istorij|истори|театр|культур|выстав|музе|"
+        r"sport|sports|vaterpol|košark|fudbal|liga|utakmic|klub|"
+        r"спорт|ватерпол|кошарк|фудбал|клуб|матч|лиг|жител|stanovnik|komšij|inicijativ|"
+        r"фестивал|концерт|позориш|становник|комшиј|иницијатив",
+        text, re.IGNORECASE,
+    ) is not None
+
+
 _PROCUREMENT = re.compile(
     r"\b(?:јавн\w*\s+набав\w*|javn\w*\s+nabav\w*|"
     r"гос(?:ударственн\w*)?\s*закуп\w*|public\s+procurement)\b", re.IGNORECASE)

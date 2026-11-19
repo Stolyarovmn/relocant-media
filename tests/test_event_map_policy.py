@@ -13,6 +13,7 @@ def presentation(version=5, **maps):
     ("events", "Arab Strap выступят в Zappa Baza", "Когда: 24 ноября.\nПлощадка: Zappa Baza."),
     ("culture", "В галерее открылась выставка", "Посетителей ждут сегодня."),
     ("events", "Вечер музыки", "Где: Dom omladine Beograda"),
+    ("sport", "В Белграде пройдёт баскетбольный матч", "Билеты: в кассе."),
 ])
 def test_physical_event_requires_verified_mini_app_place(category, title, body):
     assert event_map_review_reason(presentation(), category, title, body) == (
@@ -38,3 +39,12 @@ def test_historical_hashes_remain_compatible_but_pending_delivery_is_checked():
         "В Zappa Baza") == "event_place_requires_verification"
     assert event_map_review_reason(presentation(), "events", "Онлайн-концерт",
         "Формат: полностью онлайн.") is None
+
+
+@pytest.mark.parametrize("category,title,body", [
+    ("sport", "Нови-Београд уступил Барселонете 17:18", "Итог домашнего матча."),
+    ("culture", "В Белграде прошёл фестиваль", "Итоги и новые работы участников."),
+    ("city", "История белградского двора", "Как жители сохраняют память района."),
+])
+def test_story_or_result_does_not_require_invented_visitor_place(category, title, body):
+    assert event_map_review_reason(presentation(), category, title, body) is None

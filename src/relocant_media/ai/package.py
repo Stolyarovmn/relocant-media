@@ -29,7 +29,7 @@ from relocant_media.ai.models import (
 )
 from relocant_media.ai.pipeline import _citations_are_grounded, _verification_map
 from relocant_media.domain.editorial_products import EditorialPresentation
-from relocant_media.domain.policy import requires_human_review
+from relocant_media.domain.policy import AUTO_PUBLISH_CATEGORIES, requires_human_review
 
 
 class StrictModel(BaseModel):
@@ -236,7 +236,7 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     if status == PublicationStatus.READY:
         status, reason = PublicationStatus.HUMAN_REVIEW, "package_requires_review"
         eligible = (
-            package.outcome.ranking.category.strip().lower() in {"transport", "events"}
+            package.outcome.ranking.category.strip().lower() in AUTO_PUBLISH_CATEGORIES
             and package.outcome.ranking.should_process
             and not requires_human_review(outcome.ranking.category, confidence)
             and all(
