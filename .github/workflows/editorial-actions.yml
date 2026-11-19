@@ -26,7 +26,7 @@ on:
         type: string
         required: false
       fallback_blob_sha256:
-        description: SHA256 of the private GPT result (fallback or map-republish)
+        description: SHA256 of the private GPT result or evidence refresh request
         type: string
         required: false
       fallback_cycle_id:

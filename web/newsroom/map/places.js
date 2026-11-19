@@ -1,10 +1,16 @@
 import {
   clusterMapPoints, incidentTimes, launchPlaces, placeCountdown, placeOptionLabel, placeStatus, readPlaces,
   straightLineDistance, updateStamp,
-} from "./core.js?v=11";
+} from "./core.js?v=12";
 import { calendarLink } from "./calendar.js?v=4";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
+const courseStyles = [
+  { color: "#076342", weight: 7 },
+  { color: "#5827a9", weight: 4, dashArray: "9 7" },
+  { color: "#155a9a", weight: 4, dashArray: "3 6" },
+  { color: "#9c3c02", weight: 4, dashArray: "12 5 3 5" },
+];
 
 function distanceLabel(origin, place) {
   const meters = straightLineDistance(origin, place);
@@ -68,6 +74,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   const locationStatus = byId("location-status");
   const leaflet = globalThis.L;
   const layer = map ? leaflet.layerGroup().addTo(map) : null;
+  const courseLayer = map ? leaflet.layerGroup().addTo(map) : null;
   const state = {
     entries: [], selected: "", pending: "", group: "", enabled: false, loading: false,
     loaded: false, failed: false, stamp: "", origin: null,
@@ -140,7 +147,35 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     detail.replaceChildren(close, make("h3", "", place.title), ...describe(place, now));
     if (place.address && place.address !== place.venue) detail.append(make("p", "place-address", place.address));
     if (place.venueNote) detail.append(make("p", "place-address", place.venueNote));
+    if (place.courses.length) {
+      const legend = make("ul", "place-course-legend");
+      legend.setAttribute("aria-label", "Трассы на карте");
+      for (const [index, course] of place.courses.entries()) {
+        const style = courseStyles[index];
+        const sample = make("i", "place-course-sample");
+        sample.setAttribute("aria-hidden", "true");
+        sample.style.color = style.color;
+        sample.style.borderTopStyle = style.dashArray ? "dashed" : "solid";
+        const item = make("li");
+        item.append(sample, make("span", "", course.name));
+        legend.append(item);
+      }
+      detail.append(legend);
+    }
     detail.append(links);
+  }
+
+  function renderCourses(place) {
+    if (!courseLayer) return;
+    courseLayer.clearLayers();
+    if (!place) return;
+    // Общая светлая подложка сохраняет контраст на светлой и цветной карте.
+    for (const { latLngs } of place.courses) {
+      leaflet.polyline(latLngs, { color: "#fffdf9", weight: 10, interactive: false }).addTo(courseLayer);
+    }
+    for (const [index, { latLngs }] of place.courses.entries()) {
+      leaflet.polyline(latLngs, { ...courseStyles[index], interactive: false }).addTo(courseLayer);
+    }
   }
 
   function mark(places, zoom) {
@@ -204,7 +239,9 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     }
     count.textContent = state.loaded ? String(entries.length) : "";
     list.replaceChildren(...entries.map((place) => card(place, now)));
-    renderDetail(entries.find((place) => place.id === state.selected), now);
+    const selected = entries.find((place) => place.id === state.selected);
+    renderDetail(selected, now);
+    renderCourses(selected);
     const message = state.failed
       ? state.loaded ? "Афиша не обновилась. Показана предыдущая версия." : "Афиша не загрузилась. Попробуйте обновить."
       : !state.loaded ? "Загружаем события."
@@ -234,7 +271,13 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     render();
     if (fromList) detail.querySelector("button")?.focus({ preventScroll: true });
     map?.invalidateSize({ pan: false });
-    map?.setView([place.lat, place.lon], Math.max(map.getZoom(), 16), { animate });
+    if (map && place.courses.length) {
+      const bounds = leaflet.latLngBounds([
+        [place.lat, place.lon], ...place.courses.flatMap(({ latLngs }) => latLngs),
+      ]);
+      map.fitBounds(bounds, { paddingTopLeft: [32, 80], paddingBottomRight: [32, 35],
+        maxZoom: 16, animate });
+    } else map?.setView([place.lat, place.lon], Math.max(map.getZoom(), 16), { animate });
   }
 
   function scheduleClock() {
@@ -358,6 +401,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       clearTimeout(clock);
       clearTimeout(retry);
       layer?.clearLayers();
+      courseLayer?.clearLayers();
     },
     refresh() {
       attempts = 0;

@@ -14,6 +14,7 @@ from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, Publica
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.publisher import Publisher
 from relocant_media.domain.dedup import DEFAULT_EVENT_WINDOW, EventCandidate, event_key, same_event
+from relocant_media.domain.event_programs import linked_event_program
 from relocant_media.domain.originality import copies_source_text
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION, primary_evidence_kind
 from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
@@ -111,6 +112,12 @@ def _event_items(
 
     lower = anchor.published_at - DEFAULT_EVENT_WINDOW
     upper = anchor.published_at + DEFAULT_EVENT_WINDOW
+    date_scope = and_(RawItem.published_at >= lower, RawItem.published_at <= upper)
+    program = linked_event_program(anchor.source_id, anchor.url, anchor.body, anchor.published_at)
+    if program is not None:
+        date_scope = or_(date_scope, and_(
+            RawItem.source_id == program[0], RawItem.url == program[1],
+        ))
     rows = session.execute(
         select(RawItem, Source)
         .join(Source, Source.id == RawItem.source_id)
@@ -118,8 +125,7 @@ def _event_items(
             RawItem.id != anchor.id,
             Source.city == anchor_source.city,
             Source.enabled.is_(True),
-            RawItem.published_at >= lower,
-            RawItem.published_at <= upper,
+            date_scope,
         )
         .order_by(RawItem.published_at, RawItem.id)
         .execution_options(populate_existing=True)

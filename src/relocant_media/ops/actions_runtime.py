@@ -82,6 +82,8 @@ def _gpt_blob(storage: SnapshotStore, digest: str) -> dict[str, Any]:
 
 
 def _prepare_gpt_input(storage: SnapshotStore, digest: str, path: Path) -> bool:
+    from relocant_media.services.gpt_refresh import RefreshResult
+
     result = _gpt_blob(storage, digest)
     packages = result.get("packages")
     rejected = result.get("rejected", [])
@@ -97,16 +99,21 @@ def _prepare_gpt_input(storage: SnapshotStore, digest: str, path: Path) -> bool:
         and result["kind"] == "batch_preselection"
         and isinstance(result["selected_ids"], list) and len(result["selected_ids"]) <= 5
     )
-    if not package_result and not rank_result:
+    refresh_result = result.get("kind") == "evidence_refresh"
+    if refresh_result:
+        RefreshResult.model_validate(result)
+    if not package_result and not rank_result and not refresh_result:
         raise ValueError("invalid GPT result envelope")
     request_sha = _gpt_digest(result["request_sha256"])
     request = _gpt_blob(storage, request_sha)
     if hashlib.sha256(canonical_json(request).encode()).hexdigest() != request_sha:
         raise ValueError("GPT request blob is not canonical")
-    if rank_result and hashlib.sha256(canonical_json(result).encode()).hexdigest() != digest:
-        raise ValueError("GPT ranking blob is not canonical")
+    if (rank_result or refresh_result) and hashlib.sha256(
+        canonical_json(result).encode()
+    ).hexdigest() != digest:
+        raise ValueError("GPT result blob is not canonical")
     path.write_text(canonical_json({"request": request, "result": result}), encoding="utf-8")
-    return rank_result or not packages
+    return rank_result or refresh_result or not packages
 
 
 def _upload_gpt_request(storage: SnapshotStore, request: dict[str, Any], path: Path) -> str:
@@ -863,6 +870,12 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     _runtime_phase("state_commit_started")
     store.write(ready, busy_sha)
     _runtime_phase("state_committed")
+    refreshed_request = run_dir / "gpt-refreshed-request.json"
+    if mode == "fallback" and code == 0 and refreshed_request.is_file():
+        request = json.loads(refreshed_request.read_text(encoding="utf-8"))
+        digest = _upload_gpt_request(drive, request, work / "gpt-request.json")
+        print(json.dumps({"gpt_fallback_request_sha256": digest,
+                          "candidate_count": len(request["candidates"])}), flush=True)
     # Purge ingress copies only after snapshot verification and successful canonical CAS.
     # A lost ACK leaves harmless private copies; the next ready checkpoint retries it.
     source = ingress_config(budget)

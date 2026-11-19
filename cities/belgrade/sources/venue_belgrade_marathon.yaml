@@ -1,0 +1,20 @@
+id: venue_belgrade_marathon
+name: Белградский марафон
+publisher: Beogradski maraton
+ownership: official
+url: https://bgdmarathon.org/
+language: sr
+source_type: official_venue_events
+trust: 0.98
+check_every: 3h
+categories: [events]
+extraction:
+  strategy: belgrade_marathon
+  status: active
+policy:
+  auto_publish: false
+  high_risk: false
+verification:
+  checked_at: '2026-11-19'
+  note: Заранее опубликованная программа. Подключается к свежему анонсу
+    после проверки события и используется как первоисточник расписания и трасс.

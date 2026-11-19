@@ -16,8 +16,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
+    StringConstraints,
     TypeAdapter,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from sqlalchemy import create_engine, or_, select
@@ -48,6 +51,8 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, S
 
 MAX_EVENTS = 1000
 MAX_FEED_BYTES = 2_000_000
+MAX_EVENT_COURSES = 4
+MAX_COURSE_POINTS = 4096
 # Другой город включается явно, вместе с проверенным публичным каналом.
 PUBLIC_CHANNELS = {"belgrade": "eduvbelgrad"}
 Label = Annotated[str, Field(min_length=1, max_length=500)]
@@ -62,6 +67,27 @@ class Venue(PublicModel):
     address: Label
     latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
     longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+
+
+CoursePoint = tuple[
+    Annotated[float, Field(strict=True, ge=19.8, le=21.1, allow_inf_nan=False)],
+    Annotated[float, Field(strict=True, ge=44.2, le=45.2, allow_inf_nan=False)],
+]
+
+
+class PublicCourse(PublicModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+    coordinates: tuple[CoursePoint, ...] = Field(min_length=2, max_length=MAX_COURSE_POINTS)
+
+    @model_validator(mode="after")
+    def a_path(self) -> PublicCourse:
+        if len(set(self.coordinates)) < 2:
+            raise ValueError("a course requires distinct points")
+        return self
+
+
+Courses = Annotated[tuple[PublicCourse, ...], Field(max_length=MAX_EVENT_COURSES)]
+_COURSES = TypeAdapter(Courses)
 
 
 class PublicEvent(PublicModel):
@@ -85,6 +111,16 @@ class PublicEvent(PublicModel):
     group_id: str | None = Field(default=None, pattern=r"^event_[0-9a-f]{20}$")
     occurrence_key: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,100}$")
     venue_note: Label | None = None
+    courses: Courses = ()
+
+    @model_serializer(mode="wrap")
+    def serialize_with_optional_courses(
+        self, handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = handler(self)
+        if not self.courses:
+            result.pop("courses", None)
+        return result
 
     @field_validator("source_url", "coordinate_source_url", "venue_source_url")
     @classmethod
@@ -108,6 +144,8 @@ class PublicEvent(PublicModel):
 
     @model_validator(mode="after")
     def consistent(self) -> PublicEvent:
+        if len({course.name.casefold() for course in self.courses}) != len(self.courses):
+            raise ValueError("course names must be distinct")
         zone = ZoneInfo(self.timezone)
         expected = map_event_id(self.source_url)
         if self.group_id is not None:
@@ -488,6 +526,7 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                     continue
                 cards = []
                 for slot in event_occurrences(place):
+                    courses = _COURSES.validate_python(slot.get("courses", ())) if attested else ()
                     cards.append(PublicEvent(
                         id=slot["id"],
                         group_id=slot.get("group_id"),
@@ -505,6 +544,7 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                         venue_source_url=slot["venue_source_url"],
                         schedule_source_url=slot.get("schedule_source_url"),
                         venue_note=slot.get("venue_note"),
+                        courses=courses,
                         sponsored=active_map_ad(policy, post.telegram_message_id or 0, observed_at),
                     ))
                 # Неполная программа не должна попадать в фид при ограничении размера.

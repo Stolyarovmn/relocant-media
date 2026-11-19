@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -9,11 +10,17 @@ from sqlalchemy.orm import Session
 from test_editorial_package import bind_context, package_payload, parse
 from test_editorial_pipeline import _document
 
-from relocant_media.ai.package import EditorialPackage, PackageEvidence, draft_sha256
+from relocant_media.ai.package import (
+    EditorialPackage,
+    PackageEvidence,
+    canonical_json,
+    draft_sha256,
+)
+from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.scheduler.models import SchedulerRun
-from relocant_media.services import gpt_fallback
+from relocant_media.services import gpt_fallback, gpt_refresh
 from relocant_media.services.editorial_products import present_draft
 from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.services.package_import import import_package
@@ -141,6 +148,85 @@ def fallback_session():
         raw, run = seed_fallback(session)
         yield session, raw, run
     engine.dispose()
+
+
+def _refresh_exchange(request: dict, raw_id: int, urls: list[str]):
+    return gpt_refresh.RefreshInput.model_validate({
+        "request": request,
+        "result": {
+            "version": 3, "kind": "evidence_refresh",
+            "request_sha256": hashlib.sha256(canonical_json(request).encode()).hexdigest(),
+            "raw_item_id": raw_id, "urls": urls,
+        },
+    })
+
+
+def test_refresh_recollects_live_evidence_and_leaves_the_story_unresolved(
+    fallback_session, monkeypatch,
+):
+    session, raw, run = fallback_session
+    raw_id, cycle_id = raw.id, run.id
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    alternative = "https://www.cukarica.rs/vesti/example"
+    exchange = _refresh_exchange(request, raw_id, [alternative])
+    engine = session.get_bind()
+    new_body = f"{raw.body} Radovi su planirani zbog popravke mreže."
+    articles = [
+        CollectedRawItem(
+            raw.source_id, raw.external_id, raw.url, raw.title, new_body, raw.published_at,
+            published_at_precision="instant",
+        ),
+        CollectedRawItem(
+            "cukarica_news", "alternative-url", alternative, raw.title, new_body,
+            raw.published_at, published_at_precision="instant",
+        ),
+    ]
+    session.rollback()
+
+    async def collect(links):
+        assert [(config.id, url) for config, url in links] == [
+            (item.source_id, item.url) for item in articles
+        ]
+        return articles
+
+    monkeypatch.setattr(gpt_refresh, "_collect", collect)
+    refreshed_at = NOW + timedelta(minutes=5)
+    refreshed = gpt_refresh.refresh_gpt_evidence(engine, exchange, now=refreshed_at)
+    assert refreshed["scheduler_run_id"] == cycle_id
+    assert refreshed["created_at"] == refreshed_at.isoformat()
+    candidate, = refreshed["candidates"]
+    assert candidate["raw_item_id"] == raw_id
+    assert [doc["url"] for doc in candidate["documents"]] == [articles[0].url, alternative]
+    assert all(doc["body"] == new_body for doc in candidate["documents"])
+    assert session.get(EditorialRun, raw_id) is None
+    assert session.get(SchedulerRun, cycle_id).details["gpt_evidence_refresh"][str(raw_id)][
+        "attempts"
+    ] == 1
+    gpt_fallback.validate_fallback_candidate(session, refreshed, raw_id, now=refreshed_at)
+    with pytest.raises(ValueError, match="Снимок события"):
+        gpt_fallback.validate_fallback_candidate(session, request, raw_id, now=refreshed_at)
+
+
+@pytest.mark.parametrize(("url", "error"), [
+    ("https://unregistered.example/announcement", "не зарегистрирован"),
+    ("https://www.cukarica.rs/vesti/example", "просрочен"),
+])
+def test_refresh_refuses_unregistered_source_or_expired_request_before_network(
+    fallback_session, monkeypatch, url, error,
+):
+    session, raw, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    exchange = _refresh_exchange(request, raw.id, [url])
+
+    async def collect(_links):
+        pytest.fail("Недопустимый запрос не должен обращаться к сборщику")
+
+    monkeypatch.setattr(gpt_refresh, "_collect", collect)
+    now = NOW + timedelta(hours=5) if error == "просрочен" else NOW
+    with pytest.raises(ValueError, match=error):
+        gpt_refresh.refresh_gpt_evidence(session.get_bind(), exchange, now=now)
 
 
 def test_request_and_validation_are_read_only_and_exclude_private_payload(fallback_session):

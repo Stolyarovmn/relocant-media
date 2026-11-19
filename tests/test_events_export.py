@@ -5,6 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from test_editorial_package import bind_context, event_payload, parse
@@ -16,6 +17,7 @@ from relocant_media.ai.package import canonical_json, draft_sha256
 from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.map_links import map_event_id
 from relocant_media.ingestion.persistence import capture_collected_batch
+from relocant_media.ops import events_export as event_projection
 from relocant_media.ops.events_export import export_events, export_events_snapshot, read_events_feed
 from relocant_media.ops.map_backfill import plan_event_buttons
 from relocant_media.ops.newsroom_publish import EVENTS_PATH, _publish_events
@@ -163,7 +165,57 @@ def test_feed_only_exposes_allowlisted_published_fields_and_keeps_archive_id(ses
     assert later.events[0].archived and later.events[0].id == event.id
     assert "PRIVATE_INTAKE" not in first.model_dump_json()
     assert "reviews" not in first.model_dump_json() and "raw_item_id" not in first.model_dump_json()
+    assert "courses" not in event.model_dump()
     assert not session.dirty and not session.new and not session.deleted
+
+
+def test_feed_exports_both_attested_courses_and_ignores_changed_geometry(session, monkeypatch):
+    _, run, _, payload = seed(session)
+    presentation = payload["presentation"]
+    courses = [
+        {"name": "21,1 км", "coordinates": [[20.45, 44.81], [20.43, 44.83], [20.45, 44.81]]},
+        {"name": "10 км", "coordinates": [[20.45, 44.81], [20.40, 44.82]]},
+    ]
+    place = {**presentation["event_place"], "courses": courses}
+    presentation["event_place"] = place
+    persist_package(run, payload)
+    session.commit()
+    monkeypatch.setattr(
+        event_projection, "resolve_saved_event_place", lambda *_args, **_kwargs: place,
+    )
+
+    feed = export_events(session, observed_at=NOW)
+    assert read_events_feed(feed.model_dump_json().encode()).events == feed.events
+    event, = feed.events
+    assert event.model_dump(mode="json")["courses"] == courses
+
+    changed = [{**courses[0], "coordinates": [[20.45, 44.81], [20.44, 44.83]]}, courses[1]]
+    monkeypatch.setattr(
+        event_projection, "resolve_saved_event_place",
+        lambda *_args, **_kwargs: {**place, "courses": changed},
+    )
+    assert export_events(session, observed_at=NOW).events == ()
+
+
+@pytest.mark.parametrize(
+    "coordinates",
+    [
+        [[20.45, 44.81]],
+        [[20.45, 44.81], [20.45, 44.81]],
+        [[20.45, 44.81], [22.0, 44.81]],
+        [[20.45, 44.81], [20.43, True]],
+        [[20.45, 44.81], ["20.43", 44.83]],
+        [[20.45, 44.81], [20.43, float("nan")]],
+        [[20.45, 44.81], [20.43, 44.83, 0]],
+        [[20.45, 44.81], [20.43, 44.83]] * 2049,
+    ],
+)
+def test_feed_rejects_invalid_course_geometry(session, coordinates):
+    seed(session)
+    payload = export_events(session, observed_at=NOW).model_dump(mode="json")
+    payload["events"][0]["courses"] = [{"name": "10 км", "coordinates": coordinates}]
+    with pytest.raises(ValidationError):
+        read_events_feed(json.dumps(payload).encode())
 
 
 def test_reviewed_event_matches_a_sent_post_even_when_the_article_is_media(session):

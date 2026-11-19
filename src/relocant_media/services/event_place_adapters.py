@@ -12,8 +12,10 @@ from bs4 import BeautifulSoup, Tag
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, CityEditorialProfile
+from relocant_media.domain.event_programs import MARATHON_PAGE_URL, MARATHON_SOURCE_ID
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.exhibition_map_point import MAX_HTML_BYTES
+from relocant_media.services.marathon_event_map import marathon_event_facts
 
 _DOB_HOSTS = {"domomladine.org", "www.domomladine.org"}
 _DOB_CONTACT = "https://domomladine.org/kontakt/"
@@ -296,6 +298,11 @@ def extract_event_adapter(
     if (profile.city_id != "belgrade" or not isinstance(source_html, str)
             or len(source_html.encode()) > MAX_HTML_BYTES):
         return None
+    if document.source_id == MARATHON_SOURCE_ID:
+        return (
+            marathon_event_facts(document.body, source_html)
+            if document.url == MARATHON_PAGE_URL else None
+        )
     if document.source_id == "cukarica_news":
         from relocant_media.collectors.cukarica_news import (
             CukaricaExtractionError,
