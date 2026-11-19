@@ -55,7 +55,9 @@ MAX_CANDIDATES = 5
 MAX_DOCUMENTS = 8
 MAX_DOCUMENT_BODY = 20_000
 MAX_CANDIDATE_TEXT = 80_000
-GEMINI_FAILURES = frozenset({"GeminiWorkerError", "GeminiCallTimeout", "GeminiQuotaCooldown"})
+GEMINI_FAILURES = frozenset({
+    "GeminiWorkerError", "GeminiCallTimeout", "GeminiQuotaCooldown", "StructuredOutputError",
+})
 _TASK = "editorial-primary:belgrade"
 
 
@@ -79,6 +81,8 @@ class _FallbackRequest(StrictModel):
     profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     city_profile: CityEditorialProfile
     writing_brief: dict[str, Any] | None = None
+    batch_request_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    batch_result_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     candidates: list[_CandidateRequest] = Field(min_length=1, max_length=MAX_CANDIDATES)
 
 
@@ -188,17 +192,20 @@ def _registry() -> dict[str, SourceConfig]:
 def pending_gpt_ids(session: Session, *, now: datetime) -> set[int]:
     """Give the subscription monitor a bounded first chance after a Gemini failure."""
     now = _utc(now)
+    from relocant_media.services.gpt_batch_fallback import pending_batch_ids
+
+    batch_ids = pending_batch_ids(session, now=now)
     with session.no_autoflush:
         failed_ids = {
             raw_id for run in _recent_runs(session, now) for raw_id in _failed_ids(run, now)
         }
         if not failed_ids:
-            return set()
+            return batch_ids
         registry = _registry()
         unresolved = session.execute(select(RawItem, Source).join(Source).where(
             RawItem.id.in_(failed_ids),
         ))
-        return {item.id for item, source in unresolved
+        return batch_ids | {item.id for item, source in unresolved
                 if _registered_public(item, source, registry.get(source.id))
                 and (session.get(EditorialRun, item.id, populate_existing=True) is None
                      or eligible_policy_reassessment(session, item.id, now=now))}
@@ -265,13 +272,16 @@ def _candidate_request(
     }
 
 
-def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
+def build_request(
+    session: Session, *, now: datetime, scheduler_run_id: int | None = None,
+) -> dict[str, Any] | None:
     """Действующие коммунальные предупреждения идут перед обычной очередью резерва."""
     now = _utc(now)
     with session.no_autoflush:
         profile = load_city_profile("belgrade")
         registry = _registry()
-        windows = [(run, _failed_ids(run, now)) for run in reversed(_recent_runs(session, now))]
+        windows = [(run, _failed_ids(run, now)) for run in _recent_runs(session, now)
+                   if scheduler_run_id is None or run.id == scheduler_run_id]
         pending = pending_gpt_ids(session, now=now)
         pending_items = session.execute(
             select(RawItem, Source).join(Source).where(RawItem.id.in_(pending)),
@@ -286,8 +296,7 @@ def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
                 verified_at=item.ingested_at, timezone_name=profile.timezone,
             ).action == "keep"
         }
-        # Ранний нерелевантный сбой СМИ не должен всё окно перекрывать афиши и
-        # объявления служб. Приоритет только для очереди, не для допуска к выпуску.
+        # В пределах одного приоритета сначала восстанавливаем свежий цикл.
         windows.sort(key=lambda window: (
             urgent.isdisjoint(window[1]), official.isdisjoint(window[1]),
         ))
@@ -331,31 +340,45 @@ def build_request(session: Session, *, now: datetime) -> dict[str, Any] | None:
     return None
 
 
-def validate_fallback_package(
+def validate_fallback_candidate(
     session: Session,
     request: dict[str, Any],
-    package: EditorialPackage,
+    raw_id: int,
     *,
     now: datetime,
-) -> EditorialPackage:
-    """Только проверка; живой fetch и штатный импорт выполняет вызывающий воркер."""
+) -> tuple[_FallbackRequest, CityEditorialProfile, _CandidateRequest, dict[str, Any]]:
+    """Границы сбоя и доказательства одинаковы для готового пакета и отказа."""
     now = _utc(now)
     if type(request.get("version")) is not int:
         raise FallbackValidationError("Некорректная версия запроса")
     parsed = _FallbackRequest.model_validate_json(_bounded_json(request))
-    package = EditorialPackage.model_validate_json(_bounded_json(package.model_dump(mode="json")))
     ids = [candidate.raw_item_id for candidate in parsed.candidates]
-    if len(ids) != len(set(ids)) or package.raw_item_id not in ids:
+    if len(ids) != len(set(ids)) or raw_id not in ids:
         raise FallbackValidationError("Чужой или повторяющийся кандидат")
     if not timedelta(0) <= now - parsed.created_at <= REQUEST_TTL:
         raise FallbackValidationError("Резервный запрос просрочен или датирован будущим")
     with session.no_autoflush:
         run = session.get(SchedulerRun, parsed.scheduler_run_id, populate_existing=True)
+        batch = run.details.get("batch_preselection") if run is not None else None
+        failed_ids = set(_failed_ids(run, parsed.created_at)) if run is not None else set()
+        selected_ids = set(batch.get("gpt_selected_ids", ())) if isinstance(batch, dict) else set()
+        ranked_scope = (
+            isinstance(batch, dict) and batch.get("status") == "gpt_ranked"
+            and parsed.batch_request_sha256 is not None and parsed.batch_result_sha256 is not None
+            and parsed.batch_request_sha256 == batch.get("gpt_request_sha256")
+            and parsed.batch_result_sha256 == batch.get("gpt_rank_sha256")
+            and set(ids) <= selected_ids | failed_ids
+        )
+        from_batch = (
+            parsed.batch_request_sha256 is not None or parsed.batch_result_sha256 is not None
+        )
         if (
             run is None
-            or package.raw_item_id not in _failed_ids(run, parsed.created_at)
+            or (from_batch and not ranked_scope)
+            or (not from_batch and raw_id not in failed_ids)
             or run.finished_at is None
             or parsed.created_at < run.finished_at
+            or (from_batch and not timedelta(0) <= now - run.finished_at <= REQUEST_TTL)
         ):
             raise FallbackValidationError("Исходный сбой Gemini больше не подтверждён")
         profile = load_city_profile("belgrade")
@@ -369,15 +392,40 @@ def validate_fallback_package(
             raise FallbackValidationError("Правила подачи не совпадают с резервным запросом")
         registry = _registry()
         expected = _candidate_request(
-            session, package.raw_item_id, profile=profile, registry=registry, now=now
+            session, raw_id, profile=profile, registry=registry, now=now
         )
+        if from_batch and raw_id in selected_ids:
+            assert isinstance(batch, dict)
+            anchor = next(doc for doc in expected["documents"]
+                          if doc["raw_item_id"] == raw_id)
+            hashes = batch.get("gpt_evidence_sha256")
+            if not isinstance(hashes, dict) or hashes.get(str(raw_id)) != (
+                hashlib.sha256(canonical_json(anchor).encode()).hexdigest()
+            ):
+                raise FallbackValidationError("Исходник изменился после пакетного отбора GPT")
         requested = next(
             candidate
             for candidate in parsed.candidates
-            if candidate.raw_item_id == package.raw_item_id
+            if candidate.raw_item_id == raw_id
         )
         if requested.model_dump(mode="json") != expected:
             raise FallbackValidationError("Снимок события или оформления изменился после запроса")
+        return parsed, profile, requested, expected
+
+
+def validate_fallback_package(
+    session: Session,
+    request: dict[str, Any],
+    package: EditorialPackage,
+    *,
+    now: datetime,
+) -> EditorialPackage:
+    """Только проверка; живой fetch и штатный импорт выполняет вызывающий воркер."""
+    package = EditorialPackage.model_validate_json(_bounded_json(package.model_dump(mode="json")))
+    parsed, profile, requested, expected = validate_fallback_candidate(
+        session, request, package.raw_item_id, now=now,
+    )
+    with session.no_autoflush:
         if (
             package.version != 2
             or package.city != profile.city_id

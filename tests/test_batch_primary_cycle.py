@@ -12,6 +12,7 @@ from test_primary_cycle import queue as _queue
 from relocant_media.ai.batch_preselection import preselect_candidates
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.ops.primary_cycle import run_cycle
+from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.storage.models import EditorialRun, RawItem
 
 editorial_session = _editorial_session
@@ -139,6 +140,71 @@ def test_mandatory_reassessment_reserves_one_of_five_slots_after_batch(queue, tm
     assert report["batch_preselection"]["full_review_ids"] == processed
     manifest = json.loads((tmp_path / "repair/manifest.json").read_text(encoding="utf-8"))
     assert manifest["candidates"][0] == {"raw_item_id": held_id, "reassessment": True}
+
+
+def test_gemini_failure_checkpoints_whole_public_pool_for_gpt(queue, tmp_path):
+    engine, process = queue
+    protected_id, *_, held_id = raw_ids(engine)
+    with Session(engine) as session:
+        session.add(EditorialRun(
+            raw_item_id=held_id, outcome={"status": "human_review", "reason": "technical_hold"},
+            evidence={}, delivery_status="pending",
+        ))
+        session.commit()
+
+    class Outage(Provider):
+        def generate_json(self, **kwargs):
+            self.calls.append(kwargs)
+            raise TimeoutError("Повреждённый ответ")
+
+    provider = Outage()
+
+    def preselect(candidates, limit):
+        return preselect_candidates(candidates, provider, profile=PROFILE, limit=limit, now=NOW)
+
+    report = run_cycle(
+        engine, city="belgrade", output=tmp_path / "waiting", now=NOW,
+        ingest=ingest_ok, process=process, preselect=preselect,
+        defer_failed_batch=True, priority_items=lambda: {protected_id},
+        reassessment_ids=lambda: ([held_id], []),
+    )
+    assert len(provider.calls) == 1
+    prompt = json.loads(provider.calls[0]["prompt"])
+    submitted_ids = [row["raw_item_id"] for row in prompt["candidates"]]
+    assert len(submitted_ids) == 10
+    assert report["status"] == "PRIMARY_PARTIAL" and report["fallback_required"] is True
+    assert report["window_complete"] is False
+    assert report["processed_raw_item_ids"] == [protected_id]
+    assert reviewed_ids(engine) == {protected_id, held_id}
+    batch = report["batch_preselection"]
+    assert batch["status"] == "gpt_waiting" and batch["gpt_slots"] == 4
+    assert batch["gpt_candidate_ids"] == submitted_ids
+    assert batch["full_review_ids"] == [protected_id] and batch["selected_ids"] == []
+    assert report["gpt_deferred_count"] == len(submitted_ids)
+    with Session(engine) as session:
+        run = session.get(SchedulerRun, report["run_id"])
+        assert run.status == "partial" and run.details["batch_preselection"] == batch
+        assert run.details["fallback_required"] is True
+        assert session.get(EditorialRun, held_id).outcome["status"] == "human_review"
+
+
+def test_gemini_failure_without_gpt_keeps_local_fallback(queue, tmp_path):
+    engine, process = queue
+
+    def preselect(candidates, limit):
+        return candidates[:limit], {
+            "status": "fallback", "error_type": "GeminiCallTimeout",
+            "deferred_ids": [row["raw_item_id"] for row in candidates[limit:]],
+        }
+
+    report = run_cycle(
+        engine, city="belgrade", output=tmp_path / "local-fallback", now=NOW,
+        ingest=ingest_ok, process=process, preselect=preselect,
+    )
+    assert report["status"] == "PRIMARY_PARTIAL"
+    assert report["batch_preselection"]["status"] == "fallback"
+    assert len(report["processed_raw_item_ids"]) == 5
+    assert reviewed_ids(engine) == set(report["processed_raw_item_ids"])
 
 
 @pytest.mark.parametrize("invalid", [

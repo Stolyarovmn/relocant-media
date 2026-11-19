@@ -29,6 +29,10 @@ on:
         description: SHA256 of the private GPT result (fallback or map-republish)
         type: string
         required: false
+      fallback_cycle_id:
+        description: Optional exact scheduler run ID for GPT fallback preview
+        type: string
+        required: false
       map_targets:
         description: Existing post and event pairs for map-backfill
         type: string
@@ -178,6 +182,7 @@ jobs:
           MAP_BACKFILL_TARGETS: ${{ inputs.map_targets }}
           MAP_REPUBLICATION_REQUEST: ${{ inputs.map_republication }}
           GPT_FALLBACK_BLOB_SHA256: ${{ inputs.fallback_blob_sha256 }}
+          GPT_FALLBACK_CYCLE_ID: ${{ inputs.fallback_cycle_id }}
         run: |
           mkdir -p _site
           rm -f _site/data.json

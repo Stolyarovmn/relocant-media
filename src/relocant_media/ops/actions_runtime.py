@@ -81,18 +81,32 @@ def _gpt_blob(storage: SnapshotStore, digest: str) -> dict[str, Any]:
     return value
 
 
-def _prepare_gpt_input(storage: SnapshotStore, digest: str, path: Path) -> None:
+def _prepare_gpt_input(storage: SnapshotStore, digest: str, path: Path) -> bool:
     result = _gpt_blob(storage, digest)
     packages = result.get("packages")
-    if (set(result) != {"version", "request_sha256", "packages"}
-            or type(result.get("version")) is not int or result["version"] != 1
-            or not isinstance(packages, list) or not 1 <= len(packages) <= 5):
+    rejected = result.get("rejected", [])
+    package_result = (
+        set(result) - {"rejected"} == {"version", "request_sha256", "packages"}
+        and type(result["version"]) is int and result["version"] == 1
+        and isinstance(packages, list) and isinstance(rejected, list)
+        and 1 <= len(packages) + len(rejected) <= 5
+    )
+    rank_result = (
+        set(result) == {"version", "kind", "request_sha256", "selected_ids"}
+        and type(result["version"]) is int and result["version"] == 2
+        and result["kind"] == "batch_preselection"
+        and isinstance(result["selected_ids"], list) and len(result["selected_ids"]) <= 5
+    )
+    if not package_result and not rank_result:
         raise ValueError("invalid GPT result envelope")
     request_sha = _gpt_digest(result["request_sha256"])
     request = _gpt_blob(storage, request_sha)
     if hashlib.sha256(canonical_json(request).encode()).hexdigest() != request_sha:
         raise ValueError("GPT request blob is not canonical")
+    if rank_result and hashlib.sha256(canonical_json(result).encode()).hexdigest() != digest:
+        raise ValueError("GPT ranking blob is not canonical")
     path.write_text(canonical_json({"request": request, "result": result}), encoding="utf-8")
+    return rank_result or not packages
 
 
 def _upload_gpt_request(storage: SnapshotStore, request: dict[str, Any], path: Path) -> str:
@@ -106,13 +120,34 @@ def _upload_gpt_request(storage: SnapshotStore, request: dict[str, Any], path: P
     return digest
 
 
-def _export_gpt_request(storage: SnapshotStore, database: Path, work: Path) -> int:
-    from relocant_media.services.gpt_fallback import build_request
+def _export_gpt_request(
+    storage: SnapshotStore, database: Path, work: Path, scheduler_run_id: int | None = None,
+) -> int:
+    from relocant_media.services.gpt_batch_fallback import build_batch_request, build_ranked_request
+    from relocant_media.services.gpt_fallback import _recent_runs, build_request
 
     engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
     try:
         with Session(engine) as session:
-            request = build_request(session, now=datetime.now(UTC))
+            now = datetime.now(UTC)
+            request = None
+            for run in _recent_runs(session, now):
+                if scheduler_run_id is not None and run.id != scheduler_run_id:
+                    continue
+                batch = run.details.get("batch_preselection")
+                if not isinstance(batch, dict) or batch.get("status") != "gpt_ranked":
+                    continue
+                if not batch.get("gpt_selected_ids"):
+                    continue
+                batch_request = _gpt_blob(storage, _gpt_digest(batch.get("gpt_request_sha256")))
+                batch_result = _gpt_blob(storage, _gpt_digest(batch.get("gpt_rank_sha256")))
+                request = build_ranked_request(session, batch_request, batch_result, now=now)
+                if request is not None:
+                    break
+            if request is None:
+                request = build_batch_request(session, now=now, scheduler_run_id=scheduler_run_id)
+            if request is None:
+                request = build_request(session, now=now, scheduler_run_id=scheduler_run_id)
     finally:
         engine.dispose()
     if request is None:
@@ -535,6 +570,10 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if incoming and mode != "discovery":
         raise ValueError("discovery input requires discovery mode")
     gpt_input = environment.get("GPT_FALLBACK_BLOB_SHA256", "")
+    gpt_cycle = environment.get("GPT_FALLBACK_CYCLE_ID", "")
+    if gpt_cycle and (mode != "fallback-preview" or not re.fullmatch(r"[1-9][0-9]{0,18}", gpt_cycle)
+                      or int(gpt_cycle) >= 2**63):
+        raise ValueError("GPT cycle input requires an exact fallback preview cycle")
     if gpt_input and mode not in {"fallback", "map-republish"}:
         raise ValueError("GPT result input requires fallback or map-republish mode")
     map_input = environment.get("MAP_BACKFILL_TARGETS", "")
@@ -632,7 +671,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         apply_map_republication(database, repost, state, sha, commit, environment, gpt, previous)
         return 0
     if mode == "fallback-preview":
-        return _export_gpt_request(drive, database, work)
+        return _export_gpt_request(drive, database, work, int(gpt_cycle) if gpt_cycle else None)
     if slot is not None:
         def commit_digest(current: dict[str, Any], digest: str,
                           updates: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -647,8 +686,9 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if mode == "digest":
         return 0
     fallback_file = work / "gpt-fallback-input.json"
+    without_gpt_delivery = False
     if mode == "fallback":
-        _prepare_gpt_input(drive, gpt_input, fallback_file)
+        without_gpt_delivery = _prepare_gpt_input(drive, gpt_input, fallback_file)
     # Readback/restore and all validation precede the claim; all side effects follow it.
     identifier(folder)
     require_snapshot_capacity(database)
@@ -667,6 +707,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             "DRIVE_STATE_FOLDER_ID", "DRIVE_PREVIEW_MANIFEST_ID", "GOOGLE_APPLICATION_CREDENTIALS",
             "CLOUD_DISCOVERY_BATCH",
             "GPT_FALLBACK_BLOB_SHA256",
+            "GPT_FALLBACK_CYCLE_ID",
         }:
             env.pop(name, None)
     # The worker creates its own output directory and refuses one that already exists.
@@ -682,6 +723,9 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         finally:
             engine.dispose()
     if mode == "fallback":
+        if without_gpt_delivery:
+            env.pop("TELEGRAM_BOT_TOKEN", None)
+            env["EDITORIAL_SEND_ENABLED"] = "false"
         for name in list(env):
             if name in {"GEMINI_API_KEY", "GEMINI_MODEL", "TYPESAFE_API_KEY"} or name.startswith(
                 ("EDITORIAL_PRIVATE_", "EDITORIAL_OWNER_")

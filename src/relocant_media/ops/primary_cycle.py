@@ -86,6 +86,7 @@ def run_cycle(
     locality_aliases: tuple[str, ...] = (),
     preselect: Callable[[list[dict[str, Any]], int],
                         tuple[list[dict[str, Any]], dict[str, Any]]] | None = None,
+    defer_failed_batch: bool = False,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
             or not city.strip() or not 1 <= limit <= 5):
@@ -129,6 +130,8 @@ def run_cycle(
                     recent_source_counts=recent_source_counts() if recent_source_counts else None,
                     locality_aliases=locality_aliases,
                     source_priorities=candidate_priorities() if candidate_priorities else None)
+            gpt_waiting = False
+            gpt_candidate_ids: list[int] = []
             if preselect is not None:
                 candidates = manifest["candidates"]
                 protected = [candidate for candidate in candidates if (
@@ -141,19 +144,40 @@ def run_cycle(
                 )][:limit]
                 protected_ids = {item["raw_item_id"] for item in protected}
                 pool = [item for item in candidates if item["raw_item_id"] not in protected_ids]
-                selected, audit = preselect(pool, limit - len(protected))
-                if (len(selected) > limit - len(protected)
+                batch_slots = limit - len(protected)
+                selected, audit = preselect(pool, batch_slots)
+                if (len(selected) > batch_slots
                         or any(type(item.get("raw_item_id")) is not int for item in selected)
                         or len({item["raw_item_id"] for item in selected}) != len(selected)
                         or any(not any(item is original for original in pool)
                                for item in selected)):
                     raise ValueError("preselection returned invalid candidate objects")
+                if defer_failed_batch and audit.get("status") == "fallback" and batch_slots:
+                    # Только исходные кандидаты из того же окна, которые прошли
+                    # проверку свежести перед запросом Gemini.
+                    order = [row["raw_item_id"] for row in selected] + audit["deferred_ids"]
+                    pool_ids = {row["raw_item_id"] for row in pool}
+                    if (any(type(raw_id) is not int or raw_id not in pool_ids for raw_id in order)
+                            or len(set(order)) != len(order)):
+                        raise ValueError("preselection returned invalid fallback IDs")
+                    public_ids = {row["raw_item_id"] for row in pool
+                                  if row["source"]["ownership"] in {"official", "media"}
+                                  and row["raw_item_id"] not in priority_ids}
+                    gpt_candidate_ids = [raw_id for raw_id in order if raw_id in public_ids]
+                    gpt_waiting = bool(gpt_candidate_ids)
+                    if gpt_waiting:
+                        audit = {**audit, "status": "gpt_waiting",
+                                 "gpt_candidate_ids": gpt_candidate_ids,
+                                 "gpt_slots": batch_slots,
+                                 "selected_ids": [], "deferred_ids": gpt_candidate_ids}
+                        selected = []
+                        heartbeat["fallback_required"] = True
                 manifest["batch_preselection"] = {**audit,
                     "protected_ids": [item["raw_item_id"] for item in protected]}
                 manifest["candidates"] = [*protected, *selected]
                 manifest["candidate_count"] = len(manifest["candidates"])
                 heartbeat["batch_preselection"] = manifest["batch_preselection"]
-            if reassessment_ids is not None:
+            if reassessment_ids is not None and not gpt_waiting:
                 selected_ids = {candidate["raw_item_id"] for candidate in manifest["candidates"]}
                 corrections = [i for i in corrections
                                if i not in selected_ids and i not in deferred]
@@ -216,11 +240,11 @@ def run_cycle(
                     SourceRevision).join(RawItem).join(Source).where(Source.city == city))
             additional_remaining = sum(map(len, reassessment_ids())) if reassessment_ids else 0
             complete = (remaining["eligible_count"] + additional_remaining == 0
-                        and not processing_errors)
+                        and not processing_errors and not gpt_waiting)
             heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
                 window_complete=complete, processed_raw_item_ids=processed,
                 processing_errors=processing_errors,
-                gpt_deferred_count=len(deferred),
+                gpt_deferred_count=len(deferred.union(gpt_candidate_ids)),
                 remaining_count=remaining["eligible_count"] + additional_remaining,
                 missing_published_at_count=remaining["missing_published_at_count"],
                 review_required=collection.get("review_required", 0),
