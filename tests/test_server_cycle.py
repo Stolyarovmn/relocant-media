@@ -132,11 +132,14 @@ def test_old_source_is_discarded_without_ai(seeded, tmp_path):
 
 def test_duplicate_of_a_reviewed_event_is_closed_once_instead_of_retried_every_cycle(
         seeded, tmp_path):
-    engine, raw_id, _ = seeded
+    from relocant_media.ai.pipeline import EditorialPipeline
+    from relocant_media.services.editorial import EditorialService
+
+    engine, raw_id, provider = seeded
     with Session(engine) as session:
         first = session.get(RawItem, raw_id)
-        session.add(EditorialRun(raw_item_id=first.id, outcome={"status": "skipped"},
-                                 evidence={}, delivery_status="pending"))
+        target = EditorialService(session, EditorialPipeline(provider)).prepare(first.id)
+        assert target.post_id is not None and target.outcome["status"] in {"ready", "human_review"}
         twin = RawItem(source_id=first.source_id, external_id="twin-of-first", url=first.url,
                        title=first.title, body=first.body, published_at=first.published_at)
         session.add(twin)

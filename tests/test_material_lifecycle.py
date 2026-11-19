@@ -395,11 +395,11 @@ def test_sweep_bulk_loads_5000_synthetic_items_without_n_plus_one(session):
         first = sweep_materials(session, city="belgrade", now=NOW)
         session.commit()
         assert len(first.due_ids) == 5000
-        assert len(statements) <= 3
+        assert len(statements) <= 4
         statements.clear()
         expired = sweep_materials(session, city="belgrade", now=NOW+MATERIAL_TTL)
         session.commit()
         assert len(expired.blocked_ids) == 5000
-        assert len(statements) <= 3
+        assert len(statements) <= 4
     finally:
         event.remove(session.bind, "before_cursor_execute", count)

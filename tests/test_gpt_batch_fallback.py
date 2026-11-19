@@ -3,14 +3,15 @@ import json
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import event
-from test_gpt_fallback_service import NOW, _refresh_exchange
+from sqlalchemy import event, select
+from test_gpt_fallback_service import NOW, _refresh_exchange, package_for_request
 from test_gpt_fallback_service import fallback_session as _fallback_session
 
 from relocant_media.ai.package import canonical_json
 from relocant_media.collectors.base import RawItem as CollectedArticle
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.services import gpt_fallback, gpt_refresh
+from relocant_media.services import material_lifecycle as lifecycle
 from relocant_media.services.gpt_batch_fallback import (
     build_batch_request,
     build_ranked_request,
@@ -260,3 +261,82 @@ def test_empty_accepted_choice_and_expired_runs_release_the_queue(batch):
     with pytest.raises(ValueError, match="сбой"):
         validate_batch_rank(session, request, rank, now=NOW + timedelta(hours=4))
     assert build_batch_request(session, now=NOW + timedelta(hours=4)) is None
+
+
+@pytest.mark.parametrize("error_type", ["ValueError", "ValidationError", "JSONDecodeError"])
+def test_legacy_response_handoff_releases_candidates_and_rejects_old_results(batch, error_type):
+    session, raw, _, run = batch
+    brief = build_batch_request(session, now=NOW)
+    rank = _rank(brief, [raw.id])
+    _record_rank(session, run, brief, rank)
+    work = build_ranked_request(session, brief, rank, now=NOW)
+    package = package_for_request(work)
+    run.details = {**run.details, "processing_errors": [], "batch_preselection": {
+        **run.details["batch_preselection"], "error_type": error_type}}
+    session.commit()
+    assert pending_batch_ids(session, now=NOW) == set()
+    assert build_batch_request(session, now=NOW) is None
+    assert gpt_fallback.pending_gpt_ids(session, now=NOW) == set()
+    with pytest.raises(gpt_fallback.FallbackValidationError):
+        validate_batch_rank(session, brief, rank, now=NOW)
+    with pytest.raises(gpt_fallback.FallbackValidationError):
+        gpt_fallback.validate_fallback_package(session, work, package, now=NOW)
+    assert session.get(EditorialRun, raw.id) is None
+
+
+def test_explicit_provider_error_uses_location_not_exception_name(batch):
+    session, raw, other, run = batch
+    run.details = {**run.details, "batch_preselection": {
+        **run.details["batch_preselection"], "error_type": "ValueError", "error_stage": "provider"}}
+    session.commit()
+    assert pending_batch_ids(session, now=NOW) == {raw.id, other.id}
+    assert build_batch_request(session, now=NOW) is not None
+
+
+def test_batch_handoff_expires_from_finished_cycle_without_block_or_new_attempt(batch, monkeypatch):
+    session, raw, _, run = batch
+    initial = lifecycle.lifecycle_state(session, raw.id, now=NOW)
+    session.commit()
+    finished = run.finished_at
+    expiry = finished+lifecycle.FALLBACK_WAIT
+    before = expiry-timedelta(seconds=1)
+    brief = build_batch_request(session, now=NOW)
+    rank = _rank(brief, [raw.id])
+    _record_rank(session, run, brief, rank)
+    work = build_ranked_request(session, brief, rank, now=before)
+    assert work is not None and work["created_at"] == before.isoformat()
+    package = package_for_request(work)
+    assert pending_batch_ids(session, now=before) == {raw.id}
+    assert pending_batch_ids(session, now=expiry) == set()
+    assert build_batch_request(session, now=expiry) is None
+    with pytest.raises(gpt_fallback.FallbackValidationError):
+        validate_batch_rank(session, brief, rank, now=expiry)
+    with pytest.raises(gpt_fallback.FallbackValidationError):
+        gpt_fallback.validate_fallback_package(session, work, package, now=expiry)
+    monkeypatch.setattr(gpt_refresh, "_collect",
+                        lambda *a: pytest.fail("Поздний запрос не читает сеть"))
+    with pytest.raises(gpt_fallback.FallbackValidationError):
+        gpt_refresh.refresh_gpt_evidence(session.get_bind(), _refresh_exchange(work, raw.id, []),
+                                         now=expiry)
+    assert run.finished_at == finished and session.get(EditorialRun, raw.id) is None
+    assert not lifecycle.is_terminal_blocked(session, raw.id, now=expiry)
+    assert not session.new and not session.dirty
+    assert lifecycle.before_attempt(session, raw.id, now=expiry)
+    state = lifecycle.lifecycle_state(session, raw.id, now=expiry)
+    assert state["attempts"] == 1 and state["fallback_attempts"] == 0
+    assert state["deadline_at"] == initial["deadline_at"]
+
+
+def test_material_deadline_and_terminal_owner_close_remain_stricter_than_batch_lease(batch):
+    session, raw, other, _ = batch
+    lifecycle.lifecycle_state(session, raw.id, now=NOW)
+    lifecycle.close_by_owner(session, other.id, now=NOW)
+    from relocant_media.scheduler.models import SchedulerRun
+
+    record = session.scalar(select(SchedulerRun).where(
+        SchedulerRun.task_key == f"material-lifecycle:belgrade:{raw.id}"))
+    record.details = {**record.details, "deadline_at": (NOW+timedelta(seconds=30)).isoformat()}
+    session.commit()
+    assert pending_batch_ids(session, now=NOW) == {raw.id}
+    assert pending_batch_ids(session, now=NOW+timedelta(seconds=30)) == set()
+    assert session.get(EditorialRun, raw.id) is None

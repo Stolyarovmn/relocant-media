@@ -283,6 +283,7 @@ def test_batch_reserve_reaches_final_decision_in_same_cycle(fallback_session, mo
     engine = session.get_bind()
     scheduler.details = {"processing_errors": [], "batch_preselection": {
         "status": "gpt_waiting", "gpt_slots": 5, "gpt_candidate_ids": [raw.id],
+        "error_type": "GeminiWorkerError", "error_stage": "provider",
         "full_review_ids": [],
     }}
     session.commit()

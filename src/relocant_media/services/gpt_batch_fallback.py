@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.batch_preselection import MAX_CANDIDATES as BATCH_CAPACITY
+from relocant_media.ai.batch_preselection import provider_handoff
 from relocant_media.ai.channel_style import writing_brief
 from relocant_media.ai.package import StrictModel, canonical_json
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
@@ -36,7 +37,7 @@ from relocant_media.services.gpt_fallback import (
     build_request,
     refresh_target,
 )
-from relocant_media.services.material_lifecycle import is_terminal_blocked
+from relocant_media.services.material_lifecycle import FALLBACK_WAIT, is_terminal_blocked
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 
@@ -101,11 +102,13 @@ def _batch_state(
         or run.status not in {"partial", "failed"}
         or run.finished_at is None
         or run.started_at > run.finished_at
-        or not timedelta() <= now - run.finished_at <= REQUEST_TTL
+        or not timedelta() <= now - run.finished_at < min(REQUEST_TTL, FALLBACK_WAIT)
     ):
         return None
     details = run.details.get("batch_preselection")
     if not isinstance(details, dict) or details.get("status") not in {"gpt_waiting", "gpt_ranked"}:
+        return None
+    if not provider_handoff(details):
         return None
     slots = details.get("gpt_slots")
     candidates = _ids(details.get("gpt_candidate_ids"), BATCH_CAPACITY)
@@ -130,6 +133,12 @@ def _batch_state(
         ):
             return None
     return details, candidates, slots
+
+
+def validate_batch_handoff(run: SchedulerRun | None, *, now: datetime) -> None:
+    """Проверить исходный контракт и неизменяемый срок, включая поздний полный пакет."""
+    if _batch_state(run, _utc(now)) is None:
+        raise FallbackValidationError("Исходный сбой пакетного отбора больше не подтверждён")
 
 
 def _brief(

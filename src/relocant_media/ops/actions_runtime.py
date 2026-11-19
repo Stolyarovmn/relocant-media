@@ -230,8 +230,16 @@ def _upload_gpt_request(storage: SnapshotStore, request: dict[str, Any], path: P
 def _export_gpt_request(
     storage: SnapshotStore, database: Path, work: Path, scheduler_run_id: int | None = None,
 ) -> int:
-    from relocant_media.services.gpt_batch_fallback import build_batch_request, build_ranked_request
-    from relocant_media.services.gpt_fallback import _recent_runs, build_request
+    from relocant_media.services.gpt_batch_fallback import (
+        build_batch_request,
+        build_ranked_request,
+        validate_batch_handoff,
+    )
+    from relocant_media.services.gpt_fallback import (
+        FallbackValidationError,
+        _recent_runs,
+        build_request,
+    )
 
     engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
     try:
@@ -245,6 +253,10 @@ def _export_gpt_request(
                 if not isinstance(batch, dict) or batch.get("status") != "gpt_ranked":
                     continue
                 if not batch.get("gpt_selected_ids"):
+                    continue
+                try:
+                    validate_batch_handoff(run, now=now)
+                except FallbackValidationError:
                     continue
                 batch_request = _gpt_blob(storage, _gpt_digest(batch.get("gpt_request_sha256")))
                 batch_result = _gpt_blob(storage, _gpt_digest(batch.get("gpt_rank_sha256")))

@@ -115,6 +115,7 @@ def test_batch_reserve_binding_keeps_room_for_lifecycle_retries(queue, tmp_path)
     def unavailable(items, limit):
         seen.append(limit)
         return items[:limit], {"status": "fallback", "error_type": "ModelUnavailable",
+            "error_stage": "provider",
             "deferred_ids": [item["raw_item_id"] for item in items[limit:]]}
 
     result = run_cycle(engine, city="belgrade", output=tmp_path / "reserve", now=NOW,

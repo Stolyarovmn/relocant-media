@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -19,7 +21,7 @@ from relocant_media.ai.rejection_review import audit_rejection
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import material_lifecycle as core
-from relocant_media.services.editorial import source_replacement_target
+from relocant_media.services.editorial import reviewed_event_proof, source_replacement_target
 from relocant_media.services.policy_reassessment import eligible_policy_reassessment
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 
@@ -161,6 +163,35 @@ class MaterialLifecycleRuntime:
             run = session.get(EditorialRun, raw_id)
             if run is None or run.outcome.get("status") not in {"skipped", "blocked"}:
                 raise ValueError("Отсутствует проверяемый отказ")
+            if run.outcome.get("reason") == "event_already_reviewed":
+                # Ранний детерминированный skip не обязан иметь ranking/LLM documents.
+                raw = session.get(RawItem, raw_id)
+                assert raw is not None
+                source = session.get(Source, raw.source_id)
+                assert source is not None
+                target_id = run.outcome.get("duplicate_of_raw_item")
+                target = session.get(RawItem, target_id) if type(target_id) is int else None
+                proof = (reviewed_event_proof(session, anchor=raw, anchor_source=source,
+                    target=target, now=self._time()) if target is not None else None)
+                kind = proof.kind if proof else "unconfirmed"
+                context = hashlib.sha256(json.dumps({"raw_item_id": raw_id,
+                    "target_raw_id": target.id if target else None, "kind": kind,
+                    "now": self._time().isoformat()}, sort_keys=True).encode()).hexdigest()
+                decision = ("retry_processing" if proof is None else "delivery_reconciliation"
+                            if kind == "delivery_reconciliation" else "confirm_rejection")
+                core.record_rejection_review(session, raw_id, {
+                    "policy_version": "event-duplicate-review-v1", "kind": "deterministic_event",
+                    "raw_item_id": raw_id, "duplicate_of_raw_item": target.id if target else None,
+                    "decision": decision, "basis": kind,
+                    "context_sha256": proof.context_sha256 if proof else context,
+                    "reviewed_at": self._time().isoformat()}, now=self._time())
+                if kind == "delivery_reconciliation":
+                    state = core.block_related_delivery(session, raw_id, now=self._time())
+                else:
+                    state = core.rejection_reviewed(session, raw_id, justified=proof is not None,
+                        confirmed_reason="event_duplicate_confirmed", now=self._time())
+                session.commit()
+                return state.get("next_action") == "retry_prepare"
             ranking = RankingResult.model_validate(run.outcome.get("ranking"))
             documents = self._documents(session, raw_id, run)
         review = audit_rejection(self.provider, raw_item_id=raw_id, ranking=ranking,
