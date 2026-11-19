@@ -67,7 +67,8 @@ _MONTHS = ("января февраля марта апреля мая июня 
            .split())
 _PRIORITY = {"transport": 0, "utilities": 1, "immigration": 2, "city": 3, "events": 5}
 _LABELS = {"road": "🚧 Перекрытия", "route": "🚋 Транспорт", "weather": "🌦 Погода",
-           "water": "💧 Вода", "power": "⚡ Свет", "event": "🎭 Событие"}
+           "water": "💧 Отключения воды", "power": "⚡ Отключения света",
+           "event": "🎭 Событие"}
 _TITLE = {"morning": "Белград сегодня", "evening": "Главное за день",
           "reminder": "Напоминание на завтра"}
 _EMOJI = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u200D\uFE0F\u20E3]+")
