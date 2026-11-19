@@ -31,6 +31,7 @@ from relocant_media.services.gpt_fallback import (
     validate_fallback_candidate,
     validate_fallback_package,
 )
+from relocant_media.services.gpt_refresh import RefreshInput, refresh_gpt_evidence
 from relocant_media.services.package_import import import_package
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
@@ -295,16 +296,30 @@ def main() -> None:
             raise ValueError("Приватный входной файл отсутствует или слишком велик")
         exchange = args.input.read_text(encoding="utf-8")
         value = json.loads(exchange)
-        rank_only = isinstance(value, dict) and isinstance(value.get("result"), dict) and (
-            value["result"].get("kind") == "batch_preselection")
-        payload = None if rank_only else FallbackInput.model_validate_json(exchange)
+        result = value.get("result") if isinstance(value, dict) else None
+        kind = result.get("kind") if isinstance(result, dict) else None
+        rank_only = kind == "batch_preselection"
+        refresh = RefreshInput.model_validate_json(exchange) if kind == "evidence_refresh" else None
+        payload = None if rank_only or refresh is not None else FallbackInput.model_validate_json(
+            exchange,
+        )
         url = make_url(os.environ["DATABASE_URL"])
         if (url.get_backend_name() != "sqlite" or not url.database or url.query
                 or not Path(url.database).is_file()):
             raise ValueError("Требуется существующая локальная SQLite")
         engine = create_engine(url)
         verify_sqlite_schema(engine)
-        if payload is None:
+        if refresh is not None:
+            request = refresh_gpt_evidence(engine, refresh)
+            (args.output / "gpt-refreshed-request.json").write_text(
+                canonical_json(request), encoding="utf-8",
+            )
+            report = {
+                "status": "PRIMARY_PARTIAL", "mode": "subscription_gpt_evidence_refresh",
+                "fallback_required": True, "model_calls": 0,
+                "sources": len(request["candidates"][0]["documents"]),
+            }
+        elif payload is None:
             if set(value) != {"request", "result"} or not isinstance(value["request"], dict):
                 raise ValueError("Ожидался приватный запрос и результат отбора")
             report = save_batch_rank(

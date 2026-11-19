@@ -9,6 +9,7 @@ import {
   pointsAtScale, readIncidents, readPlaces, searchAddresses, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
+import { setupPlaces } from "../web/newsroom/map/places.js";
 
 const waterId = "event_0123456789abcdef1234";
 const roadId = "event_0123456789abcdef1235";
@@ -97,6 +98,115 @@ test("отсчёт афиши использует только подтверж
   assert.match(uncertain.scheduleNote, /Уточните дату/);
   assert.equal(placeCountdown(uncertain, now("18:00")), "Дата уточняется");
   assert.equal(buildCalendar(uncertain, now("18:00")), null);
+});
+
+const race = {
+  id: roadId, kind: "event", title: "Белградский полумарафон", timezone: "Europe/Belgrade",
+  source_url: "https://www.beograd.rs/", starts_at: "2090-11-24T09:00:00+01:00",
+  ends_at: "2090-11-24T13:00:00+01:00", expires_at: "2090-11-24T13:00:00+01:00",
+  venue: { name: "Старт", address: "Теразие", latitude: 44.816, longitude: 20.459 },
+  courses: [
+    { name: "21,1 км", coordinates: [[20.459, 44.816], [20.430, 44.823], [20.459, 44.816]] },
+    { name: "10 км", coordinates: [[20.459, 44.816], [20.440, 44.800]] },
+  ],
+};
+
+test("афиша нормализует обе трассы и сохраняет старые карточки с маркером", () => {
+  const readCourses = (courses) => readPlaces({ version: 1, events: [{ ...race, courses }] })[0].courses;
+  assert.deepEqual(readCourses(race.courses), [
+    { name: "21,1 км", latLngs: [[44.816, 20.459], [44.823, 20.430], [44.816, 20.459]] },
+    { name: "10 км", latLngs: [[44.816, 20.459], [44.800, 20.440]] },
+  ]);
+  const [course] = race.courses;
+  for (const invalid of [undefined, Array(5).fill(course), [...race.courses, course],
+    [{ ...course, coordinates: [[20.459, 44.816]] }],
+    [{ ...course, coordinates: [[20.459, 44.816], [20.459, 44.816]] }],
+    [{ ...course, coordinates: [[20.459, 44.816], [20.430, Infinity]] }],
+    [{ ...course, coordinates: [[20.459, 44.816], ["20.430", 44.823]] }],
+    [{ ...course, coordinates: [[20.459, 44.816], [44.823, 20.430]] }],
+    [{ ...course, coordinates: Array(4097).fill([20.459, 44.816]) }],
+  ]) assert.deepEqual(readCourses(invalid), []);
+});
+
+test("ссылка на событие показывает обе трассы и легенду, закрытие убирает линии", async (t) => {
+  function make(tag, className, textContent) {
+    return {
+      tag, className, textContent, children: [], style: {}, dataset: {}, events: {}, attributes: {},
+      append(...children) { this.children.push(...children); },
+      replaceChildren(...children) { this.children = children; },
+      addEventListener(name, fn) { this.events[name] = fn; },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      querySelector(tagName) { return this.children.find((child) => child.tag === tagName); },
+      focus() {},
+    };
+  }
+  const groups = [];
+  const leaflet = {
+    layerGroup() {
+      return {
+        layers: [],
+        addTo() { groups.push(this); return this; },
+        clearLayers() { this.layers = []; },
+      };
+    },
+    latLngBounds(points) { return points; },
+    divIcon(options) { return options; },
+    polyline(points, options) {
+      return { addTo(group) { group.layers.push({ points, options }); } };
+    },
+    marker(point) {
+      return { on() {}, addTo(group) { group.layers.push(point); } };
+    },
+  };
+  const map = {
+    on() {}, closePopup() {}, invalidateSize() {},
+    getZoom() { return 12; },
+    project([lat, lon]) { return { x: lat, y: lon }; },
+    fitBounds(points) { this.bounds = points; },
+  };
+  const savedLeaflet = globalThis.L;
+  const savedDocument = globalThis.document;
+  t.after(() => {
+    globalThis.L = savedLeaflet;
+    globalThis.document = savedDocument;
+  });
+  globalThis.L = leaflet;
+  globalThis.document = {
+    hidden: true, addEventListener() {},
+    createElement: make, createTextNode: (text) => text,
+  };
+  const elements = new Map();
+  const byId = (id) => {
+    if (!elements.has(id)) elements.set(id, make("div", id));
+    return elements.get(id);
+  };
+  const places = setupPlaces({
+    map, mobile: { matches: true, addEventListener() {} }, animate: false, byId, make,
+    link: (_url, title) => make("a", "", title),
+    readJSON: async () => ({ version: 1, events: [race] }), onSync() {},
+  });
+  places.enter(roadId);
+  await new Promise(setImmediate);
+
+  const [, courses] = groups;
+  assert.equal(courses.layers.length, 4);
+  const [first, second] = courses.layers.slice(2);
+  assert.notEqual(first.options.color, second.options.color);
+  assert.equal(first.options.dashArray, undefined);
+  assert.ok(second.options.dashArray);
+  assert.deepEqual(map.bounds, [[44.816, 20.459], ...first.points, ...second.points]);
+  const detail = byId("place-detail");
+  const legend = detail.querySelector("ul");
+  assert.equal(legend.attributes["aria-label"], "Трассы на карте");
+  assert.deepEqual(legend.children.map(({ children }) => children[1].textContent), ["21,1 км", "10 км"]);
+
+  detail.querySelector("button").events.click();
+  assert.equal(detail.hidden, true);
+  assert.deepEqual(courses.layers, []);
+  places.enter(roadId);
+  assert.equal(courses.layers.length, 4);
+  places.leave();
+  assert.deepEqual(courses.layers, []);
 });
 
 test("расстояние по прямой считается по двум координатам", () => {

@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, Field
 from sqlalchemy import select
@@ -30,6 +31,7 @@ from relocant_media.domain.audience import local_utility_notice
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.dedup import event_key, find_repeated_publication
 from relocant_media.domain.editorial_products import EditorialPresentation
+from relocant_media.domain.event_programs import MARATHON_PAGE_URL, MARATHON_SOURCE_ID
 from relocant_media.domain.freshness import evidence_freshness
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.scheduler.models import SchedulerRun
@@ -44,9 +46,11 @@ from relocant_media.services.editorial_products import (
     recent_publications,
     verify_stored_presentation,
 )
+from relocant_media.services.marathon_event_map import marathon_event_facts
 from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.services.policy_reassessment import eligible_policy_reassessment
 from relocant_media.sources.registry import SourceConfig, load_source_registry
+from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 REQUEST_TTL = timedelta(hours=4)
@@ -238,7 +242,7 @@ def _candidate_request(
             or not 1 <= len(member.title) <= 1000
             or not 1 <= len(member.body) <= MAX_DOCUMENT_BODY
             or total > MAX_CANDIDATE_TEXT
-            or evidence_freshness(
+            or (evidence_freshness(
                 member.title,
                 member.body,
                 member.published_at,
@@ -247,8 +251,10 @@ def _candidate_request(
                 source_type=policy.source_type,
                 verified_at=member.ingested_at,
                 timezone_name=profile.timezone,
-            ).action
-            != "keep"
+            ).action != "keep" and not (
+                member.id != raw_id
+                and _active_marathon_program(session, member, now=now, profile=profile)
+            ))
         ):
             raise FallbackValidationError("Источник закрыт, устарел или превышает лимит")
     snapshots = [_snapshot_member(member, policy) for member, policy in members]
@@ -270,6 +276,20 @@ def _candidate_request(
             for rubric in profile.rubrics
         },
     }
+
+
+def _active_marathon_program(
+    session: Session, document: RawItem, *, now: datetime, profile: CityEditorialProfile,
+) -> bool:
+    if document.source_id != MARATHON_SOURCE_ID or document.url != MARATHON_PAGE_URL:
+        return False
+    snapshot = session.get(RawItemMediaSnapshot, document.id, populate_existing=True)
+    if snapshot is None or not snapshot.source_html:
+        return False
+    facts = marathon_event_facts(document.body, snapshot.source_html)
+    return facts is not None and datetime.fromisoformat(facts["starts_at"]).replace(
+        tzinfo=ZoneInfo(profile.timezone),
+    ) > now
 
 
 def build_request(
@@ -395,13 +415,15 @@ def validate_fallback_candidate(
             session, raw_id, profile=profile, registry=registry, now=now
         )
         if from_batch and raw_id in selected_ids:
+            from relocant_media.services.gpt_refresh import refreshed_anchor_sha256
+
             assert isinstance(batch, dict)
             anchor = next(doc for doc in expected["documents"]
                           if doc["raw_item_id"] == raw_id)
             hashes = batch.get("gpt_evidence_sha256")
-            if not isinstance(hashes, dict) or hashes.get(str(raw_id)) != (
-                hashlib.sha256(canonical_json(anchor).encode()).hexdigest()
-            ):
+            if not isinstance(hashes, dict) or (
+                refreshed_anchor_sha256(run, raw_id) or hashes.get(str(raw_id))
+            ) != hashlib.sha256(canonical_json(anchor).encode()).hexdigest():
                 raise FallbackValidationError("Исходник изменился после пакетного отбора GPT")
         requested = next(
             candidate

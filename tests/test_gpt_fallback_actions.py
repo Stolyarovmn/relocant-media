@@ -119,3 +119,53 @@ def test_tampered_gpt_blob_fails_before_claim(context, tmp_path):
                         folder="ssh_blobs", mode="fallback",
                         environment={**environment(), "GPT_FALLBACK_BLOB_SHA256": sha})
     assert store.sha == "initial"
+
+
+def test_evidence_refresh_exports_private_request_after_state_commit(
+    context, tmp_path, monkeypatch, capsys,
+):
+    store, old = context
+    storage = PrivateStore(old.files)
+    request = {"version": 1, "candidates": [{"raw_item_id": 23}]}
+    request_sha = storage.save(canonical_json(request).encode())
+    result = {
+        "version": 3, "kind": "evidence_refresh", "request_sha256": request_sha,
+        "raw_item_id": 23, "urls": ["https://bgdmarathon.org/example"],
+    }
+    result_sha = storage.save(canonical_json(result).encode())
+    refreshed = {"version": 1, "candidates": [{"raw_item_id": 23, "body": "PRIVATE-DO-NOT-LOG"}]}
+    original_upload = storage.upload
+
+    def upload(path, folder):
+        if folder == "gpt-fallback-request":
+            assert store.state["status"] == "ready"
+        return original_upload(path, folder)
+
+    def child(command, env):
+        assert store.state["status"] == "busy"
+        assert "TELEGRAM_BOT_TOKEN" not in env
+        assert env["EDITORIAL_SEND_ENABLED"] == "false"
+        assert json.loads(Path(command[4]).read_text(encoding="utf-8")) == {
+            "request": request, "result": result,
+        }
+        directory = Path(command[6])
+        directory.mkdir()
+        (directory / "gpt-refreshed-request.json").write_text(
+            canonical_json(refreshed), encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(storage, "upload", upload)
+    monkeypatch.setattr(runtime, "run_child", child)
+    monkeypatch.setattr(runtime, "export_public", lambda *args: None)
+    code = runtime.execute(store, storage, work=tmp_path / "private",
+                           output=tmp_path / "data.json", folder="ssh_blobs", mode="fallback",
+                           environment={**environment(), "GPT_FALLBACK_BLOB_SHA256": result_sha})
+    assert code == 0
+    captured = capsys.readouterr().out
+    assert "PRIVATE-DO-NOT-LOG" not in captured
+    receipt = next(json.loads(line) for line in captured.splitlines()
+                   if line.startswith('{"gpt_fallback_request_sha256"'))
+    assert storage.download(receipt["gpt_fallback_request_sha256"]) == canonical_json(
+        refreshed,
+    ).encode()

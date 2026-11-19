@@ -478,6 +478,20 @@ h1 {
   line-height: 1;
 }
 .place-detail .event-links { grid-column: 1 / -1; margin-top: 3px; font-size: .85rem; }
+.place-course-legend {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 3px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: .82rem;
+  font-weight: 650;
+}
+.place-course-legend li { display: flex; align-items: center; gap: 6px; }
+.place-course-sample { display: inline-block; flex: 0 0 23px; border-top: 3px solid; }
 .places .announcement-body { padding: 1px 0; }
 .selected-preview {
   display: flex;

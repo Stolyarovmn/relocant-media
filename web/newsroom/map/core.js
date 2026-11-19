@@ -111,6 +111,31 @@ function readWindow(window) {
   return start !== null && end !== null && start < end ? { start, end } : null;
 }
 
+function readPlaceCourses(value) {
+  if (!Array.isArray(value) || value.length > 4) return [];
+  const names = new Set();
+  const courses = [];
+  for (const course of value) {
+    const name = textValue(course?.name);
+    const key = name.toLowerCase();
+    const points = course?.coordinates;
+    if (!name || name.length > 80 || names.has(key)
+        || !Array.isArray(points) || points.length < 2 || points.length > 4096) return [];
+    const latLngs = [];
+    for (const point of points) {
+      if (!Array.isArray(point) || point.length !== 2) return [];
+      const [lon, lat] = point;
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)
+          || lon < 19.8 || lon > 21.1 || lat < 44.2 || lat > 45.2) return [];
+      latLngs.push([lat, lon]);
+    }
+    if (latLngs.every(([lat, lon]) => lat === latLngs[0][0] && lon === latLngs[0][1])) return [];
+    names.add(key);
+    courses.push({ name, latLngs });
+  }
+  return courses;
+}
+
 export function readPlaces(document) {
   if (document?.version !== 1 || !Array.isArray(document.events)) {
     throw new Error("Не удалось прочитать афишу");
@@ -141,6 +166,7 @@ export function readPlaces(document) {
     return [{ id: item.id, group, title, source, schedule: schedule === source ? "" : schedule,
       post, venue, address, visitorHours: textValue(item.visitor_hours),
       scheduleNote: textValue(item.schedule_note), venueNote: textValue(item.venue_note), lat, lon,
+      courses: paidPlace ? [] : readPlaceCourses(item.courses),
       paidPlace, sponsored: paidPlace || item.sponsored === true,
       archived: item.archived === true, start, end, expires }];
   });

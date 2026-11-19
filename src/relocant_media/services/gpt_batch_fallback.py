@@ -179,6 +179,8 @@ def _briefs(
 
 def pending_batch_ids(session: Session, *, now: datetime) -> set[int]:
     """Оставить пакету его нерешённые темы только пока действует срок резерва."""
+    from relocant_media.services.gpt_refresh import refreshed_anchor_sha256
+
     now = _utc(now)
     with session.no_autoflush:
         waiting: set[int] = set()
@@ -190,7 +192,8 @@ def pending_batch_ids(session: Session, *, now: datetime) -> set[int]:
             details, candidates, _ = state
             if details["status"] == "gpt_ranked":
                 for raw_id in details["gpt_selected_ids"]:
-                    digest = details["gpt_evidence_sha256"][str(raw_id)]
+                    digest = (refreshed_anchor_sha256(run, raw_id)
+                              or details["gpt_evidence_sha256"][str(raw_id)])
                     ranked_hashes.setdefault(raw_id, set()).add(digest)
             else:
                 waiting.update(candidates)
@@ -307,6 +310,8 @@ def build_ranked_request(
     session: Session, batch_request: dict[str, Any], batch_result: dict[str, Any], *, now: datetime,
 ) -> dict[str, Any] | None:
     """Экспортировать полные публичные исходники только для принятых тем конкретного цикла."""
+    from relocant_media.services.gpt_refresh import refreshed_anchor_sha256
+
     now = _utc(now)
     with session.no_autoflush:
         run, selected = validate_batch_rank(session, batch_request, batch_result, now=now)
@@ -344,7 +349,11 @@ def build_ranked_request(
                     except ValueError:
                         candidates.pop()
         for raw_id in selected:
-            if raw_id not in current or current[raw_id] != original[raw_id]:
+            if raw_id not in current:
+                continue
+            refreshed = refreshed_anchor_sha256(run, raw_id)
+            if (current[raw_id]["evidence_sha256"] != refreshed if refreshed is not None
+                    else current[raw_id] != original[raw_id]):
                 continue
             item = session.get(RawItem, raw_id, populate_existing=True)
             assert item is not None
