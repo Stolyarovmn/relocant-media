@@ -510,7 +510,7 @@ def process_existing(
                 local_place_aliases=load_queue_place_aliases(CITY),
                 recent_source_counts=source_load, candidate_priorities=lambda: queue_priorities(
                     {}, media_sources()), deferred_items=deferred, continue_on_error=True,
-                defer_failed_batch=os.environ.get("EDITORIAL_GPT_FALLBACK_ENABLED") == "true")
+                defer_failed_batch=False)
             cycles.append({"status": result.get("status"), "run_id": result.get("run_id")})
             last_remaining = result.get("remaining_count", 0)
             cycle_errors = [error for error in result.get("processing_errors", [])
