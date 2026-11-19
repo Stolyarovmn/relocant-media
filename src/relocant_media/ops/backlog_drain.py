@@ -44,6 +44,7 @@ from relocant_media.services.editorial_products import recent_publications
 from relocant_media.services.gpt_fallback import pending_gpt_ids
 from relocant_media.services.material_lifecycle_runtime import MaterialLifecycleRuntime
 from relocant_media.services.published_watch import recent_source_load
+from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -102,23 +103,25 @@ def _root(records: dict[int, dict[str, Any]], raw_id: int) -> dict[str, Any] | N
     return None
 
 
-def _view(engine: Engine, cohort: set[int]) -> dict[str, Any]:
+def _view(engine: Engine, cohort: set[int], *, session: Session | None = None) -> dict[str, Any]:
     """Только технические поля; ни outcome, ни evidence целиком не экспортируются."""
-    with Session(engine) as session:
-        records: dict[int, dict[str, Any]] = {}
-        for row in session.scalars(select(SchedulerRun).where(
-                SchedulerRun.task_type == core.TASK_TYPE,
-                SchedulerRun.city == CITY).order_by(SchedulerRun.id)):
-            item_id = row.details.get("raw_item_id")
-            if type(item_id) is int:
-                records[item_id] = row.details
-        rows = session.execute(select(
-            EditorialRun.raw_item_id, EditorialRun.delivery_status,
-            EditorialRun.outcome["reason"].as_string(),
-            EditorialRun.outcome["replacement_raw_item_id"].as_integer(),
-            Post.telegram_message_id,
-        ).outerjoin(Post, Post.id == EditorialRun.post_id))
-        runs = {row[0]: row for row in rows}
+    if session is None:
+        with Session(engine) as reader:
+            return _view(engine, cohort, session=reader)
+    records: dict[int, dict[str, Any]] = {}
+    for row in session.scalars(select(SchedulerRun).where(
+            SchedulerRun.task_type == core.TASK_TYPE,
+            SchedulerRun.city == CITY).order_by(SchedulerRun.id)):
+        item_id = row.details.get("raw_item_id")
+        if type(item_id) is int:
+            records[item_id] = row.details
+    rows = session.execute(select(
+        EditorialRun.raw_item_id, EditorialRun.delivery_status,
+        EditorialRun.outcome["reason"].as_string(),
+        EditorialRun.outcome["replacement_raw_item_id"].as_integer(),
+        Post.telegram_message_id,
+    ).outerjoin(Post, Post.id == EditorialRun.post_id))
+    runs = {row[0]: row for row in rows}
     scope = set(cohort)
     for raw_id in records:
         root = _root(records, raw_id)
@@ -162,6 +165,24 @@ def _view(engine: Engine, cohort: set[int]) -> dict[str, Any]:
             "delivery_claims": delivery_claims}
 
 
+def _validated_campaign(row: SchedulerRun, cutoff: datetime) -> dict[str, Any]:
+    data = row.details
+    ids = data.get("cohort_ids")
+    budget = data.get("initial_run_budget")
+    if (data.get("schema_version") != 1 or data.get("policy_version") != POLICY_VERSION
+            or data.get("cutoff") != cutoff.isoformat() or not isinstance(ids, list)
+            or any(type(raw_id) is not int or raw_id <= 0 for raw_id in ids)
+            or ids != sorted(set(ids)) or data.get("cohort_sha256") != _digest(ids)
+            or type(budget) is not int or not 1 <= budget <= 200):
+        raise ValueError("Повреждена фиксированная когорта разбора")
+    completed = data.get("completed_hops")
+    if (not isinstance(completed, list) or len(completed) > budget
+            or any(type(hop) is not int for hop in completed)
+            or completed != list(range(budget, budget-len(completed), -1))):
+        raise ValueError("Повреждён сохранённый бюджет продолжений")
+    return dict(data)
+
+
 def _campaign(engine: Engine, cutoff: datetime, runs_left: int) -> tuple[int, dict[str, Any]]:
     key = f"material-backlog-drain:{CITY}:{cutoff.isoformat()}"
     with Session(engine) as session:
@@ -183,19 +204,10 @@ def _campaign(engine: Engine, cutoff: datetime, runs_left: int) -> tuple[int, di
                          "quarantine_count": quarantined, "completed_hops": []})
             session.add(row)
             session.commit()
-        data = row.details
-        ids = data.get("cohort_ids")
-        if (data.get("schema_version") != 1 or data.get("policy_version") != POLICY_VERSION
-                or data.get("cutoff") != cutoff.isoformat() or not isinstance(ids, list)
-                or any(type(raw_id) is not int for raw_id in ids)
-                or ids != sorted(set(ids)) or data.get("cohort_sha256") != _digest(ids)
-                or type(data.get("initial_run_budget")) is not int):
-            raise ValueError("Повреждена фиксированная когорта разбора")
-        completed = data.get("completed_hops")
-        if (not isinstance(completed, list) or any(type(hop) is not int for hop in completed)
-                or completed != list(range(data["initial_run_budget"],
-                                           data["initial_run_budget"]-len(completed), -1))):
-            raise ValueError("Повреждён сохранённый бюджет продолжений")
+        data = _validated_campaign(row, cutoff)
+        if data.get("closed_by_owner") is True:
+            return row.id, data
+        completed = data["completed_hops"]
         expected = data["initial_run_budget"]-len(completed)
         if completed and runs_left == completed[-1]:
             return row.id, {**data, "replay": True}
@@ -227,6 +239,161 @@ def _write_report(output: Path, report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _close_targets(session: Session, cohort: set[int], cutoff: datetime) -> list[int]:
+    """Полностью проверить область отмены до первой записи, включая связи замен."""
+    records: dict[int, SchedulerRun] = {}
+    for row in session.scalars(select(SchedulerRun).where(
+        SchedulerRun.task_type == core.TASK_TYPE, SchedulerRun.city == CITY,
+    ).order_by(SchedulerRun.id)):
+        raw_id = row.details.get("raw_item_id")
+        if type(raw_id) is int:
+            records[raw_id] = row
+    scope, roots, edges = set(cohort), {}, {}
+    pending = list(cohort)
+
+    def objects(raw_id: int) -> tuple[RawItem, EditorialRun | None]:
+        raw = session.get(RawItem, raw_id)
+        source = session.get(Source, raw.source_id) if raw else None
+        if raw is None or source is None or source.city != CITY:
+            raise ValueError("Материал фиксированной когорты или его источник отсутствует")
+        return raw, session.get(EditorialRun, raw_id)
+
+    while pending:
+        raw_id = pending.pop()
+        if raw_id in roots:
+            continue
+        raw, run = objects(raw_id)
+        if raw_id in cohort and raw.ingested_at > cutoff:
+            raise ValueError("Материал не принадлежит исходному cutoff")
+        record = records.get(raw_id)
+        root_id = raw_id
+        if record is not None:
+            data = record.details
+            if (record.task_key != f"material-lifecycle:{CITY}:{raw_id}"
+                    or data.get("policy_version") != core.POLICY_VERSION):
+                raise ValueError("Повреждена запись жизненного цикла")
+            if "lifecycle_root_raw_id" in data:
+                root_id = data["lifecycle_root_raw_id"]
+                parent = records.get(root_id) if type(root_id) is int else None
+                _, original = objects(root_id) if type(root_id) is int else (None, None)
+                if (type(root_id) is not int or root_id <= 0 or root_id == raw_id
+                        or parent is None or "lifecycle_root_raw_id" in parent.details
+                        or parent.details.get("replacement_raw_item_id") != raw_id
+                        or original is None
+                        or original.outcome.get("reason") != SOURCE_REPLACED_REASON
+                        or original.outcome.get("replacement_raw_item_id") != raw_id):
+                    raise ValueError("Повреждена связь первоисточника с жизненным циклом")
+                if root_id not in scope:
+                    scope.add(root_id)
+                    pending.append(root_id)
+            else:
+                if (data.get("schema_version") != 1
+                        or data.get("state") not in core.TERMINAL_STATES
+                        and not core.valid_owner_close_state(data)
+                        or not isinstance(data.get("history", []), list)):
+                    raise ValueError("Повреждено состояние жизненного цикла")
+                replacement = data.get("replacement_raw_item_id")
+                if replacement is not None and (run is None
+                        or run.outcome.get("reason") != SOURCE_REPLACED_REASON
+                        or run.outcome.get("replacement_raw_item_id") != replacement):
+                    raise ValueError("Отсутствует доказанная замена первоисточника")
+        roots[raw_id] = root_id
+        if run is not None and run.outcome.get("reason") == SOURCE_REPLACED_REASON:
+            target = run.outcome.get("replacement_raw_item_id")
+            if type(target) is not int or target <= 0 or target == raw_id:
+                raise ValueError("Повреждена редакционная связь первоисточника")
+            objects(target)
+            edges[raw_id] = target
+            if target not in scope:
+                scope.add(target)
+                pending.append(target)
+        for child_id, child in records.items():
+            if child.details.get("lifecycle_root_raw_id") == raw_id and child_id not in scope:
+                scope.add(child_id)
+                pending.append(child_id)
+    for original_id, replacement in edges.items():
+        linked_parent, linked_child = records.get(original_id), records.get(replacement)
+        if (linked_parent is None or linked_child is None
+                or roots[original_id] != roots[replacement]
+                or linked_parent.details.get("replacement_raw_item_id") != replacement
+                or linked_child.details.get("lifecycle_root_raw_id") != original_id):
+            raise ValueError("Замена не принадлежит доказанному общему жизненному циклу")
+    for raw_id in scope:
+        visited: set[int] = set()
+        target = raw_id
+        while target in edges:
+            if target in visited:
+                raise ValueError("Цикл замен первоисточника")
+            visited.add(target)
+            target = edges[target]
+    targets = [raw_id for raw_id in scope if raw_id not in edges]
+    return sorted(targets)
+
+
+def close_existing(engine: Engine, cutoff: datetime, output: Path) -> dict[str, Any]:
+    """Атомарно снять остаток существующей кампании по решению владельца, без AI и сети."""
+    cutoff = aware_datetime(cutoff.isoformat())
+    now = _utc()
+    if cutoff > now:
+        raise ValueError("Cutoff не должен быть в будущем")
+    verify_sqlite_schema(engine)
+    key = f"material-backlog-drain:{CITY}:{cutoff.isoformat()}"
+    with Session(engine) as session, session.begin():
+        lock_editorial_city(session, CITY)
+        row = session.scalar(select(SchedulerRun).where(
+            SchedulerRun.task_type == TASK_TYPE, SchedulerRun.task_key == key,
+            SchedulerRun.city == CITY,
+        ).order_by(SchedulerRun.id.desc()).limit(1).with_for_update())
+        if row is None:
+            raise ValueError("Нет существующей фиксированной кампании с этим cutoff")
+        campaign = _validated_campaign(row, cutoff)
+        cohort = set(campaign["cohort_ids"])
+        targets = _close_targets(session, cohort, cutoff)
+        before = _view(engine, cohort | set(targets), session=session)
+        closed = 0
+        for raw_id in targets:
+            state = before["states"].get(raw_id)
+            if state is None or state["status"] not in {"published", "blocked"}:
+                core.close_by_owner(session, raw_id, now=now)
+                closed += 1
+        session.flush()
+        final = _view(engine, cohort, session=session)
+        states = [final["states"][raw_id] for raw_id in sorted(cohort)]
+        remaining = sum(item["status"] not in {"published", "blocked"} for item in states)
+        if remaining:
+            raise ValueError("Не все материалы фиксированной когорты удалось закрыть")
+        counts = Counter(item["status"] for item in states)
+        reconciliation = 0
+        for raw_id in targets:
+            run = session.get(EditorialRun, raw_id)
+            post = session.get(Post, run.post_id) if run and run.post_id else None
+            confirmed = bool(run and run.delivery_status == "sent" and post
+                             and type(post.telegram_message_id) is int
+                             and post.telegram_message_id > 0)
+            unsafe = bool(run and (run.delivery_status in {"sending", "uncertain", "sent"}
+                          or run.staging_message_id is not None) or post and (
+                          post.telegram_message_id is not None or post.published_at is not None))
+            state = final["states"].get(raw_id)
+            reconciliation += bool(unsafe and not confirmed or state
+                                   and state["reason"] == "delivery_reconciliation_required")
+        replay = campaign.get("closed_by_owner") is True
+        report = {"status": "DRAIN_OK", "mode": "close_existing", "closed_by_owner": True,
+                  "observed_at": now.isoformat(), "cutoff": cutoff.isoformat(),
+                  "cohort_total": len(cohort), "cohort_sha256": campaign["cohort_sha256"],
+                  "remaining": 0, "needs_continue": False, "next_at": None,
+                  "next_delay_seconds": 0, "attempts_used": 0, "delivered": 0,
+                  "closed_count": closed, "replay": replay,
+                  "requires_reconciliation": bool(reconciliation),
+                  "requires_reconciliation_count": reconciliation,
+                  "status_counts": {status: counts[status] for status in ("published", "blocked")},
+                  "stop_reason": "closed_by_owner"}
+        row.details = {**campaign, "closed_by_owner": True,
+                       "closed_by_owner_at": campaign.get("closed_by_owner_at", now.isoformat()),
+                       "close_reason": "owner_closed_backlog", "last_report": report}
+        row.status, row.finished_at = "closed_by_owner", now
+    return _write_report(output, report)
+
+
 def process_existing(
     engine: Engine, cutoff: datetime, output: Path, provider: StructuredAIProvider,
     max_attempts: int = 10, max_seconds: int = 300,
@@ -245,6 +412,10 @@ def process_existing(
     started = time.monotonic()
     provider = _BudgetProvider(provider, started+max_seconds)
     campaign_id, campaign = _campaign(engine, cutoff, runs_left)
+    if campaign.get("closed_by_owner") is True:
+        return _write_report(output, {**campaign["last_report"], "status": "DRAIN_OK",
+                                     "replay": True, "needs_continue": False,
+                                     "next_delay_seconds": 0})
     if campaign.get("replay"):
         previous = campaign.get("last_report", {})
         return _write_report(output, {**previous, "status": "DRAIN_OK", "replay": True,
@@ -428,6 +599,7 @@ def main() -> None:
     parser.add_argument("--max-seconds", default=300, type=int)
     parser.add_argument("--runs-left", default=1, type=int)
     parser.add_argument("--send-enabled", action="store_true")
+    parser.add_argument("--close-existing", action="store_true")
     args = parser.parse_args()
     engine = None
     try:
@@ -437,6 +609,10 @@ def main() -> None:
             raise ValueError("Нужен существующий канонический локальный SQLite")
         engine = create_engine(url)
         args.output.mkdir(parents=True, exist_ok=True)
+        if args.close_existing:
+            report = close_existing(engine, args.before, args.output)
+            print(json.dumps({"status": report["status"], "needs_continue": False}))
+            return
         budget_ends = time.monotonic()+args.max_seconds
         provider = PublicPreparationCache(ServerAI(IsolatedGeminiProvider(
             os.environ["GEMINI_API_KEY"], model=os.environ["GEMINI_MODEL"],

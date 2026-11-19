@@ -529,6 +529,40 @@ def block_unsupported_repair(session: Session, raw_id: int, *, now: datetime) ->
     return dict(record.details)
 
 
+def close_by_owner(session: Session, raw_id: int, *, now: datetime) -> dict[str, Any]:
+    """Закрыть материал по явному решению владельца; commit делает канонический caller.
+
+    Квитанции, транспорт и подтверждённое согласование не переписываются. Сверка
+    неизвестной доставки остаётся отдельной причиной окончательной блокировки.
+    """
+    now = _now(now)
+    raw, source, run, post = _objects(session, raw_id)
+    record = _record(session, raw, source, now)
+    if record.details.get("state") == "blocked":
+        return dict(record.details)
+    if _published(run, post):
+        if record.details.get("state") != "published":
+            _set(record, now=now, state="published", action=None,
+                 reason="telegram_receipt_confirmed")
+        return dict(record.details)
+    reason = ("delivery_reconciliation_required" if _unsafe_delivery(run, post)
+              or record.details.get("state") == "published" else "owner_closed_backlog")
+    history = list(record.details.get("history", []))
+    previous = {"previous_state": record.details.get("state"),
+                "previous_reason": record.details.get("reason")}
+    _block(session, record, run, post, now=now, reason=reason)
+    # Разовая ручная отмена сохраняет всю прежнюю историю, включая старейшую запись.
+    record.details = {**record.details, "history": [*history, {
+        "at": now.isoformat(), "state": "blocked", "next_action": None, "reason": reason,
+    }], "owner_closure": {"at": now.isoformat(), "reason": "owner_closed_backlog", **previous}}
+    return dict(record.details)
+
+
+def valid_owner_close_state(data: dict[str, Any]) -> bool:
+    """Без записи проверить нетерминальный журнал перед атомарной ручной отменой."""
+    return _validate(data)
+
+
 def authorize_refreshed_evidence(session: Session, raw_id: int, *, now: datetime) -> bool:
     """Принять уже валидированный capture без нового бюджета, пакета и разрешения доставки."""
     now = _now(now)
