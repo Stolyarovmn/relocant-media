@@ -20,6 +20,7 @@ from relocant_media.ops import gpt_fallback_worker as worker
 from relocant_media.services import gpt_fallback
 from relocant_media.services.editorial import _candidate, _snapshot_member
 from relocant_media.services.editorial_products import build_presentation, present_draft
+from relocant_media.services.gpt_batch_fallback import build_batch_request, build_ranked_request
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 seeded = server_seeded
@@ -215,6 +216,49 @@ def test_real_fallback_validation_requires_the_recorded_gemini_failure(
     assert result["fallback_required"] is invalidate
     assert fetched == ([] if invalidate else [True])
     assert (session.get(EditorialRun, raw.id) is None) is invalidate
+
+
+@pytest.mark.parametrize("approve", [True, False])
+def test_batch_reserve_reaches_final_decision_in_same_cycle(fallback_session, monkeypatch, approve):
+    session, raw, scheduler = fallback_session
+    engine = session.get_bind()
+    scheduler.details = {"processing_errors": [], "batch_preselection": {
+        "status": "gpt_waiting", "gpt_slots": 5, "gpt_candidate_ids": [raw.id],
+        "full_review_ids": [],
+    }}
+    session.commit()
+    brief = build_batch_request(session, now=NOW)
+    rank = {"version": 2, "kind": "batch_preselection", "selected_ids": [raw.id],
+            "request_sha256": hashlib.sha256(canonical_json(brief).encode()).hexdigest()}
+    assert worker.save_batch_rank(engine, brief, rank, now=NOW)["selected_count"] == 1
+    assert worker.save_batch_rank(engine, brief, rank, now=NOW)["selected_count"] == 1
+    request = build_ranked_request(session, brief, rank, now=NOW)
+    assert request["scheduler_run_id"] == scheduler.id
+    assert gpt_fallback.pending_gpt_ids(session, now=NOW) == {raw.id}
+    if approve:
+        payload = _input(package_for_request(request), request)
+        monkeypatch.setattr(worker, "_check_live_evidence", lambda package: None)
+    else:
+        payload = {"request": request, "result": {
+            "version": 1,
+            "request_sha256": hashlib.sha256(canonical_json(request).encode()).hexdigest(),
+            "packages": [],
+            "rejected": [{"raw_item_id": raw.id, "category": "transport",
+                          "rationale": "Детали заявки уже не представляют интереса читателю."}],
+        }}
+    result = worker.run_worker(engine, _parse(payload), now=NOW)
+    assert result["status"] == "PRIMARY_OK"
+    assert result["imported"] == int(approve)
+    assert result["declined"] == int(not approve)
+    assert result["sent_count"] == 0
+    assert result["fallback_required"] is False
+    run = session.get(EditorialRun, raw.id)
+    assert run is not None
+    if not approve:
+        assert run.post_id is None
+        assert run.outcome["reason"] == "gpt_ranking_rejected"
+    assert build_ranked_request(session, brief, rank, now=NOW) is None
+    assert gpt_fallback.pending_gpt_ids(session, now=NOW) == set()
 
 
 def test_real_gemini_failure_can_recover_an_existing_selection_hold(

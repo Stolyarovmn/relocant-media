@@ -129,7 +129,10 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
                     "illustration_mode")),
                 "delivery": _token(delivery), "telegram_message_id": message_id,
             })
+        batch = details.get("batch_preselection")
+        waiting_for_gpt = isinstance(batch, dict) and batch.get("status") == "gpt_waiting"
         return {"scheduler_run_id": cycle_id, "status": _token(status),
+                "gpt_batch_waiting": waiting_for_gpt,
                 "materials": materials, "errors": [
                     {"raw_item_id": error["raw_item_id"], "type": _token(error.get("error_type")),
                      "site": _token(error.get("error_site"))}

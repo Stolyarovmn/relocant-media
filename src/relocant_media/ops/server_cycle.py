@@ -1288,6 +1288,9 @@ def main() -> None:
                     {"id": str(row["id"]), "title": row["title"], "body": row["body"]}
                     for row in recent[:20]],
             )
+        gpt_fallback_enabled = (
+            not args.submissions_only and os.environ.get("EDITORIAL_GPT_FALLBACK_ENABLED") == "true"
+        )
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=ingest,
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output),
@@ -1301,9 +1304,8 @@ def main() -> None:
                               else lambda: policy_reassessment_ids(engine)),
             continue_on_error=True, submissions_only=args.submissions_only,
             allowed_items=allowed_items if args.submissions_only else None,
-            deferred_items=(deferred_items if not args.submissions_only
-                            and os.environ.get("EDITORIAL_GPT_FALLBACK_ENABLED") == "true"
-                            else None),
+            deferred_items=deferred_items if gpt_fallback_enabled else None,
+            defer_failed_batch=gpt_fallback_enabled,
             candidate_priorities=lambda: queue_priorities(
                 source_priorities(json.loads(
                     (args.output / "venue-attention.json").read_text(encoding="utf-8")))
@@ -1314,7 +1316,8 @@ def main() -> None:
         if not feedback_status:
             send_feedback()
         result["private_feedback"] = feedback_status
-        result["fallback_required"] = (result["status"] == "PRIMARY_FAILED"
+        result["fallback_required"] = (bool(result.get("fallback_required"))
+                                       or result["status"] == "PRIMARY_FAILED"
                                        or bool(result.get("processing_errors"))
                                        or bool(result.get("gpt_deferred_count")))
         result["sent_message_ids"] = []

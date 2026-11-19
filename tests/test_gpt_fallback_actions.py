@@ -63,13 +63,21 @@ def test_export_only_writes_private_request_blob(context, tmp_path, monkeypatch,
     assert not public.exists()
 
 
-def test_fallback_uses_one_canonical_claim_and_no_primary_model(context, tmp_path, monkeypatch):
+@pytest.mark.parametrize("rank_only", [False, True])
+def test_fallback_uses_one_canonical_claim_and_no_primary_model(
+    context, tmp_path, monkeypatch, rank_only,
+):
     store, old = context
     store.state["last_editorial_at"] = "editorial-before-fallback"
     storage = PrivateStore(old.files)
     request = {"version": 1, "candidates": [{"raw_item_id": 23}]}
     request_sha = storage.save(canonical_json(request).encode())
-    result = {"version": 1, "request_sha256": request_sha, "packages": [{"raw_item_id": 23}]}
+    result = (
+        {"version": 2, "kind": "batch_preselection", "request_sha256": request_sha,
+         "selected_ids": [23]}
+        if rank_only else
+        {"version": 1, "request_sha256": request_sha, "packages": [{"raw_item_id": 23}]}
+    )
     result_sha = storage.save(canonical_json(result).encode())
     seen = []
 
@@ -82,7 +90,11 @@ def test_fallback_uses_one_canonical_claim_and_no_primary_model(context, tmp_pat
         assert "GEMINI_API_KEY" not in env
         assert "EDITORIAL_OWNER_CHAT_ID" not in env
         assert "GPT_FALLBACK_BLOB_SHA256" not in env
-        assert env["TELEGRAM_BOT_TOKEN"] == "mock-bot"
+        if rank_only:
+            assert "TELEGRAM_BOT_TOKEN" not in env
+            assert env["EDITORIAL_SEND_ENABLED"] == "false"
+        else:
+            assert env["TELEGRAM_BOT_TOKEN"] == "mock-bot"
         seen.append(True)
         return 0
 
