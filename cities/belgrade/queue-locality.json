@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "city_id": "belgrade",
+  "place_aliases": [
+    "Knez Mihailova",
+    "Knez Mihailove",
+    "Knez Mihailovoj",
+    "kneza Mihaila",
+    "Кнез Михаилова",
+    "Кнез Михаилове",
+    "Кнез Михаиловој",
+    "кнеза Михаила",
+    "Кнез Михайлова",
+    "Кнез Михайловой"
+  ]
+}

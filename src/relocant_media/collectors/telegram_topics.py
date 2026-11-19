@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from relocant_media.analytics.public_preview import (
     PreviewError,
     VisibleCounter,
+    message_text_node,
     parse_preview,
     validate_username,
 )
@@ -114,8 +115,9 @@ def parse_topics(
             continue
         node = nodes.get(f'{channel}/{post["post_id"]}'.lower())
         links: list[str] = []
-        if node is not None:
-            for anchor in node.select(".tgme_widget_message_text a[href]"):
+        body = message_text_node(node) if node is not None else None
+        if body is not None:
+            for anchor in body.select("a[href]"):
                 href = str(anchor.get("href", ""))
                 try:
                     parsed = urlsplit(href)
@@ -169,7 +171,7 @@ async def collect_topics(
             continue
         timestamp = node.select_one("time[datetime]")
         published = _publication_time(timestamp.get("datetime") if timestamp else None)
-        if published is None and node.select_one(".tgme_widget_message_text") is not None:
+        if published is None and message_text_node(node) is not None:
             # A visible clock is not a publication date. Try only the same post's
             # public permalink, bounded to twenty reads; never guess today's date.
             if fallback_attempts < 20:

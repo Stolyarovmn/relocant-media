@@ -45,6 +45,23 @@ class EditorialGeography(ProfileModel):
         return values
 
 
+class QueueLocalityHints(ProfileModel):
+    """Места меняют только порядок очереди, не хеш редакционного допуска."""
+
+    schema_version: Literal[1] = 1
+    city_id: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
+    place_aliases: tuple[str, ...] = Field(default=(), max_length=30)
+
+    @field_validator("place_aliases")
+    @classmethod
+    def specific_places(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not 5 <= len(value.strip()) <= 150 for value in values):
+            raise ValueError("Нужно конкретное название места")
+        if len({value.casefold() for value in values}) != len(values):
+            raise ValueError("Названия мест не должны повторяться")
+        return values
+
+
 class EditorialRubric(ProfileModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
     name: str = Field(min_length=1, max_length=100)
@@ -126,3 +143,21 @@ def load_city_profile(
     if profile.city_id != city:
         raise ValueError("Идентификатор профиля не совпадает с запрошенным городом")
     return profile
+
+
+def load_queue_place_aliases(city: str, *, cities_root: Path | None = None) -> tuple[str, ...]:
+    """Прочитать необязательные местные ориентиры; правила допуска не изменяются."""
+    if not _CITY_ID.fullmatch(city):
+        raise ValueError("Недопустимый идентификатор города")
+    root = (cities_root or DEFAULT_CITIES_ROOT).resolve()
+    path = (root / city / "queue-locality.json").resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("Ориентиры находятся вне каталога городов")
+    if not path.is_file():
+        return ()
+    if path.stat().st_size > 16 * 1024:
+        raise ValueError("Список ориентиров превышает допустимый размер")
+    hints = QueueLocalityHints.model_validate_json(path.read_text(encoding="utf-8"))
+    if hints.city_id != city:
+        raise ValueError("Город ориентиров не совпадает с запрошенным")
+    return hints.place_aliases

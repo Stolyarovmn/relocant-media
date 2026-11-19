@@ -66,6 +66,7 @@ def select_candidates(
     allowed_raw_ids: set[int] | None = None,
     excluded_raw_ids: set[int] | None = None,
     locality_aliases: tuple[str, ...] = (),
+    local_place_aliases: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Only SELECT; the caller supplies a consistent read-only transaction."""
     if not city.strip() or not 1 <= limit <= 50:
@@ -165,10 +166,13 @@ def select_candidates(
     clusters = cluster_events(event_inputs)
     if newest_first:
         priorities = source_priorities or {}
+        # Только настроенные местные ориентиры; название общенациональной организации
+        # не подставляется вместо географии. Это порядок рассмотрения, не доказательство.
+        locality_names = (*locality_aliases, *local_place_aliases)
         locality = re.compile(
-            r"(?<!\w)(?:" + "|".join(re.escape(alias.casefold()) for alias in locality_aliases)
+            r"(?<!\w)(?:" + "|".join(re.escape(alias.casefold()) for alias in locality_names)
             + r")\w*", re.I,
-        ) if locality_aliases else None
+        ) if locality_names else None
         practical = re.compile(
             r"saobrać|prevoz|isklju|bez vode|bez struje|grejanj|letov|otkaz|"
             r"avio|aerodrom|kašnjen|poremećaj|poplav|kiš|vremensk|nevrem|"
@@ -190,7 +194,7 @@ def select_candidates(
             local = bool(locality and locality.search(lead))
             local_practical = bool(media and local and (
                 practical.search(lead)
-                or local_reader_interest(item.title, item.body, locality_aliases)))
+                or local_reader_interest(item.title, item.body, locality_names)))
             # Национальный поток не получает транспортный приоритет только из-за
             # слова «отмена» о чужом городе. Локальная практическая новость СМИ
             # не остаётся навечно ниже любой общей официальной заметки.

@@ -37,6 +37,27 @@ def test_observations_preserve_unknown_and_approximation():
     assert datetime.fromisoformat(data["fetched_at"]).utcoffset() is not None
 
 
+@pytest.mark.parametrize("body_class", ["tgme_widget_message_text js-message_text",
+                                        "tgme_widget_message_text"])
+def test_reply_quote_does_not_replace_nested_album_caption(body_class):
+    html = f'''<div class="tgme_widget_message" data-post="city_news/115">
+    <a class="tgme_widget_message_reply"><div class="tgme_widget_message_text">
+    Старый анонс фламенко</div></a>
+    <div class="tgme_widget_message_grouped_wrap"><div class="{body_class}">
+    Главное за день · 15 ноября</div></div>
+    <time datetime="2026-11-15T19:32:55Z"></time></div>'''
+    post, = parse_preview(html, "city_news", datetime.now(UTC))["posts"]
+    assert post["text"] == "Главное за день · 15 ноября"
+
+
+def test_reply_only_post_does_not_claim_quoted_text_as_main_text():
+    html = '''<div class="tgme_widget_message" data-post="city_news/115">
+    <a class="tgme_widget_message_reply"><div class="tgme_widget_message_text js-message_text">
+    Старый анонс</div></a><time datetime="2026-11-15T19:32:55Z"></time></div>'''
+    post, = parse_preview(html, "city_news", datetime.now(UTC))["posts"]
+    assert post["text"] is None
+
+
 @pytest.mark.parametrize(
     "name",
     [

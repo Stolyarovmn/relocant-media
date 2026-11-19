@@ -4,7 +4,11 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
+from relocant_media.domain.city_profile import (
+    CityEditorialProfile,
+    load_city_profile,
+    load_queue_place_aliases,
+)
 
 
 def second_city_profile() -> CityEditorialProfile:
@@ -85,3 +89,32 @@ def test_directory_and_declared_city_must_match(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="не совпадает"):
         load_city_profile("belgrade", cities_root=tmp_path)
+
+
+def test_queue_places_are_optional_city_scoped_and_do_not_change_profile_hash(tmp_path) -> None:
+    import json
+
+    profile = second_city_profile()
+    directory = tmp_path / profile.city_id
+    directory.mkdir()
+    (directory / "editorial.yaml").write_text(
+        yaml.safe_dump(profile.model_dump(mode="json")), encoding="utf-8",
+    )
+    before = load_city_profile(profile.city_id, cities_root=tmp_path)
+    assert load_queue_place_aliases(profile.city_id, cities_root=tmp_path) == ()
+    path = directory / "queue-locality.json"
+    path.write_text(json.dumps({"schema_version": 1, "city_id": profile.city_id,
+                                "place_aliases": ["Rustaveli Avenue"]}))
+    assert load_queue_place_aliases(profile.city_id, cities_root=tmp_path) == ("Rustaveli Avenue",)
+    assert load_queue_place_aliases("belgrade", cities_root=tmp_path) == ()
+    assert load_city_profile(profile.city_id, cities_root=tmp_path).sha256 == before.sha256
+    path.write_text(json.dumps({"schema_version": 1, "city_id": "belgrade",
+                                "place_aliases": ["Knez Mihailova"]}))
+    with pytest.raises(ValueError, match="не совпадает"):
+        load_queue_place_aliases(profile.city_id, cities_root=tmp_path)
+
+
+@pytest.mark.parametrize("city", ["../belgrade", "", "BELGRADE"])
+def test_queue_places_reject_unsafe_city_path(city, tmp_path) -> None:
+    with pytest.raises(ValueError):
+        load_queue_place_aliases(city, cities_root=tmp_path)

@@ -15,6 +15,7 @@ from relocant_media.ai.audience_policy import (
 )
 from relocant_media.ai.channel_style import (
     CHANNEL_DRAFT_STYLE,
+    PROCEDURAL_GUIDANCE_POLICY,
     writing_context,
     writing_instruction,
 )
@@ -195,6 +196,7 @@ def reviewed_package(
                         "блокирует approve. "
                     )
         if role == "facts":
+            instructions += PROCEDURAL_GUIDANCE_POLICY
             instructions += (
                 "Роль facts: проверь каждое утверждение, цитаты и полный комплект источников, "
                 "точность заголовка и отсутствие неподтверждённых выводов. "

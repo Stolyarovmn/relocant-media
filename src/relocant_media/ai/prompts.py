@@ -28,8 +28,11 @@ PROFILE_RANK_SYSTEM = COMMON_GROUNDING_RULES + """
 RANK_EVERGREEN = """
 This item is an official evergreen guide for newcomers and has no publication date by design.
 Judge it by lasting practical value for Russian-speaking relocants in the named city, not by
-news timeliness or a local event. Set should_process=true when it gives concrete requirements,
-steps, documents, deadlines, fees or contacts that a newcomer can act on.
+news timeliness or a local event. Concrete officially stated requirements, steps, documents,
+deadlines, fees or contacts can justify processing, not approval. Absence of a publication date
+does not establish that a procedure is current. Preserve the actual risk category even for an
+official notice; never classify banking, legal, immigration, tax or medical guidance as city,
+events or transport just to make it auto-publishable. Never invent missing procedural details.
 """
 
 CLAIMS_SYSTEM = COMMON_GROUNDING_RULES + """

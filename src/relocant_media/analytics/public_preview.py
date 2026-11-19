@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 USERNAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{4,31}", re.ASCII)
 
@@ -41,6 +41,26 @@ def parse_counter(raw: str) -> VisibleCounter | None:
     return VisibleCounter(int(Decimal(number) * multiplier), bool(suffix), raw.strip())
 
 
+def message_text_node(node: Tag) -> Tag | None:
+    """Выбирает основной текст, исключая цитату ответа и предпросмотр ссылки."""
+    excluded = {
+        "tgme_widget_message_reply", "tgme_widget_message_link_preview",
+        "tgme_widget_message",
+    }
+    # Подпись альбома может быть вложенной. Старые страницы не имеют js-message_text.
+    for selector in (".tgme_widget_message_text.js-message_text", ".tgme_widget_message_text"):
+        for candidate in node.select(selector):
+            for ancestor in candidate.parents:
+                if ancestor is node:
+                    return candidate
+                if isinstance(ancestor, Tag):
+                    classes = ancestor.get("class")
+                    names = classes.split() if isinstance(classes, str) else classes
+                    if names and excluded.intersection(names):
+                        break
+    return None
+
+
 def parse_preview(
     html: str, channel: str, fetched_at: datetime, *, max_age: timedelta | None = None
 ) -> dict[str, Any]:
@@ -69,7 +89,7 @@ def parse_preview(
         # Topic discovery drops stale/future posts before extracting or retaining text.
         if max_age is not None and not timedelta(0) <= fetched_at - published <= max_age:
             continue
-        text = node.select_one(".tgme_widget_message_text")
+        text = message_text_node(node)
         views_node = node.select_one(".tgme_widget_message_views")
         views = parse_counter(views_node.get_text()) if views_node else None
         posts.append(
