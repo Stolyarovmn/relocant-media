@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import sys
@@ -17,14 +18,72 @@ from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.presentation import presentation_title
 from relocant_media.ops import gpt_fallback_worker as worker
+from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import gpt_fallback
 from relocant_media.services.editorial import _candidate, _snapshot_member
 from relocant_media.services.editorial_products import build_presentation, present_draft
 from relocant_media.services.gpt_batch_fallback import build_batch_request, build_ranked_request
+from relocant_media.services.material_lifecycle import can_retry_snapshot, lifecycle_state
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 seeded = server_seeded
 fallback_session = service_session
+
+
+def test_primary_error_snapshot_is_archived_before_fallback_claim_without_resetting_budget(
+    fallback_session, monkeypatch,
+):
+    session, raw, _ = fallback_session
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Фиксация резерва не должна обращаться к сети, модели или публикации")
+
+    monkeypatch.setattr(worker.server_runtime, "fetch_documents", forbidden)
+    monkeypatch.setattr(worker.server_cycle, "IsolatedGeminiProvider", forbidden)
+    monkeypatch.setattr(worker.server_cycle, "publish_pending", forbidden)
+    lifecycle_state(session, raw.id, now=NOW)
+    ledger = session.scalar(select(SchedulerRun).where(
+        SchedulerRun.task_type == "material_lifecycle"))
+    ledger.details = {**ledger.details, "state": "waiting", "next_action": "retry_prepare",
+                      "attempts": 1, "last_error_type": "TimeoutError"}
+    source = session.get(Source, raw.source_id)
+    evidence = _snapshot_member(raw, source)
+    previous = EditorialRun(raw_item_id=raw.id, delivery_status="pending", created_at=NOW,
+        evidence={**evidence, "documents": [evidence]},
+        outcome={"status": "human_review", "reason": "selection_ungrounded_evidence",
+                 "ranking": {"category": "transport"}})
+    session.add(previous)
+    session.commit()
+    before = copy.deepcopy(ledger.details)
+    old_outcome, old_evidence = copy.deepcopy(previous.outcome), copy.deepcopy(previous.evidence)
+    assert "rejection_justified" not in before
+    assert can_retry_snapshot(session, raw.id, now=NOW)
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    gpt_fallback.validate_fallback_candidate(session, request, raw.id, now=NOW)
+
+    assert worker._claim_fallback(session, raw.id, now=NOW)
+
+    # Отдельная сессия видит committed budget до первого внешнего действия.
+    with Session(session.get_bind()) as durable:
+        saved = durable.get(SchedulerRun, ledger.id).details
+        assert saved["state"] == "processing" and saved["attempt_kind"] == "fallback"
+        assert saved["attempts"] == before["attempts"] == 1
+        assert saved["fallback_attempts"] == before["fallback_attempts"] + 1 == 1
+        for key in ("first_seen_at", "deadline_at", "fingerprint", "fingerprints",
+                    "rejection_audits", "audit_attempts"):
+            assert saved[key] == before[key]
+        assert len(saved["attempt_records"]) == 1
+        archived = saved["attempt_records"][0]
+        assert archived["outcome"] == old_outcome and archived["evidence"] == old_evidence
+        assert archived["created_at"] == NOW.isoformat()
+        assert archived["archived_at"] == NOW.isoformat()
+        assert durable.get(EditorialRun, raw.id) is None
+        assert durable.get(RawItem, raw.id).body == raw.body
+        assert durable.get(Source, raw.source_id).auto_publish == source.auto_publish
+
+    # Повторная проверка исходного запроса остаётся действующей после архивирования.
+    gpt_fallback.validate_fallback_candidate(session, request, raw.id, now=NOW)
 
 
 def _input(package, request=None):

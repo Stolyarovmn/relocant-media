@@ -178,14 +178,13 @@ def _claim_fallback(session: Session, raw_id: int, *, now: datetime) -> bool:
         # Дальше importer проверит точное совпадение и вернёт прежнюю квитанцию.
         return False
     retry_snapshot = can_retry_snapshot(session, raw_id, now=now)
+    if retry_snapshot and not archive_for_retry(session, raw_id, now=now):
+        raise LifecycleBlockedError("Прежний отказ нельзя безопасно заменить резервным пакетом")
     adopt_fallback_request(session, raw_id, now=now)
     allowed = before_attempt(session, raw_id, now=now, channel="fallback")
     session.commit()
     if not allowed:
         raise LifecycleBlockedError("Резервная попытка недоступна или срок истёк")
-    if retry_snapshot and not archive_for_retry(session, raw_id, now=now):
-        raise LifecycleBlockedError("Прежний отказ нельзя безопасно заменить резервным пакетом")
-    session.commit()
     return True
 
 

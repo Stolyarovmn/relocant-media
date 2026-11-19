@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from test_editorial_integration import editorial_session as _editorial_session
 from test_primary_cycle import NOW, ingest_ok
 from test_primary_cycle import queue as primary_queue
 
@@ -11,6 +12,7 @@ from relocant_media.ops.primary_cycle import run_cycle
 from relocant_media.storage.models import RawItem
 
 queue = primary_queue
+editorial_session = _editorial_session
 
 
 def test_due_retry_survives_reserve_deferral_and_uses_bounded_slots(queue, tmp_path):

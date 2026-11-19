@@ -28,6 +28,65 @@ def _object(raw: str | None) -> dict[str, Any] | None:
     return value
 
 
+def _lifecycle(connection: sqlite3.Connection, raw_id: int) -> dict[str, Any] | None:
+    """Прочитать только безопасные поля root ledger, не меняя старый снимок."""
+    seen: set[int] = set()
+    for _ in range(10):
+        if raw_id in seen:
+            break
+        seen.add(raw_id)
+        row = connection.execute(
+            "SELECT details FROM scheduler_run WHERE task_type=? AND json_valid(details) "
+            "AND json_extract(details, '$.raw_item_id')=? ORDER BY id DESC LIMIT 1",
+            ("material_lifecycle", raw_id),
+        ).fetchone()
+        if row is None:
+            if len(seen) == 1:
+                return None
+            break
+        details = _object(row["details"]) or {}
+        if type(details.get("raw_item_id")) is not int or details["raw_item_id"] != raw_id:
+            break
+        if "lifecycle_root_raw_id" in details:
+            root_id = details["lifecycle_root_raw_id"]
+            if type(root_id) is not int or root_id <= 0:
+                break
+            raw_id = root_id
+            continue
+        result: dict[str, Any] = {}
+        status = details.get("state")
+        if isinstance(status, str) and status in {
+            "waiting", "processing", "ready", "waiting_fallback", "blocked", "published",
+        }:
+            result["status"] = status
+        action = details.get("next_action")
+        if action is None or isinstance(action, str) and action in {
+            "prepare", "retry_prepare", "repair", "fallback", "process",
+            "audit_rejection", "deliver", "owner_delivery",
+        }:
+            result["next_action"] = action
+        for key in ("next_attempt_at", "deadline_at"):
+            value = details.get(key)
+            if value is None:
+                result[key] = None
+            elif isinstance(value, str):
+                try:
+                    result[key] = _utc(value).isoformat()
+                except ValueError:
+                    pass
+        for key in ("attempts", "fallback_attempts", "rejection_audits", "audit_attempts",
+                    "delivery_attempts"):
+            value = details.get(key)
+            if type(value) is int and 0 <= value <= 100:
+                result[key] = value
+        for key in ("reason", "policy_version"):
+            value = details.get(key)
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", value):
+                result[key] = value
+        return result
+    return {"status": "blocked", "reason": "invalid_lifecycle_link"}
+
+
 def audit_coverage(
     database: Path, cases: list[dict[str, Any]], *, observed_at: datetime,
 ) -> dict[str, Any]:
@@ -82,8 +141,18 @@ def audit_coverage(
             assert record is not None
             value = dict(record)
             outcome = _object(value.pop("outcome"))
-            if value["delivery_status"] == "sent":
+            lifecycle = _lifecycle(connection, raw_id)
+            if lifecycle is not None:
+                value["lifecycle"] = lifecycle
+            if (value["delivery_status"] == "sent"
+                    or type(value["telegram_message_id"]) is int
+                    and value["telegram_message_id"] > 0 and value["delivered_at"]):
                 stage = "published"
+            elif lifecycle and lifecycle.get("status") == "blocked":
+                stage = "blocked"
+            elif (lifecycle and lifecycle.get("status") not in {"blocked", "published"}
+                    and lifecycle.get("next_action")):
+                stage = "lifecycle_pending"
             elif outcome is None:
                 stage = "processing_failed" if errors.get(raw_id) else "collected_without_decision"
             elif outcome.get("status") == "skipped":
