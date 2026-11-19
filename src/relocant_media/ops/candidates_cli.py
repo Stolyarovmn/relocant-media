@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import and_, create_engine, func, or_, select, text
 from sqlalchemy.orm import Session, aliased
 
+from relocant_media.domain.audience import local_reader_interest
 from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key, same_event
 from relocant_media.domain.freshness import GUIDE_MAX_AGE, GUIDE_SOURCE_TYPE
 from relocant_media.domain.publication_time import publication_interval
@@ -187,7 +188,9 @@ def select_candidates(
             lead = item.title + "\n" + item.body[:500]
             media = source.source_type == "news_media"
             local = bool(locality and locality.search(lead))
-            local_practical = bool(media and local and practical.search(lead))
+            local_practical = bool(media and local and (
+                practical.search(lead)
+                or local_reader_interest(item.title, item.body, locality_aliases)))
             # Национальный поток не получает транспортный приоритет только из-за
             # слова «отмена» о чужом городе. Локальная практическая новость СМИ
             # не остаётся навечно ниже любой общей официальной заметки.

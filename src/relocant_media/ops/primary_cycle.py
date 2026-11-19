@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.jev import jev_enabled, rank_shadow
+from relocant_media.domain.freshness import GUIDE_SOURCE_TYPE
 from relocant_media.ops.candidates_cli import aware_datetime, select_candidates
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.storage.models import EditorialRun, RawItem, Source, SourceRevision
@@ -82,6 +84,8 @@ def run_cycle(
     deferred_items: Callable[[Session], set[int]] | None = None,
     submissions_only: bool = False,
     locality_aliases: tuple[str, ...] = (),
+    preselect: Callable[[list[dict[str, Any]], int],
+                        tuple[list[dict[str, Any]], dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
             or not city.strip() or not 1 <= limit <= 5):
@@ -112,21 +116,49 @@ def run_cycle(
             if collection["failures"] and not allow_partial_ingest:
                 raise ValueError("source collection incomplete")
             corrections, policy_holds = reassessment_ids() if reassessment_ids else ([], [])
+            priority_ids = priority_items() if priority_items else set()
             with Session(engine) as session:
                 deferred = deferred_items(session) if deferred_items else set()
                 manifest = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
-                    until=aware_datetime(window["until"]), limit=limit, newest_first=newest_first,
-                    priority_raw_ids=priority_items() if priority_items else None,
+                    until=aware_datetime(window["until"]),
+                    limit=30 if preselect else limit, newest_first=newest_first,
+                    priority_raw_ids=priority_ids,
                     allowed_raw_ids=allowed_items() if allowed_items else None,
                     excluded_raw_ids=deferred,
                     recent_source_counts=recent_source_counts() if recent_source_counts else None,
                     locality_aliases=locality_aliases,
                     source_priorities=candidate_priorities() if candidate_priorities else None)
+            if preselect is not None:
+                candidates = manifest["candidates"]
+                protected = [candidate for candidate in candidates if (
+                    candidate["raw_item_id"] in priority_ids
+                    or candidate["source"]["type"] == GUIDE_SOURCE_TYPE
+                    or candidate["source"]["ownership"] == "official" and re.search(
+                        r"obustav|izmen.*saobra|preusmer|затвор|обустав|измен.*саобра",
+                        candidate["evidence"]["title"], re.IGNORECASE,
+                    )
+                )][:limit]
+                protected_ids = {item["raw_item_id"] for item in protected}
+                pool = [item for item in candidates if item["raw_item_id"] not in protected_ids]
+                selected, audit = preselect(pool, limit - len(protected))
+                if (len(selected) > limit - len(protected)
+                        or any(type(item.get("raw_item_id")) is not int for item in selected)
+                        or len({item["raw_item_id"] for item in selected}) != len(selected)
+                        or any(not any(item is original for original in pool)
+                               for item in selected)):
+                    raise ValueError("preselection returned invalid candidate objects")
+                manifest["batch_preselection"] = {**audit,
+                    "protected_ids": [item["raw_item_id"] for item in protected]}
+                manifest["candidates"] = [*protected, *selected]
+                manifest["candidate_count"] = len(manifest["candidates"])
+                heartbeat["batch_preselection"] = manifest["batch_preselection"]
             if reassessment_ids is not None:
-                selected = {candidate["raw_item_id"] for candidate in manifest["candidates"]}
-                corrections = [i for i in corrections if i not in selected and i not in deferred]
-                policy_holds = [i for i in policy_holds if i not in selected and i not in deferred]
+                selected_ids = {candidate["raw_item_id"] for candidate in manifest["candidates"]}
+                corrections = [i for i in corrections
+                               if i not in selected_ids and i not in deferred]
+                policy_holds = [i for i in policy_holds
+                                if i not in selected_ids and i not in deferred]
                 # Repair one previously stalled decision even if the fresh queue is full.
                 if corrections:
                     manifest["candidates"].insert(0, {
@@ -138,6 +170,9 @@ def run_cycle(
                     for i in (corrections[1:] + policy_holds)[:slots])
                 manifest["candidate_count"] = len(manifest["candidates"])
                 manifest["reassessment_count"] = len(corrections) + len(policy_holds)
+            if preselect is not None:
+                heartbeat["batch_preselection"]["full_review_ids"] = [
+                    candidate["raw_item_id"] for candidate in manifest["candidates"]]
             # Jev is a non-authoritative, optional observer; it never edits the queue.
             if jev_enabled():
                 try:

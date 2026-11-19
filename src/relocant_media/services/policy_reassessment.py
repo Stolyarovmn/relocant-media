@@ -7,7 +7,12 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
 from relocant_media.ai.package import EditorialPackage, canonical_json
-from relocant_media.domain.audience import local_flight_change, local_utility_notice
+from relocant_media.domain.audience import (
+    READER_VALUE_POLICY_VERSION,
+    local_flight_change,
+    local_reader_interest,
+    local_utility_notice,
+)
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import evidence_freshness
@@ -73,7 +78,50 @@ def eligible_policy_reassessment(
     session: Session, raw_item_id: int, *, now: datetime | None = None,
 ) -> bool:
     return (eligible_empty_policy_hold(session, raw_item_id, now=now)
-            or eligible_map_hold(session, raw_item_id, now=now))
+            or eligible_map_hold(session, raw_item_id, now=now)
+            or eligible_reader_category_hold(session, raw_item_id, now=now))
+
+
+def eligible_reader_category_hold(
+    session: Session, raw_id: int, *, now: datetime | None = None,
+) -> bool:
+    """Однократная новая проверка прежних низкорисковых категорий, без sent/owner receipts."""
+    run = session.get(EditorialRun, raw_id, populate_existing=True)
+    item = session.get(RawItem, raw_id, populate_existing=True)
+    source = session.get(Source, item.source_id, populate_existing=True) if item else None
+    if (run is None or item is None or source is None or not source.enabled
+            or run.delivery_status != "pending" or run.staging_message_id is not None
+            or run.outcome.get("reason") != "package_requires_review"
+            or run.outcome.get("status") != "human_review"
+            or "_autonomous_assessment" in run.outcome
+            or any(key in run.outcome for key in ("_rich_delivery", "_media_delivery"))):
+        return False
+    try:
+        payload = run.outcome["_package"]
+        package = EditorialPackage.model_validate_json(canonical_json(payload))
+        post = session.get(Post, run.post_id) if run.post_id else None
+        if (package.version != 2 or package.event is None
+                or package.outcome.ranking.category not in {"culture", "sport", "city"}
+                or package.outcome.status != "ready"
+                or package.raw_item_id != raw_id or package.source_id != item.source_id
+                or package.city != source.city
+                or run.outcome.get("_package_sha256") != hashlib.sha256(
+                    canonical_json(payload).encode()).hexdigest()
+                or post is None or post.telegram_message_id is not None
+                or post.published_at is not None
+                or (post.title, post.body) != (
+                    package.outcome.draft.title, package.outcome.draft.body)):
+            return False
+        members = _event_items(session, anchor=item, anchor_source=source)
+        snapshots = [_snapshot_member(member, policy) for member, policy in members]
+        return (run.evidence.get("documents") == snapshots
+                and [doc.model_dump(mode="json") for doc in package.event.documents] == snapshots
+                and package.event.event_key == event_key(_candidate(item))
+                and evidence_freshness(item.title, item.body, item.published_at,
+                    now or datetime.now(UTC), precision=item.published_at_precision,
+                    source_type=source.source_type, verified_at=item.ingested_at).action == "keep")
+    except (ValueError, KeyError, TypeError):
+        return False
 
 
 def eligible_empty_policy_hold(
@@ -107,7 +155,12 @@ def eligible_empty_policy_hold(
         return False
     if rejected and not utility:
         profile = load_city_profile(source.city)
-        if not local_flight_change(item.title, item.body, profile.geography.city_aliases):
+        interest = (outcome.get("ranking", {}).get("category") in {
+            "city", "events", "culture", "sport",
+        } and local_reader_interest(item.title, item.body, profile.geography.city_aliases))
+        if not interest and not local_flight_change(
+            item.title, item.body, profile.geography.city_aliases,
+        ):
             return False
     members = _event_items(session, anchor=item, anchor_source=source)
     expected = [_snapshot_member(member, policy) for member, policy in members]
@@ -148,7 +201,8 @@ def persist_policy_reassessment(
         previous = policy_hold_audit(run)
         run.outcome = {**outcome.model_dump(mode="json"),
                        "_previous_policy_hold": previous,
-                       "_autonomous_assessment": {"checked_at": now.isoformat()}}
+                       "_autonomous_assessment": {"checked_at": now.isoformat(),
+                           "reader_value_policy": READER_VALUE_POLICY_VERSION}}
         session.commit()
         return run
     except BaseException:

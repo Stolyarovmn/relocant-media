@@ -18,6 +18,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.batch_preselection import preselect_candidates
 from relocant_media.ai.diagnostics import AI_PHASES
 from relocant_media.ai.gemini_process import IsolatedGeminiProvider
 from relocant_media.ai.models import (
@@ -1064,10 +1065,10 @@ def policy_reassessment_ids(engine: Engine) -> tuple[list[int], list[int]]:
         correction_cutoff = datetime.now(UTC) - timedelta(days=8)
         rows = session.scalars(select(EditorialRun).join(RawItem).join(Source)
             .where(Source.city == "belgrade", (EditorialRun.post_id.is_(None)
-                   | (reason == "event_place_requires_verification")),
+                   | reason.in_(("event_place_requires_verification", "package_requires_review"))),
                    EditorialRun.delivery_status == "pending",
                    reason.in_(("source_auto_publish_disabled",
-                               "event_place_requires_verification")) | (
+                               "event_place_requires_verification", "package_requires_review")) | (
                        reason.in_(("selection_ungrounded_evidence", "ranking_rejected"))
                        & (RawItem.published_at >= correction_cutoff)
                    ))
@@ -1277,10 +1278,21 @@ def main() -> None:
             return set(scope.get("submission_raw_ids", []))
         def deferred_items(session: Session) -> set[int]:
             return pending_gpt_ids(session, now=datetime.now(UTC))
+        def preselect(items: list[dict[str, Any]], limit: int
+                      ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            with Session(engine) as session:
+                recent = recent_publications(session, "belgrade", now=datetime.now(UTC))
+            return preselect_candidates(
+                items, provider, profile=load_city_profile("belgrade"), limit=limit,
+                now=datetime.now(UTC), recent_publications=[
+                    {"id": str(row["id"]), "title": row["title"], "body": row["body"]}
+                    for row in recent[:20]],
+            )
         result = run_cycle(engine, city="belgrade", output=args.output, now=datetime.now(UTC),
             ingest=ingest,
             process=lambda raw_id: prepare_reviewed(engine, raw_id, provider, args.output),
             limit=PROCESS_LIMIT,
+            preselect=None if args.submissions_only else preselect,
             locality_aliases=load_city_profile("belgrade").geography.city_aliases,
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
             priority_items=private_priorities,

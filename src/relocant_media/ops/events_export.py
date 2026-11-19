@@ -248,7 +248,8 @@ def _reviewed_package(
         or package.source_id != item.source_id
         or package.article_id != item.external_id
         or package.city != post.city
-        or package.outcome.ranking.category != "events"
+        or package.outcome.ranking.category not in {"events", "culture", "sport"}
+        or package.outcome.ranking.category != post.category
         or (post.title, post.body) != (package.outcome.draft.title, package.outcome.draft.body)
     ):
         return None
@@ -447,7 +448,7 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
             ),
             Source.enabled.is_(True),
             Post.city == city,
-            Post.category == "events",
+            Post.category.in_(("events", "culture", "sport")),
             Post.published_at.is_not(None),
             Post.published_at <= observed_at,
             Post.telegram_message_id > 0,

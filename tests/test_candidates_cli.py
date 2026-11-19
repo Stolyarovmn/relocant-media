@@ -45,7 +45,7 @@ def test_local_practical_media_precedes_newer_national_news_without_changing_eli
         locality_aliases=("Београд", "Београду", "Белград"), recent_source_counts={"local": 5},
     )
     assert [row["article_id"] for row in result["candidates"]] == [
-        "official", "local", "world", "sport",
+        "official", "sport", "local", "world",
     ]
     assert result["eligible_count"] == 4
     assert session.scalar(select(func.count()).select_from(EditorialRun)) == 0
