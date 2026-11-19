@@ -330,6 +330,7 @@ def process_existing(
                 ingest=lambda: {"failures": 0, "raw_items_written": 0, "review_required": 0},
                 process=bounded_process, limit=min(5, max_attempts-claims_before),
                 allowed_items=scope, lifecycle_due=reconcile, lifecycle_retry_slots=5,
+                close_window=False,
                 lifecycle_fallback_items=lambda: {
                     raw_id for raw_id, state in _view(engine, cohort)["states"].items()
                     if state["next_action"] == "fallback"},
