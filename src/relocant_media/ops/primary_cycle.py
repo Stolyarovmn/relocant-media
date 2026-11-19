@@ -84,6 +84,7 @@ def run_cycle(
     deferred_items: Callable[[Session], set[int]] | None = None,
     submissions_only: bool = False,
     locality_aliases: tuple[str, ...] = (),
+    local_place_aliases: tuple[str, ...] = (),
     preselect: Callable[[list[dict[str, Any]], int],
                         tuple[list[dict[str, Any]], dict[str, Any]]] | None = None,
     defer_failed_batch: bool = False,
@@ -129,6 +130,7 @@ def run_cycle(
                     excluded_raw_ids=deferred,
                     recent_source_counts=recent_source_counts() if recent_source_counts else None,
                     locality_aliases=locality_aliases,
+                    local_place_aliases=local_place_aliases,
                     source_priorities=candidate_priorities() if candidate_priorities else None)
             gpt_waiting = False
             gpt_candidate_ids: list[int] = []

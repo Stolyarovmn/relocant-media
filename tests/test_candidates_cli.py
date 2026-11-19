@@ -53,6 +53,52 @@ def test_local_practical_media_precedes_newer_national_news_without_changing_eli
     engine.dispose()
 
 
+def test_configured_place_prioritizes_gallery_without_promoting_national_organization() -> None:
+    from sqlalchemy import create_engine
+
+    from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
+    from relocant_media.storage.models import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        source = Source(id="media_nova", city="belgrade", name="Nova", url="https://nova.rs/",
+                        source_type="news_media", ownership="media", auto_publish=True,
+                        high_risk=False, trust=0.8, enabled=True)
+        session.add(source)
+        session.flush()
+        fixtures = [
+            ("national", "SANU predlaže izmene zakona o nauci",
+             "Akademija je predstavila stavove o nacionalnoj politici nauke.", 5),
+            ("foreign", "Otvara se nova galerija u Nišu",
+             "Galerija u centru Niša predstavlja radove lokalnih umetnika.", 4),
+            ("gallery", "SANU otvara novu galeriju u Knez Mihailovoj",
+             "Galerija će biti otvorena u Ulici kneza Mihaila 36. Posetioci mogu da vide izložbu.",
+             1),
+        ]
+        for key, title, body, hour in fixtures:
+            session.add(RawItem(source_id=source.id, external_id=key,
+                                url=f"https://nova.rs/kultura/{key}/", title=title, body=body,
+                                published_at=NOW + timedelta(hours=hour)))
+        session.commit()
+        options = dict(city="belgrade", since=NOW, until=NOW + timedelta(days=1), limit=10,
+                       newest_first=True, source_priorities={source.id: -1},
+                       locality_aliases=load_city_profile("belgrade").geography.city_aliases)
+        before = select_candidates(session, **options)
+        assert [row["article_id"] for row in before["candidates"]] == [
+            "national", "foreign", "gallery",
+        ]
+        after = select_candidates(session, **options,
+                                  local_place_aliases=load_queue_place_aliases("belgrade"))
+        assert [row["article_id"] for row in after["candidates"]] == [
+            "gallery", "national", "foreign",
+        ]
+        assert before["eligible_count"] == after["eligible_count"] == 3
+        assert session.scalar(select(func.count()).select_from(EditorialRun)) == 0
+        assert (source.ownership, source.auto_publish, source.high_risk) == ("media", True, False)
+    engine.dispose()
+
+
 def test_local_interest_changes_order_but_transport_warning_stays_first(
     editorial_session: Session,
 ) -> None:

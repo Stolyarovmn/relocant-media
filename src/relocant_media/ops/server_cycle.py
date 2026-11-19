@@ -68,7 +68,7 @@ from relocant_media.collectors.telegram_topics import (
 )
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.attention import source_priorities, venue_attention
-from relocant_media.domain.city_profile import load_city_profile
+from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
 from relocant_media.domain.dedup import event_key, find_repeated_publication
 from relocant_media.domain.freshness import (
     GUIDE_SOURCE_TYPE,
@@ -776,6 +776,7 @@ async def collect_sources(
                         "published_at": lead.published_at.isoformat(),
                         "status": resolution.status,
                         "primary_results": list(resolution.primary_results),
+                        "discovery_gaps": list(resolution.discovery_gaps),
                         "primary_urls": list(resolution.primary_urls), "ai_calls": 0})
             except Exception as error:
                 result["channel_failures"] += 1
@@ -804,6 +805,7 @@ async def collect_sources(
                         "published_at": news_lead.published_at.isoformat(),
                         "status": resolution.status,
                         "primary_results": list(resolution.primary_results),
+                        "discovery_gaps": list(resolution.discovery_gaps),
                         "primary_urls": list(resolution.primary_urls), "ai_calls": 0})
             except Exception as error:
                 result["news_failures"] += 1
@@ -1301,6 +1303,7 @@ def main() -> None:
             limit=PROCESS_LIMIT,
             preselect=None if args.submissions_only else preselect,
             locality_aliases=load_city_profile("belgrade").geography.city_aliases,
+            local_place_aliases=load_queue_place_aliases("belgrade"),
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
             priority_items=private_priorities,
             recent_source_counts=source_load,

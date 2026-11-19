@@ -34,6 +34,7 @@ class _WritingMatrix(BaseModel):
     context: str
     weather: str
     guide: str
+    procedural_guidance: str
     formats: dict[str, _WritingFormat]
 
     @model_validator(mode="after")
@@ -49,7 +50,11 @@ _MATRIX = _WritingMatrix.model_validate(yaml.safe_load(
 ))
 _BY_CATEGORY = {category: rule for rule in _MATRIX.formats.values() for category in rule.categories}
 CHANNEL_STYLE_VERSION = _MATRIX.version
-CHANNEL_DRAFT_STYLE = f"\n{_MATRIX.common}\n{_MATRIX.context}\n{_MATRIX.weather}\n"
+PROCEDURAL_GUIDANCE_POLICY = _MATRIX.procedural_guidance
+CHANNEL_DRAFT_STYLE = (
+    f"\n{_MATRIX.common}\n{_MATRIX.context}\n{_MATRIX.weather}\n"
+    f"{PROCEDURAL_GUIDANCE_POLICY}\n"
+)
 
 
 def writing_instruction(category: str, *, evergreen: bool = False) -> str:

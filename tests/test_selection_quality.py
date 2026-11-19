@@ -242,6 +242,20 @@ def test_meaningful_city_story_does_not_require_personal_action() -> None:
     assert result.status == PublicationStatus.READY
 
 
+def test_selection_policy_preserves_current_disruption_and_procedure_change_boundaries() -> None:
+    profile = load_city_profile("belgrade")
+    provider = provider_for(profile)
+    EditorialPipeline(provider, city_profile=profile).run(
+        city="belgrade", documents=(_document(),),
+    )
+    instruction = provider.requests[0]["system_instruction"]
+    assert "не отклоняй только из-за отсутствия номеров конкретных рейсов" in instruction
+    assert "не выдумывай" in instruction.lower()
+    assert "общий разговор о погоде без подтверждённого текущего сбоя" in instruction
+    assert "даты чужого Telegram-поста или нового перевода" in instruction
+    assert "подтверждённое новое обстоятельство и дату" in instruction
+
+
 def test_country_scope_and_evergreen_are_explicit() -> None:
     profile = load_city_profile("belgrade")
     profile = profile.model_copy(update={

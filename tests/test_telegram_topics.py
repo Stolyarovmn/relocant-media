@@ -67,6 +67,28 @@ def test_only_recent_posts_extract_text_and_public_links() -> None:
     assert "Старое" not in repr(leads)
 
 
+@pytest.mark.parametrize("body_class", ["tgme_widget_message_text js-message_text",
+                                        "tgme_widget_message_text"])
+def test_reply_links_cannot_resolve_main_topic(body_class) -> None:
+    html = f'''<div class="tgme_widget_message" data-post="example/4">
+    <a class="tgme_widget_message_reply"><div class="tgme_widget_message_text">
+    <a href="https://beograd.rs/old/quote">Старая тема</a></div></a>
+    <div class="tgme_widget_message_grouped_wrap"><div class="{body_class}">
+    Новая галерея <a href="https://nova.rs/kultura/new-gallery/">Источник</a></div></div>
+    <time datetime="2026-10-20T17:00:00Z"></time></div>'''
+    lead, = parse_topics(html, "example", NOW)
+    assert lead.text == "Новая галерея\nИсточник"
+    assert lead.outbound_urls == ("https://nova.rs/kultura/new-gallery/",)
+
+
+def test_quote_only_post_is_not_a_topic() -> None:
+    html = '''<div class="tgme_widget_message" data-post="example/4">
+    <a class="tgme_widget_message_reply"><div class="tgme_widget_message_text">
+    <a href="https://beograd.rs/old/quote">Старая тема</a></div></a>
+    <time datetime="2026-10-20T17:00:00Z"></time></div>'''
+    assert parse_topics(html, "example", NOW) == []
+
+
 def test_missing_date_media_only_missing_metrics_and_duplicate() -> None:
     html = card(1, "bad") + card(2, "2026-10-20T17:00:00Z", "")
     html += card(3, "2026-10-20T17:00:00Z").replace(

@@ -55,6 +55,7 @@ class PrimaryResolution:
     primary_results: tuple[str, ...]
     primary_urls: tuple[str, ...]
     searches_performed: int
+    discovery_gaps: tuple[str, ...] = ()
 
 
 ResolveLink = Callable[[str], Awaitable[str | None]]
@@ -177,10 +178,12 @@ async def resolve_public_discovery(
     primary_urls: list[str] = []
     media_urls: list[str] = []
     searches_performed = 0
+    gaps: list[str] = []
 
     for url in lead.outbound_urls[:10]:
         result = await resolve_link(url)
         if result is None:
+            gaps.append("outbound_url_not_supported")
             continue
         if aviation_article_id(url):
             if result in {"primary_source_collected", "already_collected"}:
@@ -200,17 +203,26 @@ async def resolve_public_discovery(
         results.append("primary_source_collected")
 
     if not any(result == "primary_source_collected" for result in results):
-        for source_id, search_url in search_plan(lead.text):
+        plan = search_plan(lead.text)
+        if not plan:
+            gaps.append("no_configured_search_plan")
+        for source_id, search_url in plan:
             if not search_budget.claim(source_id, search_url):
+                gaps.append("search_already_attempted" if (source_id, search_url)
+                            in search_budget.claimed else "search_budget_exhausted")
                 continue
             searches_performed += 1
             found = await search_official(source_id, search_url)
+            accepted = False
             for item in found:
                 if not topic_matches(lead.text, item.title) or not accept_official(item):
                     continue
                 register_official(item)
                 primary_urls.append(item.url)
                 results.append("primary_source_collected")
+                accepted = True
+            if not accepted:
+                gaps.append("search_without_accepted_match")
 
     resolved = any(
         result in {"primary_source_collected", "already_collected"}
@@ -223,4 +235,7 @@ async def resolve_public_discovery(
         primary_results=tuple(results) + (("attributed_media",) if media_urls else ()),
         primary_urls=tuple(dict.fromkeys([*primary_urls, *media_urls])),
         searches_performed=searches_performed,
+        # Только коды причин. Не расширять allowlist и не сохранять тексты/URL
+        # отклонённых ссылок ради диагностики.
+        discovery_gaps=tuple(dict.fromkeys(gaps)) if not resolved else (),
     )

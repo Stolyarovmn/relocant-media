@@ -257,7 +257,7 @@ def test_request_and_validation_are_read_only_and_exclude_private_payload(fallba
     finally:
         event.remove(engine, "before_cursor_execute", listener)
     assert request["candidates"][0]["raw_item_id"] == raw.id
-    assert request["writing_brief"]["version"] == "ru-local-news-v2"
+    assert request["writing_brief"]["version"] == "ru-local-news-v3"
     assert "ближайший подтверждённый шаг" in request["writing_brief"]["common"]
     assert request["writing_brief"]["calendar"]["timezone"] == "Europe/Belgrade"
     assert request["writing_brief"]["formats"]["events"]["words"] == [55, 110]
