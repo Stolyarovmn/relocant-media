@@ -88,13 +88,13 @@ def test_render_uses_compact_html_one_hashtag_and_grouped_map():
     entries = [Entry("🚧 Перекрытия", "Улица <Центр>", source, map_id=first),
                Entry("🚋 Транспорт", "Линия 26", source),
                Entry("🌦 Погода", "Дождь", source),
-               Entry("⚡ Свет", "Отключение", source, map_id=second)]
+               Entry("⚡ Отключения света", "Отключение", source, map_id=second)]
     assert render(slot, []) is None
     assert render(slot, entries[:1]) is not None
     digest = render(slot, entries, "https://t.me/relocant_media_belgrade_bot/map")
     assert digest is not None and digest.map_url is not None
     assert is_map_event_url(digest.map_url) and first in digest.map_url and second in digest.map_url
-    assert "<b>Свет</b>" in digest.html and "⚡" not in digest.html
+    assert "<b>Отключения света</b>" in digest.html and "⚡" not in digest.html
     assert "&lt;Центр&gt;" in digest.html and digest.html.count("#Сводка") == 1
 
 
@@ -135,7 +135,7 @@ def test_morning_power_notice_keeps_every_current_address_and_its_interval():
         ),
     )
     text, rows = _incident_content(incident, now, now.replace(day=15, hour=0, minute=0))
-    digest = render(slot, [Entry("⚡ Свет", text, "https://t.me/eduvbelgrad/102",
+    digest = render(slot, [Entry("⚡ Отключения света", text, "https://t.me/eduvbelgrad/102",
                                  "Подробнее", address_rows=rows)])
     assert digest is not None
     lead, quote = digest.html.split("<blockquote expandable>", 1)
@@ -153,8 +153,9 @@ def test_long_address_quote_is_bounded_by_telegram_text_limit():
     assert slot is not None
     rows = tuple(f"Улица <Центр>, {index} — 08:00–13:00" for index in range(250))
     digest = render(slot, [
-        Entry("⚡ Свет", "Два района.", "https://www.beograd.rs/example", address_rows=rows),
-        Entry("💧 Вода", "Чукарица.", "https://www.beograd.rs/water", address_rows=rows),
+        Entry("⚡ Отключения света", "Два района.", "https://www.beograd.rs/example",
+              address_rows=rows),
+        Entry("💧 Отключения воды", "Чукарица.", "https://www.beograd.rs/water", address_rows=rows),
     ])
     assert digest is not None and formatted_text_units(digest.html) <= TELEGRAM_TEXT_LIMIT
     assert digest.html.count("<blockquote expandable>") == 2
@@ -169,9 +170,9 @@ def test_evening_cover_keeps_long_address_lists_reachable():
     event = "event_6b93722844d60e041820"
     rows = tuple(f"Улица {index}, дом 125 — 08:30–12:00" for index in range(100))
     entries = [
-        Entry("💧 Вода", "Бараево — 08:00–22:00.", "https://www.beograd.rs/water",
+        Entry("💧 Отключения воды", "Бараево — 08:00–22:00.", "https://www.beograd.rs/water",
               reminder=True, address_rows=("Посёлки: Гай и Бождаревац",)),
-        Entry("⚡ Свет", "Плановые отключения в нескольких общинах.",
+        Entry("⚡ Отключения света", "Плановые отключения в нескольких общинах.",
               "https://t.me/eduvbelgrad/120", "Подробнее", map_id=event,
               reminder=True, address_rows=rows),
         Entry("Новости города", "Обычная новость за день.", "https://t.me/eduvbelgrad/122",
@@ -187,7 +188,7 @@ def test_evening_cover_keeps_long_address_lists_reachable():
     assert f'href="{app}?startapp={event}">Все адреса' in digest.html
     assert "Фото:" in digest.html and digest.map_url == original.map_url
 
-    unlinked = [entries[0], Entry("⚡ Свет", "", "https://www.beograd.rs/light",
+    unlinked = [entries[0], Entry("⚡ Отключения света", "", "https://www.beograd.rs/light",
                                   address_rows=rows), entries[2]]
     original = render(slot, unlinked, app)
     assert original is not None
@@ -217,7 +218,8 @@ def test_morning_link_uses_only_a_sent_post_for_the_current_notice():
         session.add(run)
         session.commit()
         document = EvidenceDocument.model_validate(item, from_attributes=True)
-        entry = Entry("⚡ Свет", "Два района.", source_url, evidence_sha=_evidence_sha(document))
+        entry = Entry("⚡ Отключения света", "Два района.", source_url,
+                      evidence_sha=_evidence_sha(document))
         linked = _link_to_published(session, entry, now)
         assert linked.url == "https://t.me/eduvbelgrad/102" and linked.link_text == "Подробнее"
         assert _link_to_published(session, entry, now.replace(day=12)) == entry
@@ -225,9 +227,11 @@ def test_morning_link_uses_only_a_sent_post_for_the_current_notice():
                            title=item.title, body="12:00–15:00")
         session.add(revision)
         session.commit()
-        current = Entry("⚡ Свет", "Два района.", source_url, evidence_sha=_evidence_sha(
-            EvidenceDocument.model_validate(revision, from_attributes=True),
-        ))
+        current = Entry(
+            "⚡ Отключения света", "Два района.", source_url,
+            evidence_sha=_evidence_sha(EvidenceDocument.model_validate(
+                revision, from_attributes=True)),
+        )
         assert _link_to_published(session, current, now) == current
     engine.dispose()
 
@@ -324,6 +328,7 @@ def test_next_morning_delivers_addresses_and_all_map_items_before_evening_remind
     assert receipt["state"] == "sent" and len(sent) == 1
     message = sent[0]
     html = message["text"]
+    assert "<b>⚡ Отключения света</b>" in html
     assert '<a href="https://t.me/eduvbelgrad/201">Подробнее</a>' in html
     assert "<blockquote expandable><b>Адреса и время работ</b>" in html
     assert "PRVA ULICA, 42 — 09:00–11:00" in html
@@ -390,7 +395,7 @@ def test_baraevo_near_date_keeps_the_published_scope():
 def test_reminder_in_quiet_evening_can_publish_alone_with_original_link():
     slot = due_slot(datetime(2026, 11, 16, 19, 30, tzinfo=UTC))
     assert slot is not None
-    notice = Entry("💧 Вода", "Бараево — 08:00–22:00.", "https://www.beograd.rs/example",
+    notice = Entry("💧 Отключения воды", "Бараево — 08:00–22:00.", "https://www.beograd.rs/example",
                    reminder=True, original=106)
     draft = render(slot, [notice])
     assert draft is not None
