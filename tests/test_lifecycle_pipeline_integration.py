@@ -51,6 +51,22 @@ def test_closed_queue_is_not_reported_as_perpetually_pending(queue, tmp_path):
     assert result["status"] == "PRIMARY_OK"
 
 
+def test_drain_can_use_all_five_slots_for_due_audits(queue, tmp_path):
+    engine, process = queue
+    with Session(engine) as session:
+        due = list(session.scalars(select(RawItem.id).order_by(RawItem.id)))[-5:]
+    calls = []
+
+    def wrapped(raw_id):
+        calls.append(raw_id)
+        return process(raw_id)
+
+    run_cycle(engine, city="belgrade", output=tmp_path / "due-only", now=NOW,
+        ingest=ingest_ok, process=wrapped,
+        lifecycle_due=lambda: (due, set(due)), lifecycle_retry_slots=5)
+    assert calls == due
+
+
 def test_batch_reserve_binding_keeps_room_for_lifecycle_retries(queue, tmp_path):
     engine, process = queue
     with Session(engine) as session:

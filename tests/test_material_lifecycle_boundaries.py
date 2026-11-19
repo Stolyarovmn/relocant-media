@@ -200,7 +200,8 @@ def test_only_audited_refuted_empty_rejection_can_enter_fallback(fallback_sessio
         validate_fallback_package(session, request, package, now=NOW)
 
 
-def test_ledger_is_excluded_before_public_and_cli_run_limits(reviewed, monkeypatch):
+@pytest.mark.parametrize("private_task", ["material_lifecycle", "material_backlog_drain"])
+def test_ledger_is_excluded_before_public_and_cli_run_limits(reviewed, monkeypatch, private_task):
     session, run = reviewed
     now = datetime.now(UTC)
     visible = SchedulerRun(task_key="editorial-primary:belgrade", task_type="editorial_primary",
@@ -210,6 +211,7 @@ def test_ledger_is_excluded_before_public_and_cli_run_limits(reviewed, monkeypat
     session.commit()
     for offset in range(35):
         record = close_material(session, run.raw_item_id, now=now+timedelta(seconds=offset))
+        record.task_type = private_task
         record.task_key += f":test:{offset}"
         session.commit()
     projection = city_snapshot(Path.cwd(), "belgrade", session)

@@ -122,6 +122,20 @@ def test_confirmed_rejection_never_calls_delegate(engine):
         assert session.get(EditorialRun, 1) is not None
 
 
+def test_bounded_drain_can_stop_between_audit_and_full_retry(engine):
+    rejected(engine)
+    provider = Provider(engine)
+    runtime = MaterialLifecycleRuntime(engine, "belgrade", provider, NOW)
+    result = runtime.process(1, lambda _: pytest.fail("Повтор — отдельная попытка"),
+                             retry_refuted=False)
+    assert result["lifecycle"]["next_action"] == "retry_prepare"
+    state = ledger(engine)
+    assert state["audit_attempts"] == 1 and state["attempts"] == 0
+    assert len(provider.calls) == 1
+    with Session(engine) as session:
+        assert session.get(EditorialRun, 1) is not None
+
+
 def test_refuted_rejection_cannot_remove_reviewed_or_private_package(engine):
     rejected(engine, _package={"must_preserve":"Проверенный пакет"})
     runtime = MaterialLifecycleRuntime(engine, "belgrade", Provider(engine), NOW)

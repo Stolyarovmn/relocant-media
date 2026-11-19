@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from typing import Any, cast
 
 from relocant_media.ai.diagnostics import AI_PHASES
@@ -30,12 +31,14 @@ class GeminiQuotaCooldown(GeminiWorkerError):
 
 
 class IsolatedGeminiProvider:
-    def __init__(self, api_key: str, *, model: str, timeout_seconds: float = 330) -> None:
+    def __init__(self, api_key: str, *, model: str, timeout_seconds: float = 330,
+                 remaining_seconds: Callable[[], float] | None = None) -> None:
         if not api_key or not model.strip():
             raise ValueError("Gemini credentials and model required")
         if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 330:
             raise ValueError("Gemini call deadline must be between zero and 330 seconds")
         self._api_key, self._model, self._timeout = api_key, model, timeout_seconds
+        self._remaining_seconds = remaining_seconds
         self._cooldown_until = 0.0
         self._last_quota: dict[str, Any] = {}
 
@@ -45,10 +48,16 @@ class IsolatedGeminiProvider:
             blocked = GeminiQuotaCooldown("Gemini server-requested cooldown active")
             blocked.phase, blocked.quota = "quota_cooldown", dict(self._last_quota)
             raise blocked
+        timeout = self._timeout
+        if self._remaining_seconds is not None:
+            remaining = self._remaining_seconds()
+            if not math.isfinite(remaining) or remaining <= 0:
+                raise GeminiCallTimeout("Gemini operation budget exhausted before call")
+            timeout = min(timeout, remaining)
         payload = dict(api_key=self._api_key, model=self._model, task=task,
                        system_instruction=system_instruction, prompt=prompt,
                        response_schema=response_schema,
-                       http_timeout_ms=max(1, min(300000, int(self._timeout * 1000))))
+                       http_timeout_ms=max(1, min(300000, int(timeout * 1000))))
         allowed = {"PATH", "SYSTEMROOT", "WINDIR", "HOME", "USERPROFILE", "LANG", "LC_ALL",
                    "PYTHONPATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
                    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
@@ -58,7 +67,7 @@ class IsolatedGeminiProvider:
                 [sys.executable, "-m", "relocant_media.ai.gemini_process"],
                 input=json.dumps(payload), text=True, encoding="utf-8",
                 capture_output=True,
-                timeout=self._timeout, env=environment, check=False,
+                timeout=timeout, env=environment, check=False,
             )
         except subprocess.TimeoutExpired as expired:
             # subprocess.run kills and waits for the child before raising. No thread
