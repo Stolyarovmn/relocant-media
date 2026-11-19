@@ -102,6 +102,30 @@ def test_teaser_only_feeds_fetch_the_article_page_for_evidence() -> None:
     assert teaser.strip() not in items[0].body
 
 
+def test_danas_publication_header_does_not_expire_upcoming_event() -> None:
+    from datetime import UTC, datetime
+
+    from relocant_media.collectors.venue_feed import _article
+    from relocant_media.domain.freshness import freshness_decision
+
+    source = _registry()["media_danas"]
+    url = "https://www.danas.rs/sport/a/"
+    page = (
+        '<meta property="article:published_time" content="2026-11-18T16:27:01Z">'
+        '<article><h1>Beogradski polumaraton u nedelju</h1>'
+        '<div class="post-meta">Beta 18.11.2026. 17:27</div>'
+        '<div class="post-content content"><p>Sedmi Beogradski polumaraton, koji će se '
+        'održati 22. novembra, imaće više od 4.000 učesnika. Start je na Novom Beogradu.'
+        '</p></div></article>'
+    )
+    item = _article(page, url, source, fallback=None)
+    assert "18.11.2026." not in item.body
+    assert item.published_at == datetime(2026, 11, 18, 16, 27, 1, tzinfo=UTC)
+    assert freshness_decision(
+        item.title, item.body, item.published_at, datetime(2026, 11, 19, 9, tzinfo=UTC),
+    ).action == "keep"
+
+
 @pytest.mark.asyncio
 async def test_n1_uses_full_main_article_even_when_feed_and_jsonld_have_only_teasers():
     import json
