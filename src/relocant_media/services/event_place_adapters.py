@@ -40,6 +40,12 @@ _CUKARICA_POST_2026 = (
     "na-sceni-kulturnog-centra-cukarica/"
 )
 _CUKARICA_PROGRAM = "https://www.kccukarica.rs/srl/program/dramski-program/vecernja-scena/"
+_SANU_ARTICLE = (
+    "https://www.beograd.rs/lat/zivot-u-beogradu/umetnicki-program/a116694/"
+    "pocinje-sa-radom-novi-galerijski-prostor-u-sanu.html"
+)
+_SANU_PROGRAM = "https://www.sanu.ac.rs/otvaranje-novog-galerijskog-prostora-sanu-u-kneza-mihaila-36/"
+_SANU_PLACE = "https://www.openstreetmap.org/node/4014618797"
 CUKARICA_STAGE = re.compile(
     r'на великој сцени културног центра\s*[„"«]?чукарица[“"»]?', re.IGNORECASE,
 )
@@ -303,6 +309,37 @@ def extract_event_adapter(
             marathon_event_facts(document.body, source_html)
             if document.url == MARATHON_PAGE_URL else None
         )
+    if document.source_id == "city_beograd_news" and document.url == _SANU_ARTICLE:
+        from relocant_media.collectors.beograd_article import (
+            ArticleExtractionError,
+            parse_beograd_article,
+        )
+        from relocant_media.sources.registry import load_source_file
+
+        source = load_source_file(DEFAULT_CITIES_ROOT / "belgrade/sources/city_beograd_news.yaml")
+        try:
+            item = parse_beograd_article(source_html, source, document.url)
+        except ArticleExtractionError:
+            return None
+        if (item.title, item.body) != (document.title, document.body):
+            return None
+        lead = " ".join(item.body.split("\n\n", 1)[0].casefold().split())
+        if not (
+            "topografija pogleda" in lead and "novi galerijski prostor sanu" in lead
+            and "20. novembra, u 19 sati" in lead and "kneza mihaila 36" in lead
+            and item.published_at is not None and item.published_at.year == 2026
+            and not _CHANGE.search(item.body)
+        ):
+            return None
+        return {
+            "event_name": "Topografija pogleda",
+            "venue": {"name": "Новая галерея САНУ", "address": "Kneza Mihaila 36, Beograd",
+                      "latitude": 44.8180268, "longitude": 20.4568544},
+            "starts_at": datetime(2026, 11, 20, 19).isoformat(),
+            "ends_at": None, "time_basis": "source_sanu_opening",
+            "schedule_source_url": _SANU_PROGRAM, "venue_source_url": _SANU_PROGRAM,
+            "coordinate_source_url": _SANU_PLACE,
+        }
     if document.source_id == "cukarica_news":
         from relocant_media.collectors.cukarica_news import (
             CukaricaExtractionError,

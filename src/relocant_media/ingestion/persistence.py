@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.domain.dedup import canonicalize_url, content_sha256
+from relocant_media.domain.policy import SOURCE_REPLACED_REASON
 from relocant_media.ingestion.media_provenance import build_media_provenance
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.locks import lock_editorial_city
@@ -79,6 +80,8 @@ def _referencing_runs(session: Session, raw_item_id: int) -> list[EditorialRun]:
 
 def _block_changed_evidence(session: Session, raw_item_id: int) -> None:
     for run in _referencing_runs(session, raw_item_id):
+        if run.outcome.get("reason") == SOURCE_REPLACED_REASON:
+            continue
         post = session.get(Post, run.post_id) if run.post_id else None
         already_sent = run.delivery_status == "sent" or bool(
             post is not None

@@ -5,8 +5,9 @@ import copy
 import json
 import os
 import time
-from collections.abc import Coroutine, Iterable
+from collections.abc import Coroutine, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,6 +45,7 @@ from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.collectors.beograd_article import (
     UTILITY_SECTIONS,
     BelgradeArticleCollector,
+    match_beograd_article_url,
     parse_beograd_article,
 )
 from relocant_media.collectors.beograd_news import parse_beograd_news_list
@@ -133,6 +135,8 @@ from relocant_media.services.published_watch import (
     recent_source_load,
 )
 from relocant_media.services.source_enrichment import build_media_preparation_packet
+from relocant_media.services.source_recovery import recover_primary_source
+from relocant_media.services.source_replacement import SourceUnavailableError, is_source_unavailable
 from relocant_media.services.submission_feedback import reply_to_submissions, resolve_submission
 from relocant_media.services.submission_queue import (
     batch_submissions,
@@ -354,6 +358,36 @@ async def _collect_exact_url(collector: Any, url: str) -> Any:
     return matches[0]
 
 
+async def fetch_public_article(
+    config: SourceConfig, url: str, client: httpx.AsyncClient,
+) -> CollectedRawItem:
+    """Читать конкретный реестровый документ штатным разбором."""
+    if config.id == "city_beograd_news":
+        if match_beograd_article_url(url) is None:
+            raise ValueError("unsupported live city article")
+        response = await client.get(url, follow_redirects=False)
+        response.raise_for_status()
+        item = parse_beograd_article(response.text, config, str(response.url))
+        return replace(item, source_html=response.text,
+                       approved_image_hosts=("static.beograd.rs",))
+    if config.id == "cukarica_news":
+        return await CukaricaNewsCollector(config, client).collect_url(url)
+    item = await _collect_exact_url(build_collector(config, client), url)
+    if not isinstance(item, CollectedRawItem):
+        raise ValueError("live collector did not return an article")
+    return item
+
+
+@contextmanager
+def _note_source_unavailable(source_id: str) -> Iterator[None]:
+    try:
+        yield
+    except (httpx.HTTPError, TimeoutError, ValueError, ExceptionGroup) as error:
+        if is_source_unavailable(error):
+            raise SourceUnavailableError(source_id) from error
+        raise
+
+
 def _run_sync[T](coroutine: Coroutine[Any, Any, T]) -> T:
     """asyncio.run, also from synchronous code that an async caller (the owner cycle) runs."""
     try:
@@ -376,12 +410,12 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             venues[source.id] = source
     async def fetch_venue(source: SourceConfig, url: str) -> Any:
         async with httpx.AsyncClient(timeout=25, trust_env=False) as venue_client:
-            collector = build_collector(source, venue_client)
-            return await _collect_exact_url(collector, url)
+            return await fetch_public_article(source, url, venue_client)
     with httpx.Client(timeout=25, trust_env=False) as client:
         for document in package.event.documents:
             if document.source_id in venues:
-                item = _run_sync(fetch_venue(venues[document.source_id], document.url))
+                with _note_source_unavailable(document.source_id):
+                    item = _run_sync(fetch_venue(venues[document.source_id], document.url))
                 documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
                     title=item.title, body=item.body, published_at=item.published_at,
                     published_at_precision=item.published_at_precision))
@@ -396,8 +430,9 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
                     or parts.username is not None or parts.password is not None
                     or parts.port not in {None, 443}):
                 raise ValueError("live source URL is not approved")
-            response = client.get(document.url, follow_redirects=False)
-            response.raise_for_status()
+            with _note_source_unavailable(document.source_id):
+                response = client.get(document.url, follow_redirects=False)
+                response.raise_for_status()
             parser = (parse_beograd_article if document.source_id == "city_beograd_news"
                       else parse_cukarica_article)
             item = parser(response.text, source, str(response.url))
@@ -908,6 +943,26 @@ async def collect_sources(
 
 
 def prepare_reviewed(
+    engine: Engine, raw_id: int, provider: StructuredAIProvider, output: Path,
+) -> dict[str, Any]:
+    try:
+        return _prepare_reviewed(engine, raw_id, provider, output)
+    except SourceUnavailableError as error:
+        with Session(engine) as session:
+            original = session.get(RawItem, raw_id)
+            if original is None or original.source_id != error.source_id:
+                raise
+        new_id = _run_sync(recover_primary_source(
+            engine, raw_id, sources=load_source_registry(SOURCES),
+            fetch_article=fetch_public_article,
+        ))
+        if new_id is None:
+            raise
+        result = _prepare_reviewed(engine, new_id, provider, output)
+        return {**result, "replaced_unavailable_raw_item_id": raw_id}
+
+
+def _prepare_reviewed(
     engine: Engine, raw_id: int, provider: StructuredAIProvider, output: Path,
 ) -> dict[str, Any]:
     with Session(engine) as session:

@@ -318,6 +318,9 @@ def main() -> None:
                 "status": "PRIMARY_PARTIAL", "mode": "subscription_gpt_evidence_refresh",
                 "fallback_required": True, "model_calls": 0,
                 "sources": len(request["candidates"][0]["documents"]),
+                "source_replaced": (
+                    request["candidates"][0]["raw_item_id"] != refresh.result.raw_item_id
+                ),
             }
         elif payload is None:
             if set(value) != {"request", "result"} or not isinstance(value["request"], dict):

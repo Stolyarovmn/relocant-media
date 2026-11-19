@@ -12,7 +12,7 @@ from relocant_media.sources.registry import SourceConfig
 
 UTILITY_SECTIONS = ("vodovod-i-kanalizacija", "elektricna-energija")
 ARTICLE_ID_RE = re.compile(
-    r"/lat/(?:beoinfo-vesti|servisne-informacije/"
+    r"/lat/(?:beoinfo-vesti|zivot-u-beogradu/umetnicki-program|servisne-informacije/"
     r"(?:saobracaj-i-prevoz|zdravstvo|vodovod-i-kanalizacija|elektricna-energija))/"
     r"a(?P<article_id>\d+)/[^/?#]+\.html"
 )
@@ -80,6 +80,8 @@ def _paragraphs_after_heading(
         if id(paragraph) not in following:
             continue
         if paragraph.find_parent(["footer", "nav", "aside", "form"]) is not None:
+            continue
+        if paragraph.find_parent(class_="bg-life-info-box") is not None:
             continue
         if include_lists and paragraph.find_parent("li") is not None:
             continue

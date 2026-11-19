@@ -33,6 +33,7 @@ from relocant_media.domain.dedup import event_key, find_repeated_publication
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.event_programs import MARATHON_PAGE_URL, MARATHON_SOURCE_ID
 from relocant_media.domain.freshness import evidence_freshness
+from relocant_media.domain.policy import SOURCE_REPLACED_REASON
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.editorial import (
@@ -62,6 +63,7 @@ MAX_CANDIDATE_TEXT = 80_000
 GEMINI_FAILURES = frozenset({
     "GeminiWorkerError", "GeminiCallTimeout", "GeminiQuotaCooldown", "StructuredOutputError",
 })
+_RECOVERABLE_FAILURES = GEMINI_FAILURES | {"SourceUnavailableError"}
 _TASK = "editorial-primary:belgrade"
 
 
@@ -124,7 +126,7 @@ def _failed_ids(run: SchedulerRun, now: datetime) -> list[int]:
         raw_id = error.get("raw_item_id")
         if (
             isinstance(error.get("error_type"), str)
-            and error["error_type"] in GEMINI_FAILURES
+            and error["error_type"] in _RECOVERABLE_FAILURES
             and type(raw_id) is int
             and raw_id > 0
             and raw_id not in result
@@ -193,6 +195,28 @@ def _registry() -> dict[str, SourceConfig]:
     return {source.id: source for source in load_source_registry(Path("cities/belgrade/sources"))}
 
 
+def refresh_target(session: Session, run: SchedulerRun, original_id: int) -> int:
+    """Серверная квитанция разрешает другой ID только в исходном задании."""
+    receipts = run.details.get("gpt_evidence_refresh", {})
+    if not isinstance(receipts, dict):
+        raise FallbackValidationError("Некорректная квитанция пересъёма")
+    receipt = receipts.get(str(original_id))
+    if receipt is None:
+        return original_id
+    if not isinstance(receipt, dict):
+        raise FallbackValidationError("Некорректная квитанция пересъёма")
+    raw_id = receipt.get("replacement_raw_item_id")
+    if raw_id is None:
+        return original_id
+    marker = session.get(EditorialRun, original_id, populate_existing=True)
+    if (type(raw_id) is not int or not 0 < raw_id < 2**63 or raw_id == original_id
+            or marker is None or marker.post_id is not None
+            or marker.outcome.get("reason") != SOURCE_REPLACED_REASON
+            or marker.outcome.get("replacement_raw_item_id") != raw_id):
+        raise FallbackValidationError("Нет связанной серверной записи о замене источника")
+    return raw_id
+
+
 def pending_gpt_ids(session: Session, *, now: datetime) -> set[int]:
     """Give the subscription monitor a bounded first chance after a Gemini failure."""
     now = _utc(now)
@@ -201,7 +225,8 @@ def pending_gpt_ids(session: Session, *, now: datetime) -> set[int]:
     batch_ids = pending_batch_ids(session, now=now)
     with session.no_autoflush:
         failed_ids = {
-            raw_id for run in _recent_runs(session, now) for raw_id in _failed_ids(run, now)
+            refresh_target(session, run, raw_id)
+            for run in _recent_runs(session, now) for raw_id in _failed_ids(run, now)
         }
         if not failed_ids:
             return batch_ids
@@ -300,7 +325,8 @@ def build_request(
     with session.no_autoflush:
         profile = load_city_profile("belgrade")
         registry = _registry()
-        windows = [(run, _failed_ids(run, now)) for run in _recent_runs(session, now)
+        windows = [(run, list(dict.fromkeys(refresh_target(session, run, raw_id)
+                    for raw_id in _failed_ids(run, now)))) for run in _recent_runs(session, now)
                    if scheduler_run_id is None or run.id == scheduler_run_id]
         pending = pending_gpt_ids(session, now=now)
         pending_items = session.execute(
@@ -382,20 +408,27 @@ def validate_fallback_candidate(
         batch = run.details.get("batch_preselection") if run is not None else None
         failed_ids = set(_failed_ids(run, parsed.created_at)) if run is not None else set()
         selected_ids = set(batch.get("gpt_selected_ids", ())) if isinstance(batch, dict) else set()
+        from_batch = (
+            parsed.batch_request_sha256 is not None or parsed.batch_result_sha256 is not None
+        )
+        origins = failed_ids | selected_ids if from_batch else failed_ids
+        pairs = ([(origin, refresh_target(session, run, origin))
+                  for origin in origins] if run is not None else [])
+        targets = {target: origin for origin, target in pairs if target == origin}
+        # Уже выбранный официальный документ может оказаться целью замены.
+        # В этом случае приоритет у привязки и хеша пересъёма.
+        targets.update((target, origin) for origin, target in pairs if target != origin)
         ranked_scope = (
             isinstance(batch, dict) and batch.get("status") == "gpt_ranked"
             and parsed.batch_request_sha256 is not None and parsed.batch_result_sha256 is not None
             and parsed.batch_request_sha256 == batch.get("gpt_request_sha256")
             and parsed.batch_result_sha256 == batch.get("gpt_rank_sha256")
-            and set(ids) <= selected_ids | failed_ids
-        )
-        from_batch = (
-            parsed.batch_request_sha256 is not None or parsed.batch_result_sha256 is not None
+            and set(ids) <= targets.keys()
         )
         if (
             run is None
             or (from_batch and not ranked_scope)
-            or (not from_batch and raw_id not in failed_ids)
+            or raw_id not in targets
             or run.finished_at is None
             or parsed.created_at < run.finished_at
             or (from_batch and not timedelta(0) <= now - run.finished_at <= REQUEST_TTL)
@@ -414,7 +447,8 @@ def validate_fallback_candidate(
         expected = _candidate_request(
             session, raw_id, profile=profile, registry=registry, now=now
         )
-        if from_batch and raw_id in selected_ids:
+        origin = targets[raw_id]
+        if from_batch and origin in selected_ids:
             from relocant_media.services.gpt_refresh import refreshed_anchor_sha256
 
             assert isinstance(batch, dict)
@@ -422,7 +456,7 @@ def validate_fallback_candidate(
                           if doc["raw_item_id"] == raw_id)
             hashes = batch.get("gpt_evidence_sha256")
             if not isinstance(hashes, dict) or (
-                refreshed_anchor_sha256(run, raw_id) or hashes.get(str(raw_id))
+                refreshed_anchor_sha256(run, origin) or hashes.get(str(origin))
             ) != hashlib.sha256(canonical_json(anchor).encode()).hexdigest():
                 raise FallbackValidationError("Исходник изменился после пакетного отбора GPT")
         requested = next(
