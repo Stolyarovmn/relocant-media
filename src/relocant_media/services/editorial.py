@@ -233,6 +233,9 @@ class EditorialService:
             source = self.session.get(Source, item.source_id, populate_existing=True)
             if source is None:
                 raise ValueError("raw item source does not exist")
+            from relocant_media.services.material_lifecycle import ensure_not_terminal
+
+            ensure_not_terminal(self.session, raw_item_id)
             if not source.enabled:
                 raise ValueError("raw item source is disabled")
             reviewed_event = _reviewed_event_item(

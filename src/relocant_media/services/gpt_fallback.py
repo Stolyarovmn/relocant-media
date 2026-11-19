@@ -48,6 +48,12 @@ from relocant_media.services.editorial_products import (
     verify_stored_presentation,
 )
 from relocant_media.services.marathon_event_map import marathon_event_facts
+from relocant_media.services.material_lifecycle import (
+    LifecycleBlockedError,
+    can_retry_snapshot,
+    ensure_not_terminal,
+    is_terminal_blocked,
+)
 from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.services.policy_reassessment import eligible_policy_reassessment
 from relocant_media.sources.registry import SourceConfig, load_source_registry
@@ -117,10 +123,13 @@ def _failed_ids(run: SchedulerRun, now: datetime) -> list[int]:
     ):
         return []
     errors = run.details.get("processing_errors")
-    if not isinstance(errors, list):
-        return []
     result: list[int] = []
-    for error in errors:
+    fallback_ids = run.details.get("lifecycle_fallback_ids")
+    if (isinstance(fallback_ids, list) and len(fallback_ids) <= MAX_CANDIDATES
+            and all(type(raw_id) is int and raw_id > 0 for raw_id in fallback_ids)
+            and len(set(fallback_ids)) == len(fallback_ids)):
+        result.extend(fallback_ids)
+    for error in errors if isinstance(errors, list) else []:
         if not isinstance(error, dict):
             continue
         raw_id = error.get("raw_item_id")
@@ -236,8 +245,21 @@ def pending_gpt_ids(session: Session, *, now: datetime) -> set[int]:
         ))
         return batch_ids | {item.id for item, source in unresolved
                 if _registered_public(item, source, registry.get(source.id))
+                and not is_terminal_blocked(session, item.id, now=now)
                 and (session.get(EditorialRun, item.id, populate_existing=True) is None
-                     or eligible_policy_reassessment(session, item.id, now=now))}
+                     or eligible_policy_reassessment(session, item.id, now=now)
+                     or can_retry_snapshot(session, item.id, now=now))}
+
+
+def _ensure_fallback_open(session: Session, raw_id: int, *, now: datetime) -> None:
+    # Старую отправку можно только сверить; import_package отдельно требует точный хеш.
+    existing = session.get(EditorialRun, raw_id, populate_existing=True)
+    if existing is not None and existing.delivery_status == "sent":
+        return
+    try:
+        ensure_not_terminal(session, raw_id, now=now)
+    except LifecycleBlockedError as error:
+        raise FallbackValidationError(str(error)) from error
 
 
 def _candidate_request(
@@ -248,6 +270,7 @@ def _candidate_request(
     registry: dict[str, SourceConfig],
     now: datetime,
 ) -> dict[str, Any]:
+    _ensure_fallback_open(session, raw_id, now=now)
     item = session.get(RawItem, raw_id, populate_existing=True)
     source = session.get(Source, item.source_id, populate_existing=True) if item else None
     if (
@@ -361,7 +384,8 @@ def build_request(
                 raw_id not in urgent, raw_id not in official,
             )):
                 if (session.get(EditorialRun, raw_id, populate_existing=True) is not None
-                        and not eligible_policy_reassessment(session, raw_id, now=now)):
+                        and not eligible_policy_reassessment(session, raw_id, now=now)
+                        and not can_retry_snapshot(session, raw_id, now=now)):
                     continue
                 try:
                     candidate = _candidate_request(
@@ -397,6 +421,7 @@ def validate_fallback_candidate(
     now = _utc(now)
     if type(request.get("version")) is not int:
         raise FallbackValidationError("Некорректная версия запроса")
+    _ensure_fallback_open(session, raw_id, now=now)
     parsed = _FallbackRequest.model_validate_json(_bounded_json(request))
     ids = [candidate.raw_item_id for candidate in parsed.candidates]
     if len(ids) != len(set(ids)) or raw_id not in ids:
@@ -531,7 +556,7 @@ def validate_fallback_package(
         existing = session.get(EditorialRun, package.raw_item_id, populate_existing=True)
         if existing is not None and not eligible_policy_reassessment(
             session, package.raw_item_id, now=now,
-        ):
+        ) and not can_retry_snapshot(session, package.raw_item_id, now=now):
             fingerprint = hashlib.sha256(
                 canonical_json(package.model_dump(mode="json")).encode()
             ).hexdigest()

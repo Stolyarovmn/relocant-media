@@ -30,6 +30,10 @@ from relocant_media.services.gpt_fallback import (
     refresh_target,
     validate_fallback_candidate,
 )
+from relocant_media.services.material_lifecycle import (
+    authorize_refreshed_evidence,
+    inherit_lifecycle,
+)
 from relocant_media.services.primary_discovery import source_for_url
 from relocant_media.services.source_replacement import (
     SourceUnavailableError,
@@ -176,7 +180,17 @@ def _refresh_origin_id(session: Session, run: SchedulerRun, raw_id: int) -> int:
     return origins[0] if origins else raw_id
 
 
-def _require_unresolved(session: Session, raw_id: int) -> tuple[RawItem, Source]:
+def _require_unresolved(session: Session, raw_id: int, *,
+                        now: datetime | None = None) -> tuple[RawItem, Source]:
+    from relocant_media.services.material_lifecycle import (
+        LifecycleBlockedError,
+        ensure_not_terminal,
+    )
+
+    try:
+        ensure_not_terminal(session, raw_id, now=now or datetime.now(UTC))
+    except LifecycleBlockedError as error:
+        raise FallbackValidationError(str(error)) from error
     raw = session.get(RawItem, raw_id, populate_existing=True)
     source = session.get(Source, raw.source_id) if raw is not None else None
     if (raw is None or source is None or session.get(EditorialRun, raw_id) is not None
@@ -195,7 +209,7 @@ def refresh_gpt_evidence(
         parsed, profile, candidate, _ = validate_fallback_candidate(
             session, payload.request, raw_id, now=now or datetime.now(UTC),
         )
-        raw, _ = _require_unresolved(session, raw_id)
+        raw, _ = _require_unresolved(session, raw_id, now=now)
         run = session.get(SchedulerRun, parsed.scheduler_run_id)
         assert run is not None
         origin_id = _refresh_origin_id(session, run, raw_id)
@@ -231,7 +245,7 @@ def refresh_gpt_evidence(
     with Session(engine) as session:
         now = now or datetime.now(UTC)
         validate_fallback_candidate(session, payload.request, raw_id, now=now)
-        raw, _ = _require_unresolved(session, raw_id)
+        raw, _ = _require_unresolved(session, raw_id, now=now)
         target_id = raw_id
         if original_unavailable:
             if origin_id != raw_id:
@@ -246,6 +260,7 @@ def refresh_gpt_evidence(
                 session, original=raw, replacement=replacement,
                 config=registry[replacement.source_id], now=now, profile=profile,
             )
+            inherit_lifecycle(session, origin_id, target_id, now=now)
             articles = [replacement]
         else:
             if (articles[0].source_id, articles[0].external_id) != (raw.source_id, raw.external_id):
@@ -255,6 +270,8 @@ def refresh_gpt_evidence(
             written, revisions = capture_collected_batch(session, articles)
             if written != len(articles) or revisions:
                 raise FallbackValidationError("Пересъём затронул ранее проверенный снимок")
+            if not authorize_refreshed_evidence(session, raw_id, now=now):
+                raise FallbackValidationError("Жизненный цикл не допускает обновление снимка")
         refreshed = _candidate_request(
             session, target_id, profile=profile, registry=registry, now=now,
         )

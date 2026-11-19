@@ -89,6 +89,8 @@ def run_cycle(
     preselect: Callable[[list[dict[str, Any]], int],
                         tuple[list[dict[str, Any]], dict[str, Any]]] | None = None,
     defer_failed_batch: bool = False,
+    lifecycle_due: Callable[[], tuple[list[int], set[int]]] | None = None,
+    lifecycle_fallback_items: Callable[[], set[int]] | None = None,
 ) -> dict[str, Any]:
     if (engine.dialect.name not in {"postgresql", "sqlite"}
             or not city.strip() or not 1 <= limit <= 5):
@@ -120,15 +122,23 @@ def run_cycle(
                 raise ValueError("source collection incomplete")
             corrections, policy_holds = reassessment_ids() if reassessment_ids else ([], [])
             priority_ids = priority_items() if priority_items else set()
+            due_ids, lifecycle_excluded = lifecycle_due() if lifecycle_due else ([], set())
+            allowed = allowed_items() if allowed_items else None
+            retry_ids = [raw_id for raw_id in dict.fromkeys(due_ids)
+                         if allowed is None or raw_id in allowed][:min(2, limit)]
+            normal_limit = limit - len(retry_ids)
             with Session(engine) as session:
                 deferred = deferred_items(session) if deferred_items else set()
+                # Просроченные/закрытые материалы и ещё не наступившие повторы
+                # исключаются независимо от наличия резервного обработчика.
+                deferred = (deferred - set(due_ids)) | lifecycle_excluded
                 manifest = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
                     until=aware_datetime(window["until"]),
                     limit=30 if preselect else limit, newest_first=newest_first,
                     priority_raw_ids=priority_ids,
                     allowed_raw_ids=allowed_items() if allowed_items else None,
-                    excluded_raw_ids=deferred,
+                    excluded_raw_ids=deferred | set(retry_ids),
                     recent_source_counts=recent_source_counts() if recent_source_counts else None,
                     locality_aliases=locality_aliases,
                     local_place_aliases=local_place_aliases,
@@ -144,10 +154,10 @@ def run_cycle(
                         r"obustav|izmen.*saobra|preusmer|затвор|обустав|измен.*саобра",
                         candidate["evidence"]["title"], re.IGNORECASE,
                     )
-                )][:limit]
+                )][:normal_limit]
                 protected_ids = {item["raw_item_id"] for item in protected}
                 pool = [item for item in candidates if item["raw_item_id"] not in protected_ids]
-                batch_slots = limit - len(protected)
+                batch_slots = normal_limit - len(protected)
                 selected, audit = preselect(pool, batch_slots)
                 if (len(selected) > batch_slots
                         or any(type(item.get("raw_item_id")) is not int for item in selected)
@@ -191,12 +201,23 @@ def run_cycle(
                     manifest["candidates"].insert(0, {
                         "raw_item_id": corrections[0], "reassessment": True,
                     })
-                    del manifest["candidates"][limit:]
-                slots = limit - len(manifest["candidates"])
+                    del manifest["candidates"][normal_limit:]
+                slots = normal_limit - len(manifest["candidates"])
                 manifest["candidates"].extend({"raw_item_id": i, "reassessment": True}
                     for i in (corrections[1:] + policy_holds)[:slots])
                 manifest["candidate_count"] = len(manifest["candidates"])
                 manifest["reassessment_count"] = len(corrections) + len(policy_holds)
+            if due_ids:
+                # Два места для наступивших повторов и проверки отказов. Новый
+                # поток сохраняет штатный отбор, но не вытесняет старые ошибки.
+                retry_set = set(retry_ids)
+                manifest["candidates"] = [
+                    *({"raw_item_id": raw_id, "lifecycle_retry": True} for raw_id in retry_ids),
+                    *(item for item in manifest["candidates"]
+                      if item["raw_item_id"] not in retry_set),
+                ][:limit]
+                manifest["candidate_count"] = len(manifest["candidates"])
+                heartbeat["lifecycle_due_count"] = len(due_ids)
             if preselect is not None:
                 heartbeat["batch_preselection"]["full_review_ids"] = [
                     candidate["raw_item_id"] for candidate in manifest["candidates"]]
@@ -241,15 +262,27 @@ def run_cycle(
                 if raw_id not in processed:
                     processed.append(raw_id)
             with Session(engine) as session:
+                # Повторный sweep учитывает только что завершённые попытки.
+                if lifecycle_due:
+                    remaining_due, lifecycle_excluded = lifecycle_due()
+                else:
+                    remaining_due = []
                 remaining = select_candidates(session, city=city,
                     since=aware_datetime(window["since"]),
                     until=aware_datetime(window["until"]), limit=1,
-                    allowed_raw_ids=allowed_items() if allowed_items else None)
+                    allowed_raw_ids=allowed_items() if allowed_items else None,
+                    excluded_raw_ids=lifecycle_excluded)
                 revision_count = session.scalar(select(func.count()).select_from(
                     SourceRevision).join(RawItem).join(Source).where(Source.city == city))
-            additional_remaining = sum(map(len, reassessment_ids())) if reassessment_ids else 0
+            additional_remaining = (len(remaining_due) if lifecycle_due else
+                sum(map(len, reassessment_ids())) if reassessment_ids else 0)
+            fallback_ids = sorted(lifecycle_fallback_items())[:limit] if (
+                lifecycle_fallback_items) else []
+            if fallback_ids:
+                heartbeat["fallback_required"] = True
+                heartbeat["lifecycle_fallback_ids"] = fallback_ids
             complete = (remaining["eligible_count"] + additional_remaining == 0
-                        and not processing_errors and not gpt_waiting)
+                        and not processing_errors and not gpt_waiting and not fallback_ids)
             heartbeat.update(status="PRIMARY_OK" if complete else "PRIMARY_PARTIAL",
                 window_complete=complete, processed_raw_item_ids=processed,
                 processing_errors=processing_errors,

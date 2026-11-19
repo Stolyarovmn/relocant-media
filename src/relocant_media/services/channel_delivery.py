@@ -90,6 +90,15 @@ async def deliver_reviewed(
             result = DeliveryResult("sent", "", post.telegram_message_id)
             session.commit()
             return result
+        from relocant_media.services.material_lifecycle import (
+            LifecycleBlockedError,
+            ensure_not_terminal,
+        )
+
+        try:
+            ensure_not_terminal(session, raw_item_id, now=datetime.now(UTC))
+        except LifecycleBlockedError as error:
+            raise DeliveryBlockedError(str(error)) from error
         if (run.delivery_status != "pending" or post.telegram_message_id is not None
                 or run.staging_message_id is not None):
             raise DeliveryBlockedError("delivery outcome requires manual reconciliation")

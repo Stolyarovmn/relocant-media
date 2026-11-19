@@ -28,6 +28,7 @@ from relocant_media.services.gpt_fallback import (
     FallbackValidationError,
     _bounded_json,
     _candidate_request,
+    _ensure_fallback_open,
     _recent_runs,
     _registered_public,
     _registry,
@@ -35,6 +36,7 @@ from relocant_media.services.gpt_fallback import (
     build_request,
     refresh_target,
 )
+from relocant_media.services.material_lifecycle import is_terminal_blocked
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 
@@ -177,7 +179,8 @@ def _briefs(
     return {
         item.id: brief
         for item, source in rows
-        if (brief := _brief(item, source, now=now, profile=profile, registry=registry))
+        if not is_terminal_blocked(session, item.id, now=now)
+        and (brief := _brief(item, source, now=now, profile=profile, registry=registry))
         is not None
     }
 
@@ -299,9 +302,13 @@ def validate_batch_rank(
                 or details["gpt_evidence_sha256"] != evidence
             ):
                 raise FallbackValidationError("Для цикла уже принят другой порядок GPT")
+            for raw_id in selected:
+                _ensure_fallback_open(session, raw_id, now=now)
             # Прежняя квитанция закрепила выбор; последующий импорт сам сверяет
             # каждый ещё не обработанный материал с его исходным снимком.
             return run, selected
+        if any(is_terminal_blocked(session, raw_id, now=now) for raw_id in selected):
+            raise FallbackValidationError("Выбранный материал закрыт или срок обработки истёк")
         registry = _registry()
         canonical = _briefs(
             session, candidates, now=request.created_at, profile=profile, registry=registry,

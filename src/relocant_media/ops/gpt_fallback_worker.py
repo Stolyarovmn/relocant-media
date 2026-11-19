@@ -133,6 +133,7 @@ def _save_rejection(
         if rejection.category not in {category for rubric in profile.rubrics
                                       for category in rubric.categories}:
             raise ValueError("Неизвестная категория отказа GPT")
+        _claim_fallback(session, raw_id, now=now)
         documents = tuple(EvidenceDocument.model_validate(
             doc.model_dump(include=set(EvidenceDocument.model_fields)))
             for doc in candidate.documents)
@@ -156,6 +157,53 @@ def _save_rejection(
               or any(existing.outcome.get(key) != value
                      for key, value in outcome.model_dump(mode="json").items())):
             raise ValueError("Материал уже обработан другим решением")
+        from relocant_media.services.material_lifecycle import after_result
+
+        after_result(session, raw_id, now=now)
+        session.commit()
+
+
+def _claim_fallback(session: Session, raw_id: int, *, now: datetime) -> bool:
+    """Вызывать только после полной проверки привязки к неуспешному циклу."""
+    from relocant_media.services.material_lifecycle import (
+        LifecycleBlockedError,
+        adopt_fallback_request,
+        archive_for_retry,
+        before_attempt,
+        can_retry_snapshot,
+    )
+
+    existing = session.get(EditorialRun, raw_id)
+    if existing is not None and existing.delivery_status == "sent":
+        # Дальше importer проверит точное совпадение и вернёт прежнюю квитанцию.
+        return False
+    retry_snapshot = can_retry_snapshot(session, raw_id, now=now)
+    adopt_fallback_request(session, raw_id, now=now)
+    allowed = before_attempt(session, raw_id, now=now, channel="fallback")
+    session.commit()
+    if not allowed:
+        raise LifecycleBlockedError("Резервная попытка недоступна или срок истёк")
+    if retry_snapshot and not archive_for_retry(session, raw_id, now=now):
+        raise LifecycleBlockedError("Прежний отказ нельзя безопасно заменить резервным пакетом")
+    session.commit()
+    return True
+
+
+def _fail_claimed_fallback(engine: Engine, raw_id: int, error: Exception, *, now: datetime) -> None:
+    from relocant_media.scheduler.models import SchedulerRun
+    from relocant_media.services.material_lifecycle import after_error, lifecycle_state
+
+    with Session(engine) as session:
+        record = session.scalar(select(SchedulerRun).where(
+            SchedulerRun.task_type == "material_lifecycle",
+            SchedulerRun.task_key == f"material-lifecycle:belgrade:{raw_id}",
+        ))
+        if record is None:
+            return
+        state = lifecycle_state(session, raw_id, now=now)
+        if state.get("state") == "processing" and state.get("attempt_kind") == "fallback":
+            after_error(session, raw_id, type(error).__name__, now=now, channel="fallback")
+        session.commit()
 
 
 def _check_live_evidence(package: EditorialPackage) -> None:
@@ -215,6 +263,8 @@ def run_worker(
             _save_rejection(engine, payload.request, rejection, now=now or datetime.now(UTC))
             declined += 1
         except Exception as error:
+            _fail_claimed_fallback(engine, rejection.raw_item_id, error,
+                                  now=now or datetime.now(UTC))
             rejected += 1
             errors.append({"stage": "reject", "error_type": _error_type(error)})
     for package in payload.result.packages:
@@ -224,6 +274,7 @@ def run_worker(
                 package = validate_fallback_package(
                     session, payload.request, package, now=now or datetime.now(UTC),
                 )
+                _claim_fallback(session, package.raw_item_id, now=now or datetime.now(UTC))
             phase = "live"
             _check_live_evidence(package)
             # Сетевое чтение не держит транзакцию. После него ещё раз проверяем
@@ -236,12 +287,18 @@ def run_worker(
                 phase = "import"
                 run = import_package(session, package, now=now, replace_empty_hold=True,
                                      replace_map_hold=True)
+                from relocant_media.services.material_lifecycle import after_result
+
+                after_result(session, package.raw_item_id, now=now or datetime.now(UTC))
+                session.commit()
                 imported += 1
                 if run.outcome.get("status") == "ready":
                     ready += 1
                     if run.delivery_status == "pending":
                         delivery_ids.add(package.raw_item_id)
         except Exception as error:
+            _fail_claimed_fallback(engine, package.raw_item_id, error,
+                                  now=now or datetime.now(UTC))
             rejected += 1
             errors.append({"stage": phase, "error_type": _error_type(error)})
     blocked: list[dict[str, Any]] = []
