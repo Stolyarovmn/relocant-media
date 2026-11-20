@@ -1,15 +1,17 @@
+import hashlib
 import json
 import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from facts_check_helpers import bind_facts_check
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from test_channel_delivery import reviewed as _reviewed
 from test_editorial_integration import prepare_service
 
 from relocant_media.ai.models import EvidenceDocument, SelectionBrief
-from relocant_media.ai.package import context_sha256, draft_sha256
+from relocant_media.ai.package import canonical_json, context_sha256, draft_sha256
 from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.freshness import FreshnessDecision
@@ -180,6 +182,9 @@ def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch, 
         assert package.outcome.draft.body.endswith("#Транспорт")
         assert (package.outcome.ranking.selection.profile_sha256
                 == load_city_profile("belgrade").sha256)
+        payload = package.model_dump(mode="json")
+        bind_facts_check(payload)
+        package = server_cycle.EditorialPackage.model_validate_json(json.dumps(payload))
         digest = context_sha256(package)
         seen.append(digest)
         reviews = tuple(r.model_copy(update={
@@ -213,6 +218,7 @@ async def test_invalid_ready_never_sends(reviewed, monkeypatch, mutation):
         package["reviews"] = [{**r, "reviewed_at":
             (datetime.now(UTC) - timedelta(days=2)).isoformat()} for r in package["reviews"]]
         payload["_package"] = package
+        payload["_package_sha256"] = hashlib.sha256(canonical_json(package).encode()).hexdigest()
         run.outcome = payload
         session.commit()
     package = server_cycle.EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))

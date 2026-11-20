@@ -1,13 +1,15 @@
 import copy
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from facts_check_helpers import bind_facts_check
 from sqlalchemy.orm import Session
 from test_channel_delivery import reviewed as reviewed_fixture
 from test_editorial_package import bind_context, parse
 
 from relocant_media.ai.models import EvidenceDocument
-from relocant_media.ai.package import draft_sha256
+from relocant_media.ai.package import canonical_json, draft_sha256
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import FreshnessDecision
 from relocant_media.ops import server_cycle
@@ -45,12 +47,15 @@ async def test_blocked_first_package_does_not_block_second_valid_delivery(
     for review in payload["reviews"]:
         review.update(article_id=second_item.external_id, draft_sha256=digest,
                       reviewed_at=datetime.now(UTC).isoformat())
+    bind_facts_check(payload)
     bind_context(payload)
     second = import_package(session, parse(payload))
     if first_failure == "expired_review":
         first_payload = copy.deepcopy(first.outcome)
         for review in first_payload["_package"]["reviews"]:
             review["reviewed_at"] = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+        first_payload["_package_sha256"] = hashlib.sha256(
+            canonical_json(first_payload["_package"]).encode()).hexdigest()
         first.outcome = first_payload
         session.commit()
     original_outcome = copy.deepcopy(first.outcome)

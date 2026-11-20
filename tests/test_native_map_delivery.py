@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from facts_check_helpers import bind_facts_check
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from test_editorial_package import bind_context, parse
@@ -137,6 +138,7 @@ def payload(session, *, city="belgrade", map_enabled=True, country_value=None, t
                      "verdict": "approve", "score": 95, "flags": [], "live_source_checked": True}
                     for role in ("facts", "utility")],
     }
+    bind_facts_check(data)
     bind_context(data)
     return data, profile, document, html
 

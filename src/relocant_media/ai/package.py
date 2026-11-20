@@ -16,6 +16,7 @@ from pydantic import (
     model_validator,
 )
 
+from relocant_media.ai.draft_coverage import DraftFactsCheck, draft_coverage_reason
 from relocant_media.ai.models import (
     ClaimSet,
     ClaimVerification,
@@ -96,6 +97,14 @@ class ReviewVerdict(StrictModel):
     score: int = Field(ge=0, le=100)
     flags: tuple[str, ...]
     live_source_checked: bool = False
+    facts_check: DraftFactsCheck | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_compatible(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if self.facts_check is None:
+            payload.pop("facts_check", None)
+        return payload
 
 
 class PackageEventDocument(PackageEvidence):
@@ -174,6 +183,28 @@ def context_sha256(package: EditorialPackage) -> str:
     return hashlib.sha256(canonical_json(context).encode()).hexdigest()
 
 
+def package_coverage_reason(package: EditorialPackage) -> str | None:
+    """Общий допуск фактического покрытия для импорта и ожидающей доставки."""
+    outcome = package.outcome
+    documents = (tuple(package.event.documents) if package.event is not None
+                 else (package.evidence,))
+    facts = next((review for review in package.reviews if review.role == "facts"), None)
+    return draft_coverage_reason(
+        facts.facts_check if facts else None, outcome.draft, outcome.claims,
+        outcome.verification, documents, outcome.ranking.category,
+    )
+
+
+def package_facts_scope(package: EditorialPackage) -> str | None:
+    facts = next((review for review in package.reviews if review.role == "facts"), None)
+    return facts.facts_check.publication_scope if facts and facts.facts_check else None
+
+
+def package_requires_official_primary(package: EditorialPackage) -> bool:
+    """Независимо выявленная чувствительность повышает требования к первоисточнику."""
+    return package_facts_scope(package) == "sensitive_substance"
+
+
 def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) -> EditorialOutcome:
     """Recompute eligibility; an asserted ready/should_process is never sufficient."""
     from relocant_media.ai.models import PublicationStatus
@@ -249,6 +280,13 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
         )
         if eligible:
             status, reason = PublicationStatus.READY, "package_independently_reviewed"
+    coverage_reason = package_coverage_reason(package)
+    if coverage_reason is not None and status in {
+            PublicationStatus.READY, PublicationStatus.HUMAN_REVIEW}:
+        if coverage_reason != "independent_sensitivity_review_required":
+            status, reason = PublicationStatus.HUMAN_REVIEW, coverage_reason
+        elif status == PublicationStatus.READY:
+            status, reason = PublicationStatus.HUMAN_REVIEW, "package_requires_review"
     language_reason = draft_language_reason(draft.title, draft.body)
     if language_reason is not None:
         status, reason = PublicationStatus.HUMAN_REVIEW, language_reason

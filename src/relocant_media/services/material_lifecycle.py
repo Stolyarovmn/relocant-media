@@ -259,6 +259,26 @@ def _validate(data: dict[str, Any]) -> bool:
         return False
 
 
+def _stored_coverage_reason(run: EditorialRun | None) -> str | None:
+    if run is None or "_package" not in run.outcome:
+        return None
+    from relocant_media.ai.package import (
+        EditorialPackage,
+        canonical_json,
+        package_coverage_reason,
+    )
+
+    payload = run.outcome["_package"]
+    if hashlib.sha256(canonical_json(payload).encode()).hexdigest() != (
+            run.outcome.get("_package_sha256")):
+        return "invalid_reviewed_package"
+    try:
+        package = EditorialPackage.model_validate_json(json.dumps(payload))
+    except ValueError:
+        return "invalid_reviewed_package"
+    return package_coverage_reason(package)
+
+
 def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
     raw, source, run, post = _objects(session, raw_id)
     record = _record(session, raw, source, now)
@@ -313,6 +333,15 @@ def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
             or category in HIGH_RISK_CATEGORIES
             or category and category not in AUTO_PUBLISH_CATEGORIES):
         _block(session, record, run, post, now=now, reason="separate_publication_approval_required")
+        return record
+    coverage_reason = _stored_coverage_reason(run)
+    if coverage_reason == "independent_sensitivity_review_required":
+        if not owner_approved:
+            _block(session, record, run, post, now=now,
+                   reason="separate_publication_approval_required")
+            return record
+    elif coverage_reason is not None:
+        _block(session, record, run, post, now=now, reason=coverage_reason)
         return record
     if run is None:
         from relocant_media.services.editorial import _reviewed_event_match

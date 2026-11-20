@@ -2,6 +2,7 @@ import json
 from datetime import timedelta
 
 import pytest
+from facts_check_helpers import facts_check_for
 from test_editorial_package import NOW, event_payload, parse
 
 from relocant_media.ai.independent_reviews import reviewed_package
@@ -23,6 +24,10 @@ class Provider:
     def generate_json(self, **kwargs):
         self.calls.append(kwargs)
         response = self.responses.pop(0)
+        if (kwargs["task"] == "independent_facts" and isinstance(response, dict)
+                and "facts_check" not in response):
+            response = {**response,
+                        "facts_check": facts_check_for(json.loads(kwargs["prompt"])["package"])}
         return response if isinstance(response, str) else json.dumps(response)
 
 

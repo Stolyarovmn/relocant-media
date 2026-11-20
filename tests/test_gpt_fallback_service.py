@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from facts_check_helpers import bind_facts_check
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 from test_editorial_package import bind_context, package_payload, parse
@@ -142,6 +143,7 @@ def package_for_request(request: dict) -> EditorialPackage:
             reviewed_at=request["created_at"],
             draft_sha256=draft_sha256(draft),
         )
+    bind_facts_check(payload)
     bind_context(payload)
     return parse(payload)
 
@@ -399,6 +401,7 @@ def test_perfect_reviews_cannot_publish_a_new_physical_event_without_its_map(fal
     payload["presentation"] = presentation.model_dump(mode="json")
     for review in payload["reviews"]:
         review.update(draft_sha256=draft_sha256(draft), score=100)
+    bind_facts_check(payload)
     bind_context(payload)
     outcome = evaluate_package(parse(payload), now=NOW)
     assert outcome.status == "human_review"

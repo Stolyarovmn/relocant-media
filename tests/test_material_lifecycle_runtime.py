@@ -253,9 +253,11 @@ def test_inapplicable_confirm_cannot_reopen_closed_or_delivered_material(engine,
 
 def test_refuted_rejection_cannot_remove_reviewed_or_private_package(engine):
     rejected(engine, _package={"must_preserve":"Проверенный пакет"})
-    runtime = MaterialLifecycleRuntime(engine, "belgrade", Provider(engine), NOW)
-    with pytest.raises(ValueError, match="архивировать"):
-        runtime.process(1, lambda _: pytest.fail("Нельзя обходить защиту архивирования"))
+    provider = Provider(engine)
+    runtime = MaterialLifecycleRuntime(engine, "belgrade", provider, NOW)
+    result = runtime.process(1, lambda _: pytest.fail("Нельзя обходить защиту архивирования"))
+    assert result["status"] == "blocked" and provider.calls == []
+    assert ledger(engine)["reason"] == "invalid_reviewed_package"
     with Session(engine) as session:
         run = session.get(EditorialRun, 1)
         assert run.outcome["_package"] == {"must_preserve":"Проверенный пакет"}

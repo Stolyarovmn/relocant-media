@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from facts_check_helpers import bind_facts_check
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from test_editorial_integration import prepare_service
@@ -50,6 +51,7 @@ def reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         for review in payload["reviews"]:
             review["reviewed_at"] = datetime.now(UTC).isoformat()
             review["draft_sha256"] = draft_sha256(draft)
+        bind_facts_check(payload)
         bind_context(payload)
         run = import_package(session, parse(payload))
         yield session, run

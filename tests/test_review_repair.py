@@ -35,6 +35,28 @@ def test_approved_draft_requires_no_repair():
     assert result.outcome == value.outcome
 
 
+def test_repaired_draft_discards_old_factual_coverage_before_new_review(monkeypatch):
+    from relocant_media.ai import review_repair
+
+    value, provider = initial(), Provider()
+    provider.responses = [*reviews(True), repaired(value), *reviews()]
+    actual_review = review_repair.reviewed_package
+    incoming = []
+
+    def capture(package, *args, **kwargs):
+        incoming.append(package)
+        if len(incoming) == 2:
+            assert all(review.facts_check is None for review in package.reviews)
+            assert all(review.verdict == "hold" for review in package.reviews)
+        return actual_review(package, *args, **kwargs)
+
+    monkeypatch.setattr(review_repair, "reviewed_package", capture)
+    result = review_repair.review_with_repairs(value, provider, lambda: documents(value))
+    assert len(incoming) == 2 and len(provider.calls) == 5
+    assert result.reviews[0].facts_check is not None
+    assert result.reviews[0].facts_check.segments[0].text == result.outcome.draft.title
+
+
 def test_repair_gets_both_fresh_reviews_and_preserves_all_other_fields():
     value, provider, audit = initial(), Provider(), []
     provider.responses = [*reviews(True), repaired(value), *reviews()]

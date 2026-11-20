@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from facts_check_helpers import facts_check_for
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from test_editorial_integration import prepare_service
@@ -73,7 +74,7 @@ class ReviewProvider:
         self.calls: list[str] = []
 
     def generate_json(self, *, task, system_instruction, prompt, response_schema):
-        del system_instruction, prompt, response_schema
+        del system_instruction, response_schema
         self.calls.append(task)
         if task == "owner_revision":
             assert self.revision is not None
@@ -84,6 +85,7 @@ class ReviewProvider:
                 "score": 95,
                 "flags": [],
                 "reason": "Факты подтверждены точным источником.",
+                "facts_check": facts_check_for(json.loads(prompt)["package"]),
             })
         if task == "independent_utility":
             return json.dumps({

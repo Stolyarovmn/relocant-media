@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from facts_check_helpers import bind_facts_check
 from pydantic import ValidationError
 from test_editorial_pipeline import _claims, _document, _draft, _ranking, _verification
 
@@ -53,6 +54,7 @@ def package_payload() -> dict:
             "verdict": "approve", "score": 80, "flags": [], "live_source_checked": True,
         } for role in ("facts", "utility")],
     }
+    bind_facts_check(payload)
     bind_context(payload)
     return payload
 
@@ -117,6 +119,7 @@ def test_v2_citations_can_use_reviewed_secondary_source() -> None:
     payload["event"]["documents"].append(other)
     citation = payload["outcome"]["claims"]["claims"][0]["citations"][0]
     citation.update(source_id=other["source_id"], url=other["url"])
+    bind_facts_check(payload)
     bind_context(payload)
     assert evaluate_package(parse(payload), now=NOW).status == "ready"
 

@@ -13,6 +13,10 @@ from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.media_publisher import MediaBot, publish_media
 from relocant_media.bot.publisher import Publisher
+from relocant_media.domain.channel_targets import APPROVED_CHANNEL_ID as APPROVED_CHANNEL_ID
+from relocant_media.domain.channel_targets import (
+    APPROVED_CHANNELS_BY_CITY as APPROVED_CHANNELS_BY_CITY,
+)
 from relocant_media.domain.event_map_policy import event_map_review_reason
 from relocant_media.domain.presentation import valid_title_presentation
 from relocant_media.services.editorial import DeliveryBlockedError, DeliveryResult, EditorialService
@@ -31,13 +35,6 @@ from relocant_media.services.rich_delivery import (
 )
 from relocant_media.storage.locks import lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
-
-APPROVED_CHANNEL_ID = -1003967014133
-# Production routing is fail-closed per city. Future city channels (for example
-# Novi Sad) must receive their own explicit mapping before delivery can be enabled.
-APPROVED_CHANNELS_BY_CITY = {
-    "belgrade": APPROVED_CHANNEL_ID,
-}
 
 
 def _media_receipt(
