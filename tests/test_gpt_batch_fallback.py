@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 from datetime import timedelta
@@ -10,6 +11,8 @@ from test_gpt_fallback_service import fallback_session as _fallback_session
 from relocant_media.ai.package import canonical_json
 from relocant_media.collectors.base import RawItem as CollectedArticle
 from relocant_media.domain.city_profile import load_city_profile
+from relocant_media.ops import gpt_fallback_worker as worker
+from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import gpt_fallback, gpt_refresh
 from relocant_media.services import material_lifecycle as lifecycle
 from relocant_media.services.gpt_batch_fallback import (
@@ -98,6 +101,54 @@ def test_ranking_resumes_same_cycle_and_releases_unselected_candidates(batch):
     assert work["candidates"][0]["documents"][0]["body"] == other.body
     assert session.get(EditorialRun, raw.id) is None
     assert session.get(EditorialRun, other.id) is None
+
+
+def test_terminal_gpt_declines_do_not_hold_remaining_or_direct_exports(batch):
+    session, raw, other, run = batch
+    run.details = {**run.details, "processing_errors": [], "batch_preselection": {
+        **run.details["batch_preselection"], "gpt_slots": 2}}
+    session.commit()
+    brief = build_batch_request(session, now=NOW)
+    rank = _rank(brief, [raw.id, other.id])
+    _record_rank(session, run, brief, rank)
+    request = build_ranked_request(session, brief, rank, now=NOW)
+
+    def decline(raw_id):
+        return worker.FallbackRejection(raw_item_id=raw_id, category="transport",
+            rationale="Исходные сведения не подтверждают значимость события.")
+
+    worker._save_rejection(session.get_bind(), request, decline(raw.id), now=NOW)
+    session.expire_all()
+    before = {record.id: copy.deepcopy(record.details)
+              for record in session.scalars(select(SchedulerRun))}
+    remaining = build_ranked_request(session, brief, rank, now=NOW)
+    assert [candidate["raw_item_id"] for candidate in remaining["candidates"]] == [other.id]
+    assert {record.id: record.details for record in session.scalars(select(SchedulerRun))} == before
+    assert not session.new and not session.dirty and not session.deleted
+    with pytest.raises(gpt_fallback.FallbackValidationError):
+        validate_batch_rank(session, brief, rank, now=NOW)
+    with pytest.raises(gpt_fallback.FallbackValidationError):
+        worker._save_rejection(session.get_bind(), request, decline(raw.id), now=NOW)
+
+    worker._save_rejection(session.get_bind(), request, decline(other.id), now=NOW)
+    session.expire_all()
+    direct = RawItem(source_id=raw.source_id, external_id="independent-direct",
+        url="https://www.beograd.rs/lat/vesti/independent-direct",
+        title="Najavljena izmena saobraćaja", body="Gradski prevoz menja trasu zbog radova." * 20,
+        published_at=raw.published_at, published_at_precision=raw.published_at_precision,
+        ingested_at=raw.ingested_at)
+    session.add(direct)
+    session.flush()
+    run.details = {**run.details, "processing_errors": [
+        {"raw_item_id": direct.id, "error_type": "GeminiWorkerError"}]}
+    session.commit()
+    before = {record.id: copy.deepcopy(record.details)
+              for record in session.scalars(select(SchedulerRun))}
+    assert build_ranked_request(session, brief, rank, now=NOW) is None
+    direct_request = gpt_fallback.build_request(session, now=NOW)
+    assert [candidate["raw_item_id"] for candidate in direct_request["candidates"]] == [direct.id]
+    assert {record.id: record.details for record in session.scalars(select(SchedulerRun))} == before
+    assert not session.new and not session.dirty and not session.deleted
 
 
 def test_approved_batch_slot_moves_to_live_source_and_reopens_on_preview(batch, monkeypatch):

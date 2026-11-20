@@ -2,7 +2,7 @@ import copy
 import hashlib
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -316,9 +316,89 @@ def test_batch_reserve_reaches_final_decision_in_same_cycle(fallback_session, mo
     assert run is not None
     if not approve:
         assert run.post_id is None
-        assert run.outcome["reason"] == "gpt_ranking_rejected"
+        assert run.outcome["reason"] == "lifecycle_fallback_editorial_rejection"
+        assert run.outcome["_lifecycle_block"]["previous_reason"] == "gpt_ranking_rejected"
     assert build_ranked_request(session, brief, rank, now=NOW) is None
     assert gpt_fallback.pending_gpt_ids(session, now=NOW) == set()
+
+
+@pytest.mark.parametrize("audit_failure", ["none", "both", "second"])
+@pytest.mark.parametrize("approve", [False, True])
+def test_unconfirmed_rejection_uses_existing_full_fallback_once(
+    fallback_session, monkeypatch, approve, audit_failure,
+):
+    from relocant_media.services import material_lifecycle as core
+
+    session, raw, scheduler = fallback_session
+    source = session.get(Source, raw.source_id)
+    snapshot = _snapshot_member(raw, source)
+    now = NOW
+    original = core.lifecycle_state(session, raw.id, now=now)
+
+    def reject():
+        session.add(EditorialRun(raw_item_id=raw.id, delivery_status="pending", created_at=now,
+            evidence={**snapshot, "documents": [snapshot]},
+            outcome={"status": "skipped", "reason": "not_selected",
+                     "ranking": {"category": "transport"}}))
+        session.flush()
+        core.after_result(session, raw.id, now=now)
+
+    assert core.before_attempt(session, raw.id, now=now)
+    reject()
+    for attempt in range(2):
+        assert core.before_attempt(session, raw.id, now=now, channel="rejection_audit")
+        if audit_failure == "both" or audit_failure == "second" and attempt == 1:
+            core.after_error(session, raw.id, "TimeoutError", now=now, channel="rejection_audit")
+            if attempt == 0:
+                now += timedelta(minutes=5)
+        else:
+            core.record_rejection_review(session, raw.id, {
+                "decision": "retry_processing", "basis": "unsupported_rejection",
+                "reviewed_at": now.isoformat(), "synthetic_attempt": attempt,
+            }, now=now)
+            core.rejection_reviewed(session, raw.id, justified=False, now=now)
+            if attempt == 0:
+                assert core.before_attempt(session, raw.id, now=now)
+                assert core.archive_for_retry(session, raw.id, now=now)
+                reject()
+    before = core.lifecycle_state(session, raw.id, now=now)
+    assert before["next_action"] == "fallback" and before["audit_attempts"] == 2
+    assert before["fallback_attempts"] == 0
+    if audit_failure != "none":
+        assert before["rejection_justified"] is None
+        assert before["unconfirmed_rejection_fallback"] is True
+    if audit_failure == "second":
+        assert [review["decision"] for review in before["rejection_review_history"]] == [
+            "retry_processing", "audit_error"]
+    scheduler.details = {"processing_errors": [], "lifecycle_fallback_ids": [raw.id]}
+    session.commit()
+    request = gpt_fallback.build_request(session, now=now)
+    assert request is not None and request["scheduler_run_id"] == scheduler.id
+    gpt_fallback.validate_fallback_candidate(session, request, raw.id, now=now)
+    if approve:
+        payload = _input(package_for_request(request), request)
+        monkeypatch.setattr(worker, "_check_live_evidence", lambda package: None)
+    else:
+        payload = {"request": request, "result": {"version": 1,
+            "request_sha256": hashlib.sha256(canonical_json(request).encode()).hexdigest(),
+            "packages": [], "rejected": [{"raw_item_id": raw.id, "category": "transport",
+                "rationale": "Исходные сведения не подтверждают значимость события."}]}}
+    result = worker.run_worker(session.get_bind(), _parse(payload), now=now)
+    assert result["unresolved"] == 0 and result["sent_count"] == 0
+    session.expire_all()
+    state = core.lifecycle_state(session, raw.id, now=now)
+    assert state["fallback_attempts"] == 1 and state["audit_attempts"] == 2
+    assert state["attempts"] == before["attempts"]
+    assert state["deadline_at"] == original["deadline_at"]
+    assert state["fallback_deadline_at"] == before["fallback_deadline_at"]
+    assert len(state["rejection_review_history"]) == 2
+    if approve:
+        assert state["state"] == "ready" and state["next_action"] == "deliver"
+        assert session.get(EditorialRun, raw.id).post_id is not None
+    else:
+        assert state["state"] == "blocked" and state["reason"] == "fallback_editorial_rejection"
+        assert session.get(EditorialRun, raw.id).post_id is None
+    assert not core.before_attempt(session, raw.id, now=now, channel="fallback")
 
 
 def test_real_gemini_failure_can_recover_an_existing_selection_hold(
