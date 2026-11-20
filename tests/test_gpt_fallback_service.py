@@ -358,6 +358,13 @@ def test_request_and_validation_are_read_only_and_exclude_private_payload(fallba
     assert "ближайший подтверждённый шаг" in request["writing_brief"]["common"]
     assert request["writing_brief"]["calendar"]["timezone"] == "Europe/Belgrade"
     assert request["writing_brief"]["formats"]["events"]["words"] == [55, 110]
+    from relocant_media.ai.draft_coverage import FACTS_COVERAGE_INSTRUCTION, DraftFactsCheck
+
+    contract = request["writing_brief"]["facts_review_contract"]
+    assert contract["instruction"] == FACTS_COVERAGE_INSTRUCTION
+    assert contract["schema"] == DraftFactsCheck.model_json_schema()
+    assert contract["placement"] == "package.reviews[role=facts].facts_check"
+    assert request["version"] == 1
     assert "НЕ ЭКСПОРТИРОВАТЬ" not in json.dumps(request, ensure_ascii=False)
     assert "СЕКРЕТ ПОДПИСЧИКА" not in json.dumps(request, ensure_ascii=False)
     assert all(statement.lstrip().startswith("SELECT") for statement in statements)

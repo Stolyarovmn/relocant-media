@@ -79,4 +79,11 @@ def writing_context(profile: CityEditorialProfile | None, now: datetime) -> dict
 
 
 def writing_brief(profile: CityEditorialProfile, now: datetime) -> dict[str, Any]:
-    return {**_MATRIX.model_dump(mode="json"), "calendar": writing_context(profile, now)}
+    from relocant_media.ai.draft_coverage import FACTS_COVERAGE_INSTRUCTION, DraftFactsCheck
+
+    return {**_MATRIX.model_dump(mode="json"), "calendar": writing_context(profile, now),
+            "facts_review_contract": {
+                "placement": "package.reviews[role=facts].facts_check",
+                "instruction": FACTS_COVERAGE_INSTRUCTION,
+                "schema": DraftFactsCheck.model_json_schema(),
+            }}
