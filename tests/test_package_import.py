@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from facts_check_helpers import bind_facts_check
 from sqlalchemy.orm import Session
 from test_editorial_integration import editorial_session as _editorial_session
 from test_editorial_integration import prepare_service
@@ -40,6 +41,7 @@ def test_parallel_entry_points_create_only_one_result_for_an_event(
             citation['url'] = duplicate.url
     for review in payload['reviews']:
         review['article_id'] = duplicate.external_id
+    bind_facts_check(payload)
     bind_context(payload)
     copy_package = parse(payload)
     original_payload = package_payload()
@@ -115,6 +117,7 @@ def test_package_import_rejects_an_event_already_reviewed_under_another_url(
             citation['url'] = duplicate.url
     for review in payload['reviews']:
         review['article_id'] = duplicate.external_id
+    bind_facts_check(payload)
     bind_context(payload)
     with pytest.raises(PackageConflictError, match='event already reviewed'):
         import_package(editorial_session, parse(payload), now=NOW)

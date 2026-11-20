@@ -1,10 +1,13 @@
 import copy
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from facts_check_helpers import reviewed_package_for
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.package import canonical_json
 from relocant_media.domain.policy import SOURCE_REPLACED_REASON
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.material_lifecycle import (
@@ -326,7 +329,10 @@ def test_confirmed_publication_skipped_without_extra_ledger_during_sweep(session
 
 
 def test_delivery_retries_keep_ready_package_and_observe_backoff(session):
-    run = editorial(session, status="ready", post=True, _package={"verified": True})
+    run = editorial(session, status="ready", post=True)
+    payload = reviewed_package_for(session.get(RawItem, 1), session.get(Source, "city"), now=NOW)
+    run.outcome = {**run.outcome, "_package": payload,
+                   "_package_sha256": hashlib.sha256(canonical_json(payload).encode()).hexdigest()}
     original = copy.deepcopy(run.outcome)
     assert before_delivery_attempt(session, 1, now=NOW)
     state = delivery_failure(session, 1, "LiveFetchError", now=NOW)
@@ -340,7 +346,10 @@ def test_delivery_retries_keep_ready_package_and_observe_backoff(session):
 
 
 def test_post_cannot_be_deleted_by_primary_retry(session):
-    run = editorial(session, status="human_review", post=True, _package={"verified": True})
+    run = editorial(session, status="human_review", post=True)
+    payload = reviewed_package_for(session.get(RawItem, 1), session.get(Source, "city"), now=NOW)
+    run.outcome = {**run.outcome, "_package": payload,
+                   "_package_sha256": hashlib.sha256(canonical_json(payload).encode()).hexdigest()}
     now = NOW+timedelta(minutes=5)
     lifecycle_state(session, 1, now=NOW)
     assert before_attempt(session, 1, now=now)

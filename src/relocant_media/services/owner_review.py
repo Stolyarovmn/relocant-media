@@ -26,6 +26,7 @@ from relocant_media.ai.package import (
     canonical_json,
     draft_sha256,
     evaluate_package,
+    package_requires_official_primary,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.ai.review_repair import review_with_repairs
@@ -370,6 +371,7 @@ def _validated_pending_package(
         [document.ownership for document in package.event.documents],
         package.outcome.ranking.category, package.outcome.draft,
         [f"{document.title}\n{document.body}" for document in package.event.documents],
+        independent_sensitive=package_requires_official_primary(package),
     )
     return run, post, item, source, package
 
@@ -881,6 +883,7 @@ async def deliver_owner_approved(
         assert_primary_evidence(
             [policy.ownership for _, policy in members], package.outcome.ranking.category,
             package.outcome.draft, [f"{member.title}\n{member.body}" for member, _ in members],
+            independent_sensitive=package_requires_official_primary(package),
         )
         for member, _ in members:
             audience_reason = audience_relevance_reason(member.title, member.body)

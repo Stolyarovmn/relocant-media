@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from facts_check_helpers import bind_facts_check
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from test_events_export import persist_package, seed
@@ -108,6 +109,7 @@ def state():
                                "quote": doc.body[:500]}],
         }
         payload["presentation"] = presentation.model_dump(mode="json")
+        bind_facts_check(payload)
         for review in payload["reviews"]:
             review["reviewed_at"] = NOW.isoformat()
             review["draft_sha256"] = draft_sha256(draft)

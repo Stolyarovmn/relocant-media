@@ -1,12 +1,15 @@
 import copy
+import hashlib
 import json
 import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from facts_check_helpers import reviewed_package_for
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.package import canonical_json
 from relocant_media.domain.policy import SOURCE_REPLACED_REASON
 from relocant_media.ops import backlog_drain as drain
 from relocant_media.scheduler.models import SchedulerRun
@@ -206,9 +209,13 @@ def test_delivery_uses_cohort_and_at_most_two_claims_in_entire_hop(state, monkey
                         title="Проверенный тест", body="PRIVATE_BODY", confidence=1)
             session.add(post)
             session.flush()
+            payload = reviewed_package_for(session.get(RawItem, raw_id),
+                session.get(Source, "official"), title=post.title, body=post.body, now=now)
+            package_sha = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
             session.add(EditorialRun(raw_item_id=raw_id, post_id=post.id,
-                delivery_status="pending", outcome={"status": "ready", "ranking": {
-                    "category": "transport"}, "_package": {}}, evidence={}))
+                delivery_status="pending", outcome={**payload["outcome"], "_package": payload,
+                    "_package_sha256": package_sha},
+                evidence={}))
             session.commit()
         return {"raw_item_id": raw_id}
 

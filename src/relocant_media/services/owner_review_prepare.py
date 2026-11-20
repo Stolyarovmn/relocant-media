@@ -51,10 +51,11 @@ REVIEWED_STATES = frozenset({
 
 def assert_primary_evidence(
     ownerships: list[str], category: str, draft: Any, source_texts: list[str],
+    *, independent_sensitive: bool = False,
 ) -> str:
     """Official evidence, or verified media outside high-risk topics with our own retelling."""
     kind = primary_evidence_kind(ownerships, category)
-    if kind is None:
+    if kind is None or independent_sensitive and kind != "official":
         raise DeliveryBlockedError("official primary evidence is required")
     if kind == "media" and copies_source_text(f"{draft.title}\n{draft.body}", source_texts):
         raise DeliveryBlockedError("draft copies the media source text")

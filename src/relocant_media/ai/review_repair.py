@@ -12,7 +12,12 @@ from relocant_media.ai.audience_policy import (
 from relocant_media.ai.channel_style import CHANNEL_DRAFT_STYLE, writing_instruction
 from relocant_media.ai.independent_reviews import reviewed_package
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
-from relocant_media.ai.package import EditorialPackage, PackageDraft, canonical_json
+from relocant_media.ai.package import (
+    EditorialPackage,
+    PackageDraft,
+    canonical_json,
+    package_coverage_reason,
+)
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import draft_date_reason
@@ -44,6 +49,10 @@ def review_with_repairs(
                 audit({**entry, "repair_attempt": repair_attempt})
 
         current = reviewed_package(current, provider, live_documents, audit=record)
+        if package_coverage_reason(current) in {
+                "independent_sensitivity_review_required",
+                "independent_risk_classification_required"}:
+            return current
         if any({AUDIENCE_MISMATCH_FLAG, PROFILE_AUDIENCE_MISMATCH_FLAG} & set(review.flags)
                for review in current.reviews):
             # Rewording cannot manufacture a reason for the audience to care.
@@ -113,6 +122,7 @@ def review_with_repairs(
         # the new context and draft hashes after re-fetching the live documents.
         placeholders = tuple(r.model_copy(update={
             "verdict": "hold", "score": 0, "flags": (), "live_source_checked": False,
+            "facts_check": None,
         }) for r in current.reviews)
         presentation = current.presentation
         if presentation is not None:

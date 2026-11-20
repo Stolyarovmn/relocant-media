@@ -5,6 +5,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from facts_check_helpers import bind_facts_check
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -139,6 +140,7 @@ def ready_package(seeded):
                          "draft_sha256": draft_sha256(draft), "context_sha256": "0" * 64}
                         for role in ("facts", "utility")],
         }
+    bind_facts_check(values)
     package = EditorialPackage.model_validate_json(json.dumps(values))
     digest = context_sha256(package)
     package = package.model_copy(update={"reviews": tuple(
