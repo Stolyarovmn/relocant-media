@@ -25,6 +25,7 @@ from relocant_media.services.native_map import (
     verify_live_native_map,
     verify_native_map_snapshot,
 )
+from relocant_media.services.published_text import effective_published_text
 from relocant_media.services.source_enrichment import (
     build_source_enrichment,
     plan_illustration,
@@ -49,11 +50,11 @@ def recent_publications(
                 EditorialRun.outcome["status"].as_string() == "ready")),
         ).order_by(observed_at.desc(), Post.id.desc()))
     return [{
-        "id": post.id, "title": post.title, "body": post.body,
+        "id": post.id, "title": effective.title, "body": effective.body,
         "status": "published" if run.delivery_status == "sent" else "ready",
         "published_at": (post.published_at or post.created_at).isoformat(),
         "rubric_id": (run.outcome.get("ranking", {}).get("selection") or {}).get("rubric_id"),
-    } for post, run in rows]
+    } for post, run in rows for effective in [effective_published_text(post, run)]]
 
 
 def rubric_plan(

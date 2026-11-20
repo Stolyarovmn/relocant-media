@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key
 from relocant_media.scheduler.models import SchedulerRun
+from relocant_media.services.published_text import effective_published_text
 from relocant_media.storage.models import (
     CollectorFailure,
     EditorialRun,
@@ -406,6 +407,8 @@ def build_newsroom_inbox(
                 if stored_ids:
                     evidence_ids = stored_ids
 
+        published_text = (effective_published_text(post, run)
+                          if post is not None and run is not None else None)
         control_items.append(
             {
                 "event_key": resolved_event_key,
@@ -413,7 +416,8 @@ def build_newsroom_inbox(
                 "reason_code": reason_code,
                 "raw_item_ids": member_ids,
                 "anchor_raw_item_id": anchor.id,
-                "title": anchor.title,
+                "title": (published_text.title if published_text is not None
+                          and published_text.corrected else anchor.title),
                 "published_at": _iso(anchor.published_at),
                 "review_status": _review_status(run, post),
                 "delivery_status": run.delivery_status if run is not None else "not_started",

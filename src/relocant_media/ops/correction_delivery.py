@@ -323,6 +323,10 @@ def execute(
         raise ValueError("Нужен SHA256 приватного плана")
     content = storage.download(plan_sha)
     _validate_plan_input(content, plan_sha, checked_at)
+    if json.loads(content).get("version") == 4:
+        from relocant_media.ops.exact_text_correction import execute_exact_text_edit
+
+        return execute_exact_text_edit(storage, content, plan_sha, work, client, token, checked_at)
     if json.loads(content).get("version") == 3:
         from relocant_media.ops.event_post_correction import execute_event_edit
 
