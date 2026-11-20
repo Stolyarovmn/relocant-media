@@ -9,7 +9,7 @@ import httpx
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
-from test_correction_delivery import NOW, embed
+from test_correction_delivery import NOW, TOKEN, embed
 from test_exact_text_correction import Remote, execute, seal
 from test_exact_text_correction import exact as exact
 from test_exact_text_correction import frozen as frozen
@@ -206,6 +206,8 @@ def test_changed_plan_cannot_reuse_previous_api_ack(stale, tmp_path):
 
 def test_original_edit_still_requires_fresh_reviews(exact, tmp_path):
     remote = CachedRemote(exact)
-    with pytest.raises(ValueError):
-        replay(exact, tmp_path / "expired", remote, now=NOW + timedelta(hours=3))
+    with httpx.Client(transport=httpx.MockTransport(remote)) as client:
+        with pytest.raises(ValueError, match="свежих"):
+            worker.execute(exact["storage"], exact["sha"], tmp_path / "expired", client,
+                           token=TOKEN, now=NOW + timedelta(hours=3))
     assert not remote.posts and not exact["storage"].writes
