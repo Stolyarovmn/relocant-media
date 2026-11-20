@@ -205,8 +205,8 @@ def audit_rejection(
         raise ValueError("Контекст проверки превышает предел")
     context_sha256 = hashlib.sha256(prompt.encode()).hexdigest()
     output = provider.generate_json(
-        task="audit_rejection", system_instruction=profile_audience_policy(profile) + "\n\n" + _SYSTEM,
-        prompt=prompt,
+        task="audit_rejection",
+        system_instruction=profile_audience_policy(profile) + "\n\n" + _SYSTEM, prompt=prompt,
         response_schema=_Response.model_json_schema(),
     )
     try:
