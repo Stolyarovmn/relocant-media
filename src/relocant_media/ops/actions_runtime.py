@@ -36,6 +36,12 @@ from relocant_media.ops.belgrade_digests import due_slot as due_digest_slot
 from relocant_media.ops.belgrade_digests import run as run_digest
 from relocant_media.ops.digest_preview import preview as preview_digest
 from relocant_media.ops.events_export import export_events_snapshot
+from relocant_media.ops.gpt_export_receipt import (
+    EXPORT_KIND,
+    PUBLIC_SOURCE_TYPES,
+    require_public_documents,
+    validate_export_marker,
+)
 from relocant_media.ops.map_backfill import apply as apply_map_buttons
 from relocant_media.ops.map_backfill import parse_targets as parse_map_button_targets
 from relocant_media.ops.map_export import export_map_snapshot
@@ -281,6 +287,69 @@ def _export_gpt_request(
 def _runtime_phase(phase: str) -> None:
     """Только фиксированные имена стадий; никаких исходных текстов и реквизитов."""
     print(json.dumps({"runtime_phase": phase}), file=sys.stderr, flush=True)
+
+
+def _require_public_fallback_documents(session: Session, request: dict[str, Any]) -> None:
+    """Реестр сам по себе не даёт закрытому источнику право внешнего экспорта."""
+    from relocant_media.ai.package import PackageEventDocument
+    from relocant_media.services.editorial import _snapshot_member
+    from relocant_media.services.gpt_fallback import _registered_public, _registry
+    from relocant_media.storage.models import RawItem, Source
+
+    require_public_documents(request)
+    registry = _registry()
+    for candidate in request["candidates"]:
+        for snapshot in candidate["documents"]:
+            document = PackageEventDocument.model_validate_json(canonical_json(snapshot))
+            item = session.get(RawItem, document.raw_item_id)
+            source = session.get(Source, document.source_id)
+            config = registry.get(document.source_id)
+            if (document.ownership not in {"official", "media"} or item is None or source is None
+                    or item.source_id != source.id or config is None
+                    or config.ownership not in {"official", "media"}
+                    or config.source_type not in PUBLIC_SOURCE_TYPES
+                    or not _registered_public(item, source, config)
+                    or canonical_json(snapshot) != canonical_json(_snapshot_member(item, source))):
+                raise ValueError("Внешний экспорт допускает только точные публичные документы")
+
+
+def _export_committed_fallback(
+    storage: SnapshotStore, database: Path, work: Path, *, ready: dict[str, Any],
+    mode: str, environment: Mapping[str, str],
+) -> None:
+    """Опциональный public-only v1 на уже сохранённой локальной БД, без нового restore."""
+    from relocant_media.services.gpt_fallback import build_request
+
+    engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
+    try:
+        with Session(engine) as session, session.no_autoflush:
+            session.connection().exec_driver_sql("PRAGMA query_only=ON")
+            request = build_request(session, now=datetime.now(UTC))
+            if request is not None:
+                _require_public_fallback_documents(session, request)
+    finally:
+        engine.dispose()
+    if request is None:
+        print(json.dumps({"gpt_fallback_export_status": "no_pending_candidates"}), flush=True)
+        return
+    # Валидация контекста до upload; ни локальная подделка, ни другой job не анонсируются.
+    marker = validate_export_marker({
+        "gpt_fallback_export": EXPORT_KIND,
+        "gpt_fallback_request_sha256": hashlib.sha256(canonical_json(request).encode()).hexdigest(),
+        "candidate_count": len(request["candidates"]),
+        "scheduler_run_id": request["scheduler_run_id"],
+        "snapshot_sha256": ready["snapshot"]["sha256"], "generation": ready["generation"],
+        "workflow_run_id": int(environment.get("GITHUB_RUN_ID", "")),
+        "workflow_run_attempt": int(environment.get("GITHUB_RUN_ATTEMPT", "")),
+        "head_sha": environment.get("GITHUB_SHA"), "job_key": environment.get("GITHUB_JOB"),
+        "worker_mode": mode,
+    })
+    if type(request.get("version")) is not int or request["version"] != 1:
+        raise ValueError("Канонический экспорт допускает только существующий запрос v1")
+    digest = _upload_gpt_request(storage, request, work / "gpt-committed-request.json")
+    if digest != marker["gpt_fallback_request_sha256"]:
+        raise ValueError("Квитанция upload не совпадает с каноническим запросом")
+    print(json.dumps(marker), flush=True)
 
 
 class SnapshotCapacityError(ValueError):
@@ -1018,6 +1087,17 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     _runtime_phase("state_commit_started")
     store.write(ready, busy_sha)
     _runtime_phase("state_committed")
+    if (mode in {"editorial", "drain"} and code == 0
+            and environment.get("GITHUB_ACTIONS") == "true"
+            and environment.get("EDITORIAL_STORAGE_BACKEND") == "ssh"
+            and isinstance(drive, SSHStateClient)):
+        try:
+            _export_committed_fallback(drive, work / "saved" / "editorial.sqlite3", work,
+                                       ready=ready, mode=mode, environment=environment)
+        except Exception as error:
+            # Канонический commit уже завершён. Optional export не меняет его исход.
+            print(json.dumps({"gpt_fallback_export_error_type": type(error).__name__}),
+                  file=sys.stderr, flush=True)
     if drain is not None:
         _write_drain_control(environment, drain_control)
     refreshed_request = run_dir / "gpt-refreshed-request.json"
