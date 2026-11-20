@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -222,6 +223,147 @@ def _confirmed(result: Any, payload: dict[str, Any]) -> bool:
                     ("photo", "video", "document", "caption", "reply_markup")))
 
 
+def _restore_edit(storage: SSHStateClient, state: dict[str, Any], work: Path,
+                  plan: ExactTextCorrectionPlan) -> tuple[Path, dict[str, Any]]:
+    work.mkdir(mode=0o700, parents=True, exist_ok=False)
+    database = restored(storage, state["snapshot"], work)
+    uri = database.resolve().as_uri() + "?mode=ro"
+    engine = create_engine("sqlite://", creator=lambda: sqlite3.connect(uri, uri=True))
+    try:
+        with Session(engine) as session:
+            session.execute(text("PRAGMA query_only=ON"))
+            return database, prepared_exact_edit(session, plan)
+    finally:
+        engine.dispose()
+
+
+def _check_sources(client: httpx.Client, plan: ExactTextCorrectionPlan) -> None:
+    for proof in plan.documents:
+        live = source_text(_get_html(client, proof.url))
+        if (text_sha256(live) != proof.live_text_sha256
+                or any(quote not in live for quote in proof.quotes)):
+            raise ValueError("Живой источник изменил проверенный текст")
+
+
+@dataclass(frozen=True)
+class _Commit:
+    ledger: dict[str, Any]
+    key: str
+    target: dict[str, Any]
+    intent: dict[str, Any]
+    intent_sha: str
+    busy_sha: str
+    recovery: dict[str, Any]
+    checkpoint_sha: str
+
+
+def _claim(storage: SSHStateClient, state: dict[str, Any], state_sha: str,
+           ledger: dict[str, Any], key: str, target: dict[str, Any], intent: dict[str, Any],
+           intent_sha: str, work: Path) -> _Commit:
+    busy = _busy_state(state, os.environ)
+    busy[_LEDGER] = {**ledger, key: target}
+    # Контрольная точка не разрешает повтор внешнего edit.
+    recovery = {**busy, "status": "ready", "generation": busy["attempt"]}
+    _state_digest({**recovery, _LEDGER: {**ledger, key: {**target, "receipt_sha256": "0" * 64}}})
+    checkpoint_sha = storage.checkpoint(recovery, _state_digest(busy), work / "checkpoint.json")
+    print(json.dumps({"correction_intent_sha256": intent_sha,
+                      "recovery_checkpoint_sha256": checkpoint_sha}), flush=True)
+    busy_sha = storage.write(busy, state_sha)
+    if storage.read() != (busy, busy_sha):
+        raise ValueError("Захват исправления не подтверждён каноническим чтением")
+    return _Commit(ledger, key, target, intent, intent_sha, busy_sha, recovery, checkpoint_sha)
+
+
+def _read_record(storage: SSHStateClient, sha: Any, *, maximum: int = 32 * 1024) -> dict[str, Any]:
+    if not isinstance(sha, str) or not re.fullmatch(_SHA, sha):
+        raise ValueError("Нужен сохранённый SHA записи исправления")
+    content = storage.download(sha)
+    if len(content) > maximum or hashlib.sha256(content).hexdigest() != sha:
+        raise ValueError("Хеш или размер сохранённой записи не совпал")
+    record = json.loads(content, object_pairs_hook=unique_object)
+    if not isinstance(record, dict):
+        raise ValueError("Повреждена сохранённая запись исправления")
+    return record
+
+
+def _api_proof(storage: SSHStateClient, previous: dict[str, Any], plan: ExactTextCorrectionPlan,
+               plan_sha: str, edit: dict[str, Any], key: str,
+               now: datetime) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Проверить старое API-подтверждение, не создавать новое и не менять его смысл."""
+    receipt = _read_record(storage, previous.get("receipt_sha256"))
+    intent = _read_record(storage, previous.get("intent_sha256"))
+    if receipt.get("api_confirmed") is not True:
+        return None
+    payload = edit["payload"]
+    expected = {"version": 4, "operation": "editMessageText", "plan_sha256": plan_sha,
+        "old_package_sha256": plan.old_package_sha256, "old_text_sha256": plan.old_text_sha256,
+        "new_text_sha256": text_sha256(payload["text"]), "payload_sha256": _digest(payload),
+        "chat_id": payload["chat_id"], "message_id": plan.message_id}
+    if (type(previous.get("attempts")) is not int or previous["attempts"] != 1
+            or previous.get("status") != "uncertain"
+            or previous.get("old_text_sha256") != expected["old_text_sha256"]
+            or previous.get("new_text_sha256") != expected["new_text_sha256"]
+            or receipt.get("intent_sha256") != previous["intent_sha256"]
+            or receipt.get("status") != "uncertain" or receipt.get("public_confirmed") is not False
+            or "error_type" in receipt
+            or any(type(intent.get(field)) is not type(value) or intent.get(field) != value
+                   for field, value in expected.items())
+            or any(type(receipt.get(field)) is not type(value) or receipt.get(field) != value
+                   for field, value in intent.items())
+            or not re.fullmatch(_SHA, str(intent.get("snapshot_sha256", "")))
+            or not re.fullmatch(_SHA, str(intent.get("canonical_state_sha256", "")))):
+        raise ValueError("Сохранённое API-подтверждение не связано с точным планом и получателем")
+    checkpoint = _read_record(storage, receipt.get("checkpoint_sha256"), maximum=512 * 1024)
+    checkpoint_state = checkpoint.get("state", {})
+    validate_ready(checkpoint_state)
+    checkpoint_target = checkpoint_state.get(_LEDGER, {}).get(key)
+    if (type(checkpoint.get("version")) is not int or checkpoint["version"] != 1
+            or not re.fullmatch(_SHA, str(checkpoint.get("expected_busy_sha256", "")))
+            or checkpoint_state["snapshot"]["sha256"] != intent["snapshot_sha256"]
+            or checkpoint_state.get("generation") != checkpoint_state.get("attempt")
+            or not isinstance(checkpoint_target, dict)
+            or set(previous) != set(checkpoint_target) | {"receipt_sha256"}
+            or any(type(previous.get(field)) is not type(value) or previous.get(field) != value
+                   for field, value in checkpoint_target.items())
+            or checkpoint_target.get("intent_sha256") != previous["intent_sha256"]):
+        raise ValueError("Исходная контрольная точка не подтверждает эту операцию")
+    checked_at = datetime.fromisoformat(intent["checked_at"])
+    _validate_reviews(plan, checked_at)
+    if checked_at > now or previous.get("recorded_at") != intent["checked_at"]:
+        raise ValueError("Время исходного подтверждения не согласовано")
+    return intent, receipt
+
+
+def _reconcile(storage: SSHStateClient, content: bytes, plan: ExactTextCorrectionPlan,
+               plan_sha: str, work: Path, client: httpx.Client, now: datetime,
+               state: dict[str, Any], state_sha: str, ledger: dict[str, Any], key: str,
+               previous: dict[str, Any]) -> dict[str, Any]:
+    """Только GET и локальная фиксация; token и право внешнего edit сюда не передаются."""
+    unresolved = {"status": "uncertain", "receipt_sha256": previous.get("receipt_sha256")}
+    if previous.get("status") != "uncertain" or not previous.get("receipt_sha256"):
+        return unresolved
+    database, edit = _restore_edit(storage, state, work, plan)
+    proof = _api_proof(storage, previous, plan, plan_sha, edit, key, now)
+    if proof is None:
+        return unresolved
+    intent, old_receipt = proof
+    _check_sources(client, plan)
+    if _public(client, plan) != (edit["payload"]["text"], plan.source_url):
+        return unresolved
+    if storage.read() != (state, state_sha):
+        raise ValueError("Каноническое состояние изменилось при сверке")
+    commit = _claim(storage, state, state_sha, ledger, key, previous,
+                    intent, previous["intent_sha256"], work)
+    receipt = {**old_receipt, "status": "corrected", "public_confirmed": True,
+        "public_text_sha256": text_sha256(edit["payload"]["text"]),
+        "previous_receipt_sha256": previous["receipt_sha256"], "previous_receipt": old_receipt,
+        "reconciliation_kind": "late_public_readback",
+        "reconciled_at": now.isoformat(), "reconciliation_checkpoint_sha256": commit.checkpoint_sha,
+        "reconciliation_state_sha256": state_sha,
+        "reconciliation_snapshot_sha256": state["snapshot"]["sha256"]}
+    return _finish(storage, content, plan, plan_sha, work, database, commit, receipt)
+
+
 def execute_exact_text_edit(
     storage: SSHStateClient, content: bytes, plan_sha: str, work: Path,
     client: httpx.Client, token: str, now: datetime,
@@ -229,7 +371,6 @@ def execute_exact_text_edit(
     _validate_plan_input(content, plan_sha, now)
     json.loads(content, object_pairs_hook=unique_object)
     plan = ExactTextCorrectionPlan.model_validate_json(content)
-    _validate_reviews(plan, now)
     state, state_sha = storage.read()
     validate_ready(state)
     key = f"{APPROVED_CHANNELS_BY_CITY[plan.city]}:{plan.message_id}"
@@ -246,27 +387,16 @@ def execute_exact_text_edit(
                     or source != plan.source_url):
                 raise ValueError("Подтверждённое исправление изменилось публично")
             return {"status": "already_corrected", "receipt_sha256": previous["receipt_sha256"]}
-        # Ни новый workflow, ни прежний план не разрешают повтор неизвестного edit.
-        return {"status": "uncertain", "receipt_sha256": previous.get("receipt_sha256")}
+        # SAME PLAN может только сверить известный APIack; token сюда не передаётся.
+        return _reconcile(storage, content, plan, plan_sha, work, client, now,
+                          state, state_sha, ledger, key, previous)
     if len(ledger) >= _MAX_TARGETS:
         raise ValueError("Журнал исправлений заполнен; автоматического удаления истории нет")
+    _validate_reviews(plan, now)
     if not re.fullmatch(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,100}", token):
         raise ValueError("Некорректный токен Bot API")
-    work.mkdir(mode=0o700, parents=True, exist_ok=False)
-    database = restored(storage, state["snapshot"], work)
-    uri = database.resolve().as_uri() + "?mode=ro"
-    engine = create_engine("sqlite://", creator=lambda: sqlite3.connect(uri, uri=True))
-    try:
-        with Session(engine) as session:
-            session.execute(text("PRAGMA query_only=ON"))
-            edit = prepared_exact_edit(session, plan)
-    finally:
-        engine.dispose()
-    for proof in plan.documents:
-        live = source_text(_get_html(client, proof.url))
-        if (text_sha256(live) != proof.live_text_sha256
-                or any(quote not in live for quote in proof.quotes)):
-            raise ValueError("Живой источник изменил проверенный текст")
+    database, edit = _restore_edit(storage, state, work, plan)
+    _check_sources(client, plan)
     if _public(client, plan) != (edit["old_text"], plan.source_url):
         raise ValueError("Публичный текст не совпадает с точным исходным сообщением")
     fresh, fresh_sha = storage.read()
@@ -284,19 +414,9 @@ def execute_exact_text_edit(
     target = {"plan_sha256": plan_sha, "intent_sha256": intent_sha, "status": "uncertain",
         "old_text_sha256": plan.old_text_sha256, "new_text_sha256": intent["new_text_sha256"],
         "attempts": 1, "recorded_at": now.isoformat()}
-    busy = _busy_state(state, os.environ)
-    busy[_LEDGER] = {**ledger, key: target}
-    # До claim готовим только безопасное восстановление в uncertain, никогда resend.
-    recovery = {**busy, "status": "ready", "generation": busy["attempt"]}
-    _state_digest({**recovery, _LEDGER: {**ledger, key: {**target, "receipt_sha256": "0" * 64}}})
-    checkpoint_sha = storage.checkpoint(recovery, _state_digest(busy), work / "checkpoint.json")
-    print(json.dumps({"correction_intent_sha256": intent_sha,
-                      "recovery_checkpoint_sha256": checkpoint_sha}), flush=True)
-    busy_sha = storage.write(busy, state_sha)
-    if storage.read() != (busy, busy_sha):
-        raise ValueError("Захват исправления не подтверждён каноническим чтением")
+    commit = _claim(storage, state, state_sha, ledger, key, target, intent, intent_sha, work)
     receipt: dict[str, Any] = {**intent, "intent_sha256": intent_sha,
-        "checkpoint_sha256": checkpoint_sha, "status": "uncertain", "api_confirmed": False,
+        "checkpoint_sha256": commit.checkpoint_sha, "status": "uncertain", "api_confirmed": False,
         "public_confirmed": False}
     try:
         response = client.post(f"https://api.telegram.org/bot{token}/editMessageText",
@@ -314,6 +434,15 @@ def execute_exact_text_edit(
         receipt["public_error_type"] = type(error).__name__
     if receipt["api_confirmed"] and receipt["public_confirmed"]:
         receipt["status"] = "corrected"
+    return _finish(storage, content, plan, plan_sha, work, database, commit, receipt)
+
+
+def _finish(storage: SSHStateClient, content: bytes, plan: ExactTextCorrectionPlan,
+            plan_sha: str, work: Path, database: Path, commit: _Commit,
+            receipt: dict[str, Any]) -> dict[str, Any]:
+    ledger, key, target = commit.ledger, commit.key, commit.target
+    intent, intent_sha = commit.intent, commit.intent_sha
+    recovery, busy_sha = commit.recovery, commit.busy_sha
     receipt_sha = _upload_audit(storage, work, "receipt", receipt)
     final_target = {**target, "status": receipt["status"], "receipt_sha256": receipt_sha}
     ready = {**recovery, _LEDGER: {**ledger, key: final_target}}

@@ -68,7 +68,9 @@ class CasStorage(MemoryStorage):
         envelope = {"version": 1, "expected_busy_sha256": expected, "state": state}
         path.write_text(canonical_json(envelope), encoding="utf8")
         self.checkpoints.append(copy.deepcopy(envelope))
-        return worker._digest(envelope)
+        sha = worker._digest(envelope)
+        self.blobs[sha] = canonical_json(envelope).encode()
+        return sha
 
 
 def seal(storage, plan):
