@@ -33,6 +33,9 @@ def ranking(reason="Не указаны номера конкретных рей
 
 def response(doc, decision="retry_processing", basis="unsupported_rejection", **changes):
     return dict(raw_item_id=7, decision=decision, basis=basis,
+                rubric_id="city_changes", criterion=("unsupported_rejection"
+                    if decision == "retry_processing" else "insufficient_reader_interest"),
+                missing_required_details=[],
                 reason="В источнике подтверждено актуальное предупреждение для пассажиров.",
                 evidence_refs=[dict(source_id=doc.source_id, url=doc.url,
                                     quote=doc.body)]) | changes
@@ -63,7 +66,8 @@ def run(provider, doc, previous=None, **kwargs):
 ])
 def test_unsupported_rejection_goes_to_full_processing_without_changing_risk(doc, previous, reason):
     original = copy.deepcopy(previous.model_dump())
-    provider = Provider(response(doc, reason=reason))
+    provider = Provider(response(doc, reason=reason,
+        rubric_id="city_life" if previous.category == "culture" else "city_changes"))
     review = run(provider, doc, previous)
     assert review.decision == "retry_processing"
     assert review.raw_item_id == 7 and len(review.context_sha256) == 64
@@ -76,11 +80,16 @@ def test_unsupported_rejection_goes_to_full_processing_without_changing_risk(doc
     assert "не обязаны содержать бытовую инструкцию" in call["system_instruction"]
     assert "не одобрение текста" in call["system_instruction"]
     assert json.loads(call["prompt"])["previous_ranking"]["category"] == previous.category
+    assert review.policy_version == "rejection-review-v2"
+    assert review.profile_sha256 == PROFILE.sha256 and not review.policy_issues
+    assert "Название поля practical_value сохранено для совместимости" in call["system_instruction"]
+    assert "understanding, experience или connection" in call["system_instruction"]
 
 
 def test_confirmed_irrelevant_material_requires_real_source_reference():
     doc = document(body="Американский актёр купил дом в Калифорнии.", title="Зарубежная хроника")
     provider = Provider(response(doc, decision="confirm_rejection", basis="supported_rejection",
+                                 criterion="outside_geography",
                                  reason="Это зарубежная хроника без связи с выбранным городом."))
     review = run(provider, doc, ranking("Нет связи с местной аудиторией.", "city"))
     assert review.decision == "confirm_rejection"
@@ -90,9 +99,12 @@ def test_confirmed_irrelevant_material_requires_real_source_reference():
 def test_missing_external_support_is_not_invented():
     doc = document(body="Организатор обещает когда-нибудь рассказать подробности проекта.")
     provider = Provider(response(doc, decision="confirm_rejection", basis="no_external_support",
+                                 criterion="insufficient_evidence",
                                  reason="Переданный текст не подтверждает условия или новый факт."))
     review = run(provider, doc)
     assert review.basis == "no_external_support"
+    assert review.decision == "confirm_rejection" and not review.policy_issues
+    assert review.criterion == "insufficient_evidence"
     assert "недостающие факты не достраивай" in provider.calls[0]["system_instruction"]
 
 
@@ -181,3 +193,89 @@ def test_input_and_context_are_bounded_and_immutable():
     huge = doc.model_copy(update={"body":"x"*120_001})
     with pytest.raises(ValueError, match="предел"):
         run(Provider(error=AssertionError("Не должно быть вызова")), huge)
+
+
+@pytest.mark.parametrize("category,field", [("culture", "registration"), ("sport", "price")])
+def test_unrequired_city_life_condition_is_refuted_even_with_exact_source_quote(category, field):
+    doc = document(title="Городская история", body="В Белграде открылась новая площадка "
+                   "для встреч местных жителей и небольших культурных мероприятий.")
+    output = response(doc, decision="confirm_rejection", basis="supported_rejection",
+        rubric_id="city_life", criterion="missing_required_details",
+        missing_required_details=[field],
+        reason="Отказ объяснён отсутствием обязательных условий участия в материале.")
+    review = run(Provider(output), doc, ranking("Не указаны условия участия.", category))
+    assert review.decision == "retry_processing" and review.basis == "unsupported_rejection"
+    assert review.policy_issues == ("detail_not_required_by_rubric",)
+    assert review.original_assessment.decision == "confirm_rejection"
+    assert review.original_assessment.reason == output["reason"]
+    assert review.evidence_refs[0].quote == doc.body
+    assert not set(review.model_dump()) & {"ready", "approved", "publish", "category"}
+
+
+@pytest.mark.parametrize("rubric,criterion,details,issue", [
+    (None, "no_applicable_rubric", [], "compatible_rubric_exists"),
+    ("unknown_rubric", "insufficient_reader_interest", [], "rubric_not_identified"),
+    ("weekend", "missing_required_details", ["price"], "rubric_category_mismatch"),
+    ("city_life", "missing_required_details", [], "missing_requirements_not_identified"),
+    ("city_life", "missing_required_details", ["invented_requirement"],
+     "detail_not_required_by_rubric"),
+    ("city_life", "outside_geography", ["price"], "details_do_not_match_criterion"),
+    ("city_life", "unsupported_rejection", [], "unsupported_criterion_cannot_confirm"),
+])
+def test_inapplicable_policy_cannot_confirm_rejection(rubric, criterion, details, issue):
+    doc = document()
+    review = run(Provider(response(doc, decision="confirm_rejection", basis="supported_rejection",
+        rubric_id=rubric, criterion=criterion, missing_required_details=details)),
+        doc, ranking(category="sport"))
+    assert review.decision == "retry_processing" and issue in review.policy_issues
+    assert review.original_assessment is not None
+
+
+def test_real_missing_requirement_can_confirm_without_filling_unknown_facts():
+    doc = document(title="Анонс показа", body="Организатор анонсировал показ фильма "
+                   "в Белграде. Точную площадку он объявит позднее.")
+    review = run(Provider(response(doc, decision="confirm_rejection", basis="no_external_support",
+        rubric_id="weekend", criterion="missing_required_details",
+        missing_required_details=["venue"],
+        reason="Без подтверждённой площадки нельзя спланировать посещение этого показа.")),
+        doc, ranking(category="events"))
+    assert review.decision == "confirm_rejection" and review.basis == "no_external_support"
+    assert not review.policy_issues and review.original_assessment is None
+    assert review.missing_required_details == ("venue",)
+
+
+def test_world_sports_without_local_connection_may_still_be_rejected():
+    doc = document(title="Спортивное интервью за рубежом", body="Тренер канадского клуба "
+                   "рассказал о прошедшей встрече местной школьной команды в Оттаве.")
+    review = run(Provider(response(doc, decision="confirm_rejection", basis="supported_rejection",
+        rubric_id="city_life", criterion="outside_geography", missing_required_details=[],
+        reason="Источник описывает местный матч в другой стране без связи с нашей аудиторией.")),
+        doc, ranking(category="sport"))
+    assert review.decision == "confirm_rejection" and not review.policy_issues
+
+
+def test_no_compatible_rubric_can_be_confirmed_only_when_profile_has_none():
+    doc = document()
+    review = run(Provider(response(doc, decision="confirm_rejection", basis="supported_rejection",
+        rubric_id=None, criterion="no_applicable_rubric")),
+        doc, ranking(category="unsupported_topic"))
+    assert review.decision == "confirm_rejection" and not review.policy_issues
+
+
+@pytest.mark.parametrize("field,value", [
+    ("criterion", "publish_now"), ("rubric_id", 5), ("missing_required_details", [True]),
+    ("missing_required_details", ["price", "price"]),
+])
+def test_malformed_policy_contract_is_a_technical_error(field, value):
+    doc = document()
+    with pytest.raises(StructuredOutputError):
+        run(Provider(response(doc, **{field:value})), doc)
+
+
+@pytest.mark.parametrize("field", ["rubric_id", "criterion", "missing_required_details"])
+def test_new_audit_response_requires_explicit_policy_contract(field):
+    doc = document()
+    output = response(doc, decision="confirm_rejection", basis="supported_rejection")
+    del output[field]
+    with pytest.raises(StructuredOutputError):
+        run(Provider(output), doc)

@@ -20,8 +20,9 @@ BODY = "Air Serbia upozorava na kašnjenja zbog nepogode u Beogradu."
 
 
 class Provider:
-    def __init__(self, engine, *, decision="retry_processing", error=None):
+    def __init__(self, engine, *, decision="retry_processing", error=None, audit_changes=None):
         self.engine, self.decision, self.error = engine, decision, error
+        self.audit_changes = audit_changes or {}
         self.calls = []
 
     def generate_json(self, **kwargs):
@@ -37,9 +38,13 @@ class Provider:
             return json.dumps(dict(raw_item_id=1, decision=self.decision,
                 basis=("unsupported_rejection" if self.decision == "retry_processing"
                        else "supported_rejection"),
+                rubric_id="city_changes",
+                criterion=("unsupported_rejection" if self.decision == "retry_processing"
+                           else "insufficient_reader_interest"),
+                missing_required_details=[],
                 reason="Проверка исходных фактов и обоснованности прежнего отказа.",
                 evidence_refs=[dict(source_id="official", url="https://example.test/notice/",
-                                    quote=BODY)]))
+                                    quote=BODY)]) | self.audit_changes)
         return json.dumps(rank())
 
 
@@ -134,6 +139,109 @@ def test_bounded_drain_can_stop_between_audit_and_full_retry(engine):
     assert len(provider.calls) == 1
     with Session(engine) as session:
         assert session.get(EditorialRun, 1) is not None
+
+
+def unsupported_policy_provider(engine):
+    return Provider(engine, decision="confirm_rejection", audit_changes={
+        "rubric_id": "city_life", "criterion": "missing_required_details",
+        "missing_required_details": ["price"],
+    })
+
+
+def test_inapplicable_confirm_uses_existing_full_retry_without_new_budget_or_ready(engine):
+    rejected(engine, ranking=rank() | {"category": "sport"})
+    provider = unsupported_policy_provider(engine)
+    runtime = MaterialLifecycleRuntime(engine, "belgrade", provider, NOW)
+    runtime.reconcile()
+    original = ledger(engine)
+    result = runtime.process(1, lambda _: pytest.fail("Повтор требует отдельного запуска"),
+                             retry_refuted=False)
+    state = ledger(engine)
+    assert result["lifecycle"]["next_action"] == "retry_prepare"
+    assert state["attempts"] == 0 and state["audit_attempts"] == 1
+    assert state["rejection_justified"] is False
+    review = state["rejection_review"]
+    assert review["decision"] == "retry_processing" and review["basis"] == "unsupported_rejection"
+    assert review["policy_issues"] == ["detail_not_required_by_rubric"]
+    assert review["original_assessment"]["decision"] == "confirm_rejection"
+    assert review["policy_version"] == "rejection-review-v2"
+    assert all(state[key] == original[key] for key in
+               ("first_seen_at", "deadline_at", "fingerprints", "fallback_attempts"))
+    called = []
+
+    def full_pipeline(raw_id):
+        called.append(raw_id)
+        with Session(engine) as session:
+            assert session.get(EditorialRun, raw_id) is None
+            assert session.scalar(select(SchedulerRun)).details["attempts"] == 1
+        # Модельный аудит не заменяет повторные claims/facts/draft и оба ревью.
+        rejected(engine, ranking=rank() | {"category": "sport"})
+        return {"status": "skipped", "raw_item_id": raw_id}
+
+    final = runtime.process(1, full_pipeline)
+    assert called == [1] and len(provider.calls) == 1
+    assert final["lifecycle"]["state"] == "blocked"
+    state = ledger(engine)
+    assert state["reason"] == "repeated_editorial_rejection" and state["attempts"] == 1
+    assert all(state[key] == original[key] for key in
+               ("first_seen_at", "deadline_at", "fingerprints", "fallback_attempts"))
+    with Session(engine) as session:
+        assert session.scalar(select(Post)) is None
+        assert session.get(EditorialRun, 1).outcome["ranking"]["category"] == "sport"
+
+
+def test_legacy_v1_saved_retry_still_invalidates_rank_cache_without_migration(engine):
+    runtime = MaterialLifecycleRuntime(engine, "belgrade", Provider(engine), NOW)
+    runtime.reconcile()
+    legacy = {"policy_version": "rejection-review-v1", "decision": "retry_processing",
+              "basis": "unsupported_rejection", "context_sha256": "a" * 64,
+              "reason": "Сохранённое прежнее решение требует полного повтора."}
+    with Session(engine) as session:
+        record = session.scalar(select(SchedulerRun))
+        record.details = {**record.details, "rejection_review": legacy}
+        session.commit()
+    runtime.provider_for(1).generate_json(task="rank", system_instruction="Политика.",
+        prompt="Исходный источник.", response_schema=RankingResult.model_json_schema())
+    assert "rejection_review_context_sha256=" + "a" * 64 in (
+        runtime.provider.calls[0]["system_instruction"])
+    assert ledger(engine)["rejection_review"] == legacy
+
+
+@pytest.mark.parametrize("protection", ["owner_closed", "sent", "sending", "uncertain", "staging"])
+def test_inapplicable_confirm_cannot_reopen_closed_or_delivered_material(engine, protection):
+    rejected(engine, ranking=rank() | {"category": "sport"})
+    provider = unsupported_policy_provider(engine)
+    runtime = MaterialLifecycleRuntime(engine, "belgrade", provider, NOW)
+    runtime.reconcile()
+    with Session(engine) as session:
+        if protection == "owner_closed":
+            core.close_by_owner(session, 1, now=NOW)
+        else:
+            post = Post(city="belgrade", category="sport", status="ready", title="Источник",
+                        body=BODY, confidence=1,
+                        telegram_message_id=123 if protection == "sent" else None)
+            session.add(post)
+            session.flush()
+            run = session.get(EditorialRun, 1)
+            run.post_id = post.id
+            run.delivery_status = "pending" if protection == "staging" else protection
+            if protection == "staging":
+                run.staging_message_id = 456
+        session.commit()
+    result = runtime.process(1, lambda _: pytest.fail("Защищённый материал не переоткрывается"))
+    assert result["status"] in {"blocked", "published"} and provider.calls == []
+    assert ledger(engine)["attempts"] == 0 and ledger(engine)["audit_attempts"] == 0
+    with Session(engine) as session:
+        run = session.get(EditorialRun, 1)
+        assert run is not None
+        if protection == "owner_closed":
+            assert ledger(engine)["reason"] == "owner_closed_backlog"
+        elif protection == "staging":
+            assert run.staging_message_id == 456
+        else:
+            assert run.delivery_status == protection
+            if protection == "sent":
+                assert session.get(Post, run.post_id).telegram_message_id == 123
 
 
 def test_refuted_rejection_cannot_remove_reviewed_or_private_package(engine):
