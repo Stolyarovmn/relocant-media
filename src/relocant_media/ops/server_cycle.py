@@ -61,6 +61,7 @@ from relocant_media.collectors.news_discovery import (
     collect_news_feed,
     load_verified_news_feeds,
 )
+from relocant_media.collectors.srbija_gov_article import match_srbija_gov_article_url
 from relocant_media.collectors.telegram_topics import (
     DEFAULT_CHANNELS as DEFAULT_CHANNELS,
 )
@@ -135,6 +136,11 @@ from relocant_media.services.published_watch import (
     published_sources,
     recent_source_load,
 )
+from relocant_media.services.reader_source_discovery import (
+    matches_reader_event,
+    pending_source_discovery,
+    record_discovery_check,
+)
 from relocant_media.services.source_enrichment import build_media_preparation_packet
 from relocant_media.services.source_recovery import recover_primary_source
 from relocant_media.services.source_replacement import SourceUnavailableError, is_source_unavailable
@@ -162,7 +168,7 @@ from relocant_media.services.watched_updates import queue_watched_change
 from relocant_media.services.water_outage_scope import extract_official_water_map
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
 from relocant_media.storage.media_models import RawItemMediaSnapshot
-from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 SOURCES = Path("cities/belgrade/sources")
@@ -582,9 +588,27 @@ async def collect_sources(
     attempted_tips: set[int] = set()
     watch: dict[str, Any] = {"checked": 0, "changed": [], "queued": [], "failures": []}
     watched_changes: list[tuple[int, Any]] = []
+    official_source_ids = {key for key, config in sources.items() if config.ownership == "official"}
+
+    def has_article_link(payload: dict[str, Any]) -> bool:
+        return any(source_for_url(url, sources) or match_srbija_gov_article_url(url)
+                   for url in tip_urls(payload))
+
     with Session(engine) as session:
         rows = batch_submissions(session) if submissions_only else pending_submissions(session)
         tips = [(row.id, row.payload) for row in rows]
+        reader_signals = {} if submissions_only else {
+            row.id: str(row.payload.get("text", ""))
+            for row in pending_source_discovery(
+                session, city="belgrade", now=now, has_article_link=has_article_link,
+            )
+        }
+        recent_official = []
+        if reader_signals:
+            recent_official = list(session.scalars(select(RawItem).where(
+                RawItem.source_id.in_(official_source_ids), RawItem.published_at <= now,
+                RawItem.published_at >= now - timedelta(days=7),
+            ).order_by(RawItem.published_at.desc(), RawItem.id.desc()).limit(150)))
         published = [] if submissions_only else published_sources(session, now=now)
     result["submission_ids"] = [sid for sid, _ in tips]
     result["submission_raw_ids"] = []
@@ -807,29 +831,38 @@ async def collect_sources(
             fetched_channels.extend(await asyncio.gather(*(
                 fetch_channel(channel) for channel in runtime_channels[offset:offset + 6]
             )))
+        # The private signal is compared locally to fetched posts. Only the separate,
+        # publicly fetched post is passed to the existing source discovery service.
+        channel_leads = []
         for channel, (leads, observation) in zip(runtime_channels, fetched_channels, strict=True):
             channel_coverage.append(observation)
+            attention_leads.extend(leads)
+            for lead in leads[:20]:
+                matches_reader = any(matches_reader_event(
+                    text, lead.text.partition("\n")[0], lead.text,
+                    year=now.year, source_year=lead.published_at.year,
+                ) for text in reader_signals.values())
+                channel_leads.append((matches_reader, channel, lead, observation))
+        for _, channel, lead, observation in sorted(channel_leads, key=lambda entry: not entry[0]):
             try:
-                attention_leads.extend(leads)
-                for lead in leads[:20]:
-                    result["channel_leads"] += 1
-                    resolution = await resolve_public_discovery(
-                        lead,
-                        articles=articles,
-                        resolve_link=resolve_link,
-                        search_plan=plan_public_searches,
-                        search_official=search_official,
-                        accept_official=accept_official,
-                        register_official=register_official,
-                        search_budget=search_budget,
-                    )
-                    result["primary_searches"] += resolution.searches_performed
-                    topics.append({"url": lead.url, "channel": channel,
-                        "published_at": lead.published_at.isoformat(),
-                        "status": resolution.status,
-                        "primary_results": list(resolution.primary_results),
-                        "discovery_gaps": list(resolution.discovery_gaps),
-                        "primary_urls": list(resolution.primary_urls), "ai_calls": 0})
+                result["channel_leads"] += 1
+                resolution = await resolve_public_discovery(
+                    lead,
+                    articles=articles,
+                    resolve_link=resolve_link,
+                    search_plan=plan_public_searches,
+                    search_official=search_official,
+                    accept_official=accept_official,
+                    register_official=register_official,
+                    search_budget=search_budget,
+                )
+                result["primary_searches"] += resolution.searches_performed
+                topics.append({"url": lead.url, "channel": channel,
+                    "published_at": lead.published_at.isoformat(),
+                    "status": resolution.status,
+                    "primary_results": list(resolution.primary_results),
+                    "discovery_gaps": list(resolution.discovery_gaps),
+                    "primary_urls": list(resolution.primary_urls), "ai_calls": 0})
             except Exception as error:
                 result["channel_failures"] += 1
                 channel_errors.append({"channel": channel, "error_type": type(error).__name__})
@@ -863,6 +896,14 @@ async def collect_sources(
                 result["news_failures"] += 1
                 news_errors.append({"source_id": feed.source_id,
                                     "error_type": type(error).__name__})
+        # A recent article can move off the feed. Confirm its saved public URL live again.
+        previous_urls = [item.url for item in recent_official if item.url not in fetched
+                         and item.published_at is not None and any(matches_reader_event(
+                             text, item.title, item.body, year=now.year,
+                             source_year=item.published_at.year,
+                         ) for text in reader_signals.values())]
+        for url in list(dict.fromkeys(previous_urls))[:4]:
+            await resolve_link(url)
         result["utility_map_requests"] = await _enrich_utility_maps(engine, client, articles)
     transport_source = None
     transport_notices = []
@@ -906,7 +947,6 @@ async def collect_sources(
             ids = list(session.scalars(select(RawItem.id).where(RawItem.url.in_(set(urls)))))
             if not ids and submission_id not in attempted_tips:
                 continue
-            from relocant_media.storage.models import Submission
             stored_tip = session.get(Submission, submission_id)
             assert stored_tip is not None
             resolve_submission(stored_tip, ids, now=now)
@@ -915,6 +955,27 @@ async def collect_sources(
                 stored_tip.payload = {**stored_tip.payload, "triage_reason": "already_considered"}
             result["priority_submissions"] += bool(ids)
             result["submission_raw_ids"].extend(ids)
+        reader_checks: dict[str, int] = {"checked": 0, "linked": 0, "ambiguous": 0}
+        for submission_id, text in reader_signals.items():
+            matched_urls = {
+                item.url for item in articles if item.source_id in official_source_ids
+                and item.published_at is not None
+                and matches_reader_event(text, item.title, item.body, year=now.year,
+                                         source_year=item.published_at.year)
+            }
+            row = session.get(Submission, submission_id)
+            assert row is not None
+            ids = list(session.scalars(select(RawItem.id).where(RawItem.url.in_(matched_urls))))
+            status = "linked" if len(ids) == 1 else "ambiguous" if ids else "no_match"
+            record_discovery_check(row, now=now, status=status)
+            reader_checks["checked"] += 1
+            if status == "linked":
+                resolve_submission(row, ids, now=now)
+                reader_checks["linked"] += 1
+                result["priority_submissions"] += 1
+                result["submission_raw_ids"].extend(ids)
+            reader_checks["ambiguous"] += int(status == "ambiguous")
+        result["reader_source_discovery"] = reader_checks
         session.commit()
     result["raw_items_written"] = written
     result["metadata_holds"] = len(metadata_holds)
