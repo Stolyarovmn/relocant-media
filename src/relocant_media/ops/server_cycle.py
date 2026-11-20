@@ -1424,7 +1424,8 @@ def main() -> None:
             continue_on_error=True, submissions_only=args.submissions_only,
             allowed_items=allowed_items if args.submissions_only else None,
             deferred_items=deferred_items if gpt_fallback_enabled else None,
-            defer_failed_batch=gpt_fallback_enabled,
+            # Порядок советующий: ошибка сравнения не отменяет полный разбор выбранных тем.
+            defer_failed_batch=False,
             candidate_priorities=lambda: queue_priorities(
                 source_priorities(json.loads(
                     (args.output / "venue-attention.json").read_text(encoding="utf-8")))

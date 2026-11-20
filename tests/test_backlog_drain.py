@@ -131,6 +131,40 @@ def test_material_error_keeps_finite_future_retry_and_safe_report(state):
     assert report["next_delay_seconds"] == 60
 
 
+def test_advisory_provider_failure_keeps_drain_full_attempt_and_material_retry(state, monkeypatch):
+    from relocant_media.ai.gemini_process import GeminiWorkerError
+
+    engine, now, output = state
+    seed(engine, now, 2)
+    monkeypatch.setenv("EDITORIAL_GPT_FALLBACK_ENABLED", "true")
+    calls, tasks = [], []
+
+    class Unavailable:
+        def generate_json(self, **kwargs):
+            tasks.append(kwargs["task"])
+            raise GeminiWorkerError("Синтетический временный сбой")
+
+    def full(raw_id):
+        calls.append(raw_id)
+        raise GeminiWorkerError("Синтетический сбой полного ранжирования")
+
+    report = drain.process_existing(engine, now, output / "provider-failure", Unavailable(),
+                                    max_attempts=1, process=full)
+    assert tasks == ["batch_preselect"] and len(calls) == 1
+    assert report["attempts_used"] == 1 and report["remaining"] == 2
+    with Session(engine) as session:
+        state = core.lifecycle_state(session, calls[0], now=datetime.now(UTC))
+        assert state["attempts"] == 1 and state["fallback_attempts"] == 0
+        assert state["next_action"] == "retry_prepare" and state["state"] == "waiting"
+        assert datetime.fromisoformat(state["next_attempt_at"]) > datetime.now(UTC)
+        primary = list(session.scalars(select(SchedulerRun).where(
+            SchedulerRun.task_type == "editorial_primary")))
+        assert primary and all(row.details["batch_preselection"]["status"] == "fallback"
+                               for row in primary)
+        assert all("gpt_candidate_ids" not in row.details["batch_preselection"] for row in primary)
+        assert primary[0].details["processing_errors"][0]["error_type"] == "GeminiWorkerError"
+
+
 def test_noop_callbacks_do_not_invent_claims_or_reset_material_budget(state):
     engine, now, output = state
     seed(engine, now, 1)

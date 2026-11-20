@@ -1,7 +1,9 @@
 """Вспомогательный порядок не останавливает полный разбор и не подменяет допуск."""
 
 import json
+import sys
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_primary_cycle import NOW, ingest_ok
@@ -9,7 +11,9 @@ from test_primary_cycle import editorial_session as _editorial_session
 from test_primary_cycle import queue as _queue
 
 from relocant_media.ai.batch_preselection import preselect_candidates
+from relocant_media.ai.gemini_process import GeminiWorkerError
 from relocant_media.domain.city_profile import load_city_profile
+from relocant_media.ops import server_cycle
 from relocant_media.ops.primary_cycle import run_cycle
 from relocant_media.ops.server_cycle import lifecycle_due_order
 from relocant_media.services import material_lifecycle as core
@@ -131,3 +135,57 @@ def test_response_fallback_does_not_revive_terminal_or_high_risk_material(queue,
     with Session(engine) as session:
         assert core.is_terminal_blocked(session, ids[0], now=NOW)
         assert core.is_terminal_blocked(session, risky_id, now=NOW)
+
+
+def test_production_main_keeps_full_processing_after_advisory_provider_error(
+    queue, tmp_path, monkeypatch,
+):
+    engine, process = queue
+    if engine.dialect.name != "sqlite":
+        pytest.skip("Точка входа main использует только канонический SQLite")
+    precise(engine)
+    calls, batch_calls = [], []
+
+    class ProviderOutage:
+        def generate_json(self, **kwargs):
+            batch_calls.append(kwargs["task"])
+            raise GeminiWorkerError("Синтетический временный сбой сравнения")
+
+    def select(items, limit):
+        return preselect_candidates(items, ProviderOutage(), profile=load_city_profile("belgrade"),
+                                    limit=limit, now=NOW)
+
+    def full(raw_id):
+        calls.append(raw_id)
+        return process(raw_id)
+
+    def production_cycle(*args, **kwargs):
+        assert kwargs["defer_failed_batch"] is False
+        assert callable(kwargs["deferred_items"])  # Сохранённые задания остаются доступны.
+        kwargs.update(now=NOW, ingest=ingest_ok, process=full, preselect=select,
+            lifecycle_due=None, lifecycle_fallback_items=None, reassessment_ids=None,
+            priority_items=None, recent_source_counts=None, candidate_priorities=None)
+        return run_cycle(*args, **kwargs)
+
+    async def no_feedback(*args, **kwargs):
+        return {"status": "disabled"}
+
+    output = tmp_path / "production-advisory"
+    monkeypatch.setenv("DATABASE_URL", str(engine.url))
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-unused")
+    monkeypatch.setenv("GEMINI_MODEL", "synthetic-unused")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "synthetic-unused")
+    monkeypatch.setenv("EDITORIAL_GPT_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("EDITORIAL_INTAKE_MODE", "batch")
+    monkeypatch.setenv("EDITORIAL_SEND_ENABLED", "false")
+    monkeypatch.setattr(server_cycle, "run_cycle", production_cycle)
+    monkeypatch.setattr(server_cycle, "reply_to_submissions", no_feedback)
+    monkeypatch.setattr(server_cycle, "audit_cycle", lambda *args: {"status": "synthetic"})
+    monkeypatch.setattr(sys, "argv", ["server-cycle", "--output", str(output)])
+    server_cycle.main()
+    report = json.loads((output / "server-report.json").read_text(encoding="utf-8"))
+    assert batch_calls == ["batch_preselect"] and len(calls) == 5
+    assert report["batch_preselection"]["error_stage"] == "provider"
+    assert report["batch_preselection"]["status"] == "fallback"
+    assert "gpt_candidate_ids" not in report["batch_preselection"]
+    assert report["gpt_deferred_count"] == 0 and not report["fallback_required"]
