@@ -15,10 +15,14 @@ from relocant_media.domain.dedup import EventCandidate, same_event
 from relocant_media.services.owner_review import OwnerUpdateResult
 from relocant_media.services.reader_intake import reader_destination
 from relocant_media.services.reader_publication import (
-    POLICY,
     human_review_reason,
     material_fingerprint,
     owner_publication_summary,
+)
+from relocant_media.services.reader_source_discovery import (
+    DISCOVERY_FIELD,
+    confirmed_source_signal,
+    discovery_deadline_reached,
 )
 from relocant_media.services.submission_feedback import INCIDENT
 from relocant_media.services.submission_queue import tip_urls
@@ -44,6 +48,11 @@ _EXPIRED = (
     "а срок актуальности истёк. Если появились новые сведения, пришлите новое обращение."
 )
 _NOT_PUBLISHED = "Редакция рассмотрела новость и решила не публиковать её."
+_NO_PUBLIC_CONFIRMATION = (
+    "За время проверки мы не нашли достаточного публичного подтверждения, поэтому новость "
+    "по этому обращению не вышла. Если появится объявление организатора или другие "
+    "проверяемые сведения, пришлите их в новом обращении."
+)
 
 
 def _positive(value: object) -> bool:
@@ -162,9 +171,15 @@ def _news_state(session: Session, row: Submission, now: datetime) -> str | None:
                 break
         return None
     if row.status == "reader_review":
+        if discovery_deadline_reached(row, now):
+            _close(row, _NO_PUBLIC_CONFIRMATION, "public_confirmation_missing", now=now)
+            return None
         if _primary_review_available(row):
             return ("Сигнал из чужого источника. Можно проверить первоисточник отдельной кнопкой. "
                     "Присланные текст и файлы остаются только редакции.")
+        if confirmed_source_signal(row.payload):
+            return ("Подтверждение ищем в плановых циклах по публичным источникам. "
+                    "Текст и вложения обращения остаются в редакции.")
         return "Материал читателя. Проверьте содержание, права и факты перед публикацией."
     if row.status == "expired":
         _close(row, _EXPIRED, "expired", now=now)
@@ -248,19 +263,13 @@ def _exact_owner_card(
 
 
 def _primary_review_available(row: Submission) -> bool:
-    publication = row.payload.get("reader_publication")
     return bool(
         row.kind == "news_tip" and (
             row.status in {"reader_review", "waiting_primary"}
             or row.status == "source_linked"
             and _resolution(row).get("primary_processing_retryable") is True
         )
-        and isinstance(publication, dict)
-        and publication.get("version") == POLICY["version"]
-        and publication.get("stage") == "confirmed"
-        and publication.get("ownership") == "source"
-        and publication.get("permission") == "private"
-        and publication.get("material_sha256") == material_fingerprint(row.payload)
+        and confirmed_source_signal(row.payload)
         and tip_urls(row.payload)
     )
 
@@ -603,6 +612,8 @@ async def process_reader_resolutions(
                  Submission.payload["reader_publication"]["ownership"].as_string() == "source",
                  func.coalesce(Submission.payload["reader_resolution"]
                                ["primary_review_offered"].as_boolean(), False).is_(False)),
+            and_(Submission.kind == "news_tip", Submission.status == "reader_review",
+                 Submission.payload[DISCOVERY_FIELD]["checked_at"].as_string().is_not(None)),
             and_(Submission.kind.in_(_OWNER_KINDS), Submission.status == "new",
                  Submission.payload["reader_resolution"]["owner_notice"]["status"]
                  .as_string().is_(None)),

@@ -42,7 +42,8 @@ def runtime(tmp_path, monkeypatch):
         if request.url.host == 'museum.example':
             return httpx.Response(200, text=(
                 '<rss xmlns:content="http://purl.org/rss/1.0/modules/content/">'
-                '<channel><item><title>Koncert</title><link>' + URL + '</link>'
+                '<channel><item><title>' + contents.get('title', 'Koncert') + '</title><link>'
+                + URL + '</link>'
                 '<pubDate>Tue, 20 Oct 2026 18:00:00 +0000</pubDate>'
                 '<content:encoded><![CDATA[<p>' + contents['body'] + '</p>]]>'
                 '</content:encoded></item></channel></rss>'
