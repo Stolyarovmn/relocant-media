@@ -379,7 +379,8 @@ def lifecycle_state(session: Session, raw_id: int, *, now: datetime) -> dict[str
 
 
 def _fallback_or_block(session: Session, record: SchedulerRun, run: EditorialRun | None,
-                       post: Post | None, now: datetime) -> None:
+                       post: Post | None, now: datetime, *,
+                       reason: str = "primary_attempt_budget_exhausted") -> None:
     if record.details["fallback_attempts"] >= FALLBACK_ATTEMPTS:
         _block(session, record, run, post, now=now, reason="attempt_budget_exhausted")
     else:
@@ -387,7 +388,7 @@ def _fallback_or_block(session: Session, record: SchedulerRun, run: EditorialRun
         if record.details.get("fallback_deadline_at"):
             deadline = min(deadline, _stamp(record.details["fallback_deadline_at"]))
         _set(record, now=now, state="waiting_fallback", action="fallback",
-             reason="primary_attempt_budget_exhausted", next_at=now,
+             reason=reason, next_at=now,
              fallback_deadline_at=deadline.isoformat())
 
 
@@ -397,7 +398,8 @@ def _unconfirmed_rejection_fallback(session: Session, record: SchedulerRun,
     # Допуск только к резерву: источник, риск, Post и квитанции проверяются отдельно.
     record.details = {**record.details, "rejection_justified": None,
                       "unconfirmed_rejection_fallback": True}
-    _fallback_or_block(session, record, run, post, now)
+    _fallback_or_block(session, record, run, post, now,
+                       reason="rejection_audit_budget_exhausted")
 
 
 def before_attempt(session: Session, raw_id: int, *, now: datetime,
@@ -698,7 +700,7 @@ def rejection_reviewed(session: Session, raw_id: int, *, justified: bool,
         _set(record, now=now, state="waiting", action="retry_prepare",
              reason="rejection_not_justified", next_at=now)
     else:
-        _fallback_or_block(session, record, run, post, now)
+        _fallback_or_block(session, record, run, post, now, reason="rejection_not_justified")
     return dict(record.details)
 
 

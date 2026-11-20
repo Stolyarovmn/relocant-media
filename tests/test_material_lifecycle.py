@@ -183,6 +183,7 @@ def test_rejection_audit_errors_are_bounded_without_fake_confirmation(session):
                         channel="rejection_audit").details
     assert state["state"] == "waiting_fallback"
     assert state["rejection_audits"] == 0 and state["audit_attempts"] == 2
+    assert state["attempts"] == 0 and state["reason"] == "rejection_audit_budget_exhausted"
     assert state["rejection_justified"] is None
     assert can_retry_snapshot(session, 1, now=retry)
     assert [item["error_type"] for item in state["rejection_review_history"]] == [
@@ -204,6 +205,7 @@ def test_refuted_rejection_can_use_fallback_but_never_reopen_terminal(session):
     rejection_reviewed(session, 1, justified=False, now=now)
     session.commit()
     record = session.scalar(select(SchedulerRun))
+    assert record.details["reason"] == "rejection_not_justified"
     snapshot = copy.deepcopy(record.details)
     assert can_retry_snapshot(session, 1, now=now)
     assert record.details == snapshot and not session.dirty
