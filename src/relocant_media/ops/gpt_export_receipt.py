@@ -123,7 +123,8 @@ def marker_from_cycle_job(
     if (not isinstance(repository, Mapping) or repository.get("full_name") != REPOSITORY
             or run.get("path") != WORKFLOW or run.get("head_branch") != "main"
             or run.get("event") not in {"schedule", "workflow_dispatch"}
-            or not ((status == "in_progress" and conclusion is None)
+            or not ((status in {"in_progress", "queued", "pending", "waiting", "requested"}
+                     and conclusion is None)
                     or (status == "completed" and conclusion == "success"))
             or job.get("name") != "cycle" or job.get("status") != "completed"
             or job.get("conclusion") != "success" or not _positive(job.get("id"))

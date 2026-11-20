@@ -175,8 +175,10 @@ def logs(value=None):
             + "prefix "+json.dumps(value or marker())+"\n").encode()
 
 
-def test_successful_cycle_can_be_read_while_chain_still_running():
+@pytest.mark.parametrize("status", ["in_progress", "queued", "pending", "waiting", "requested"])
+def test_successful_cycle_can_be_read_while_later_jobs_are_active(status):
     run, job = metadata()
+    run["status"] = status
     assert marker_from_cycle_job(logs(), run=run, job=job, request_sha256="b"*64) == marker()
 
 
@@ -185,6 +187,7 @@ def test_successful_cycle_can_be_read_while_chain_still_running():
     ("run", {"status": "completed", "conclusion": "failure"}),
     ("run", {"status": "completed", "conclusion": "cancelled"}),
     ("run", {"run_attempt": 3}), ("job", {"status": "in_progress", "conclusion": None}),
+    ("job", {"status": "queued", "conclusion": None}),
     ("job", {"conclusion": "failure"}), ("job", {"conclusion": "cancelled"}),
     ("job", {"name": "chain"}), ("job", {"run_id": 67890}),
     ("job", {"run_attempt": 1}), ("job", {"head_sha": "f"*40}),

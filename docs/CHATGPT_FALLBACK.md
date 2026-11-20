@@ -75,7 +75,8 @@ ownership только `official`/`media`, известный публичный
 1. Через доверенный GitHub API подтверждены repository `Stolyarovmn/relocant-media`,
    точный `.github/workflows/editorial-actions.yml`, `head_branch=main`, допустимый
    `schedule`/`workflow_dispatch` и тот же `head_sha`. Overall run либо ещё
-   `in_progress` без conclusion, либо `completed/success`.
+   `in_progress`/`queued`/`pending`/`waiting`/`requested` без conclusion, либо
+   `completed/success`: последующие jobs ещё могут ждать своей очереди.
 2. В текущем точном run attempt найден job `name=cycle`, `status=completed`,
    `conclusion=success`. Его `run_id`, `run_attempt`, `head_sha` совпадают с run.
    Журнал скачивается **по этому `job.id`**, не подбирается из общих логов workflow.
