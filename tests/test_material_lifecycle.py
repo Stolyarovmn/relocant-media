@@ -154,7 +154,20 @@ def test_rejected_material_is_audited_and_safe_retry_archives_exact_decision(ses
     assert session.get(EditorialRun, 1) is None
     assert state["attempts"] == 2
     editorial(session)
-    assert after_result(session, 1, now=NOW)["state"] == "blocked"
+    assert after_result(session, 1, now=NOW)["next_action"] == "audit_rejection"
+    assert before_attempt(session, 1, now=NOW, channel="rejection_audit")
+    state = rejection_reviewed(session, 1, justified=False, now=NOW)
+    assert state["next_action"] == "fallback"
+    assert state["attempts"] == state["audit_attempts"] == state["rejection_audits"] == 2
+    assert not before_attempt(session, 1, now=NOW, channel="primary")
+    assert can_retry_snapshot(session, 1, now=NOW)
+    assert archive_for_retry(session, 1, now=NOW)
+    assert before_attempt(session, 1, now=NOW, channel="fallback")
+    editorial(session, reason="gpt_ranking_rejected")
+    state = after_result(session, 1, now=NOW)
+    assert state["state"] == "blocked" and state["reason"] == "fallback_editorial_rejection"
+    assert state["fallback_attempts"] == 1
+    assert not before_attempt(session, 1, now=NOW, channel="rejection_audit")
 
 
 def test_rejection_audit_errors_are_bounded_without_fake_confirmation(session):
@@ -168,8 +181,16 @@ def test_rejection_audit_errors_are_bounded_without_fake_confirmation(session):
     assert before_attempt(session, 1, now=retry, channel="rejection_audit")
     state = after_error(session, 1, "AuditTimeout", now=retry,
                         channel="rejection_audit").details
-    assert state["state"] == "blocked" and state["reason"] == "rejection_audit_unavailable"
+    assert state["state"] == "waiting_fallback"
     assert state["rejection_audits"] == 0 and state["audit_attempts"] == 2
+    assert state["rejection_justified"] is None
+    assert can_retry_snapshot(session, 1, now=retry)
+    assert [item["error_type"] for item in state["rejection_review_history"]] == [
+        "AuditTimeout", "AuditTimeout"]
+    deadline = state["fallback_deadline_at"]
+    assert adopt_fallback_request(session, 1, now=retry+timedelta(minutes=1))
+    assert lifecycle_state(session, 1, now=retry)["fallback_deadline_at"] == deadline
+    assert not can_retry_snapshot(session, 1, now=retry+timedelta(minutes=30))
 
 
 def test_refuted_rejection_can_use_fallback_but_never_reopen_terminal(session):
@@ -201,6 +222,37 @@ def test_confirmed_rejection_is_terminal_and_preserves_evidence(session):
     assert run.evidence == evidence
     assert run.outcome["_lifecycle_block"]["previous_status"] == "skipped"
     assert not archive_for_retry(session, 1, now=NOW)
+
+
+def test_second_rejection_is_confirmed_independently_without_fallback(session):
+    assert before_attempt(session, 1, now=NOW)
+    editorial(session)
+    after_result(session, 1, now=NOW)
+    assert before_attempt(session, 1, now=NOW, channel="rejection_audit")
+    rejection_reviewed(session, 1, justified=False, now=NOW)
+    assert before_attempt(session, 1, now=NOW)
+    assert archive_for_retry(session, 1, now=NOW)
+    editorial(session, reason="different_new_rejection")
+    assert after_result(session, 1, now=NOW)["next_action"] == "audit_rejection"
+    assert before_attempt(session, 1, now=NOW, channel="rejection_audit")
+    state = rejection_reviewed(session, 1, justified=True, now=NOW)
+    assert state["reason"] == "rejection_confirmed" and state["state"] == "blocked"
+    assert state["audit_attempts"] == 2 and state["fallback_attempts"] == 0
+    assert not can_retry_snapshot(session, 1, now=NOW)
+
+
+@pytest.mark.parametrize("reason", ["repeated_editorial_rejection", "owner_closed_backlog"])
+def test_historical_terminal_rejections_are_never_reopened(session, reason):
+    editorial(session)
+    lifecycle_state(session, 1, now=NOW)
+    record = session.scalar(select(SchedulerRun))
+    record.details = {**record.details, "state": "blocked", "next_action": None,
+                      "next_attempt_at": None, "reason": reason, "rejection_audits": 1}
+    snapshot = copy.deepcopy(record.details)
+    assert lifecycle_state(session, 1, now=NOW) == snapshot
+    assert not before_attempt(session, 1, now=NOW, channel="rejection_audit")
+    assert not adopt_fallback_request(session, 1, now=NOW)
+    assert not can_retry_snapshot(session, 1, now=NOW)
 
 
 @pytest.mark.parametrize("guard", ["source", "category", "disabled"])

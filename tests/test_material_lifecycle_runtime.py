@@ -112,8 +112,15 @@ def test_refuted_rejection_archives_then_delegates_full_pipeline(engine):
     assert runtime.reconcile().rejection_audit_ids == (1,)
     result = runtime.process(1, delegate)
     assert called == [1] and len(provider.calls) == 1
-    assert result["lifecycle"]["state"] == "blocked"
-    assert ledger(engine)["reason"] == "repeated_editorial_rejection"
+    assert result["lifecycle"]["next_action"] == "audit_rejection"
+    final = runtime.process(1, delegate)
+    assert final["lifecycle"]["next_action"] == "fallback"
+    assert called == [1] and len(provider.calls) == 2
+    state = ledger(engine)
+    assert state["audit_attempts"] == state["rejection_audits"] == 2
+    assert len(state["rejection_review_history"]) == 2
+    assert all(review["decision"] == "retry_processing"
+               for review in state["rejection_review_history"])
 
 
 def test_confirmed_rejection_never_calls_delegate(engine):
@@ -180,9 +187,9 @@ def test_inapplicable_confirm_uses_existing_full_retry_without_new_budget_or_rea
 
     final = runtime.process(1, full_pipeline)
     assert called == [1] and len(provider.calls) == 1
-    assert final["lifecycle"]["state"] == "blocked"
+    assert final["lifecycle"]["next_action"] == "audit_rejection"
     state = ledger(engine)
-    assert state["reason"] == "repeated_editorial_rejection" and state["attempts"] == 1
+    assert state["attempts"] == 1 and state["audit_attempts"] == 1
     assert all(state[key] == original[key] for key in
                ("first_seen_at", "deadline_at", "fingerprints", "fallback_attempts"))
     with Session(engine) as session:
@@ -284,7 +291,10 @@ def test_audit_failure_is_bounded_retry_without_confirming_rejection(engine):
     assert len(provider.calls) == 1
     runtime.now = NOW + timedelta(minutes=6)
     final = runtime.process(1, lambda _: pytest.fail("Ошибка не даёт разрешение"))
-    assert final["status"] == "blocked" and len(provider.calls) == 2
+    assert final["status"] == "waiting_fallback" and len(provider.calls) == 2
+    state = ledger(engine)
+    assert state["rejection_justified"] is None and state["fallback_attempts"] == 0
+    assert state["audit_attempts"] == 2
 
 
 @pytest.mark.parametrize("change", ["expired", "risk", "source_changed"])

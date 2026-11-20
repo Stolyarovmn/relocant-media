@@ -245,7 +245,7 @@ def _validate(data: dict[str, Any]) -> bool:
                 and type(data.get("fallback_attempts")) is int
                 and 0 <= data["fallback_attempts"] <= FALLBACK_ATTEMPTS
                 and type(data.get("rejection_audits")) is int
-                and 0 <= data["rejection_audits"] <= 1
+                and 0 <= data["rejection_audits"] <= AUDIT_ATTEMPTS
                 and type(data.get("audit_attempts")) is int
                 and 0 <= data["audit_attempts"] <= AUDIT_ATTEMPTS
                 and type(data.get("delivery_attempts")) is int
@@ -349,11 +349,16 @@ def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
     elif record.details["next_action"] in {"retry_prepare", "repair", "fallback"}:
         return record
     elif outcome.get("status") in {"skipped", "blocked"}:
-        if record.details["rejection_audits"] == 0 and post is None:
-            if record.details["next_action"] == "audit_rejection":
-                return record
+        if (record.details.get("attempt_kind") == "fallback"
+                and record.details["fallback_attempts"] == FALLBACK_ATTEMPTS):
+            _block(session, record, run, post, now=now, reason="fallback_editorial_rejection")
+        elif post is None and record.details["next_action"] == "audit_rejection":
+            return record
+        elif post is None and record.details["audit_attempts"] < AUDIT_ATTEMPTS:
             _set(record, now=now, state="waiting", action="audit_rejection",
                  reason="rejection_requires_audit", next_at=now)
+        elif post is None:
+            _unconfirmed_rejection_fallback(session, record, run, post, now)
         else:
             _block(session, record, run, post, now=now, reason="repeated_editorial_rejection")
     elif outcome.get("status") == "human_review":
@@ -386,6 +391,15 @@ def _fallback_or_block(session: Session, record: SchedulerRun, run: EditorialRun
              fallback_deadline_at=deadline.isoformat())
 
 
+def _unconfirmed_rejection_fallback(session: Session, record: SchedulerRun,
+                                   run: EditorialRun | None, post: Post | None,
+                                   now: datetime) -> None:
+    # Допуск только к резерву: источник, риск, Post и квитанции проверяются отдельно.
+    record.details = {**record.details, "rejection_justified": None,
+                      "unconfirmed_rejection_fallback": True}
+    _fallback_or_block(session, record, run, post, now)
+
+
 def before_attempt(session: Session, raw_id: int, *, now: datetime,
                    channel: Literal["primary", "fallback", "rejection_audit"] = "primary") -> bool:
     now = _now(now)
@@ -412,7 +426,7 @@ def before_attempt(session: Session, raw_id: int, *, now: datetime,
                         "rejection_audit": ("audit_attempts", AUDIT_ATTEMPTS)}[channel]
     if data[counter] >= maximum:
         if channel == "rejection_audit":
-            _block(session, record, run, post, now=now, reason="rejection_audit_unavailable")
+            _unconfirmed_rejection_fallback(session, record, run, post, now)
         else:
             _fallback_or_block(session, record, run, post, now)
         return False
@@ -420,7 +434,8 @@ def before_attempt(session: Session, raw_id: int, *, now: datetime,
          next_at=min(_stamp(data["deadline_at"]), now+ATTEMPT_LEASE),
          attempt_deadline_at=min(_stamp(data["deadline_at"]), now+ATTEMPT_LEASE).isoformat(),
          attempt_kind=channel, retry_authorized=(data["next_action"] == "retry_prepare"
-             or channel == "fallback" and data.get("rejection_justified") is False),
+             or channel == "fallback" and (data.get("rejection_justified") is False
+                 or data.get("unconfirmed_rejection_fallback") is True)),
          **{counter: data[counter]+1})
     return True
 
@@ -536,7 +551,15 @@ def record_rejection_review(session: Session, raw_id: int, review: dict[str, Any
                             now: datetime) -> None:
     raw, source, _, _ = _objects(session, raw_id)
     record = _record(session, raw, source, _now(now))
-    record.details = {**record.details, "rejection_review": copy.deepcopy(review)}
+    if record.details.get("state") in TERMINAL_STATES:
+        return
+    history = list(record.details.get("rejection_review_history", []))
+    previous = record.details.get("rejection_review")
+    if not history and isinstance(previous, dict):
+        history.append(copy.deepcopy(previous))
+    history.append(copy.deepcopy(review))
+    record.details = {**record.details, "rejection_review": copy.deepcopy(review),
+                      "rejection_review_history": history[-AUDIT_ATTEMPTS:]}
 
 
 def block_unsupported_repair(session: Session, raw_id: int, *, now: datetime) -> dict[str, Any]:
@@ -622,8 +645,15 @@ def after_error(session: Session, raw_id: int, error_type: str, *, now: datetime
     elif now >= _stamp(data["deadline_at"]):
         _block(session, record, run, post, now=now, reason="material_deadline_exceeded")
     elif attempt_kind == "rejection_audit":
+        history = list(record.details.get("rejection_review_history", []))
+        previous = record.details.get("rejection_review")
+        if not history and isinstance(previous, dict):
+            history.append(copy.deepcopy(previous))
+        history.append({"decision": "audit_error", "error_type": kind,
+                        "reviewed_at": now.isoformat(), "audit_attempt": data["audit_attempts"]})
+        record.details = {**record.details, "rejection_review_history": history[-AUDIT_ATTEMPTS:]}
         if data["audit_attempts"] >= AUDIT_ATTEMPTS:
-            _block(session, record, run, post, now=now, reason="rejection_audit_unavailable")
+            _unconfirmed_rejection_fallback(session, record, run, post, now)
         else:
             _set(record, now=now, state="waiting", action="audit_rejection",
                  reason="rejection_audit_error",
@@ -655,14 +685,16 @@ def rejection_reviewed(session: Session, raw_id: int, *, justified: bool,
     if record.details.get("state") in TERMINAL_STATES:
         return dict(record.details)
     if (record.details.get("next_action") != "audit_rejection"
-            or record.details["rejection_audits"] != 0 or run is None
+            or record.details["rejection_audits"] >= AUDIT_ATTEMPTS or run is None
             or run.outcome.get("status") not in {"skipped", "blocked"}):
         raise LifecycleBlockedError("Отказ не ожидает проверки")
-    record.details = {**record.details, "rejection_audits": 1,
+    record.details = {**record.details,
+                      "rejection_audits": record.details["rejection_audits"]+1,
                       "rejection_justified": justified}
     if justified:
         _block(session, record, run, post, now=now, reason=confirmed_reason)
-    elif record.details["attempts"] < PRIMARY_ATTEMPTS:
+    elif (record.details["attempts"] < PRIMARY_ATTEMPTS
+            and record.details["audit_attempts"] < AUDIT_ATTEMPTS):
         _set(record, now=now, state="waiting", action="retry_prepare",
              reason="rejection_not_justified", next_at=now)
     else:
@@ -680,7 +712,8 @@ def block_related_delivery(session: Session, raw_id: int, *, now: datetime) -> d
     if (record.details.get("state") != "processing"
             or record.details.get("attempt_kind") != "rejection_audit"):
         raise LifecycleBlockedError("Сверка дубля не владеет попыткой проверки")
-    record.details = {**record.details, "rejection_audits": 1}
+    record.details = {**record.details,
+                      "rejection_audits": record.details["rejection_audits"]+1}
     _block(session, record, run, post, now=now, reason="related_delivery_reconciliation_required")
     return dict(record.details)
 
@@ -708,7 +741,8 @@ def can_retry_snapshot(session: Session, raw_id: int, *, now: datetime) -> bool:
                and now >= _stamp(data["next_attempt_at"])
                or data.get("state") == "processing" and data.get("retry_authorized") is True
                or data.get("next_action") == "fallback"
-               and data.get("rejection_justified") is False)
+               and (data.get("rejection_justified") is False
+                    or data.get("unconfirmed_rejection_fallback") is True))
     try:
         return bool(allowed and source.enabled and source.auto_publish and not source.high_risk
                     and (not category or category in AUTO_PUBLISH_CATEGORIES)

@@ -267,6 +267,7 @@ def build_batch_request(
 
 def validate_batch_rank(
     session: Session, batch_request: dict[str, Any], batch_result: dict[str, Any], *, now: datetime,
+    for_export: bool = False,
 ) -> tuple[SchedulerRun, list[int]]:
     """Привязать выбор GPT к точной пачке; повтор той же квитанции безопасен."""
     now = _utc(now)
@@ -312,6 +313,8 @@ def validate_batch_rank(
             ):
                 raise FallbackValidationError("Для цикла уже принят другой порядок GPT")
             for raw_id in selected:
+                if for_export and is_terminal_blocked(session, raw_id, now=now):
+                    continue
                 _ensure_fallback_open(session, raw_id, now=now)
             # Прежняя квитанция закрепила выбор; последующий импорт сам сверяет
             # каждый ещё не обработанный материал с его исходным снимком.
@@ -336,7 +339,8 @@ def build_ranked_request(
 
     now = _utc(now)
     with session.no_autoflush:
-        run, selected = validate_batch_rank(session, batch_request, batch_result, now=now)
+        run, selected = validate_batch_rank(session, batch_request, batch_result, now=now,
+                                            for_export=True)
         if run.details["batch_preselection"]["status"] != "gpt_ranked":
             raise FallbackValidationError("Ранжирование GPT ещё не принято")
         profile = load_city_profile("belgrade")
