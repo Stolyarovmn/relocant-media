@@ -69,6 +69,28 @@ def effective_published_text(post: Post, run: EditorialRun) -> PublishedText:
                 or any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
                        for key, value in intent.items())):
             return original
+        reconciliation_fields = {"reconciliation_kind", "previous_receipt_sha256",
+            "previous_receipt", "reconciled_at", "reconciliation_checkpoint_sha256",
+            "reconciliation_state_sha256", "reconciliation_snapshot_sha256"}
+        if reconciliation_fields.intersection(receipt):
+            previous = receipt.get("previous_receipt")
+            if (not reconciliation_fields.issubset(receipt)
+                    or receipt.get("reconciliation_kind") != "late_public_readback"
+                    or not isinstance(previous, dict)
+                    or receipt["previous_receipt_sha256"] != _digest(previous)
+                    or previous.get("api_confirmed") is not True
+                    or previous.get("public_confirmed") is not False
+                    or previous.get("status") != "uncertain"
+                    or previous.get("intent_sha256") != overlay["intent_sha256"]
+                    or reconciliation_fields.intersection(previous) or "error_type" in previous
+                    or not isinstance(receipt.get("reconciled_at"), str)
+                    or any(not isinstance(receipt[field], str)
+                           or re.fullmatch(r"[0-9a-f]{64}", receipt[field]) is None for field in (
+                               "reconciliation_checkpoint_sha256", "reconciliation_state_sha256",
+                               "reconciliation_snapshot_sha256"))
+                    or any(type(previous.get(key)) is not type(value)
+                           or previous.get(key) != value for key, value in intent.items())):
+                return original
         package = run.outcome["_package"]
         expected_package = run.outcome["_package_sha256"]
         for key in ("plan_sha256", "intent_sha256", "receipt_sha256"):
