@@ -60,16 +60,20 @@ def matches_reader_event(
 ) -> bool:
     """A local candidate match needs a distinct title and one common event date."""
     signal = text[:4000].strip()
-    public = f"{public_title}\n{public_body[:4000]}"
-    dates = event_dates(signal, year) | event_dates(folded(signal), year)
-    source_dates = event_dates(public, source_year) | event_dates(folded(public), source_year)
-    if len(dates) != 1 or dates != source_dates:
-        return False
     first_line = signal.split("\n", 1)[0][:250]
     if len(topic_words(first_line) & topic_words(public_title[:250])) < 3:
         return False
+    # Prefer the date in the headline or opening paragraph to ticket-sale dates later on.
+    def dates_in(value: str, default_year: int) -> frozenset[str]:
+        return event_dates(value, default_year) | event_dates(folded(value), default_year)
+
+    dates = dates_in(first_line, year) or dates_in(signal, year)
+    excerpt = public_body.strip().partition("\n\n")[0][:650]
+    source_dates = dates_in(public_title, source_year) or dates_in(excerpt, source_year)
+    if len(dates) != 1 or dates != source_dates:
+        return False
     left_location = {folded(place) for place in location_anchors(signal)}
-    right_location = {folded(place) for place in location_anchors(public)}
+    right_location = {folded(place) for place in location_anchors(f"{public_title}\n{excerpt}")}
     return not (left_location and right_location and left_location.isdisjoint(right_location))
 
 

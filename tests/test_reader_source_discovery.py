@@ -110,3 +110,10 @@ def test_reader_matches_same_date_in_russian_and_serbian_cyrillic():
     assert matches_reader_event(tip, title, "24. новембра", year=2026, source_year=2026)
     assert not matches_reader_event(tip, title, "25. новембра", year=2026, source_year=2026)
     assert not matches_reader_event(tip, title, "24. новембра", year=2026, source_year=2025)
+
+
+def test_match_uses_event_date_before_ticket_sale_date():
+    title = "Представа СумЉиво лице на сцени Културног центра Чукарица"
+    body = "Представа је 30. новембра.\n\nКарте могу се преузети од 15. новембра."
+    assert matches_reader_event(f"{title} 30 ноября", title, body, year=2026, source_year=2026)
+    assert not matches_reader_event(f"{title} 15 ноября", title, body, year=2026, source_year=2026)
