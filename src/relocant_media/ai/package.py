@@ -195,11 +195,14 @@ def package_coverage_reason(package: EditorialPackage) -> str | None:
     )
 
 
+def package_facts_scope(package: EditorialPackage) -> str | None:
+    facts = next((review for review in package.reviews if review.role == "facts"), None)
+    return facts.facts_check.publication_scope if facts and facts.facts_check else None
+
+
 def package_requires_official_primary(package: EditorialPackage) -> bool:
     """Независимо выявленная чувствительность повышает требования к первоисточнику."""
-    facts = next((review for review in package.reviews if review.role == "facts"), None)
-    return bool(facts and facts.facts_check
-                and facts.facts_check.publication_scope == "sensitive_substance")
+    return package_facts_scope(package) == "sensitive_substance"
 
 
 def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) -> EditorialOutcome:

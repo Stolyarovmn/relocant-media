@@ -356,6 +356,17 @@ def test_confirmed_overlay_is_one_effective_version_and_invalid_overlay_is_not_a
                 **original, "receipt": bad_receipt,
                 "receipt_sha256": worker._digest(bad_receipt)}}
             assert not effective_published_text(post, run).corrected
+            # Согласованные между собой hashes не заменяют канонического адресата.
+            for target, value in (("chat_id", original["intent"]["chat_id"]+1),
+                                  ("message_id", original["intent"]["message_id"]+1),
+                                  ("operation", "sendMessage"), ("version", 3)):
+                forged = copy.deepcopy(original)
+                forged["intent"][target] = forged["receipt"][target] = value
+                forged["intent_sha256"] = worker._digest(forged["intent"])
+                forged["receipt"]["intent_sha256"] = forged["intent_sha256"]
+                forged["receipt_sha256"] = worker._digest(forged["receipt"])
+                run.outcome = {**run.outcome, "_published_correction": forged}
+                assert not effective_published_text(post, run).corrected
     finally:
         engine.dispose()
 

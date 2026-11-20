@@ -16,7 +16,7 @@ from relocant_media.ai.package import (
     EditorialPackage,
     PackageDraft,
     canonical_json,
-    package_coverage_reason,
+    package_facts_scope,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.domain.draft_language import draft_language_reason
@@ -49,9 +49,7 @@ def review_with_repairs(
                 audit({**entry, "repair_attempt": repair_attempt})
 
         current = reviewed_package(current, provider, live_documents, audit=record)
-        if package_coverage_reason(current) in {
-                "independent_sensitivity_review_required",
-                "independent_risk_classification_required"}:
+        if package_facts_scope(current) in {"sensitive_substance", "uncertain"}:
             return current
         if any({AUDIENCE_MISMATCH_FLAG, PROFILE_AUDIENCE_MISMATCH_FLAG} & set(review.flags)
                for review in current.reviews):

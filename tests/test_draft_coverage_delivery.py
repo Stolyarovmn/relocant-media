@@ -210,7 +210,8 @@ def test_independent_sensitivity_is_separate_gate_without_text_repair(reviewed):
 
 
 @pytest.mark.parametrize("scope", ["sensitive_substance", "uncertain"])
-def test_risk_hold_does_not_trigger_textual_repairs(reviewed, scope):
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_risk_hold_does_not_trigger_textual_repairs(reviewed, scope, unsupported):
     session, run = reviewed
     package = EditorialPackage.model_validate_json(json.dumps(run.outcome["_package"]))
     initial = package.model_copy(update={"reviews": tuple(review.model_copy(update={
@@ -227,6 +228,8 @@ def test_risk_hold_does_not_trigger_textual_repairs(reviewed, scope):
             if task == "independent_facts":
                 check = facts_check_for(json.loads(prompt)["package"])
                 check["publication_scope"] = scope
+                if unsupported:
+                    check["segments"][0]["assessment"] = "unsupported"
                 response.update(verdict="hold", flags=["Требуется отдельный допуск риска"],
                                 facts_check=check)
             else:

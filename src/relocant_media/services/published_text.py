@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from relocant_media.domain.channel_targets import APPROVED_CHANNELS_BY_CITY
 from relocant_media.storage.models import EditorialRun, Post
 
 
@@ -54,6 +55,20 @@ def effective_published_text(post: Post, run: EditorialRun) -> PublishedText:
             return original
         plan = json.loads(raw_plan, object_pairs_hook=unique_object)
         intent, receipt = overlay["intent"], overlay["receipt"]
+        channel = APPROVED_CHANNELS_BY_CITY.get(post.city)
+        if (channel is None or not isinstance(intent, dict) or not isinstance(receipt, dict)
+                or any(type(value) is not int for value in (
+                    overlay["version"], plan["version"], intent["version"], receipt["version"],
+                    plan["raw_item_id"], plan["post_id"], plan["message_id"],
+                    intent["chat_id"], intent["message_id"],
+                    receipt["chat_id"], receipt["message_id"]))
+                or intent["version"] != 4 or receipt["version"] != 4
+                or intent["operation"] != "editMessageText"
+                or receipt["operation"] != "editMessageText"
+                or intent["chat_id"] != channel or receipt["chat_id"] != channel
+                or any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
+                       for key, value in intent.items())):
+            return original
         package = run.outcome["_package"]
         expected_package = run.outcome["_package_sha256"]
         for key in ("plan_sha256", "intent_sha256", "receipt_sha256"):
