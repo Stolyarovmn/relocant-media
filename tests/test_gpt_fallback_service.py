@@ -650,6 +650,36 @@ def test_build_request_caps_five_unique_unresolved_candidates(fallback_session):
     assert [row["raw_item_id"] for row in request["candidates"]] == ids[:5]
 
 
+def test_newer_failure_does_not_displace_older_failure_of_same_priority(fallback_session):
+    session, first, run = fallback_session
+    second = RawItem(
+        source_id=first.source_id, external_id="fallback-newer",
+        url="https://www.beograd.rs/lat/beoinfo-vesti/a116900/Izlozba.html",
+        title="Izložba u Beogradu",
+        body="Izložba će biti otvorena 18. novembra u 19 časova u Kulturnom centru.",
+        published_at=first.published_at, published_at_precision="instant",
+        ingested_at=first.ingested_at,
+    )
+    session.add(second)
+    session.flush()
+    later = SchedulerRun(
+        task_key=run.task_key, task_type=run.task_type, city=run.city, status="partial",
+        scheduled_for=NOW - timedelta(minutes=4), started_at=NOW - timedelta(minutes=4),
+        finished_at=NOW - timedelta(minutes=3),
+        details={"processing_errors": [
+            {"raw_item_id": second.id, "error_type": "GeminiWorkerError"},
+        ]},
+    )
+    session.add(later)
+    session.commit()
+
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request["scheduler_run_id"] == run.id
+    assert [candidate["raw_item_id"] for candidate in request["candidates"]] == [first.id]
+    explicit = gpt_fallback.build_request(session, now=NOW, scheduler_run_id=later.id)
+    assert explicit["scheduler_run_id"] == later.id
+
+
 def test_fresh_utility_notice_precedes_an_older_gemini_failure(fallback_session):
     session, first, run = fallback_session
     water = RawItem(
