@@ -262,7 +262,7 @@ def _legacy_notice_message_html(native: dict[str, Any], draft: RussianDraft) -> 
         groups = []
         sections = native["schedule"]
         for section in sections[:100]:
-            groups.append(f'<p><code>{escape(section["when"])}</code> · время Белграда</p>')
+            groups.append(f'<p><b>{escape(section["when"])}</b> · время Белграда</p>')
             items = []
             for item in section["items"]:
                 label = escape(item).replace(" целиком · ", " <u>целиком</u> · ")
@@ -298,7 +298,7 @@ def _source_preview_notice_html(native: dict[str, Any], draft: RussianDraft) -> 
     )
     sections = native["schedule"]
     areas = [
-        f'<code>{escape(section["when"])}</code>\n'
+        f'<b>{escape(section["when"])}</b>\n'
         + "\n".join(f"• {_notice_item(item)}" for item in section["areas"])
         for section in sections if section["areas"]
     ]

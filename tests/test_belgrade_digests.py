@@ -464,3 +464,19 @@ def test_reminder_in_quiet_evening_can_publish_alone_with_original_link():
     assert "Напоминание на завтра · 17 ноября" in draft.html
     assert "https://t.me/eduvbelgrad/106" in draft.html
     assert "#Сводка" not in draft.html
+
+
+def test_only_standalone_reminder_replies_to_its_original_post():
+    from datetime import timedelta
+
+    from relocant_media.ops.belgrade_digests import Entry, Slot, reply_target
+
+    when = datetime(2026, 11, 21, 19, 30, tzinfo=UTC)
+    entry = Entry(label="🎭", text="Фламенко завтра", url="https://example.com/a")
+    originals = {"https://example.com/a": 141}
+    reminder = Slot("reminder", when, when + timedelta(minutes=45))
+    evening = Slot("evening", when, when + timedelta(minutes=45))
+    assert reply_target(reminder, [entry], originals) == 141
+    # «Главное за день» с одним напоминанием — свой пост, без чужого заголовка сверху.
+    assert reply_target(evening, [entry], originals) is None
+    assert reply_target(reminder, [entry, entry], originals) is None
