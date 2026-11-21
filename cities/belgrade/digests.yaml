@@ -4,6 +4,8 @@ starts_at: '2026-11-13T20:30'
 morning: '07:30'
 evening: '20:30'
 delivery_window_minutes: 45
+# #321: a morning digest missed during an outage still goes out until 11:00.
+morning_catch_up_until: '11:00'
 reminders_from: '2026-11-16'
 official_reminder_sources:
   '2026-11-17':
