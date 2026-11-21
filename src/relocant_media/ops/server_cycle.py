@@ -86,6 +86,7 @@ from relocant_media.domain.presentation import (
     title_instruction,
     valid_title_presentation,
 )
+from relocant_media.domain.story_fingerprint import find_same_story
 from relocant_media.ingestion.persistence import (
     capture_collected_batch,
     sync_source,
@@ -271,6 +272,11 @@ class _CachedOutcome(EditorialPipeline):
             raise ValueError("evidence changed before persistence")
         return self.outcome
 
+
+
+def _aware(value: str) -> datetime:
+    stamp = datetime.fromisoformat(value)
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
 
 def venue_sources() -> dict[str, SourceConfig]:
     """Active venue sources safe for the dated autonomous editorial queue."""
@@ -1116,14 +1122,24 @@ def _prepare_reviewed(
                                   "body": row["body"][:1200], "status": row["status"]}
                                  for row in recent[:20]], source_update=revision is not None,
             evergreen=source.source_type == GUIDE_SOURCE_TYPE)
-    if outcome.draft is not None:
+    if (draft_text := outcome.draft) is not None:
         duplicate = find_repeated_publication(
-            outcome.draft.title, outcome.draft.body,
+            draft_text.title, draft_text.body,
             [(row["id"], row["title"], row["body"]) for row in recent])
         if duplicate is not None:
             outcome = outcome.model_copy(update={
                 "status": PublicationStatus.SKIPPED,
                 "reason": f"draft_repeats_recent_post:{duplicate}", "draft": None})
+        elif revision is None and (same := find_same_story(
+                draft_text.title, draft_text.body,
+                [(row["id"], row["title"], row["body"], _aware(row["published_at"]))
+                 for row in recent],
+                now=datetime.now(UTC))) is not None:
+            # Another source retold a story already in the feed (#333). Source updates
+            # keep their own correction path; this only stops a second separate post.
+            outcome = outcome.model_copy(update={
+                "status": PublicationStatus.SKIPPED,
+                "reason": f"draft_repeats_recent_story:{same}", "draft": None})
     needs_reviewed_package = (reassessing and outcome.status == PublicationStatus.HUMAN_REVIEW
                               and outcome.ranking.selection is not None)
     if outcome.draft is None or (outcome.status != PublicationStatus.READY
