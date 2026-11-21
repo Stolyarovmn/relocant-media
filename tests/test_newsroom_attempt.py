@@ -44,7 +44,7 @@ def test_failed_attempt_keeps_only_previous_observation(tmp_path, outcome):
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure"])
-@pytest.mark.parametrize("mode", ["editorial", "drain", "drain-close"])
+@pytest.mark.parametrize("mode", ["editorial", "drain", "drain-close", "digest"])
 def test_checkpointed_projection_wins_even_for_nonzero_worker_exit(tmp_path, outcome, mode):
     output, previous = tmp_path / "data.json", tmp_path / "previous.json"
     current = projection()
@@ -56,6 +56,8 @@ def test_checkpointed_projection_wins_even_for_nonzero_worker_exit(tmp_path, out
     assert result["cities"][0]["counts"] == {"sent": 18}
     assert result["last_attempt"]["projection"] == "verified"
     assert result["last_attempt"]["status"] == outcome
+    assert result["last_attempt"]["mode"] == mode
+    assert merge(snapshot(ROOT), result)["last_attempt"] == result["last_attempt"]
 
 
 def test_no_previous_snapshot_remains_unknown(tmp_path):
