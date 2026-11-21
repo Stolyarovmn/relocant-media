@@ -29,6 +29,7 @@ const state = {
   selected: "",
   previewArchive: "",
   refocusEvent: "",
+  keepSelectedInView: false,
   address: null,
   index: null,
   loaded: false,
@@ -117,10 +118,21 @@ function setupMap() {
   state.pointLayer = leaflet.layerGroup().addTo(map);
   state.addressLayer = leaflet.layerGroup().addTo(map);
   map.on("zoomend", renderPointClusters);
-  map.on("dragstart", () => { state.refocusEvent = ""; });
-  new ResizeObserver(() => map.invalidateSize({ pan: false })).observe(mapFrame);
-  byId("reset-map").addEventListener("click", () => {
+  function stopFollowingSelection() {
     state.refocusEvent = "";
+    state.keepSelectedInView = false;
+  }
+  map.on("dragstart", stopFollowingSelection);
+  mapFrame.addEventListener("pointerdown", stopFollowingSelection, { capture: true });
+  mapFrame.addEventListener("wheel", stopFollowingSelection, { passive: true });
+  new ResizeObserver(() => {
+    const selected = mobile.matches && state.mode === "incidents" && !state.address
+      && state.keepSelectedInView && state.incidents.find((incident) => incident.id === state.selected);
+    if (selected) focusIncident(selected);
+    else map.invalidateSize({ pan: false });
+  }).observe(mapFrame);
+  byId("reset-map").addEventListener("click", () => {
+    stopFollowingSelection();
     map.setView(center, 12, { animate });
     state.focusNote = "";
     showMapNote();
@@ -543,6 +555,7 @@ function openEvent(incident, { fromCard = false } = {}) {
   const now = Date.now();
   state.deepPending = "";
   state.selected = incident.id;
+  state.keepSelectedInView = true;
   state.previewArchive = incidentStatus(incident, now) === "closed" ? incident.id : "";
   state.refocusEvent = !state.index && (incident.addresses.length || incident.segments.length)
     ? incident.id : "";
@@ -569,8 +582,10 @@ function showAnnouncements(open, refocus = false) {
   announcementBody.hidden = !open;
   const selected = refocus && mobile.matches && !state.address
     ? state.incidents.find((incident) => incident.id === state.selected) : null;
-  if (selected) focusIncident(selected);
-  else state.map?.invalidateSize({ pan: false });
+  if (selected) {
+    state.keepSelectedInView = true;
+    focusIncident(selected);
+  } else state.map?.invalidateSize({ pan: false });
 }
 
 let refreshTimer;
