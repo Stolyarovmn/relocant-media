@@ -1,0 +1,2 @@
+setuptools>=80,<84
+wheel>=0.46,<1
