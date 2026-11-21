@@ -146,41 +146,45 @@ def test_chain_books_the_next_cycle_only_after_a_finished_main_cycle():
 
 def test_manual_operations_have_separate_workflow_queues_and_shared_state_lock():
     data = workflow()
-    assert data["concurrency"] == {
-        "group": "${{ inputs.mode == 'drain-close' && 'editorial-close-backlog' "
-                 "|| inputs.mode == 'drain' && 'editorial-manual-drain' "
-                 "|| startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' "
-                 "|| startsWith(inputs.mode, 'map-') && 'editorial-map-operations' "
-                 "|| inputs.mode == 'preview' && 'editorial-preview' "
-                 "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' "
-                 "&& 'editorial-manual-cycle' "
-                 "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'intake' "
-                 "&& 'editorial-manual-intake' "
-                 "|| github.event_name == 'workflow_dispatch' && inputs.mode == 'discovery' "
-                 "&& 'editorial-manual-discovery' "
-                 "|| 'canonical-editorial-writer' }}",
-        "cancel-in-progress": "false",
-    }
+    assert data["concurrency"]["cancel-in-progress"] == "false"
     assert data["jobs"]["cycle"]["concurrency"]["group"] == "canonical-editorial-state"
     assert "inputs.mode != 'fallback-preview'" in _chain()["if"]
     assert "inputs.mode != 'fallback'" in _chain()["if"]
     assert "!startsWith(inputs.mode, 'map-')" in _chain()["if"]
+    assert "inputs.mode != 'digest-preview'" in _chain()["if"]
+    assert "inputs.mode != 'digest'" in _chain()["if"]
+    assert "needs.cycle.outputs.worker_mode != 'digest'" in _chain()["if"]
 
 
-@pytest.mark.parametrize('mode', ['intake', 'editorial', 'discovery'])
-def test_manual_workflow_is_not_queued_behind_the_automatic_chain(mode):
-    expression = workflow()['concurrency']['group'].removeprefix('${{').removesuffix('}}').strip()
+@pytest.mark.parametrize(('mode', 'schedule', 'expected'), [
+    ('auto', '', 'canonical-editorial-writer'),
+    ('', '17 * * * *', 'canonical-editorial-writer'),
+    ('intake', '', 'editorial-manual-intake'),
+    ('editorial', '', 'editorial-manual-cycle'),
+    ('discovery', '', 'editorial-manual-discovery'),
+    ('drain', '', 'editorial-manual-drain'),
+    ('drain-close', '', 'editorial-close-backlog'),
+    ('preview', '', 'editorial-preview'),
+    ('fallback-preview', '', 'editorial-subscription-gpt'),
+    ('fallback', '', 'editorial-subscription-gpt'),
+    ('map-backfill', '', 'editorial-map-operations'),
+    ('digest-preview', '', 'editorial-digest-preview'),
+    ('digest', '', 'editorial-digest'),
+    ('', '30 5,6 * * *', 'editorial-digest'),
+    ('', '30 18,19 * * *', 'editorial-digest'),
+])
+def test_workflow_queue_isolated_from_the_automatic_chain(mode, schedule, expected):
+    expression = workflow()['concurrency']['group'].removeprefix('${{').removesuffix('}}')
+    event = 'schedule' if schedule else 'workflow_dispatch'
     for prefix in ('fallback', 'map-'):
         expression = expression.replace(
             f"startsWith(inputs.mode, '{prefix}')", repr(mode.startswith(prefix)),
         )
     expression = expression.replace('inputs.mode', repr(mode))
-    expression = expression.replace('github.event_name', repr('workflow_dispatch'))
-    expression = expression.replace('&&', ' and ').replace('||', ' or ')
-    group = eval(expression, {'__builtins__': {}}, {})
-    assert group.startswith('editorial-manual-')
-    assert group != 'canonical-editorial-writer'
-    assert workflow()['jobs']['cycle']['concurrency']['group'] == 'canonical-editorial-state'
+    expression = expression.replace('github.event_name', repr(event))
+    expression = expression.replace('github.event.schedule', repr(schedule))
+    expression = ' '.join(expression.replace('&&', ' and ').replace('||', ' or ').split())
+    assert eval(expression, {'__builtins__': {}}, {}) == expected
 
 
 def test_published_correction_is_manual_main_only_and_shares_state_lock():

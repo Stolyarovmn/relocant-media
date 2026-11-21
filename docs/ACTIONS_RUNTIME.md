@@ -53,8 +53,10 @@ SQLite; формат и квитанции описаны в [CLOUD_DISCOVERY.md
 
 ## Жизненный цикл
 
-1. Все Actions-писатели (editorial и intake) используют одну concurrency group
-   `canonical-editorial-writer`, `cancel-in-progress: false`. Нет PR/push-триггеров редакции.
+1. Все режимы рабочего процесса используют общую блокировку задания
+   `canonical-editorial-state`, `cancel-in-progress: false`. На уровне запуска
+   цепочка `auto`, выпуск сводки и предпросмотр сводки ждут в отдельных группах.
+   Повторный `auto` не вытесняет ожидающую сводку или её предпросмотр. Нет PR/push-триггеров редакции.
 2. Workflow требует актуальный main и успешный push CI на точном SHA до запуска.
 3. `editorial-state/state/current.json` в выбранном приватном control repository —
    единственный канонический указатель: поколение,

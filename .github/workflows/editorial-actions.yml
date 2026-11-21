@@ -73,10 +73,21 @@ on:
 permissions:
   contents: read
 concurrency:
-  # Keep explicit editorial retries, map edits and subscription runs out of the auto queue.
+  # Digest sends and previews must survive automatic retries and each other.
   # All modes use the same state lock below.
-  # Manual intake must not wait for an automatic run's chain sleep or be replaced by its next auto.
-  group: ${{ inputs.mode == 'drain-close' && 'editorial-close-backlog' || inputs.mode == 'drain' && 'editorial-manual-drain' || startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt' || startsWith(inputs.mode, 'map-') && 'editorial-map-operations' || inputs.mode == 'preview' && 'editorial-preview' || github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' && 'editorial-manual-cycle' || github.event_name == 'workflow_dispatch' && inputs.mode == 'intake' && 'editorial-manual-intake' || github.event_name == 'workflow_dispatch' && inputs.mode == 'discovery' && 'editorial-manual-discovery' || 'canonical-editorial-writer' }}
+  group: >-
+    ${{ inputs.mode == 'drain-close' && 'editorial-close-backlog'
+    || inputs.mode == 'drain' && 'editorial-manual-drain'
+    || startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt'
+    || startsWith(inputs.mode, 'map-') && 'editorial-map-operations'
+    || inputs.mode == 'preview' && 'editorial-preview'
+    || inputs.mode == 'digest-preview' && 'editorial-digest-preview'
+    || (inputs.mode == 'digest' || github.event.schedule == '30 5,6 * * *' || github.event.schedule == '30 18,19 * * *')
+       && 'editorial-digest'
+    || github.event_name == 'workflow_dispatch' && inputs.mode == 'editorial' && 'editorial-manual-cycle'
+    || github.event_name == 'workflow_dispatch' && inputs.mode == 'intake' && 'editorial-manual-intake'
+    || github.event_name == 'workflow_dispatch' && inputs.mode == 'discovery' && 'editorial-manual-discovery'
+    || 'canonical-editorial-writer' }}
   cancel-in-progress: false
 jobs:
   cycle:
