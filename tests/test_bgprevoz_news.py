@@ -190,3 +190,94 @@ async def test_collect_url_requires_same_article_on_dated_index() -> None:
         collector = BgprevozNewsCollector(source, client)
         with pytest.raises(ValueError, match="not on the dated index page"):
             await collector.collect_url("https://bgprevoz.rs/vesti/stara-vest")
+
+
+FIXTURES = Path("tests/fixtures")
+LIVE_SLUG = (
+    "informacija-o-promeni-rezima-rada-linija-javnog-prevoza-tokom-odrzavanja-"
+    "manifestacije-7-beogradski-polumaraton"
+)
+LIVE_FULL_TITLE = (
+    "Информација о промени режима рада линија јавног превоза током одржавања "
+    'манифестације "7. београдски полумаратон"'
+)
+
+
+def test_live_20261121_truncated_card_title_binds_to_full_detail_title() -> None:
+    # Regression: source-health 2026-11-21 failed with "all dated Bgprevoz news
+    # articles failed extraction" because the index now truncates card titles.
+    source = _source()
+    candidates = parse_bgprevoz_news_list(
+        (FIXTURES / "bgprevoz_news_list_20261121.html").read_text(encoding="utf-8"),
+        source,
+    )
+    assert [item.slug for item in candidates] == [LIVE_SLUG]
+    candidate = candidates[0]
+    assert candidate.title.endswith("...")
+    assert candidate.published_at == datetime(2026, 11, 20, tzinfo=BELGRADE_TZ)
+
+    item = parse_bgprevoz_news_article(
+        (FIXTURES / "bgprevoz_news_detail_20261121.html").read_text(encoding="utf-8"),
+        source,
+        page_url=f"https://www.bgprevoz.rs/vesti/{LIVE_SLUG}",
+        published_at=candidate.published_at,
+        expected_title=candidate.title,
+    )
+    assert item.title == LIVE_FULL_TITLE
+    assert item.published_at == candidate.published_at
+    assert item.canonical_url == f"https://bgprevoz.rs/vesti/{LIVE_SLUG}"
+    assert "7. Београдски полумаратон 2026" in item.body
+    assert "Градска управа града Београда" not in item.body
+    assert "Актуелне измене" not in item.body
+
+
+@pytest.mark.parametrize(
+    "card_title",
+    [
+        "Промена трасе линије бр. 709...",  # prefix differs from the detail title
+        "Промена...",  # prefix too short to bind safely
+        "Промена трасе линије",  # untruncated partial title is not accepted
+    ],
+)
+def test_truncated_card_title_must_be_a_long_enough_exact_prefix(card_title: str) -> None:
+    with pytest.raises(ValueError, match="does not match dated index card"):
+        parse_bgprevoz_news_article(
+            _detail(title="Промена трасе линије бр. 708 од четвртка"),
+            _source(),
+            page_url="https://bgprevoz.rs/vesti/promena-trase-linije-br-708",
+            published_at=datetime(2026, 9, 30, tzinfo=BELGRADE_TZ),
+            expected_title=card_title,
+        )
+
+
+def test_unicode_ellipsis_truncation_is_accepted() -> None:
+    item = parse_bgprevoz_news_article(
+        _detail(title="Промена трасе линије бр. 708 од четвртка"),
+        _source(),
+        page_url="https://bgprevoz.rs/vesti/promena-trase-linije-br-708",
+        published_at=datetime(2026, 9, 30, tzinfo=BELGRADE_TZ),
+        expected_title="Промена трасе линије бр. 708…",
+    )
+    assert item.title == "Промена трасе линије бр. 708 од четвртка"
+
+
+@pytest.mark.asyncio
+async def test_collect_live_20261121_layout_end_to_end() -> None:
+    list_html = (FIXTURES / "bgprevoz_news_list_20261121.html").read_text(encoding="utf-8")
+    detail_html = (FIXTURES / "bgprevoz_news_detail_20261121.html").read_text(
+        encoding="utf-8"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/vesti":
+            return httpx.Response(200, text=list_html)
+        if request.url.path == f"/vesti/{LIVE_SLUG}":
+            return httpx.Response(200, text=detail_html)
+        raise AssertionError(request.url)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = BgprevozNewsCollector(_source(), client)
+        items = await collector.collect()
+
+    assert collector.item_failures == []
+    assert [item.title for item in items] == [LIVE_FULL_TITLE]
