@@ -28,6 +28,7 @@ OWNER_DECISION_REASONS = frozenset({
     "package_requires_review",
     "source_auto_publish_disabled",
     "policy_requires_human_review",
+    "sensitive_topic_requires_human_review",
 })
 
 

@@ -31,6 +31,7 @@ from relocant_media.ai.models import (
 from relocant_media.ai.pipeline import _citations_are_grounded, _verification_map
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.policy import AUTO_PUBLISH_CATEGORIES, requires_human_review
+from relocant_media.domain.sensitivity import sensitive_topic_reason
 
 
 class StrictModel(BaseModel):
@@ -205,6 +206,16 @@ def package_requires_official_primary(package: EditorialPackage) -> bool:
     return package_facts_scope(package) == "sensitive_substance"
 
 
+def _package_texts(package: EditorialPackage) -> list[str]:
+    documents = (package.event.documents if package.event is not None
+                 else (package.evidence,))
+    texts = [package.evidence.title, package.evidence.body]
+    for document in documents:
+        texts.extend((document.title, document.body))
+    texts.extend((package.outcome.draft.title, package.outcome.draft.body))
+    return texts
+
+
 def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) -> EditorialOutcome:
     """Recompute eligibility; an asserted ready/should_process is never sufficient."""
     from relocant_media.ai.models import PublicationStatus
@@ -290,6 +301,9 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     language_reason = draft_language_reason(draft.title, draft.body)
     if language_reason is not None:
         status, reason = PublicationStatus.HUMAN_REVIEW, language_reason
+    sensitive_reason = sensitive_topic_reason(_package_texts(package))
+    if sensitive_reason is not None and status == PublicationStatus.READY:
+        status, reason = PublicationStatus.HUMAN_REVIEW, sensitive_reason
     date_reason=draft_date_reason(draft.title,draft.body)
     if date_reason is not None:
         status,reason=PublicationStatus.HUMAN_REVIEW,date_reason

@@ -36,6 +36,7 @@ from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import publication_date_context
 from relocant_media.domain.policy import is_borderline, requires_human_review
+from relocant_media.domain.sensitivity import sensitive_topic_reason
 
 
 def _json_payload(value: object) -> str:
@@ -395,6 +396,11 @@ class EditorialPipeline:
         elif borderline:
             status = PublicationStatus.HUMAN_REVIEW
             reason = "borderline_relevance"
+        elif (sensitive := sensitive_topic_reason(
+                [text for document in documents for text in (document.title, document.body)]
+                + [draft.title, draft.body])) is not None:
+            status = PublicationStatus.HUMAN_REVIEW
+            reason = sensitive
 
         return EditorialOutcome(
             status=status,
