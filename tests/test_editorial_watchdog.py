@@ -12,12 +12,19 @@ NOW = datetime(2026, 11, 13, 8, 45, tzinfo=UTC)
 
 def test_healthy_stale_and_storage_unavailable(tmp_path):
     client = Mock()
-    client.read.return_value = ({"status": "ready", "last_editorial_at": NOW.isoformat()}, "sha")
+    ready = {"status": "ready", "last_editorial_at": NOW.isoformat()}
+    client.read_status.return_value = (ready, "sha", None)
     assert watchdog.inspect(client, NOW, tmp_path, allow_recovery=True).status == "healthy"
     assert watchdog.inspect(
         client, NOW + timedelta(hours=1), tmp_path, allow_recovery=True,
     ).status == "stale"
-    client.read.side_effect = SSHStorageError("storage_error", "timeout")
+    client.read_status.return_value = (ready, "sha", True)
+    warning = watchdog.inspect(client, NOW, tmp_path, allow_recovery=True)
+    assert warning.status == "storage_capacity"
+    assert watchdog.should_notify(warning, "")
+    assert not watchdog.should_notify(warning, warning.key)
+    client.write.assert_not_called()
+    client.read_status.side_effect = SSHStorageError("storage_error", "timeout")
     assert watchdog.inspect(client, NOW, tmp_path, allow_recovery=True).status == "storage"
 
 
@@ -31,9 +38,9 @@ def test_only_stopped_run_with_checkpoint_can_be_recovered(
     tmp_path, monkeypatch, run_status, checkpoint, allowed, expected,
 ):
     client = Mock()
-    client.read.return_value = ({
+    client.read_status.return_value = ({
         "status": "busy", "run_id": "123", "run_attempt": "2", "started_at": NOW.isoformat(),
-    }, "sha")
+    }, "sha", None)
     metadata = {"id": 123, "run_attempt": 2, "path": watchdog.WORKFLOW,
                 "head_branch": "main", "status": run_status}
     monkeypatch.setattr(watchdog, "run_metadata", lambda run_id: metadata)

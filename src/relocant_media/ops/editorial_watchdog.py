@@ -26,6 +26,8 @@ WORKFLOW = ".github/workflows/editorial-actions.yml"
 CHECKPOINT = re.compile(r'\{"recovery_checkpoint_sha256":\s*"([a-f0-9]{64})"\}')
 MESSAGES = {
     "storage": "Редакция Белграда: SSH-хранилище не отвечает или вернуло ошибку чтения.",
+    "storage_capacity": "У хранилища редакции Белграда мало свободного места. "
+                        "Проверьте запас на диске и резервные копии до остановки выпуска.",
     "busy": "Редакция Белграда остановилась. Завершённый запуск удерживает очередь, "
             "подтверждённый снимок не найден. Нужно сверить состояние перед восстановлением.",
     "recovery_failed": "Редакция Белграда остановилась. Подтверждённый снимок найден, "
@@ -75,10 +77,12 @@ def inspect(
     client: SSHStateClient, now: datetime, work: Path, *, allow_recovery: bool,
 ) -> Check:
     try:
-        state, _ = client.read()
+        state, _, capacity_low = client.read_status()
     except SSHStorageError:
         return Check("storage")
     if state.get("status") == "ready":
+        if capacity_low:
+            return Check("storage_capacity")
         last = state.get("last_editorial_at") or state.get("cutover", {}).get("at")
         if last and now - datetime.fromisoformat(last) >= 2 * EDITORIAL_INTERVAL:
             return Check("stale")
@@ -97,7 +101,9 @@ def inspect(
         return Check("busy", run_id)
     if run["status"] != "completed":
         age = now - datetime.fromisoformat(state["started_at"])
-        return Check("running_too_long" if age >= timedelta(minutes=90) else "running", run_id)
+        if age >= timedelta(minutes=90):
+            return Check("running_too_long", run_id)
+        return Check("storage_capacity") if capacity_low else Check("running", run_id)
     try:
         checkpoint = checkpoint_from_run(run_id, attempt)
     except subprocess.SubprocessError:

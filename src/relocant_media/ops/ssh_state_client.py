@@ -178,6 +178,10 @@ class SSHStateClient:
         return {"storage_ready": True, "bootstrapped": result["bootstrapped"]}
 
     def read(self) -> tuple[dict[str, Any], str]:
+        state, sha, _ = self.read_status()
+        return state, sha
+
+    def read_status(self) -> tuple[dict[str, Any], str, bool | None]:
         result, body = self.exchange({"op": "read_state"})
         state = result.get("state")
         if body or not isinstance(state, dict):
@@ -185,7 +189,8 @@ class SSHStateClient:
         sha = _sha(result.get("sha"))
         if _state_digest(state) != sha:
             raise SSHStorageError("storage_error")
-        return state, sha
+        capacity = result.get("capacity_low")
+        return state, sha, capacity if type(capacity) is bool else None
 
     def write(self, state: dict[str, Any], sha: str) -> str:
         expected = _state_digest(state)
