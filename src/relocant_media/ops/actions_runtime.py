@@ -1001,7 +1001,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             env["EDITORIAL_SEND_ENABLED"] = "false"
         for name in list(env):
             if name in {"GEMINI_API_KEY", "GEMINI_MODEL", "TYPESAFE_API_KEY"} or name.startswith(
-                ("EDITORIAL_PRIVATE_", "EDITORIAL_OWNER_")
+                ("EDITORIAL_PRIVATE_", "EDITORIAL_OWNER_", "GEMINI_MODEL_")
             ):
                 env.pop(name)
         command = [sys.executable, "-m", "relocant_media.ops.gpt_fallback_worker",

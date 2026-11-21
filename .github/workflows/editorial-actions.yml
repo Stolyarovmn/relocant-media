@@ -186,6 +186,8 @@ jobs:
           ACTIONS_CUTOVER_CONFIRMED: ${{ vars.ACTIONS_CUTOVER_CONFIRMED }}
           GEMINI_API_KEY: ${{ steps.mode.outputs.value != 'drain-close' && secrets.GEMINI_API_KEY || '' }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GEMINI_MODEL_DRAFT: ${{ vars.GEMINI_MODEL_DRAFT }}
+          GEMINI_MODEL_REVIEW: ${{ vars.GEMINI_MODEL_REVIEW }}
           TELEGRAM_BOT_TOKEN: ${{ steps.mode.outputs.value != 'drain-close' && secrets.TELEGRAM_BOT_TOKEN || '' }}
           EDITORIAL_SEND_ENABLED: ${{ steps.mode.outputs.value != 'drain-close' && vars.ACTIONS_SEND_ENABLED || 'false' }}
           EDITORIAL_CHANNEL_MODE: public

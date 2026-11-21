@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.batch_preselection import preselect_candidates
 from relocant_media.ai.gemini_process import IsolatedGeminiProvider
+from relocant_media.ai.model_roles import RoleRoutedProvider, cache_model_id, role_models
 from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.ai.public_cache import PublicPreparationCache
 from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
@@ -614,12 +615,14 @@ def main() -> None:
             print(json.dumps({"status": report["status"], "needs_continue": False}))
             return
         budget_ends = time.monotonic()+args.max_seconds
-        provider = PublicPreparationCache(ServerAI(IsolatedGeminiProvider(
-            os.environ["GEMINI_API_KEY"], model=os.environ["GEMINI_MODEL"],
-            remaining_seconds=lambda: budget_ends-time.monotonic()),
+        models = role_models(os.environ)
+        api_key = os.environ["GEMINI_API_KEY"]
+        provider = PublicPreparationCache(ServerAI(RoleRoutedProvider(
+            models, lambda model: IsolatedGeminiProvider(
+                api_key, model=model, remaining_seconds=lambda: budget_ends-time.monotonic())),
             audit_path=args.output / "ai-calls.jsonl", provider_name="gemini",
-            model_id=os.environ["GEMINI_MODEL"]), Path(url.database).parent / "ai-cache",
-            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v7-local-venue-style",
+            model_id=models["default"]), Path(url.database).parent / "ai-cache",
+            model_id=cache_model_id(models) + ":server-policy-v7-local-venue-style",
             public_news_only=True)
         report = process_existing(engine, args.before, args.output, provider,
             max_attempts=args.max_attempts, max_seconds=args.max_seconds,

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.batch_preselection import preselect_candidates
 from relocant_media.ai.diagnostics import AI_PHASES
 from relocant_media.ai.gemini_process import IsolatedGeminiProvider
+from relocant_media.ai.model_roles import RoleRoutedProvider, cache_model_id, role_models
 from relocant_media.ai.models import (
     EditorialOutcome,
     EvidenceDocument,
@@ -233,8 +234,10 @@ class ServerAI:
             if "category" in response_schema.get("properties", {}):
                 response_schema["properties"]["category"]["enum"] = categories
         started = time.monotonic()
+        model_for = getattr(self.provider, "model_for", None)
         record: dict[str, Any] = {"task": task, "provider": self.provider_name,
-            "model": self.model_id, "occurred_at": datetime.now(UTC).isoformat()}
+            "model": model_for(task) if callable(model_for) else self.model_id,
+            "occurred_at": datetime.now(UTC).isoformat()}
         try:
             response = self.provider.generate_json(
                 task=task, system_instruction=policy + system_instruction,
@@ -1428,13 +1431,15 @@ def main() -> None:
             raise ValueError("existing local SQLite required")
         engine = create_engine(url)
         verify_sqlite_schema(engine)
+        models = role_models(os.environ)
+        api_key = os.environ["GEMINI_API_KEY"]
         provider = PublicPreparationCache(
-            ServerAI(IsolatedGeminiProvider(os.environ["GEMINI_API_KEY"],
-                model=os.environ["GEMINI_MODEL"]),
+            ServerAI(RoleRoutedProvider(
+                models, lambda model: IsolatedGeminiProvider(api_key, model=model)),
                 audit_path=args.output / "ai-calls.jsonl", provider_name="gemini",
-                model_id=os.environ["GEMINI_MODEL"]),
+                model_id=models["default"]),
             Path(url.database).parent / "ai-cache",
-            model_id=os.environ["GEMINI_MODEL"] + ":server-policy-v7-local-venue-style",
+            model_id=cache_model_id(models) + ":server-policy-v7-local-venue-style",
             public_news_only=True,
         )
         async def intake() -> dict[str, Any]:
