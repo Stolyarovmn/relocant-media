@@ -879,6 +879,15 @@ def archive_for_retry(session: Session, raw_id: int, *, now: datetime) -> bool:
     return True
 
 
+def delivery_deadline(session: Session, raw_id: int) -> datetime | None:
+    """Read-only срок жизни материала; None, если записи нет или срок не читается."""
+    record = _read_record(session, raw_id)
+    try:
+        return _stamp(record.details["deadline_at"]) if record is not None else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _read_record(session: Session, raw_id: int) -> SchedulerRun | None:
     raw = session.get(RawItem, raw_id)
     source = session.get(Source, raw.source_id) if raw else None
