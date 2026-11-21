@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 import httpx
 from bs4 import BeautifulSoup
 
-from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.base import ArticleBatchError, RawItem, article_failure
 from relocant_media.collectors.page_snapshot import normalize_visible_text
 from relocant_media.sources.registry import SourceConfig
 
@@ -71,6 +71,7 @@ class BvkOutageNewsCollector:
     def __init__(self, source: SourceConfig, client: httpx.AsyncClient) -> None:
         self._source = source
         self._client = client
+        self.item_failures: list[dict[str, str]] = []
 
     async def _get(self, url: str, **params: str) -> bytes:
         content = bytearray()
@@ -98,9 +99,27 @@ class BvkOutageNewsCollector:
         return parse_bvk_outage_article(row, (await self._get(url)).decode(), self._source.id)
 
     async def collect(self) -> list[RawItem]:
+        self.item_failures.clear()
         since = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
         rows = await self._rows(after=since)
-        return [await self._article(row) for row in rows if _OUTAGE.search(_title(row))]
+        items: list[RawItem] = []
+        for row in rows:
+            failure_url = API
+            try:
+                if not _OUTAGE.search(_title(row)):
+                    continue
+                link = row.get("link")
+                if isinstance(link, str):
+                    _slug(link)
+                    failure_url = link
+                items.append(await self._article(row))
+            except (httpx.HTTPError, ValueError) as error:
+                self.item_failures.append(article_failure(failure_url, error))
+        if self.item_failures and not items:
+            raise ArticleBatchError(
+                "all water outage articles failed extraction", self.item_failures,
+            )
+        return items
 
     async def collect_url(self, url: str) -> RawItem:
         rows = await self._rows(slug=_slug(url))

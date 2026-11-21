@@ -27,3 +27,19 @@ class RawItem:
 
 class Collector(Protocol):
     async def collect(self) -> list[RawItem]: ...
+
+
+class ArticleBatchError(ValueError):
+    """No article could be read, with bounded diagnostics for the audit."""
+
+    def __init__(self, message: str, failures: list[dict[str, str]]) -> None:
+        super().__init__(message)
+        self.item_failures = failures.copy()
+
+
+def article_failure(url: str, error: Exception) -> dict[str, str]:
+    return {
+        "url": url,
+        "error_type": type(error).__name__,
+        "error_message": " ".join(str(error).split())[:240],
+    }

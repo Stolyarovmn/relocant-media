@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from relocant_media.collectors.base import ArticleBatchError
 from relocant_media.collectors.factory import build_collector
 from relocant_media.collectors.tls import (
     MISSING_INTERMEDIATE_HINT,
@@ -124,6 +125,8 @@ async def audit_sources(
                         error_type=type(error).__name__,
                         error_message=_error_message(error),
                     )
+                    if isinstance(error, ArticleBatchError):
+                        row["item_failures"] = error.item_failures
             rows.append(row)
 
     return {
