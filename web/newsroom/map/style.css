@@ -676,7 +676,11 @@ h1 {
   .list-header button i { width: 9px; height: 9px; transform: rotate(45deg); }
   .list-header button[aria-expanded="false"] i { transform: rotate(-135deg); }
   .selected-preview { margin-bottom: 5px; font-size: .87rem; }
-  .announcement-body { max-height: min(37dvh, 340px); overflow: auto; overscroll-behavior: contain; }
+  .announcement-body {
+    max-height: min(var(--announcement-height, 37dvh), 340px, max(45px, 100dvh - 314px));
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
   .archive-filter { min-height: 34px; font-size: .81rem; }
   .event-list { gap: 5px; }
   .event-card { padding: 7px 9px; }
@@ -698,7 +702,7 @@ h1 {
 }
 
 @media (max-width: 740px) and (max-height: 430px) {
-  .announcement-body { max-height: min(28dvh, max(45px, 100dvh - 314px)); }
+  .announcement-body { --announcement-height: 28dvh; }
   #selected-title {
     display: block;
     overflow: hidden;
