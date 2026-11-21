@@ -34,3 +34,18 @@ def test_transport_failures_carry_a_safe_reason(monkeypatch, raised, reason) -> 
 def test_unknown_reason_is_dropped() -> None:
     error = SSHStorageError("storage_error", "/root/secret path")
     assert error.reason is None and "secret" not in str(error)
+
+
+def test_capacity_failure_is_permanent_and_never_retried(monkeypatch) -> None:
+    calls = []
+
+    def fail(command, **kwargs):
+        calls.append(command)
+        kwargs['stdout'].write(b'{"error":"storage_capacity"}\n')
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(ssh_state_client.subprocess, 'run', fail)
+    monkeypatch.setattr(ssh_state_client.time, 'sleep', lambda _: pytest.fail('unexpected retry'))
+    with pytest.raises(SSHStorageError) as caught:
+        _client().exchange({'op': 'health'})
+    assert caught.value.code == 'storage_capacity' and len(calls) == 1

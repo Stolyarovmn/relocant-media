@@ -7,8 +7,9 @@ import os
 import stat
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -577,3 +578,137 @@ def test_identical_blob_reupload_is_idempotent_and_does_not_touch_pointer(contex
         assert stream.read() == content
     assert size == len(content) and backend.pointer.read_bytes() == before
     assert [path.name for path in backend.blobs.iterdir()] == [digest]
+
+
+def test_capacity_failure_happens_before_busy_and_does_not_retry_or_write(context, monkeypatch):
+    backend, state, _ = context
+    sha = initialize(context)
+    original = backend.pointer.read_bytes()
+    monkeypatch.setattr(storage.shutil, 'disk_usage', lambda _: SimpleNamespace(free=0))
+    with pytest.raises(storage.StorageError, match='storage_capacity'):
+        backend.write_state(sha, busy(state))
+    assert backend.pointer.read_bytes() == original
+    assert backend.read_state()['state']['status'] == 'ready'
+
+
+def test_capacity_guard_never_prevents_matching_busy_commit(context, monkeypatch):
+    backend, state, _ = context
+    sha = initialize(context)
+    claimed = busy(state)
+    sha = backend.write_state(sha, claimed)['sha']
+    monkeypatch.setattr(storage.shutil, 'disk_usage', lambda _: SimpleNamespace(free=0))
+    ready = {**claimed, 'status': 'ready', 'generation': claimed['attempt']}
+    backend.write_state(sha, ready)
+    assert backend.read_state()['state'] == ready
+
+
+def retention_fixture(backend):
+    snapshots = []
+    for number in range(13):
+        content = b'SQLite format 3\0' + str(number).encode()
+        sha = hashlib.sha256(content).hexdigest()
+        path = backend.blobs / sha
+        path.write_bytes(content)
+        path.chmod(0o600)
+        stamp = storage.time.time() - 20000 + number
+        os.utime(path, (stamp, stamp))
+        snapshots.append(path)
+    today = datetime.now(UTC).date()
+    proof = {'version': 1, 'verified_at': datetime.now(UTC).isoformat(), 'snapshots': [
+        {'day': (today - timedelta(days=i)).isoformat(), 'sha256': path.name,
+         'bytes': path.stat().st_size, 'archive_sha256': 'a' * 64,
+         'drive_file_id': f'private-drive-copy-{i}'}
+        for i, path in enumerate(snapshots[:3])]}
+    path = backend.root / 'verified-retention.json'
+    path.write_text(json.dumps(proof))
+    path.chmod(0o644)
+    return snapshots, proof
+
+
+def test_gc_preserves_backups_checkpoint_recent_and_eight_newest_while_busy(context, monkeypatch):
+    backend, state, _ = context
+    original = initialize(context)
+    backend.write_state(original, busy(state))
+    before = backend.pointer.read_bytes()
+    snapshots, _ = retention_fixture(backend)
+    checkpoint = {'expected_busy_sha256': hashlib.sha256(before).hexdigest(),
+                  'snapshot': {'sha256': snapshots[3].name}}
+    payload = storage.encode(checkpoint)
+    checkpoint_sha = hashlib.sha256(payload).hexdigest()
+    backend.put_blob(checkpoint_sha, len(payload), io.BytesIO(payload))
+    recent = snapshots[4]
+    os.utime(recent, None)
+    obsolete = snapshots[5]
+    monkeypatch.setattr(storage.shutil, 'disk_usage', lambda _: SimpleNamespace(
+        free=0 if obsolete.exists() else storage.CLAIM_HEADROOM))
+    with backend.locked():
+        backend.ensure_space(storage.CLAIM_HEADROOM)
+    assert not obsolete.exists()
+    assert all(path.exists() for path in snapshots if path != obsolete)
+    assert (backend.blobs / checkpoint_sha).exists()
+    assert backend.pointer.read_bytes() == before
+
+
+@pytest.mark.parametrize('invalid', [
+    'expired', 'untrusted_mode', 'untrusted_owner', 'missing_blob', 'duplicate_day', 'old_day',
+])
+def test_gc_requires_three_recent_trusted_verified_copies(context, monkeypatch, invalid):
+    backend, state, _ = context
+    sha = initialize(context)
+    snapshots, proof = retention_fixture(backend)
+    path = backend.root / 'verified-retention.json'
+    if invalid == 'expired':
+        proof['verified_at'] = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    elif invalid == 'duplicate_day':
+        proof['snapshots'][1]['day'] = proof['snapshots'][0]['day']
+    elif invalid == 'missing_blob':
+        snapshots[0].unlink()
+    elif invalid == 'old_day':
+        proof['snapshots'][2]['day'] = (datetime.now(UTC) - timedelta(days=8)).date().isoformat()
+    elif invalid == 'untrusted_owner':
+        monkeypatch.setattr(storage, 'TRUSTED_MARKER_UID', os.geteuid() + 1)
+    path.write_text(json.dumps(proof))
+    if invalid == 'untrusted_mode':
+        path.chmod(0o666)
+    before = backend.pointer.read_bytes()
+    existed = {p.name for p in backend.blobs.iterdir()}
+    monkeypatch.setattr(storage.shutil, 'disk_usage', lambda _: SimpleNamespace(free=0))
+    with pytest.raises(storage.StorageError, match='storage_capacity'):
+        backend.write_state(sha, busy(state))
+    assert existed == {p.name for p in backend.blobs.iterdir()}
+    assert backend.pointer.read_bytes() == before
+
+
+def test_gc_does_not_follow_symlinks_or_delete_before_finishing_validation(context, monkeypatch):
+    backend, state, _ = context
+    sha = initialize(context)
+    retention_fixture(backend)
+    target = backend.root / 'outside-snapshot'
+    payload = b'SQLite format 3\0outside'
+    target.write_bytes(payload)
+    target.chmod(0o600)
+    link = backend.blobs / hashlib.sha256(payload).hexdigest()
+    link.symlink_to(target)
+    before = backend.pointer.read_bytes()
+    existed = {p.name for p in backend.blobs.iterdir()}
+    monkeypatch.setattr(storage.shutil, 'disk_usage', lambda _: SimpleNamespace(free=0))
+    with pytest.raises(storage.StorageError, match='storage_capacity'):
+        backend.write_state(sha, busy(state))
+    assert link.is_symlink() and target.read_bytes() == payload
+    assert existed == {p.name for p in backend.blobs.iterdir()}
+    assert backend.pointer.read_bytes() == before
+
+
+def test_gc_refuses_invalid_canonical_snapshot_before_deletion(context, monkeypatch):
+    backend, state, _ = context
+    initialize(context)
+    retention_fixture(backend)
+    state['snapshot']['sha256'] = state['snapshot']['drive_file_id'] = 'f' * 64
+    backend.pointer.write_bytes(storage.encode(state))
+    before = backend.pointer.read_bytes()
+    existed = {p.name for p in backend.blobs.iterdir()}
+    monkeypatch.setattr(storage.shutil, 'disk_usage', lambda _: SimpleNamespace(free=0))
+    with backend.locked(), pytest.raises(storage.StorageError, match='blob_missing'):
+        backend.ensure_space(storage.CLAIM_HEADROOM)
+    assert existed == {p.name for p in backend.blobs.iterdir()}
+    assert backend.pointer.read_bytes() == before

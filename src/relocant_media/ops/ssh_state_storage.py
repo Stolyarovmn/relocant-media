@@ -9,10 +9,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -22,6 +25,8 @@ MAX_BLOB = 256 * 1024 * 1024
 CHUNK = 64 * 1024
 HELPER_COMMAND = "/usr/local/libexec/relocant-media/ssh-state-storage"
 TRUSTED_MARKER_UID = 0
+CAPACITY_RESERVE = 16 * 1024 * 1024
+CLAIM_HEADROOM = 2 * MAX_BLOB + CAPACITY_RESERVE
 
 
 class StorageError(Exception):
@@ -78,6 +83,104 @@ class Storage:
                 and stat.S_IMODE(info.st_mode) & 0o077 == 0, "storage_error")
         self.pointer = root / "current.json"
 
+    def verified_retention(self) -> dict[str, int] | None:
+        """Only an administrator's fresh Drive-readback attestation permits deletion."""
+        try:
+            descriptor = os.open(self.root / "verified-retention.json",
+                                 os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                require(stat.S_ISREG(info.st_mode) and info.st_uid == TRUSTED_MARKER_UID
+                        and not stat.S_IMODE(info.st_mode) & 0o022)
+                raw = stream.read(MAX_STATE + 1)
+            require(len(raw) <= MAX_STATE)
+            value = json.loads(raw)
+            now = datetime.now(UTC)
+            checked = datetime.fromisoformat(value["verified_at"])
+            require(checked.tzinfo is not None and timedelta(0) <= now - checked
+                    <= timedelta(hours=24))
+            entries = value["snapshots"]
+            require(type(value["version"]) is int and value["version"] == 1
+                    and isinstance(entries, list) and len(entries) == 3)
+            today = now.astimezone(timezone(timedelta(hours=3))).date()
+            days: set[str] = set()
+            protected: dict[str, int] = {}
+            for entry in entries:
+                day = datetime.fromisoformat(entry["day"]).date()
+                require(day.isoformat() == entry["day"] and entry["day"] not in days
+                        and 0 <= (today - day).days < 7)
+                sha, size = entry["sha256"], entry["bytes"]
+                require(hex_digest(sha) and sha not in protected
+                        and type(size) is int and 0 < size <= MAX_BLOB
+                        and hex_digest(entry["archive_sha256"])
+                        and isinstance(entry["drive_file_id"], str)
+                        and bool(entry["drive_file_id"]))
+                with private_file(self.blobs / sha) as stream:
+                    require(os.fstat(stream.fileno()).st_size == size
+                            and stream.read(16) == b"SQLite format 3\0")
+                days.add(entry["day"])
+                protected[sha] = size
+            return protected
+        except (OSError, ValueError, KeyError, TypeError, StorageError):
+            return None
+
+    def ensure_space(self, required: int, extra: set[str] | None = None) -> None:
+        """Called under state.lock. Never edits current or interprets SQLite."""
+        if shutil.disk_usage(self.root).free >= required:
+            return
+        approved = self.verified_retention()
+        if approved is None:
+            raise StorageError("storage_capacity")
+        recorded = self.read_state()
+        self.validate_state(recorded["state"])
+        protected = set(approved) | (extra or set())
+
+        def references(value: Any) -> None:
+            if isinstance(value, dict):
+                for item in value.values():
+                    references(item)
+            elif isinstance(value, list):
+                for item in value:
+                    references(item)
+            elif hex_digest(value):
+                protected.add(value)
+
+        references(recorded["state"])
+        snapshots: list[tuple[float, Path]] = []
+        for path in self.blobs.iterdir():
+            if not hex_digest(path.name):
+                continue
+            try:
+                with private_file(path) as stream:
+                    info = os.fstat(stream.fileno())
+                    if stream.read(16) == b"SQLite format 3\0":
+                        snapshots.append((info.st_mtime, path))
+                    elif info.st_size <= MAX_STATE:
+                        stream.seek(0)
+                        raw = stream.read(MAX_STATE + 1)
+                        try:
+                            envelope = json.loads(raw)
+                        except (ValueError, UnicodeError):
+                            continue
+                        if (isinstance(envelope, dict)
+                                and envelope.get("expected_busy_sha256") == recorded["sha"]):
+                            require(hashlib.sha256(raw).hexdigest() == path.name,
+                                    "storage_capacity")
+                            references(envelope)
+            except (OSError, StorageError) as error:
+                raise StorageError("storage_capacity") from error
+        snapshots.sort(key=lambda row: (row[0], row[1].name), reverse=True)
+        protected.update(path.name for _, path in snapshots[:8])
+        cutoff = time.time() - 7200
+        removed = False
+        for modified, path in snapshots:
+            if path.name not in protected and modified < cutoff:
+                path.unlink()
+                removed = True
+        if removed:
+            sync_directory(self.blobs)
+        require(shutil.disk_usage(self.root).free >= required, "storage_capacity")
+
     @contextlib.contextmanager
     def locked(self) -> Iterator[None]:
         descriptor = os.open(self.root / "state.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
@@ -123,6 +226,8 @@ class Storage:
 
     def put_blob(self, sha256: Any, size: Any, incoming: BinaryIO) -> dict[str, str]:
         require(hex_digest(sha256) and type(size) is int and 0 <= size <= MAX_BLOB)
+        with self.locked():
+            self.ensure_space(size + CAPACITY_RESERVE, {sha256})
         descriptor, temporary_name = tempfile.mkstemp(prefix=".upload-", dir=self.blobs)
         temporary = Path(temporary_name)
         try:
@@ -192,6 +297,7 @@ class Storage:
                 require(state["status"] == "busy" and state.get("snapshot") == old.get("snapshot")
                         and state["generation"] == old.get("generation")
                         and isinstance(state.get("attempt"), str) and bool(state["attempt"]))
+                self.ensure_space(CLAIM_HEADROOM)
             else:
                 require(old.get("status") == "busy" and state["status"] == "ready"
                         and state.get("attempt") == old.get("attempt")
