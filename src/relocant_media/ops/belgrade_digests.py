@@ -49,6 +49,7 @@ from relocant_media.ops.map_export import (
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.event_place import event_occurrences, resolve_event_place
 from relocant_media.services.local_street_geometry import load_street_index
+from relocant_media.services.published_text import effective_published_text
 from relocant_media.services.road_scope import resolve_road_segments
 from relocant_media.services.transport_map import SOURCE_ID, _signature
 from relocant_media.services.transport_map_source import _notice_id, extract_transport_map
@@ -416,7 +417,7 @@ def morning_entries(session: Session, now: datetime, forecast: Forecast | None,
 
 def evening_entries(session: Session, now: datetime) -> list[Entry]:
     since = datetime.combine(now.date(), time.min, now.tzinfo)
-    posts = session.execute(select(Post, RawItem.url)
+    posts = session.execute(select(Post, EditorialRun, RawItem.url)
         .join(EditorialRun, EditorialRun.post_id == Post.id)
         .join(RawItem, RawItem.id == EditorialRun.raw_item_id).where(
         Post.city == _CITY, Post.telegram_message_id > 0, Post.published_at >= since,
@@ -425,16 +426,19 @@ def evening_entries(session: Session, now: datetime) -> list[Entry]:
     ).order_by(Post.published_at.desc()).limit(30)).all()
     seen = set()
     entries = []
-    for post, source_url in sorted(posts, key=lambda row: _PRIORITY.get(row[0].category, 4)):
-        if post.body.lstrip().startswith("Реклама\n") or post.title.startswith("Реклама"):
+    for post, run, source_url in sorted(posts, key=lambda row: _PRIORITY.get(row[0].category, 4)):
+        published = effective_published_text(post, run)
+        if "_published_correction" in run.outcome and not published.corrected:
             continue
-        title = _short(_recap_text(post.title))
+        if published.body.lstrip().startswith("Реклама\n") or published.title.startswith("Реклама"):
+            continue
+        title = _short(_recap_text(published.title))
         key = re.sub(r"[^\w]+", " ", title.casefold()).strip()
         if not key or key in seen:
             continue
         seen.add(key)
-        lead = _recap_text(post.body.partition("\n\n")[0])
-        if (len(lead) > 240 or len(lead.split()) > 36 or post.body.lstrip().startswith("#")
+        lead = _recap_text(published.body.partition("\n\n")[0])
+        if (len(lead) > 240 or len(lead.split()) > 36 or published.body.lstrip().startswith("#")
                 or "https://" in lead or lead.casefold().rstrip(".") == title.casefold()):
             lead = ""
         entries.append(Entry(title, lead, f"{_CHANNEL}/{post.telegram_message_id}", "Подробнее",
