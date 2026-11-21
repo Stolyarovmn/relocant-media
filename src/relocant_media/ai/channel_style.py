@@ -31,6 +31,7 @@ class _WritingMatrix(BaseModel):
 
     version: str
     common: str
+    voice: str
     context: str
     weather: str
     guide: str
@@ -52,7 +53,7 @@ _BY_CATEGORY = {category: rule for rule in _MATRIX.formats.values() for category
 CHANNEL_STYLE_VERSION = _MATRIX.version
 PROCEDURAL_GUIDANCE_POLICY = _MATRIX.procedural_guidance
 CHANNEL_DRAFT_STYLE = (
-    f"\n{_MATRIX.common}\n{_MATRIX.context}\n{_MATRIX.weather}\n"
+    f"\n{_MATRIX.common}\n{_MATRIX.voice}\n{_MATRIX.context}\n{_MATRIX.weather}\n"
     f"{PROCEDURAL_GUIDANCE_POLICY}\n"
 )
 
