@@ -19,6 +19,7 @@ from test_correction_delivery import seeded as base_seeded
 from relocant_media.ai.package import canonical_json
 from relocant_media.bot.formatting import editorial_caption
 from relocant_media.ops import correction_delivery as worker
+from relocant_media.ops.belgrade_digests import evening_entries
 from relocant_media.ops.exact_text_correction import (
     ExactTextCorrectionPlan,
     prepared_exact_edit,
@@ -348,6 +349,10 @@ def test_confirmed_overlay_is_one_effective_version_and_invalid_overlay_is_not_a
             history = recent_publications(session, "belgrade", now=NOW)
             assert history[0]["title"] == effective.title and history[0]["body"] == effective.body
             assert build_newsroom_inbox(session)["items"][0]["title"] == effective.title
+            recap, = evening_entries(session, NOW)
+            assert recap.label == effective.title
+            assert OLD not in recap.text
+            assert recap.url == f"https://t.me/eduvbelgrad/{post.telegram_message_id}"
             original = copy.deepcopy(run.outcome["_published_correction"])
             for field in ("plan_sha256", "intent_sha256", "receipt_sha256"):
                 run.outcome = {**run.outcome, "_published_correction": {
@@ -358,6 +363,7 @@ def test_confirmed_overlay_is_one_effective_version_and_invalid_overlay_is_not_a
                 **original, "receipt": bad_receipt,
                 "receipt_sha256": worker._digest(bad_receipt)}}
             assert not effective_published_text(post, run).corrected
+            assert evening_entries(session, NOW) == []
             # Согласованные между собой hashes не заменяют канонического адресата.
             for target, value in (("chat_id", original["intent"]["chat_id"]+1),
                                   ("message_id", original["intent"]["message_id"]+1),

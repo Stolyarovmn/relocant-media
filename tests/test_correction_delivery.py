@@ -149,7 +149,10 @@ def embed(text, url, *, media=False):
 def frozen(ready_package, tmp_path):
     engine, original = ready_package
     body = f"Учебное сообщение для проверки исправления.\n\n{OLD}\n\n#ГородМеняется"
-    draft = original.outcome.draft.model_copy(update={"body": body})
+    draft = original.outcome.draft.model_copy(update={
+        "title": original.outcome.draft.title.removeprefix("[тестовый запуск] "),
+        "body": body,
+    })
     package = original.model_copy(update={
         "outcome": original.outcome.model_copy(update={"draft": draft})})
     package = package.model_copy(update={"reviews": tuple(
