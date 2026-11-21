@@ -21,8 +21,10 @@ def projection():
     return result
 
 
-@pytest.mark.parametrize("outcome", ["failure", "cancelled", "skipped"])
-def test_failed_attempt_keeps_only_previous_observation(tmp_path, outcome):
+@pytest.mark.parametrize(("outcome", "mode"), [
+    ("failure", "intake"), ("cancelled", "intake"), ("skipped", "intake"), ("success", "digest"),
+])
+def test_attempt_without_new_snapshot_keeps_previous_observation(tmp_path, outcome, mode):
     previous = tmp_path / "previous.json"
     prior = projection()
     prior["private"] = "SECRET"
@@ -32,19 +34,20 @@ def test_failed_attempt_keeps_only_previous_observation(tmp_path, outcome):
     (tmp_path / "working.sqlite3").write_bytes(b"PRIVATE_DATABASE")
     output = tmp_path / "data.json"
     result = record_attempt(ROOT, output, previous, outcome=outcome,
-                            mode="intake", run_id="123", run_attempt="2")
+                            mode=mode, run_id="123", run_attempt="2")
     city = result["cities"][0]
     assert city["observed_at"] == OLD and city["counts"] == {"sent": 17}
     assert result["cities"][1]["observed_at"] is None
     assert result["last_attempt"]["projection"] == "previous_or_unavailable"
     assert result["last_attempt"]["status"] == outcome
-    assert "SECRET" not in output.read_text() and "PRIVATE_DATABASE" not in output.read_text()
+    public_text = output.read_text(encoding="utf-8")
+    assert "SECRET" not in public_text and "PRIVATE_DATABASE" not in public_text
     # Publishing and the separate Pages build reconstruct through this merge.
     assert merge(snapshot(ROOT), result)["last_attempt"] == result["last_attempt"]
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure"])
-@pytest.mark.parametrize("mode", ["editorial", "drain", "drain-close"])
+@pytest.mark.parametrize("mode", ["editorial", "drain", "drain-close", "digest"])
 def test_checkpointed_projection_wins_even_for_nonzero_worker_exit(tmp_path, outcome, mode):
     output, previous = tmp_path / "data.json", tmp_path / "previous.json"
     current = projection()
