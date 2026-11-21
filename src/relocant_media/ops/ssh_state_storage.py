@@ -205,6 +205,13 @@ class Storage:
         require(isinstance(state, dict), "storage_error")
         return {"state": state, "sha": hashlib.sha256(content).hexdigest()}
 
+    def capacity_low(self) -> bool | None:
+        try:
+            usage = shutil.disk_usage(self.root)
+        except OSError:
+            return None
+        return usage.free * 5 <= usage.total or usage.free < 2 * CLAIM_HEADROOM
+
     def blob(self, blob_id: Any) -> tuple[BinaryIO, int]:
         require(hex_digest(blob_id))
         try:
@@ -353,6 +360,7 @@ def serve(storage: Storage, incoming: BinaryIO, outgoing: BinaryIO) -> None:
     elif operation == "read_state":
         require(set(request) == {"op"})
         result = storage.read_state()
+        result["capacity_low"] = storage.capacity_low()
     elif operation == "health":
         require(set(request) == {"op"})
         try:

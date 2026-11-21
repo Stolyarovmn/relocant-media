@@ -64,6 +64,7 @@ def test_bootstrap_private_atomic_state_and_exact_readback(context):
     backend, state, _ = context
     sha = initialize(context)
     result, body = request(backend, {'op': 'read_state'})
+    assert type(result.pop('capacity_low')) is bool
     assert result == {'state': state, 'sha': sha} and body == b''
     assert sha == hashlib.sha256(backend.pointer.read_bytes()).hexdigest()
     assert stat.S_IMODE(backend.pointer.stat().st_mode) == 0o600
@@ -73,6 +74,24 @@ def test_bootstrap_private_atomic_state_and_exact_readback(context):
             backend.create_state(snapshot)
         assert error.value.code in {'state_exists', 'bootstrap_blocked'}
     assert backend.read_state()['sha'] == sha
+
+
+@pytest.mark.parametrize(('total', 'free', 'warning'), [
+    (20 * storage.CLAIM_HEADROOM, 5 * storage.CLAIM_HEADROOM, False),
+    (20 * storage.CLAIM_HEADROOM, 4 * storage.CLAIM_HEADROOM, True),
+    (5 * storage.CLAIM_HEADROOM, 2 * storage.CLAIM_HEADROOM, False),
+    (5 * storage.CLAIM_HEADROOM, 2 * storage.CLAIM_HEADROOM - 1, True),
+])
+def test_capacity_warning_is_early_and_does_not_touch_pointer(context, monkeypatch, total, free,
+                                                               warning):
+    backend, state, _ = context
+    sha = initialize(context)
+    monkeypatch.setattr(storage.shutil, 'disk_usage',
+                        lambda _: SimpleNamespace(total=total, free=free))
+    result, body = request(backend, {'op': 'read_state'})
+    assert result == {'state': state, 'sha': sha, 'capacity_low': warning}
+    assert body == b''
+    assert backend.read_state() == {'state': state, 'sha': sha}
 
 
 def test_only_matching_busy_attempt_can_commit_and_retry_old_sha_conflicts(context):
