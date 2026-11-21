@@ -97,7 +97,10 @@ def _citations_are_grounded(
 
 DRAFT_LANGUAGE_RETRY_NOTE = (
     "The previous draft was not in Russian (Serbian text was left untranslated). Write the "
-    "title and body in Russian; keep only proper names in their original spelling."
+    "title and body in Russian. Transcribe street, district and venue names into Russian "
+    "Cyrillic; if the address matters for navigation, add the original once in Latin script "
+    "in brackets, e.g. «на Воеводинской (Vojvođanska)». Never use the Serbian letters "
+    "ј, љ, њ, ћ, ђ, џ in Russian text."
 )
 
 CITATION_RETRY_NOTE = (

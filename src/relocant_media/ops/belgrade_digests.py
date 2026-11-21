@@ -9,12 +9,12 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from html import escape
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Self, cast
 from zoneinfo import ZoneInfo
 
 import httpx
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,7 @@ from relocant_media.collectors.rhmz_forecast import (
 )
 from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.domain.city_profile import load_city_profile
+from relocant_media.domain.draft_language import serbian_cyrillic_words
 from relocant_media.domain.map_links import map_digest_url, map_event_url
 from relocant_media.domain.topic_tags import strip_draft_tags
 from relocant_media.ops.events_export import export_events
@@ -88,6 +89,12 @@ class TransportBrief(BaseModel):
 
     text: str = Field(min_length=1, max_length=230)
     details: tuple[str, ...] = Field(max_length=12)
+
+    @model_validator(mode="after")
+    def russian_spelling(self) -> Self:
+        if words := serbian_cyrillic_words(" ".join((self.text, *self.details))):
+            raise ValueError(f"transport brief keeps Serbian Cyrillic: {', '.join(words[:3])}")
+        return self
 
 
 class Pilot(BaseModel):
