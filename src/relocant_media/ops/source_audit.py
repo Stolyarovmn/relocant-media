@@ -10,6 +10,11 @@ from typing import Any
 import httpx
 
 from relocant_media.collectors.factory import build_collector
+from relocant_media.collectors.tls import (
+    MISSING_INTERMEDIATE_HINT,
+    is_missing_intermediate,
+    source_ssl_context,
+)
 from relocant_media.domain.freshness import freshness_decision
 from relocant_media.sources.registry import SourceConfig, load_source_registry
 
@@ -54,7 +59,9 @@ async def audit_sources(
         sources = tuple(source for source in sources if source.id in source_ids)
 
     rows = []
-    async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
+    async with httpx.AsyncClient(
+        timeout=25, trust_env=False, verify=source_ssl_context(),
+    ) as client:
         for source in sources:
             row: dict[str, Any] = {
                 "id": source.id,
@@ -109,6 +116,8 @@ async def audit_sources(
                         error_message=_error_message(error),
                         attempts=_TRANSPORT_ATTEMPTS,
                     )
+                    if is_missing_intermediate(error):
+                        row["tls_hint"] = MISSING_INTERMEDIATE_HINT
                 except Exception as error:
                     row.update(
                         status="error",
@@ -183,6 +192,8 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
                 details += f": {message}"
             if row.get("attempts", 1) > 1:
                 details += f" after {row['attempts']} attempts"
+            if row.get("tls_hint"):
+                details += f" ({row['tls_hint']})"
         elif row.get("status") == "partial":
             details = f"item_failures={len(row.get('item_failures', []))}"
         elif row.get("attempts", 1) > 1:

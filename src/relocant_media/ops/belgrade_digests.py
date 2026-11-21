@@ -30,6 +30,7 @@ from relocant_media.collectors.rhmz_forecast import (
     parse_forecast,
     parse_warning,
 )
+from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.map_links import map_digest_url, map_event_url
 from relocant_media.domain.topic_tags import strip_draft_tags
@@ -724,7 +725,9 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
               environment: dict[str, str]) -> dict[str, Any]:
     if slot.key in state.get(_HISTORY, {}):
         return cast(dict[str, Any], state[_HISTORY][slot.key])
-    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+    async with httpx.AsyncClient(
+        timeout=12, follow_redirects=False, verify=source_ssl_context(),
+    ) as client:
         now = datetime.now(UTC).astimezone(slot.scheduled.tzinfo)
         forecast = None
         warning = None

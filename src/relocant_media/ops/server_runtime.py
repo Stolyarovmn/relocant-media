@@ -25,6 +25,7 @@ from relocant_media.collectors.srbija_gov_article import (
     match_srbija_gov_article_url,
     parse_srbija_gov_article,
 )
+from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.domain.freshness import freshness_decision
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops import server_cycle as base
@@ -210,7 +211,9 @@ async def collect_sources(
     submissions_only: bool = False,
 ) -> dict[str, Any]:
     now = datetime.now(UTC)
-    async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
+    async with httpx.AsyncClient(
+        timeout=25, trust_env=False, verify=source_ssl_context(),
+    ) as client:
         direct = await _collect_direct_tips(
             engine,
             client,
