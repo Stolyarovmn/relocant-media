@@ -52,7 +52,9 @@ def test_two_week_slots_use_belgrade_time():
     assert due_slot(datetime(2026, 11, 13, 19, 29, tzinfo=UTC)) is None
     morning = due_slot(datetime(2026, 11, 14, 6, 30, tzinfo=UTC))
     assert morning is not None and morning.kind == "morning"
-    assert due_slot(datetime(2026, 11, 14, 7, 15, tzinfo=UTC)) is None
+    # После 45-минутного окна утренний слот остаётся догоняющим до 11:00 (#321).
+    assert due_slot(datetime(2026, 11, 14, 7, 15, tzinfo=UTC)).kind == "morning"
+    assert due_slot(datetime(2026, 11, 14, 10, 0, tzinfo=UTC)) is None
     assert due_slot(datetime(2026, 11, 27, 6, 30, tzinfo=UTC)) is not None
 
 
@@ -70,6 +72,15 @@ def test_digests_continue_after_the_pilot_without_an_end_date():
         slot = due_slot(now)
         assert slot is not None and slot.kind == kind
     assert due_slot(datetime(2027, 1, 15, 5, 30, tzinfo=UTC)) is None
+
+
+def test_missed_morning_digest_catches_up_until_eleven():
+    # #321: 21.11 every cycle failed 04:20–10:35 UTC and the morning digest was lost.
+    caught = due_slot(datetime(2026, 11, 21, 9, 40, tzinfo=UTC))  # 10:40 Belgrade
+    assert caught is not None and caught.kind == "morning"
+    assert caught.scheduled.hour == 7 and caught.scheduled.minute == 30
+    assert caught.key == due_slot(datetime(2026, 11, 21, 6, 30, tzinfo=UTC)).key
+    assert due_slot(datetime(2026, 11, 21, 10, 0, tzinfo=UTC)) is None  # 11:00 Belgrade
 
 
 def test_explicit_end_date_still_stops_regular_digests(monkeypatch):

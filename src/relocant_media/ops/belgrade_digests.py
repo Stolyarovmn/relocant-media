@@ -105,6 +105,9 @@ class Pilot(BaseModel):
     morning: time
     evening: time
     delivery_window_minutes: int = Field(ge=5, le=60)
+    # A morning digest missed because cycles were failing is still useful before noon:
+    # any later cycle in this window delivers it once (slot key keeps it idempotent).
+    morning_catch_up_until: time | None = None
     reminders_from: date | None = None
     official_reminder_sources: dict[date, tuple[str, ...]] = Field(default_factory=dict)
     transport_briefs: dict[str, TransportBrief] = Field(default_factory=dict)
@@ -163,6 +166,9 @@ def due_slot(now: datetime) -> Slot | None:
         scheduled = datetime.combine(local.date(), getattr(policy, kind), tzinfo=zone)
         expires = scheduled + timedelta(minutes=policy.delivery_window_minutes)
         naive = scheduled.replace(tzinfo=None)
+        if kind == "morning" and policy.morning_catch_up_until is not None:
+            expires = max(expires, datetime.combine(
+                local.date(), policy.morning_catch_up_until, tzinfo=zone))
         if (policy.starts_at <= naive
                 and (policy.ends_before is None or naive < policy.ends_before)
                 and scheduled <= local < expires):
