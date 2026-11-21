@@ -21,6 +21,7 @@ from relocant_media.domain.freshness import FreshnessDecision, evidence_freshnes
 from relocant_media.domain.policy import (
     AUTO_PUBLISH_CATEGORIES,
     HIGH_RISK_CATEGORIES,
+    OWNER_DECISION_REASONS,
     SOURCE_REPLACED_REASON,
 )
 from relocant_media.scheduler.models import SchedulerRun
@@ -252,7 +253,8 @@ def _validate(data: dict[str, Any]) -> bool:
                 and 0 <= data["delivery_attempts"] <= DELIVERY_ATTEMPTS
                 and data.get("state") in {"waiting", "processing", "ready", "waiting_fallback"}
                 and data.get("next_action") in {"prepare", "retry_prepare", "repair",
-                    "fallback", "process", "audit_rejection", "deliver", "owner_delivery"}
+                    "fallback", "process", "audit_rejection", "deliver", "owner_delivery",
+                    "owner_approval"}
                 and _stamp(data["next_attempt_at"]) <= _stamp(data["deadline_at"])
                 and _stamp(data["deadline_at"]) >= _stamp(data["first_seen_at"]))
     except (ValueError, KeyError, TypeError):
@@ -277,6 +279,68 @@ def _stored_coverage_reason(run: EditorialRun | None) -> str | None:
     except ValueError:
         return "invalid_reviewed_package"
     return package_coverage_reason(package)
+
+
+def _reviewable_utility(
+    source: Source, run: EditorialRun, post: Post | None, reason: Any,
+) -> bool:
+    ranking = run.outcome.get("ranking")
+    draft = run.outcome.get("draft")
+    return (isinstance(ranking, dict) and ranking.get("category") == "utilities"
+            and source.enabled and source.ownership == "official" and source.auto_publish
+            and not source.high_risk and post is not None and post.category == "utilities"
+            and isinstance(draft, dict) and (draft.get("title"), draft.get("body"))
+            == (post.title, post.body)
+            and run.delivery_status == "pending" and not _unsafe_delivery(run, post)
+            and isinstance(reason, str) and reason in OWNER_DECISION_REASONS
+            and "_package" in run.outcome and _stored_coverage_reason(run) is None)
+
+
+def _wait_for_owner(record: SchedulerRun, *, now: datetime) -> None:
+    if record.details.get("next_action") != "owner_approval":
+        _set(record, now=now, state="waiting", action="owner_approval",
+             reason="waiting_for_owner_approval", next_at=_stamp(record.details["deadline_at"]))
+
+
+def _restore_unqueued_utility(
+    session: Session, record: SchedulerRun, *, now: datetime,
+) -> None:
+    """Repair only a false terminal hold before an owner card ever existed."""
+    data = record.details
+    raw_id = data.get("raw_item_id")
+    if (type(raw_id) is not int or data.get("lifecycle_root_raw_id")
+            or data.get("replacement_raw_item_id")
+            or not isinstance(data.get("deadline_at"), str)
+            or not _validate({**data, "state": "waiting", "next_action": "owner_approval",
+                             "next_attempt_at": data["deadline_at"]})
+            or now >= _stamp(data["deadline_at"])):
+        return
+    try:
+        raw, source, run, post = _objects(session, raw_id)
+        fresh = _fresh(raw, source, now)
+    except ValueError:
+        return
+    old = run.outcome.get("_lifecycle_block") if run is not None else None
+    if (run is None or post is None or post.status != "blocked"
+            or run.outcome.get("status") != "blocked"
+            or run.outcome.get("reason") != "lifecycle_separate_publication_approval_required"
+            or not isinstance(old, dict) or old.get("previous_status") != "human_review"
+            or old.get("policy_version") != POLICY_VERSION
+            or not _reviewable_utility(source, run, post, old.get("previous_reason"))
+            or data.get("fingerprints", {}).get(str(raw_id)) != _fingerprint(raw)
+            or fresh.action != "keep"):
+        return
+    if session.scalar(select(Submission.id).where(
+        Submission.kind == "owner_editorial_review",
+        Submission.payload["raw_item_id"].as_integer() == raw_id,
+    ).limit(1)) is not None:
+        return
+    outcome = {key: value for key, value in run.outcome.items() if key != "_lifecycle_block"}
+    run.outcome = {**outcome, "status": "human_review", "reason": old["previous_reason"],
+                   "_recovered_owner_hold": old}
+    post.status = "human_review"
+    _wait_for_owner(record, now=now)
+    record.finished_at = None
 
 
 def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
@@ -329,6 +393,11 @@ def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
     owner_approved = _owner_approved(session, raw_id, run)
     ranking = (run.outcome if run else {}).get("ranking")
     category = str(ranking.get("category", "")).strip().lower() if isinstance(ranking, dict) else ""
+    if (not owner_approved and run is not None and post is not None
+            and run.outcome.get("status") == post.status == "human_review"
+            and _reviewable_utility(source, run, post, run.outcome.get("reason"))):
+        _wait_for_owner(record, now=now)
+        return record
     if not owner_approved and (source.high_risk or not source.auto_publish
             or category in HIGH_RISK_CATEGORIES
             or category and category not in AUTO_PUBLISH_CATEGORIES):
@@ -888,6 +957,12 @@ def sweep_materials(session: Session, *, city: str, now: datetime,
     records = {row.task_key: row for row in session.scalars(select(SchedulerRun).where(
         SchedulerRun.city == city, SchedulerRun.task_type == TASK_TYPE,
     ).order_by(SchedulerRun.id))}
+    for record in records.values():
+        if (record.status == "blocked"
+                and record.details.get("reason") == "separate_publication_approval_required"
+                and (raw_ids is None or record.details.get("raw_item_id") in raw_ids)):
+            _restore_unqueued_utility(session, record, now=now)
+    session.flush()
     closed_ids = {row.details["raw_item_id"] for row in records.values()
                   if row.details.get("state") in TERMINAL_STATES
                   and type(row.details.get("raw_item_id")) is int}

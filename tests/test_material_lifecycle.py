@@ -288,6 +288,71 @@ def test_owner_approved_risky_packet_keeps_manual_path_and_evidence(session):
     assert session.get(Post, run.post_id).status == "ready"
 
 
+def verified_utility_hold(session):
+    run = editorial(session, status="human_review", category="utilities", post=True,
+                    reason="package_requires_review")
+    post = session.get(Post, run.post_id)
+    payload = reviewed_package_for(session.get(RawItem, 1), session.get(Source, "city"),
+                                   title=post.title, body=post.body, now=NOW)
+    run.outcome = {**run.outcome, "draft": payload["outcome"]["draft"], "_package": payload,
+                   "_package_sha256": hashlib.sha256(canonical_json(payload).encode()).hexdigest()}
+    return run
+
+
+def test_verified_utility_waits_for_exact_owner_approval(session):
+    run = verified_utility_hold(session)
+    state = lifecycle_state(session, 1, now=NOW)
+    assert state["next_action"] == "owner_approval"
+    assert run.outcome["status"] == "human_review"
+    assert not before_attempt(session, 1, now=NOW)
+    assert not before_delivery_attempt(session, 1, now=NOW)
+
+    session.add(Submission(kind="owner_editorial_review", status="approved",
+                           payload={"raw_item_id": 1,
+                                    "package_sha256": run.outcome["_package_sha256"]}))
+    session.flush()
+    assert lifecycle_state(session, 1, now=NOW)["next_action"] == "owner_delivery"
+
+
+@pytest.mark.parametrize("obstacle", [None, "expired", "owner_decided", "source_changed"])
+def test_only_fresh_unqueued_verified_utility_recovers_from_false_block(session, obstacle):
+    run = verified_utility_hold(session)
+    state = lifecycle_state(session, 1, now=NOW)
+    record = session.scalar(select(SchedulerRun))
+    record.status = "blocked"
+    record.finished_at = NOW
+    record.details = {**state, "state": "blocked", "next_action": None, "next_attempt_at": None,
+                      "reason": "separate_publication_approval_required"}
+    run.outcome = {**run.outcome, "status": "blocked",
+                   "reason": "lifecycle_separate_publication_approval_required",
+                   "_lifecycle_block": {"policy_version": "material-lifecycle-v1",
+                                        "previous_status": "human_review",
+                                        "previous_reason": "package_requires_review"}}
+    post = session.get(Post, run.post_id)
+    post.status = "blocked"
+    checked = NOW + (MATERIAL_TTL if obstacle == "expired" else timedelta(minutes=5))
+    if obstacle == "owner_decided":
+        session.add(Submission(kind="owner_editorial_review", status="rejected",
+                               payload={"raw_item_id": 1}))
+    if obstacle == "source_changed":
+        session.get(RawItem, 1).body += " Дополнение к объявлению."
+    session.commit()
+
+    sweep = sweep_materials(session, city="belgrade", now=checked)
+    assert sweep.due_ids == sweep.fallback_ids == ()
+    assert 1 in sweep.excluded_ids
+    assert record.details["deadline_at"] == state["deadline_at"]
+    if obstacle:
+        assert sweep.blocked_ids == (1,)
+        assert post.status == "blocked"
+    else:
+        assert sweep.blocked_ids == ()
+        assert record.details["next_action"] == "owner_approval"
+        assert post.status == run.outcome["status"] == "human_review"
+        assert "_recovered_owner_hold" in run.outcome
+        assert record.finished_at is None
+
+
 def test_pending_owner_request_closes_as_cancelled_without_fake_owner_rejection(session):
     run = editorial(session, status="ready", post=True)
     payload = {"raw_item_id": 1, "reason": "Согласовать формулировку", "decision": None}
