@@ -486,6 +486,7 @@ function render() {
 function focusIncident(incident) {
   if (!state.map) return false;
   state.map.closePopup();
+  state.map.invalidateSize({ pan: false });
   const now = Date.now();
   const includeExpired = showsArchived(incident);
   const locations = exactMapPoints(state.index, incident, now, includeExpired)
@@ -496,18 +497,21 @@ function focusIncident(incident) {
   for (const area of incident.areas) {
     if (unexpired(area.window, now, includeExpired)) locations.push(...area.rings[0]);
   }
-  const padding = mobile.matches
-    ? { paddingTopLeft: [24, 155], paddingBottomRight: [25, 28] }
-    : { padding: [30, 30] };
-  if (locations.length === 1) {
-    state.map.setView(locations[0], 17, { animate });
-  } else if (locations.length > 1) {
-    state.map.fitBounds(locations, { ...padding, maxZoom: 17, animate });
+  let padding = { padding: [30, 30] };
+  if (mobile.matches) {
+    const frame = mapFrame.getBoundingClientRect();
+    const filters = byId("layer-filter").getBoundingClientRect();
+    const top = Math.min(Math.max(24, filters.bottom - frame.top + 12), Math.max(24, frame.height - 54));
+    padding = { paddingTopLeft: [24, top], paddingBottomRight: [25, 28] };
+  }
+  const animateFocus = animate && !mobile.matches;
+  if (locations.length) {
+    state.map.fitBounds(locations, { ...padding, maxZoom: 17, animate: animateFocus });
   } else {
     const bounds = incident.kind === "water" ? streetBounds(state.index, incident) : null;
     if (bounds) {
       state.map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]],
-        { ...padding, maxZoom: 16, animate });
+        { ...padding, maxZoom: 16, animate: animateFocus });
       state.focusNote = "Показана улица. Границы участка указаны в объявлении.";
       showMapNote();
       return true;
@@ -560,10 +564,13 @@ function openEvent(incident, { fromCard = false } = {}) {
   focusIncident(incident);
 }
 
-function showAnnouncements(open) {
+function showAnnouncements(open, refocus = false) {
   announcementToggle.setAttribute("aria-expanded", String(open));
   announcementBody.hidden = !open;
-  state.map?.invalidateSize({ pan: false });
+  const selected = refocus && mobile.matches && !state.address
+    ? state.incidents.find((incident) => incident.id === state.selected) : null;
+  if (selected) focusIncident(selected);
+  else state.map?.invalidateSize({ pan: false });
 }
 
 let refreshTimer;
@@ -783,10 +790,10 @@ document.addEventListener("visibilitychange", () => {
     scheduleClock();
   }
 });
-announcementToggle.addEventListener("click", () => showAnnouncements(announcementBody.hidden));
+announcementToggle.addEventListener("click", () => showAnnouncements(announcementBody.hidden, true));
 selectedPreview.addEventListener("click", () => {
-  showAnnouncements(true);
-  eventList.querySelector('[data-selected="true"] button')?.focus();
+  showAnnouncements(true, true);
+  eventList.querySelector('[data-selected="true"] button')?.focus({ preventScroll: true });
 });
 mobile.addEventListener("change", () => {
   showAnnouncements(!mobile.matches);
