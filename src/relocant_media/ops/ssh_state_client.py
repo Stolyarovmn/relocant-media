@@ -22,7 +22,7 @@ MAX_STATE = 512 * 1024
 REMOTE_HELPER = "/usr/local/libexec/relocant-media/ssh-state-storage"
 RETRY_SAFE_OPERATIONS = frozenset({"health", "read_state", "get_blob", "put_blob"})
 ERRORS = frozenset({"state_missing", "blob_missing", "state_exists", "conflict",
-                    "invalid_request", "storage_error", "bootstrap_blocked"})
+                    "invalid_request", "storage_error", "bootstrap_blocked", "storage_capacity"})
 
 
 REASONS = frozenset({"timeout", "ssh_unavailable", "oversize_response", "bad_header",
