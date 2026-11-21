@@ -2,7 +2,7 @@ import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=12";
+} from "./core.js?v=13";
 import { calendarLink } from "./calendar.js?v=4";
 import { setupPlaces } from "./places.js?v=12";
 
@@ -193,14 +193,27 @@ function eventCard(incident, now) {
   card.append(countdown);
 
   const times = incidentTimes(incident);
-  if (times.length === 1) card.append(make("p", "event-when", times[0]));
-  if (times.length > 1) {
+  const districts = incident.waterDistricts;
+  if (times.length === 1 && !districts.length) card.append(make("p", "event-when", times[0]));
+  if (times.length > 1 && !districts.length) {
     const details = make("details", "event-when");
     details.append(make("summary", "", `Время работ · окон ${times.length}`));
     const windows = make("ul", "event-windows");
     for (const time of times) windows.append(make("li", "", time));
     details.append(windows);
     card.append(details);
+  }
+  for (const district of districts) {
+    const group = make("div", "event-scope");
+    if (!unexpired(district.window, now)) group.dataset.expired = "true";
+    group.append(make("strong", "", district.municipality),
+      make("p", "event-when", addressWindowText(district.window)));
+    if (district.boundary.length) {
+      group.append(make("p", "", district.boundary.join(" · ")),
+        make("p", "", "На карте отмечены подтверждённые участки границы квартала."));
+    }
+    if (district.wholeStreets.length) group.append(make("p", "", district.wholeStreets.join(" · ")));
+    card.append(group);
   }
   for (const segment of incident.segments) {
     const extent = segment.start && segment.end ? ` от ${segment.start} до ${segment.end}` : "";
@@ -414,13 +427,14 @@ function renderPoints(now) {
     const archived = incidentStatus(incident, now) === "closed";
     const road = incident.kind === "road";
     const roadPaths = [];
-    for (const { coordinates, label, window } of lines) {
+    for (const { coordinates, label, window, boundary } of lines) {
       const expired = archived || !unexpired(window, now);
       const style = road
         ? { opacity: expired ? .30 : selected ? .64 : .48, weight: roadLineWeight(state.map.getZoom(), selected) }
         : { opacity: expired ? .48 : .94, weight: selected ? 8 : 5 };
       const path = leaflet.polyline(coordinates, {
         color, ...style, lineCap: "round", lineJoin: "round",
+        ...(boundary ? { dashArray: "5 7", weight: selected ? 6 : 4 } : {}),
         className: road ? "outage-road" : "outage-line",
       });
       bindFeature(path, state.eventLayer, incident, label, window);

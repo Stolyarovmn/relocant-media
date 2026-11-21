@@ -27,7 +27,9 @@ from relocant_media.services.local_outage_geometry import (
 from relocant_media.services.local_street_geometry import (
     StreetIndex,
     load_street_index,
+    local_block_edges,
     local_street_line,
+    local_street_name,
 )
 from relocant_media.services.media_review_packet import _valid_snapshot
 from relocant_media.services.road_scope import is_road_restriction, resolve_road_segments
@@ -116,6 +118,12 @@ class Settlement(Window):
     parent: Label | None = None
 
 
+class WaterDistrict(Window):
+    municipality: Label
+    boundary: Annotated[tuple[Label, ...], Field(max_length=8)] = ()
+    whole_streets: Annotated[tuple[Label, ...], Field(max_length=120)] = ()
+
+
 class Pin(PublicModel):
     lat: Latitude
     lon: Longitude
@@ -157,6 +165,7 @@ class Line(PublicModel):
     label: Label
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    boundary: bool = False
 
     @model_validator(mode="after")
     def ordered_if_timed(self) -> Line:
@@ -180,11 +189,12 @@ class Incident(PublicModel):
     published_at: datetime | None = None
     archived: bool = False
     points: Annotated[tuple[Pin, ...], Field(max_length=_MAX_HOUSES)] = ()
-    lines: Annotated[tuple[Line, ...], Field(max_length=3)] = ()
+    lines: Annotated[tuple[Line, ...], Field(max_length=16)] = ()
     areas: Annotated[tuple[Area, ...], Field(max_length=_MAX_AREAS)] = ()
     addresses: Annotated[tuple[Address, ...], Field(max_length=_MAX_HOUSES)] = ()
     ranges: Annotated[tuple[PrintedRange, ...], Field(max_length=_MAX_HOUSES)] = ()
     settlements: Annotated[tuple[Settlement, ...], Field(max_length=120)] = ()
+    water_districts: Annotated[tuple[WaterDistrict, ...], Field(max_length=120)] = ()
     reported_scope: Label | None = None
     segments: Annotated[tuple[Segment, ...], Field(max_length=3)] = ()
     windows: Annotated[tuple[Window, ...], Field(max_length=300)] = ()
@@ -244,14 +254,15 @@ def _coords(latitude: object, longitude: object) -> Coordinate | None:
     return (lat, lon) if 44.2 <= lat <= 45.2 and 19.8 <= lon <= 21.1 else None
 
 
-def _line(values: list[list[str]], label: str, window: Window | None = None) -> Line | None:
+def _line(values: list[list[str]], label: str, window: Window | None = None, *,
+          boundary: bool = False) -> Line | None:
     coords = [_coords(*value) if isinstance(value, list) and len(value) == 2 else None
               for value in values]
     if None in coords or len(set(coords)) < 2:
         return None
     return Line(coordinates=tuple(pair for pair in coords if pair is not None), label=label,
                 starts_at=window.starts_at if window else None,
-                ends_at=window.ends_at if window else None)
+                ends_at=window.ends_at if window else None, boundary=boundary)
 
 
 def _incident(
@@ -389,15 +400,46 @@ def _water(
     addresses: dict[Address, Coordinate | None] = {}
     areas: list[Area] = []
     settlements: list[Settlement] = []
+    lines: list[Line] = []
+    ranges: list[PrintedRange] = []
+    districts: list[WaterDistrict] = []
     for scope in scopes:
         window = Window(starts_at=scope.starts_at, ends_at=scope.ends_at)
+        municipality = scope.municipality
+        boundary = tuple(local_street_name(name, municipality, streets) for name in scope.boundary)
+        whole = tuple(local_street_name(name, municipality, streets)
+                      for name in scope.whole_streets)
+        districts.append(WaterDistrict(**window.model_dump(), municipality=municipality,
+                                       boundary=boundary, whole_streets=whole))
+        for edge in local_block_edges(boundary, municipality, streets):
+            if (line := _line(edge["coordinates"], edge["street"], window, boundary=True)):
+                lines.append(line)
+        for street in whole:
+            if index is not None:
+                for house_location in index.street(street, municipality):
+                    addresses[Address(**window.model_dump(), municipality=municipality,
+                                      street=street, number=house_location.number)] = None
+        for span in scope.ranges:
+            street = local_street_name(span.street, municipality, streets)
+            ranges.append(PrintedRange(**window.model_dump(), municipality=municipality,
+                                       street=street, number=f"{span.first}–{span.last}"))
+            if index is not None:
+                for house_location in index.street(street, municipality):
+                    number = re.match(r"[0-9]+", house_location.number)
+                    if number is not None and span.first <= int(number[0]) <= span.last:
+                        addresses[Address(**window.model_dump(), municipality=municipality,
+                                          street=street, number=house_location.number)] = None
         for place in scope.settlements:
             place_entry, polygons = _settlement(place, window, index)
             if place_entry not in settlements:
                 settlements.append(place_entry)
                 areas.extend(polygons)
         for segment_entry in scope.segments:
-            segment_windows[(Segment.model_validate(segment_entry), window)] = None
+            segment = Segment.model_validate({
+                **segment_entry,
+                "street": local_street_name(segment_entry["street"], municipality, streets),
+            })
+            segment_windows[(segment, window)] = None
         for address_entry in scope.addresses:
             address = Address(
                 starts_at=window.starts_at, ends_at=window.ends_at,
@@ -409,14 +451,15 @@ def _water(
         fallback_window = Window(starts_at=period[0], ends_at=period[1]) if period else None
         segment_windows.update({(Segment.model_validate(entry), fallback_window): None
                                 for entry in point["segments"]})
-    lines: list[Line] = []
     segments = tuple(dict.fromkeys(segment for segment, _ in segment_windows))[:3]
+    segment_lines = 0
     for segment, line_window in segment_windows:
         found = geography.get(segment) or local_street_line(segment.model_dump(), streets)
-        if found is not None and len(lines) < 3 and (
+        if found is not None and segment_lines < 3 and (
             line := _line(found["coordinates"], segment.street, line_window)
         ) is not None:
             lines.append(line)
+            segment_lines += 1
             if index is not None and line_window is not None:
                 for street_location in index.street(segment.street, segment.municipality):
                     if not within_outage_segment(street_location.point, line.coordinates):
@@ -456,8 +499,9 @@ def _water(
                       f"Отключение воды · {segments[0].street}" if segments else document.title)
     return _incident(
         document, "water", title or fallback_title, windows, segments=segments,
-        lines=tuple(lines), source_map_url=point["official_map_url"] if point else None,
+        lines=tuple(lines[:16]), source_map_url=point["official_map_url"] if point else None,
         addresses=tuple(houses), points=tuple(pins[:_MAX_HOUSES]), areas=tuple(areas[:_MAX_AREAS]),
+        ranges=tuple(ranges[:_MAX_HOUSES]), water_districts=tuple(districts[:120]),
         settlements=tuple(settlements[:120]), reported_scope=reported_scope,
     )
 
@@ -583,6 +627,8 @@ def export_map(
                        RawItem.url.contains("/elektricna-energija/"),
                        RawItem.url.contains("/beoinfo-vesti/") & (
                            RawItem.title.ilike("%bez vode%") | RawItem.title.contains("без воде")
+                           | RawItem.title.ilike("%vodovodnoj mreži%")
+                           | RawItem.title.contains("водоводној мрежи")
                        ), published)),
                or_(published, recent))
         .order_by(RawItem.ingested_at.desc(), RawItem.id.desc())

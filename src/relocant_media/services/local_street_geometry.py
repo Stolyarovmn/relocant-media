@@ -57,3 +57,36 @@ def local_street_line(
             })
     elements.extend({"type": "node", "id": node} for node in nodes)
     return _segment_line(segment, elements)
+
+
+def local_street_name(name: str, municipality: str, index: StreetIndex) -> str:
+    roads = index.get(_municipality({"municipality": municipality}), {})
+    if _name(name) in roads:
+        return name
+    # City notices decline street adjectives. Only use a unique indexed match.
+    endings = {"om": "a", "oj": "a", "ом": "а", "ој": "а"}
+    for ending, replacement in endings.items():
+        if name.casefold().endswith(ending):
+            candidate = name[:-len(ending)] + replacement
+            if _name(candidate) in roads:
+                return candidate
+    return name
+
+
+def local_block_edges(
+    boundary: tuple[str, ...], municipality: str, index: StreetIndex,
+) -> list[dict[str, Any]]:
+    roads = index.get(_municipality({"municipality": municipality}), {})
+    names = [local_street_name(name, municipality, index) for name in boundary]
+    nodes = {name: {point[0] for way in roads.get(_name(name), []) for point in way[2]}
+             for name in names}
+    edges = []
+    for name in names:
+        neighbors = [other for other in names if other != name and nodes[name] & nodes[other]]
+        if len(neighbors) != 2:
+            continue
+        segment = {"municipality": municipality, "street": name,
+                   "start": neighbors[0], "end": neighbors[1]}
+        if (edge := local_street_line(segment, index)) is not None:
+            edges.append({"street": name, **edge})
+    return edges

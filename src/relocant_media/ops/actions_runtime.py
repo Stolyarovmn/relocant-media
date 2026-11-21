@@ -616,19 +616,20 @@ def run_child(command: list[str], environment: dict[str, str]) -> int:
 def print_failure_coordinates(report: dict[str, Any]) -> None:
     fields: dict[str, Any] = {
         key: value for key in ("status", "error_type", "error_site", "backup_error_type")
-        if isinstance(value := report.get(key), str)
-        and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)
-    }
-    # Отчёт резервного импорта хранит причины по каждому решению; выводим только
-    # фиксированные коды этапа/типа/причины, без текстов исключений и пакетов.
+              if isinstance(value := report.get(key), str)
+              and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
     errors = report.get("processing_errors")
-    if isinstance(errors, list):
-        safe = [{key: value for key in ("stage", "error_type", "reason")
-                 if isinstance(value := entry.get(key), str)
-                 and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
-                for entry in errors[:5] if isinstance(entry, dict)]
-        if any(safe):
-            fields["errors"] = [entry for entry in safe if entry]
+    coordinates = []
+    for error in errors[:5] if isinstance(errors, list) else []:
+        if not isinstance(error, dict):
+            continue
+        safe = {key: value for key in ("stage", "error_type", "error_site", "reason")
+                if isinstance(value := error.get(key), str)
+                and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
+        if safe:
+            coordinates.append(safe)
+    if coordinates:
+        fields["processing_errors"] = coordinates
     print(json.dumps({"runtime_failure": fields}), file=sys.stderr)
 
 

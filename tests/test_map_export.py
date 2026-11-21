@@ -18,6 +18,7 @@ from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops.map_backfill import parse_targets, plan
 from relocant_media.ops.map_export import (
+    Area,
     _power,
     _water,
     export_map,
@@ -36,9 +37,58 @@ from relocant_media.services.transport_map import build_transport_map
 from relocant_media.services.utility_scope import extract_power_scopes
 from relocant_media.services.water_outage_scope import extract_water_outage_scopes
 from relocant_media.sources.registry import load_source_file
-from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, SourceRevision
+from relocant_media.storage.models import (
+    Base,
+    EditorialRun,
+    Post,
+    RawItem,
+    SourceRevision,
+    Submission,
+)
 
 NOW = datetime(2026, 11, 12, 7, tzinfo=UTC)
+
+
+def test_backfill_accepts_only_the_exact_owner_receipt_for_a_water_post():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    water = water_document(source_id="city_beograd_news", published_at=NOW)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", load_source_file(
+            Path("cities/belgrade/sources/city_beograd_news.yaml"),
+        ))
+        capture_collected_batch(session, [
+            CollectedItem(**water.model_dump(), external_id="116609"),
+        ])
+        raw = session.scalar(select(RawItem))
+        post = Post(city="belgrade", category="utilities", title="Отключение воды", body="Тест",
+                    status="published", confidence=1, telegram_message_id=149, published_at=NOW)
+        session.add(post)
+        session.flush()
+        session.add(EditorialRun(raw_item_id=raw.id, post_id=post.id, delivery_status="sent",
+                                 evidence={}, outcome={"_package_sha256": "a" * 64}))
+        receipt = Submission(kind="owner_editorial_review", status="published", payload={
+            "raw_item_id": raw.id, "post_id": post.id, "owner_decision": "publish",
+            "telegram_channel_message_id": 149, "package_sha256": "a" * 64,
+        })
+        session.add(receipt)
+        session.flush()
+        feed = export_map(session, observed_at=NOW)
+        # Геометрия может быть только контуром, без точек или адресов.
+        incident = feed.incidents[0]
+        area = Area(label="Квартал", scope="settlement", starts_at=incident.starts_at,
+                    ends_at=incident.ends_at,
+                    rings=(((44.8, 20.4), (44.8, 20.5), (44.9, 20.5), (44.8, 20.4)),))
+        incident = incident.model_copy(update={"areas": (area,)})
+        feed = feed.model_copy(update={"incidents": (incident,)})
+        targets = {149: incident.id}
+        app = "https://t.me/relocant_media_belgrade_bot"
+        assert plan(session, targets, feed, app) == {149: f"{app}?startapp={incident.id}"}
+        receipt.payload = {**receipt.payload, "package_sha256": "b" * 64}
+        session.flush()
+        with pytest.raises(ValueError, match="must match"):
+            plan(session, targets, feed, app)
+    engine.dispose()
 
 
 def test_official_suspension_revision_removes_stale_map_without_rewriting_reviewed_evidence():

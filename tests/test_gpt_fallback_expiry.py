@@ -84,7 +84,7 @@ def test_failure_coordinates_include_only_safe_processing_errors(capsys):
     assert "PRIVATE-TEXT" not in err
     assert json.loads(err)["runtime_failure"] == {
         "status": "PRIMARY_FAILED",
-        "errors": [
+        "processing_errors": [
             {"stage": "validate", "error_type": "FallbackValidationError",
              "reason": "material_closed"},
             {"error_type": "ValueError"},
