@@ -269,3 +269,36 @@ def test_package_cli_fake_requires_persist(monkeypatch: pytest.MonkeyPatch) -> N
     ])
     with pytest.raises(SystemExit, match="2"):
         main()
+
+
+def _rebind_draft(payload: dict) -> None:
+    from relocant_media.ai.models import RussianDraft
+
+    draft = RussianDraft.model_validate(payload["outcome"]["draft"])
+    for review in payload["reviews"]:
+        review.update(draft_sha256=draft_sha256(draft), score=100)
+    bind_facts_check(payload)
+    bind_context(payload)
+
+
+def test_city_category_cannot_auto_publish_missing_minor_story() -> None:
+    # Обезличенный пример из #319: модель выбрала city, пост ушёл автопубликацией.
+    payload = package_payload()
+    payload["outcome"]["ranking"]["category"] = "city"
+    payload["outcome"]["draft"]["body"] = (
+        "Полиция ищет 17-летнего подростка из Земуна, страдающего аутизмом. "
+        + payload["outcome"]["draft"]["body"])
+    _rebind_draft(payload)
+    result = evaluate_package(parse(payload), now=NOW)
+    assert result.status == "human_review"
+    assert result.reason == "sensitive_topic_requires_human_review"
+
+
+def test_serbian_source_signal_holds_even_with_neutral_draft() -> None:
+    payload = package_payload()
+    payload["evidence"]["title"] = "Nestao dečak (14) iz Zemuna, Pronađi me traži pomoć"
+    bind_facts_check(payload)
+    bind_context(payload)
+    result = evaluate_package(parse(payload), now=NOW)
+    assert result.status == "human_review"
+    assert result.reason == "sensitive_topic_requires_human_review"
