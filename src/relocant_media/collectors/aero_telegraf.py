@@ -7,7 +7,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from bs4 import BeautifulSoup
 
-from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.base import ArticleBatchError, RawItem, article_failure
 from relocant_media.sources.registry import SourceConfig
 
 SOURCE_ID = "media_aero_telegraf"
@@ -59,6 +59,7 @@ class AeroTelegrafCollector:
         if source.id != SOURCE_ID or str(source.url) != INDEX:
             raise ValueError("aviation source registry differs")
         self.client = client
+        self.item_failures: list[dict[str, str]] = []
 
     async def _read(self, url: str) -> str:
         data = bytearray()
@@ -76,20 +77,37 @@ class AeroTelegrafCollector:
         return parse_article(await self._read(url), url)
 
     async def collect(self) -> list[RawItem]:
+        self.item_failures.clear()
         soup = BeautifulSoup(await self._read(INDEX), "html.parser")
         urls: dict[str, str] = {}
-        for a in soup.select("a[href][title]"):
-            url = urljoin(INDEX, str(a.get("href", "")))
+        recognized = False
+        for a in soup.select("a[href]"):
+            try:
+                url = urljoin(INDEX, str(a.get("href", "")))
+            except ValueError:
+                continue
             key = article_id(url)
-            if key and _local(str(a.get("title", ""))):
+            if key is None:
+                continue
+            recognized = True
+            if _local(str(a.get("title") or a.get_text(" ", strip=True))):
                 urls.setdefault(key, url)
+        if not recognized:
+            raise ValueError("aviation index has no recognized article links")
         now = datetime.now(UTC)
-        items = []
+        items: list[RawItem] = []
+        parsed_count = 0
         for url in list(urls.values())[:5]:
             try:
                 item = await self.collect_url(url)
-            except (httpx.HTTPError, ValueError):
+            except (httpx.HTTPError, ValueError) as error:
+                self.item_failures.append(article_failure(url, error))
                 continue
+            parsed_count += 1
             if item.published_at and now - timedelta(hours=48) <= item.published_at <= now:
                 items.append(item)
+        if self.item_failures and not parsed_count:
+            raise ArticleBatchError(
+                "all local aviation articles failed extraction", self.item_failures,
+            )
         return items

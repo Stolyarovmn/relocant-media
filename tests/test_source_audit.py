@@ -1,5 +1,12 @@
+import asyncio
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+import httpx
+import pytest
+
+from relocant_media.ops import source_audit
 from relocant_media.ops.source_audit import (
     render_source_health_markdown,
     source_health_exit_code,
@@ -94,3 +101,80 @@ def test_render_source_health_markdown_exposes_degraded_sources() -> None:
     assert "| network | transport_error | - | ConnectError after 3 attempts |" in rendered
     assert "| broken | error | - | ValueError |" in rendered
     assert "future" not in rendered
+
+
+def _audit_with_response(monkeypatch, source_id, handler):
+    client = httpx.AsyncClient
+    monkeypatch.setattr(source_audit.httpx, "AsyncClient", lambda **kwargs: client(
+        transport=httpx.MockTransport(handler), **kwargs,
+    ))
+    report = asyncio.run(source_audit.audit_sources(
+        Path("cities/belgrade/sources"), online=True, source_ids=(source_id,),
+    ))
+    return report["sources"][0]
+
+
+@pytest.mark.parametrize(("scenario", "status"), [
+    ("index_changed", "error"), ("article_changed", "error"), ("old_article", "empty"),
+])
+def test_aviation_health_distinguishes_broken_and_old_articles(monkeypatch, scenario, status):
+    article = "https://aero.telegraf.rs/avio-kompanije/123456-air-serbia"
+    date = (datetime.now(UTC) - timedelta(days=4)).isoformat()
+
+    def handler(request):
+        if request.url.path == "/avio-kompanije":
+            index = ("<main>Promenjena struktura</main>" if scenario == "index_changed"
+                     else f'<a href="{article}">Air Serbia</a>')
+            return httpx.Response(200, text=index)
+        assert str(request.url) == article
+        if scenario == "article_changed":
+            return httpx.Response(200, text="<article><h2>Air Serbia</h2></article>")
+        return httpx.Response(200, text=(
+            f'<link rel="canonical" href="{article}">'
+            f'<meta property="article:published_time" content="{date}">'
+            '<article class="single-article"><h1>Air Serbia</h1><div class="article-content">'
+            f'<p>{"Saopštenje o letovima sa beogradskog aerodroma. " * 4}</p></div></article>'
+        ))
+
+    row = _audit_with_response(monkeypatch, "media_aero_telegraf", handler)
+    assert row["status"] == status
+    if scenario == "article_changed":
+        assert row["item_failures"][0]["url"] == article
+
+
+@pytest.mark.parametrize(("scenario", "status"), [
+    ("no_notices", "empty"), ("all_broken", "error"), ("one_broken", "partial"),
+])
+def test_water_source_keeps_valid_notices_and_reports_errors(monkeypatch, scenario, status):
+    stamp = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    headline = "Планирани радови на водоводној мрежи"
+    base = "https://www.bvk.rs/"
+
+    def document(identity, slug):
+        return {"id": identity, "slug": slug, "link": f"{base}{slug}/",
+                "title": {"rendered": headline}, "date_gmt": stamp}
+
+    broken = document(123456, "broken")
+    valid = document(123457, "valid")
+
+    def handler(request):
+        if request.url.path == "/wp-json/wp/v2/posts":
+            rows = {"no_notices": [], "all_broken": [broken], "one_broken": [broken, valid]}
+            return httpx.Response(200, json=rows[scenario])
+        if request.url.path == "/broken/":
+            return httpx.Response(200, text="<main>Promenjena struktura</main>")
+        assert str(request.url) == valid["link"]
+        return httpx.Response(200, text=(
+            f'<link rel="canonical" href="{valid["link"]}">'
+            f'<article class="post-entry-123457"><h1>{headline}</h1><div class="entry-content">'
+            f'<p>{"Без воде ће бити потрошачи у овој улици. " * 3}</p></div></article>'
+        ))
+
+    row = _audit_with_response(monkeypatch, "bvk_outage_news", handler)
+    assert row["status"] == status
+    if scenario == "one_broken":
+        assert row["fetched_items"] == 1
+    if scenario != "no_notices":
+        assert [(failure["url"], failure["error_type"]) for failure in row["item_failures"]] == [
+            (broken["link"], "ValueError"),
+        ]
