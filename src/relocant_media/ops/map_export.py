@@ -416,19 +416,19 @@ def _water(
                 lines.append(line)
         for street in whole:
             if index is not None:
-                for location in index.street(street, municipality):
+                for house_location in index.street(street, municipality):
                     addresses[Address(**window.model_dump(), municipality=municipality,
-                                      street=street, number=location.number)] = None
+                                      street=street, number=house_location.number)] = None
         for span in scope.ranges:
             street = local_street_name(span.street, municipality, streets)
             ranges.append(PrintedRange(**window.model_dump(), municipality=municipality,
                                        street=street, number=f"{span.first}–{span.last}"))
             if index is not None:
-                for location in index.street(street, municipality):
-                    number = re.match(r"[0-9]+", location.number)
+                for house_location in index.street(street, municipality):
+                    number = re.match(r"[0-9]+", house_location.number)
                     if number is not None and span.first <= int(number[0]) <= span.last:
                         addresses[Address(**window.model_dump(), municipality=municipality,
-                                          street=street, number=location.number)] = None
+                                          street=street, number=house_location.number)] = None
         for place in scope.settlements:
             place_entry, polygons = _settlement(place, window, index)
             if place_entry not in settlements:
