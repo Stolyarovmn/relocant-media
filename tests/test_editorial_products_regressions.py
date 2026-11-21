@@ -150,3 +150,31 @@ def test_duplicate_created_by_repair_is_rejected_before_package_import(
         assert run.outcome["draft"] is None
         assert run.post_id is None
         assert session.scalars(select(Post.id)).all() == [previous_id]
+
+
+def test_retold_transport_story_is_skipped_before_reviews(seeded, tmp_path, monkeypatch):
+    # #333: другой источник пересказал ту же новость про линию 82 — второго поста нет.
+    engine, raw_id, provider = seeded
+    now = datetime.now(UTC)
+    provider._responses["draft"] = provider._responses["draft"].model_copy(update={
+        "title": "Автобус №82 изменит маршрут до 11 декабря",
+        "body": "С 17 ноября по 11 декабря автобус №82 идёт в объезд из-за работ.",
+    })
+    with Session(engine) as session:
+        source_id = session.get(RawItem, raw_id).source_id
+        previous = _history_row(
+            session, source_id, "line-82", created_at=now - timedelta(hours=5),
+            published_at=now - timedelta(hours=4),
+            body="Маршрут 82 с 17.11 до 11.12 пойдёт по временной схеме.",
+        )
+        session.commit()
+        previous_id = previous.id
+
+    def forbidden_reviews(*args, **kwargs):
+        raise AssertionError("Повтор истории не должен тратить независимые ревью")
+
+    monkeypatch.setattr(server_cycle, "review_with_repairs", forbidden_reviews)
+    result = server_cycle.prepare_reviewed(engine, raw_id, provider, tmp_path)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == f"draft_repeats_recent_story:{previous_id}"
