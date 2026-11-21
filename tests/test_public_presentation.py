@@ -67,7 +67,7 @@ async def test_regular_channel_news_uses_editorial_format_and_source_preview(mon
         assert data == {
             "chat_id": -1003967014133,
             "text": ("<b>Новости &amp; события</b>\n\nКороткое описание.\n\n"
-                     "<b>Когда</b>: <code>10:00–12:30</code>\n<b>Вход</b>: свободный"
+                     "<b>Когда</b>: <b>10:00–12:30</b>\n<b>Вход</b>: свободный"
                      "\n\n<blockquote>«Точная цитата»</blockquote>\n\n"
                      "#События #Досуг\n\n"
                      '<a href="https://www.beograd.rs/vest?x=1&amp;y=2">Источник</a>'),
@@ -95,7 +95,7 @@ def test_reviewed_photo_caption_preserves_text_and_formats_utf16_entities():
     ]
     assert fragments == [
         ("text_link", "Источник"), ("bold", "🎭 Выставка"), ("bold", "Когда"),
-        ("code", "10:00–12:30"), ("hashtag", "#События"), ("hashtag", "#Досуг"),
+        ("bold", "10:00–12:30"), ("hashtag", "#События"), ("hashtag", "#Досуг"),
     ]
 
 

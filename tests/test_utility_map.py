@@ -181,7 +181,7 @@ def test_notice_collapses_plain_power_addresses_with_their_source_intervals():
         html = native["message_html"]
         collapsed = html.index("<blockquote expandable>")
         assert html.index("Проверенный текст.") < collapsed
-        assert "<b>Где</b>: Белград.\n<b>Когда</b>: <code>09:00–13:00</code>" in html
+        assert "<b>Где</b>: Белград.\n<b>Когда</b>: <b>09:00–13:00</b>" in html
         assert collapsed < html.index("VOJVODE ŠUPLJIKCA, 42, 44-48, BB")
         assert "• BRANKA KRSMANOVIĆA, 2 · Zvezdara" in html
         assert "<b>13.11.2026 · 13:00–15:00</b>" in html

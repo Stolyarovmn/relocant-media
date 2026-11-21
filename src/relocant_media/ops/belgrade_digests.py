@@ -589,6 +589,16 @@ async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | 
                    map_id=entry.map_id if same else "", reminder=True)
 
 
+def reply_target(
+    slot: Slot, confirmed: Sequence[Entry], originals: dict[str, int | None],
+) -> int | None:
+    """Only a standalone reminder answers its original post; a digest is its own post and
+    must not show another story's headline above it (#335)."""
+    if slot.kind == "reminder" and len(confirmed) == 1:
+        return originals[confirmed[0].url]
+    return None
+
+
 def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) -> Digest | None:
     if not entries or (len(entries) < 2 and slot.kind != "morning"
                        and not any(entry.reminder for entry in entries)):
@@ -804,8 +814,7 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
         ):
             return {"state": "reminder_source_unconfirmed", "items": len(candidates)}
         if confirmed:
-            if len(confirmed) == 1 and (slot.kind == "reminder" or len(entries) < 2):
-                reply_to = originals[confirmed[0].url]
+            reply_to = reply_target(slot, confirmed, originals)
             for index, item in enumerate(confirmed):
                 linked = matching_posts.get(item.url)
                 if linked and linked.url != item.url and linked.evidence_sha == item.evidence_sha:
