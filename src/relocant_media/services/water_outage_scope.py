@@ -70,6 +70,21 @@ _HOUSE_SUFFIX = (
 )
 _HOUSE_LIST = re.compile(rf"{_OUTAGE}{_HOUSE_SUFFIX}", re.I)
 _HOUSE_WITH_AREA = re.compile(rf"\b(?:i|и){_HOUSE_SUFFIX}", re.I)
+_BOUNDED_BLOCK = re.compile(
+    rf"{_OUTAGE}\s+(?:u bloku oivičenom|у блоку оивиченом)\s+"
+    r"(?P<streets>[^.;:()]{5,450}?)\s+(?:ulicom|ulicama|улицом|улицама)\b", re.I,
+)
+_STREET_LIST = re.compile(
+    rf"{_OUTAGE}\s+(?:u (?:sledećim )?ulicama|у (?:следећим )?улицама)"
+    r"(?:\s*:\s*|\s+)(?P<streets>[^.;:]{5,800})",
+    re.I,
+)
+_STREET_PART = re.compile(rf"(?P<street>{_NAME})(?:\s*\((?P<extent>[^()]+)\))?", re.I)
+_HOUSE_RANGE = re.compile(
+    r"(?:od broja|од броја)\s+([1-9]\d{0,4})\s+(?:do broja|до броја)\s+([1-9]\d{0,4})",
+    re.I,
+)
+_JUNCTIONS = re.compile(rf"(?:od|од)\s+({_NAME})\s+(?:do|до)\s+({_NAME})", re.I)
 _SEGMENTS = (
     re.compile(
         rf"{_OUTAGE}\s+(?:u|у)\s+(?:ulici|улици)\s+(?P<street>{_NAME})"
@@ -101,13 +116,14 @@ _CLOCK_RANGE = re.compile(
 )
 _HOUR_RANGE = re.compile(
     r"\b(?:od|од)\s+([0-9]{1,2})\s+(?:do|до)\s+([0-9]{1,2})\s+"
-    r"(?:sata|сати|časova|часова)\b", re.I,
+    r"(?:sata|sati|сати|часа|časova|часова)\b", re.I,
 )
 _NEWS_DATE = re.compile(
     r"\b(?:u|у)\s+"
     r"(ponedeljak|utorak|sredu|četvrtak|petak|subotu|nedelju|"
     r"понедељак|уторак|среду|четвртак|петак|суботу|недељу),?\s+"
-    r"([0-9]{1,2})\.\s*(" + "|".join(_MONTHS) + r")(?=\s*,?\s*(?:od|од)\s)", re.I,
+    r"([0-9]{1,2})\.\s*(" + "|".join(_MONTHS) + r")"
+    r"(?=\s*,?\s*(?:(?:u periodu|у периоду)\s+)?(?:od|од)\s)", re.I,
 )
 _WEEKDAYS = ("ponedeljak utorak sredu četvrtak petak subotu nedelju "
              "понедељак уторак среду четвртак петак суботу недељу").split()
@@ -140,6 +156,13 @@ class WaterSettlementScope:
 
 
 @dataclass(frozen=True)
+class WaterHouseRange:
+    street: str
+    first: int
+    last: int
+
+
+@dataclass(frozen=True)
 class WaterScope:
     starts_at: datetime
     ends_at: datetime
@@ -147,6 +170,9 @@ class WaterScope:
     settlements: tuple[SettlementScope, ...]
     segments: tuple[dict[str, str], ...]
     addresses: tuple[dict[str, str], ...]
+    boundary: tuple[str, ...] = ()
+    whole_streets: tuple[str, ...] = ()
+    ranges: tuple[WaterHouseRange, ...] = ()
 
 
 def _normalized(value: str) -> str:
@@ -197,15 +223,17 @@ def _single_event_date(document: EvidenceDocument) -> date | None:
     if (published is None or published.utcoffset() is None
             or document.published_at_precision not in {"day", "instant"}):
         return None
-    relative = list(_NEWS_DATE.finditer(_normalized(document.body)))
+    relative = {
+        (_WEEKDAYS.index(weekday.casefold()) % 7, int(number), _MONTHS[month.casefold()])
+        for weekday, number, month in _NEWS_DATE.findall(_normalized(document.body))
+    }
     if len(relative) != 1:
         return None
-    weekday, number, month = relative[0].groups()
+    (weekday, number, month), = relative
     posted = published.astimezone(ZoneInfo("Europe/Belgrade")).date()
     for offset in range(15):
         day = posted + timedelta(days=offset)
-        if (day.day == int(number) and day.month == _MONTHS[month.casefold()]
-                and day.weekday() == _WEEKDAYS.index(weekday.casefold()) % 7):
+        if (day.day, day.month, day.weekday()) == (number, month, weekday):
             return day
     return None
 
@@ -323,6 +351,34 @@ def _water_scope(
     names: tuple[str, ...],
 ) -> WaterScope:
     segments = _segments(text, municipality)
+    boundary: tuple[str, ...] = ()
+    whole_streets: list[str] = []
+    ranges: list[WaterHouseRange] = []
+    if not _AREA_EXCEPTION.search(text):
+        block = _BOUNDED_BLOCK.search(text)
+        if block is not None:
+            names_in_block = re.split(r"\s*,\s*|\s+(?:i|и)\s+", block["streets"])
+            if 3 <= len(names_in_block) <= 8 and all(_street_name(name) for name in names_in_block):
+                boundary = tuple(names_in_block)
+        street_list = _STREET_LIST.search(text)
+        if street_list is not None:
+            for part in re.split(r"\s*,(?![^()]*\))\s*|\s+(?:i|и)\s+(?![^()]*\))",
+                                 street_list["streets"].strip()):
+                entry = _STREET_PART.fullmatch(part)
+                if entry is None or (street := _street_name(entry["street"])) is None:
+                    continue
+                extent = entry["extent"]
+                if extent is None:
+                    whole_streets.append(street)
+                elif (house_range := _HOUSE_RANGE.fullmatch(extent)) is not None:
+                    first, last = map(int, house_range.groups())
+                    if first <= last:
+                        ranges.append(WaterHouseRange(street, first, last))
+                elif (junctions := _JUNCTIONS.fullmatch(extent)) is not None:
+                    start, end = (_street_name(value) for value in junctions.groups())
+                    if start and end and start.casefold() != end.casefold():
+                        segments.append({"municipality": municipality, "street": street,
+                                         "start": start, "end": end})
     if names:
         for pattern in _ENTIRE_AREAS:
             for match in pattern.finditer(text):
@@ -335,7 +391,8 @@ def _water_scope(
     return WaterScope(*period, municipality,
                       tuple(SettlementScope(municipality, name) for name in names),
                       tuple(segments),
-                      _house_addresses(text, municipality, alongside_area=bool(names)))
+                      _house_addresses(text, municipality, alongside_area=bool(names)),
+                      boundary, tuple(dict.fromkeys(whole_streets)), tuple(dict.fromkeys(ranges)))
 
 
 def extract_water_outage_scopes(document: EvidenceDocument) -> tuple[WaterScope, ...]:
@@ -343,7 +400,7 @@ def extract_water_outage_scopes(document: EvidenceDocument) -> tuple[WaterScope,
     if not _source_allowed(document) or len(document.body.encode()) > MAX_DOCUMENT_BYTES:
         return ()
     day = _single_event_date(document)
-    if day is None or _CANCELLED.search(document.title + " " + document.body):
+    if _CANCELLED.search(document.title + " " + document.body):
         return ()
     lines = [text for line in document.body.splitlines() if (text := _normalized(line))]
     headings = {_normalized(match[1]).casefold()
@@ -351,15 +408,21 @@ def extract_water_outage_scopes(document: EvidenceDocument) -> tuple[WaterScope,
     scopes = []
     for index, line in enumerate(lines):
         municipalities = {_normalized(match[1]) for match in _MUNICIPALITY.finditer(line)}
-        period = _window(day, line)
-        if len(municipalities) != 1 or period is None or _WATER.search(line) is None:
+        if len(municipalities) != 1 or _WATER.search(line) is None:
+            continue
+        local_day = day
+        if _DATE.search(line) or _NEWS_DATE.search(line):
+            local_day = _single_event_date(document.model_copy(update={"body": line}))
+        period = _window(local_day, line)
+        if period is None:
             continue
         municipality = next(iter(municipalities))
         list_items = _list_names(lines[index + 1:], headings) if _AREA_LIST.search(line) else ()
         following = lines[index + 1] if index + 1 < len(lines) else ""
         names = () if _AREA_EXCEPTION.match(following) else _area_names(line, list_items)
         scope = _water_scope(municipality, period, line, names)
-        if scope.settlements or scope.segments or scope.addresses:
+        if (scope.settlements or scope.segments or scope.addresses or scope.boundary
+                or scope.whole_streets or scope.ranges):
             scopes.append(scope)
     if scopes:
         return tuple(scopes)
@@ -369,7 +432,8 @@ def extract_water_outage_scopes(document: EvidenceDocument) -> tuple[WaterScope,
     if len(municipalities) != 1 or period is None:
         return ()
     scope = _water_scope(next(iter(municipalities)), period, text, _area_names(text, ()))
-    return (scope,) if scope.settlements or scope.segments or scope.addresses else ()
+    return (scope,) if (scope.settlements or scope.segments or scope.addresses or scope.boundary
+                        or scope.whole_streets or scope.ranges) else ()
 
 
 def extract_water_settlements(document: EvidenceDocument) -> tuple[WaterSettlementScope, ...]:

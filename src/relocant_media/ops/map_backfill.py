@@ -14,7 +14,7 @@ from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.ops.events_export import EventsFeed, export_events, read_events_feed
 from relocant_media.ops.map_export import MapFeed, read_map_feed
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
-from relocant_media.storage.models import EditorialRun, Post, RawItem
+from relocant_media.storage.models import EditorialRun, Post, RawItem, Submission
 
 _FEED_URL = "https://stolyarovmn.github.io/relocant-media/map/incidents.json"
 _EVENTS_URL = "https://stolyarovmn.github.io/relocant-media/map/events.json"
@@ -32,6 +32,22 @@ def parse_targets(value: str) -> dict[int, str]:
             raise ValueError("invalid or repeated post and event pair")
         targets[int(match[1])] = match[2]
     return targets
+
+
+def _owner_confirmed(session: Session, post: Post, run: EditorialRun, message_id: int) -> bool:
+    package = run.outcome.get("_package_sha256")
+    if post.category != "utilities" or not isinstance(package, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", package,
+    ):
+        return False
+    receipts = list(session.scalars(select(Submission).where(
+        Submission.kind == "owner_editorial_review", Submission.status == "published",
+        Submission.payload["raw_item_id"].as_integer() == run.raw_item_id,
+        Submission.payload["post_id"].as_integer() == post.id,
+        Submission.payload["telegram_channel_message_id"].as_integer() == message_id,
+    ).limit(2)))
+    return (len(receipts) == 1 and receipts[0].payload.get("owner_decision") == "publish"
+            and receipts[0].payload.get("package_sha256") == package)
 
 
 def plan(
@@ -52,14 +68,18 @@ def plan(
         event_id = targets[message_id]
         event = events.get(event_id)
         receipt = run.outcome.get("_rich_delivery")
+        rich_confirmed = (isinstance(receipt, dict) and receipt.get("state") == "sent"
+                          and receipt.get("message_ids") == [message_id])
         if (message_id in buttons or event is None or event.source_url != raw.url
                 or event_id != map_event_id(raw.url)
-                or not (event.lines or event.points or event.addresses)
-                or not isinstance(receipt, dict) or receipt.get("state") != "sent"
-                or receipt.get("message_ids") != [message_id]):
+                or not (event.lines or event.points or event.areas or event.addresses)):
+            raise ValueError("published post, delivery receipt and map event must match")
+        if not rich_confirmed and (receipt is not None or event.kind not in {"water", "power"}
+                                   or not _owner_confirmed(session, post, run, message_id)):
             raise ValueError("published post, delivery receipt and map event must match")
         url = map_event_url(raw.url, telegram_app=telegram_app)
-        if not url.startswith("https://t.me/") or receipt.get("map_url") not in (None, url):
+        old_url = receipt.get("map_url") if isinstance(receipt, dict) else None
+        if not url.startswith("https://t.me/") or old_url not in (None, url):
             raise ValueError("configured Telegram link or historical markup differs")
         buttons[message_id] = url
     if buttons.keys() != targets.keys():

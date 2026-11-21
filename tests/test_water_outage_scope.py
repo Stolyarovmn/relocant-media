@@ -1,5 +1,6 @@
 """Минимальные официальные формы a116609/BVK и отрицательные примеры без сети."""
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -56,6 +57,34 @@ def test_real_city_segment_preserves_source_names_and_case() -> None:
         "municipality": "Voždovac", "street": "kralja Bodina",
         "start": "Vidske", "end": "Kruševačke",
     }]
+
+
+@pytest.mark.parametrize(("second_day", "expected_day"), [("utorak, 24.", 24), ("sredu, 25.", 25)])
+def test_municipal_sections_keep_their_own_dates_and_times(second_day, expected_day) -> None:
+    notice = document(
+        source_id="city_beograd_news",
+        url="https://www.beograd.rs/lat/beoinfo-vesti/a116747/Radovi-na-vodovodnoj-mrezi-u-utorak.html",
+        title="Radovi na vodovodnoj mreži",
+        published_at=datetime(2026, 11, 20, 23, tzinfo=UTC),
+        published_at_precision="day",
+        body=(
+            "Zbog planiranih radova na vodovodnoj mreži u opštini Savski venac, "
+            "u utorak, 24. novembra, u periodu od 8 do 15 sati, "
+            "bez vode će ostati potrošači u bloku oivičenom Fabrisovom, Zvečanskom, "
+            "Dr Milutina Ivkovića i Oblakovskom ulicom.\n"
+            f"U opštini Voždovac, u {second_day} novembra, u periodu od 8 do 16 sati, "
+            "bez vode će ostati potrošači u ulicama Brane Ćosića (od broja 16 do broja 42), "
+            "Katarine Ivanović i Rastka Petrovića."
+        ),
+    )
+    block, streets = scope.extract_water_outage_scopes(notice)
+    assert (block.municipality, block.starts_at.day, block.ends_at.hour) == ("Savski venac", 24, 15)
+    assert len(block.boundary) == 4
+    assert (streets.municipality, streets.starts_at.day, streets.ends_at.hour) == (
+        "Voždovac", expected_day, 16,
+    )
+    assert streets.whole_streets == ("Katarine Ivanović", "Rastka Petrovića")
+    assert len(streets.ranges) == 1
 
 
 def test_only_explicit_full_settlement_is_eligible() -> None:

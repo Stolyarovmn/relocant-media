@@ -259,10 +259,17 @@ export function readIncidents(document) {
         && line.coordinates.length >= 2
         && line.coordinates.every((pair) => Array.isArray(pair) && coords(pair[0], pair[1]))
         ? [{ coordinates: line.coordinates.map(([lat, lon]) => [lat, lon]),
-          label: textValue(line.label), window: readWindow(line) }] : []),
+          label: textValue(line.label), window: readWindow(line), boundary: line.boundary === true }] : []),
       areas: array(record.areas).map((area) => readArea(area, record.kind)).filter(Boolean),
       addresses: array(record.addresses).map(readAddress).filter(Boolean),
       ranges: array(record.ranges).map(readAddress).filter(Boolean),
+      waterDistricts: array(record.water_districts).flatMap((item) => {
+        const municipality = textValue(item?.municipality);
+        const window = readWindow(item);
+        return municipality && window ? [{ municipality, window,
+          boundary: array(item.boundary).map(textValue).filter(Boolean),
+          wholeStreets: array(item.whole_streets).map(textValue).filter(Boolean) }] : [];
+      }),
       settlements: array(record.settlements).flatMap((item) => textValue(item?.name)
         ? [{ name: textValue(item.name), municipality: textValue(item.municipality),
           parent: textValue(item.parent), window: readWindow(item) }] : []),
