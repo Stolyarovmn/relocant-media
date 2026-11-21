@@ -698,7 +698,7 @@ h1 {
 }
 
 @media (max-width: 740px) and (max-height: 430px) {
-  .announcement-body { max-height: 28dvh; }
+  .announcement-body { max-height: min(28dvh, max(45px, 100dvh - 314px)); }
   #selected-title {
     display: block;
     overflow: hidden;

@@ -501,7 +501,7 @@ function focusIncident(incident) {
   if (mobile.matches) {
     const frame = mapFrame.getBoundingClientRect();
     const filters = byId("layer-filter").getBoundingClientRect();
-    const top = Math.min(Math.max(24, filters.bottom - frame.top + 12), frame.height * .64);
+    const top = Math.min(Math.max(24, filters.bottom - frame.top + 12), Math.max(24, frame.height - 54));
     padding = { paddingTopLeft: [24, top], paddingBottomRight: [25, 28] };
   }
   const animateFocus = animate && !mobile.matches;
