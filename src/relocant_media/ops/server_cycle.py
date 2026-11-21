@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
@@ -80,6 +80,7 @@ from relocant_media.domain.freshness import (
     evidence_freshness,
     freshness_decision,
 )
+from relocant_media.domain.pacing import pacing_hold
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
 from relocant_media.domain.presentation import (
     presentation_title,
@@ -1306,6 +1307,7 @@ async def publish_pending(
     from relocant_media.services.material_lifecycle import (
         after_result,
         before_delivery_attempt,
+        delivery_deadline,
         delivery_failure,
     )
     with Session(engine) as session:
@@ -1315,6 +1317,12 @@ async def publish_pending(
         if only_raw_ids is not None:
             query = query.where(EditorialRun.raw_item_id.in_(only_raw_ids))
         ids = list(session.scalars(query.order_by(EditorialRun.raw_item_id)))
+        last_sent_at = session.scalar(select(func.max(Post.published_at)).join(
+            EditorialRun, EditorialRun.post_id == Post.id).where(
+                EditorialRun.delivery_status == "sent",
+                Post.telegram_message_id.is_not(None)))
+    if last_sent_at is not None and last_sent_at.tzinfo is None:
+        last_sent_at = last_sent_at.replace(tzinfo=UTC)
     sent: list[int] = []
     async with httpx.AsyncClient(timeout=30, trust_env=False,
                                   transport=httpx.AsyncHTTPTransport(retries=0)) as client:
@@ -1326,6 +1334,17 @@ async def publish_pending(
                 run = session.get(EditorialRun, raw_id)
                 assert run is not None
                 if run.outcome.get("status") != "ready" or "_package" not in run.outcome:
+                    continue
+                ranking = run.outcome.get("ranking")
+                stored = run.outcome["_package"]
+                if pacing_hold(
+                    category=str(ranking.get("category", "")) if isinstance(ranking, dict)
+                    else "",
+                    urgent=isinstance(stored, dict) and stored.get("urgent") is True,
+                    now=datetime.now(UTC), last_sent_at=last_sent_at,
+                    deadline_at=delivery_deadline(session, raw_id),
+                ):
+                    # Not a failure: the next cycle sends it, before its deadline.
                     continue
                 allowed = before_delivery_attempt(session, raw_id, now=datetime.now(UTC))
                 session.commit()
@@ -1392,6 +1411,7 @@ async def publish_pending(
                 after_result(session, raw_id, now=datetime.now(UTC))
                 session.commit()
                 sent.append(result.message_id)
+                last_sent_at = datetime.now(UTC)
     return sent
 
 
