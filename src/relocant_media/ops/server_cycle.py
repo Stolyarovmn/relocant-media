@@ -70,6 +70,7 @@ from relocant_media.collectors.telegram_topics import (
     messenger_sources_for_city,
     runtime_channels_for_city,
 )
+from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
@@ -432,7 +433,9 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
                 and source.extraction.status == "active"):
             venues[source.id] = source
     async def fetch_venue(source: SourceConfig, url: str) -> Any:
-        async with httpx.AsyncClient(timeout=25, trust_env=False) as venue_client:
+        async with httpx.AsyncClient(
+            timeout=25, trust_env=False, verify=source_ssl_context(),
+        ) as venue_client:
             return await fetch_public_article(source, url, venue_client)
     with httpx.Client(timeout=25, trust_env=False) as client:
         for document in package.event.documents:
@@ -615,7 +618,9 @@ async def collect_sources(
     aliases_path = SOURCES.parent / "event-aliases.json"
     aliases = json.loads(aliases_path.read_text(encoding="utf-8")) if aliases_path.is_file() else {}
     search_budget = PublicSearchBudget()
-    async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
+    async with httpx.AsyncClient(
+        timeout=25, trust_env=False, verify=source_ssl_context(),
+    ) as client:
         collectors: dict[str, Any] = {
             "city_beograd_news": BelgradeArticleCollector(sources["city_beograd_news"], client),
             "cukarica_news": CukaricaNewsCollector(sources["cukarica_news"], client),
@@ -911,7 +916,7 @@ async def collect_sources(
         transport_source = load_source_file(SOURCES / f"{TRANSPORT_MAP_SOURCE}.yaml")
         try:
             async with asyncio.timeout(40), httpx.AsyncClient(
-                timeout=12, trust_env=False,
+                timeout=12, trust_env=False, verify=source_ssl_context(),
             ) as transport_client:
                 fetched_notices = await BgprevozChangesCollector(
                     transport_source, transport_client,

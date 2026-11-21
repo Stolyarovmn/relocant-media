@@ -12,6 +12,7 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
   "alembic>=1.14,<2",
   "httpx>=0.28,<1",
+  "certifi>=2024.2.2",
   "beautifulsoup4>=4.13,<5",
   "feedparser>=6.0.11,<7",
   "PyYAML>=6.0,<7",
@@ -62,6 +63,7 @@ dev = [
 
 [tool.setuptools.package-data]
 "relocant_media.ai" = ["writing_matrix.yaml"]
+"relocant_media.collectors" = ["ca/*.pem"]
 "relocant_media.domain" = ["publication_tags_v*.yaml", "reader_publication_v*.json"]
 
 [tool.pytest.ini_options]

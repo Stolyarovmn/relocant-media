@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 
+from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.ingestion.runner import ingest_city
 from relocant_media.storage.db import SessionFactory
 
@@ -20,7 +21,9 @@ def _parser() -> argparse.ArgumentParser:
 async def _run(city: str, sources: Path) -> dict[str, int]:
     headers = {"User-Agent": "relocant-media/0.1 (+source-monitoring)"}
     timeout = httpx.Timeout(30.0)
-    async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
+    async with httpx.AsyncClient(
+        headers=headers, timeout=timeout, verify=source_ssl_context(),
+    ) as client:
         with SessionFactory() as session:
             summary = await ingest_city(city, sources, session, client)
     return asdict(summary)

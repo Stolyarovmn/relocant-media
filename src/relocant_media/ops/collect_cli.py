@@ -11,6 +11,7 @@ import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.ingestion.runner import ingest_city
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -25,7 +26,7 @@ async def collect(city: str, sources: Path, source_ids: tuple[str, ...]) -> dict
     try:
         verify_sqlite_schema(engine)
         async with httpx.AsyncClient(
-            timeout=30, trust_env=False,
+            timeout=30, trust_env=False, verify=source_ssl_context(),
             headers={"User-Agent": "relocant-media/0.1 (+source-monitoring)"},
         ) as client:
             with Session(engine) as session:

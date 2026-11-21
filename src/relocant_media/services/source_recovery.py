@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.base import RawItem as CollectedArticle
+from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import canonicalize_url
@@ -99,7 +100,9 @@ async def recover_primary_source(
             except SourceReplacementError:
                 return None
 
-    async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+    async with httpx.AsyncClient(
+        timeout=15, trust_env=False, verify=source_ssl_context(),
+    ) as client:
         for config, url in known.values():
             try:
                 async with asyncio.timeout(20):
