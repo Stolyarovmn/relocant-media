@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Install project
@@ -39,7 +39,7 @@ jobs:
         run: python -m relocant_media.ops.jev_smoke --output "outputs/jev-smoke/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
       - name: Upload safe API telemetry
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: jev-smoke-${{ github.run_id }}-${{ github.run_attempt }}
           path: outputs/jev-smoke/${{ github.run_id }}-${{ github.run_attempt }}/manifest.json
