@@ -912,6 +912,18 @@ def is_terminal_blocked(session: Session, raw_id: int, *, now: datetime | None =
     return False
 
 
+def response_deadline(session: Session, raw_id: int) -> datetime | None:
+    """Крайний срок резервного ответа без записи; None, если цикл ещё не открыт."""
+    record = _read_record(session, raw_id)
+    if record is None or not _validate(record.details):
+        return None
+    data = record.details
+    deadline = _stamp(data["deadline_at"])
+    if data.get("fallback_deadline_at"):
+        deadline = min(deadline, _stamp(data["fallback_deadline_at"]))
+    return deadline
+
+
 def ensure_not_terminal(session: Session, raw_id: int, *, now: datetime | None = None) -> None:
     if is_terminal_blocked(session, raw_id, now=now):
         raise LifecycleBlockedError("Материал окончательно заблокирован жизненным циклом")

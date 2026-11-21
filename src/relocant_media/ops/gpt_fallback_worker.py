@@ -94,6 +94,16 @@ def _error_type(error: Exception) -> str:
     return name if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]{0,63}", name) else "Error"
 
 
+def _error_entry(stage: str, error: Exception) -> dict[str, str]:
+    entry = {"stage": stage, "error_type": _error_type(error)}
+    code = getattr(error, "code", None)
+    if type(error).__name__ == "LifecycleBlockedError":
+        code = "lifecycle_blocked"
+    if isinstance(code, str) and re.fullmatch(r"[a-z][a-z_]{0,39}", code):
+        entry["reason"] = code
+    return entry
+
+
 def save_batch_rank(
     engine: Engine, request: dict[str, Any], result: dict[str, Any], *, now: datetime,
 ) -> dict[str, Any]:
@@ -265,7 +275,7 @@ def run_worker(
             _fail_claimed_fallback(engine, rejection.raw_item_id, error,
                                   now=now or datetime.now(UTC))
             rejected += 1
-            errors.append({"stage": "reject", "error_type": _error_type(error)})
+            errors.append(_error_entry("reject", error))
     for package in payload.result.packages:
         phase = "validate"
         try:
@@ -299,7 +309,7 @@ def run_worker(
             _fail_claimed_fallback(engine, package.raw_item_id, error,
                                   now=now or datetime.now(UTC))
             rejected += 1
-            errors.append({"stage": phase, "error_type": _error_type(error)})
+            errors.append(_error_entry(phase, error))
     blocked: list[dict[str, Any]] = []
     sent_count = 0
     if send_enabled is True and delivery_ids:

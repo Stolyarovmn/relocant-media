@@ -273,15 +273,74 @@ def _export_gpt_request(
                 request = build_batch_request(session, now=now, scheduler_run_id=scheduler_run_id)
             if request is None:
                 request = build_request(session, now=now, scheduler_run_id=scheduler_run_id)
+            deadlines = (_request_deadlines(session, request)
+                         if request is not None else [])
     finally:
         engine.dispose()
     if request is None:
         print(json.dumps({"gpt_fallback": "no_pending_candidates"}))
         return 0
+    known = [deadline for deadline in deadlines if deadline is not None]
+    respond_by = min(known) if known else None
+    if known and len(known) == len(deadlines) and max(known) - now < GPT_RESPONSE_MIN_MARGIN:
+        # Ответ на такой запрос будет отклонён как просроченный; не тратим подписку.
+        print(json.dumps({"gpt_fallback": "deadline_too_close",
+                          "respond_by": max(known).isoformat()}))
+        return 0
     digest = _upload_gpt_request(storage, request, work / "gpt-request.json")
     print(json.dumps({"gpt_fallback_request_sha256": digest,
-                      "candidate_count": len(request["candidates"])}))
+                      "candidate_count": len(request["candidates"]),
+                      "respond_by": respond_by.isoformat() if respond_by else None}))
     return 0
+
+
+# Запрос без запаса времени почти наверняка опоздает: резервное окно материала 30 минут.
+GPT_RESPONSE_MIN_MARGIN = timedelta(minutes=10)
+
+
+def _request_deadlines(session: Session, request: dict[str, Any]) -> list[datetime | None]:
+    """Срок по каждому кандидату; None — окно откроется только при импорте."""
+    from relocant_media.services.material_lifecycle import response_deadline
+
+    deadlines: list[datetime | None] = []
+    for candidate in request.get("candidates", []):
+        raw_id = candidate.get("raw_item_id") if isinstance(candidate, dict) else None
+        deadlines.append(response_deadline(session, raw_id)
+                         if isinstance(raw_id, int) and 0 < raw_id < 2**63 else None)
+    return deadlines
+
+
+def _gpt_result_expired(database: Path, exchange_file: Path, now: datetime) -> bool:
+    """Только чтение: все решения ответа относятся к уже закрытым материалам."""
+    from relocant_media.services.material_lifecycle import is_terminal_blocked
+    from relocant_media.storage.models import EditorialRun, RawItem
+
+    exchange = json.loads(exchange_file.read_text(encoding="utf-8"))
+    result = exchange.get("result")
+    if not isinstance(result, dict) or result.get("kind") is not None:
+        return False
+    decisions = [*result.get("packages", []), *result.get("rejected", [])]
+    raw_ids = {item.get("raw_item_id") for item in decisions if isinstance(item, dict)}
+    ids = {raw_id for raw_id in raw_ids if type(raw_id) is int and 0 < raw_id < 2**63}
+    if not ids or ids != raw_ids:
+        return False
+    engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
+    try:
+        with Session(engine) as session, session.no_autoflush:
+            session.connection().exec_driver_sql("PRAGMA query_only=ON")
+            for raw_id in ids:
+                # Неизвестный материал — не просрочка: пусть воркер явно отклонит ответ.
+                if session.get(RawItem, raw_id) is None:
+                    return False
+                run = session.get(EditorialRun, raw_id)
+                # Отправленный материал сверяется импортом; это не просрочка.
+                if run is not None and run.delivery_status == "sent":
+                    return False
+                if not is_terminal_blocked(session, raw_id, now=now):
+                    return False
+    finally:
+        engine.dispose()
+    return True
 
 
 def _runtime_phase(phase: str) -> None:
@@ -555,9 +614,21 @@ def run_child(command: list[str], environment: dict[str, str]) -> int:
 
 
 def print_failure_coordinates(report: dict[str, Any]) -> None:
-    fields = {key: value for key in ("status", "error_type", "error_site", "backup_error_type")
-              if isinstance(value := report.get(key), str)
-              and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
+    fields: dict[str, Any] = {
+        key: value for key in ("status", "error_type", "error_site", "backup_error_type")
+        if isinstance(value := report.get(key), str)
+        and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)
+    }
+    # Отчёт резервного импорта хранит причины по каждому решению; выводим только
+    # фиксированные коды этапа/типа/причины, без текстов исключений и пакетов.
+    errors = report.get("processing_errors")
+    if isinstance(errors, list):
+        safe = [{key: value for key in ("stage", "error_type", "reason")
+                 if isinstance(value := entry.get(key), str)
+                 and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
+                for entry in errors[:5] if isinstance(entry, dict)]
+        if any(safe):
+            fields["errors"] = [entry for entry in safe if entry]
     print(json.dumps({"runtime_failure": fields}), file=sys.stderr)
 
 
@@ -883,6 +954,11 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     without_gpt_delivery = False
     if mode == "fallback":
         without_gpt_delivery = _prepare_gpt_input(drive, gpt_input, fallback_file)
+        if _gpt_result_expired(database, fallback_file, datetime.now(UTC)):
+            # До захвата блокировки: состояние не меняется, повтор ничего не даст.
+            print(json.dumps({"gpt_fallback": "result_expired",
+                              "reason": "material_closed"}), flush=True)
+            return 0
     # Readback/restore and all validation precede the claim; all side effects follow it.
     identifier(folder)
     require_snapshot_capacity(database)

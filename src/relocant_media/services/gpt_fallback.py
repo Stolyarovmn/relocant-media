@@ -76,6 +76,11 @@ _TASK = "editorial-primary:belgrade"
 class FallbackValidationError(ValueError):
     """Запрос или результат перестал соответствовать разрешённому резерву."""
 
+    def __init__(self, message: str, *, code: str = "validation") -> None:
+        super().__init__(message)
+        # Фиксированный безопасный код причины для логов Actions.
+        self.code = code
+
 
 class _CandidateRequest(StrictModel):
     raw_item_id: int = Field(gt=0)
@@ -259,7 +264,7 @@ def _ensure_fallback_open(session: Session, raw_id: int, *, now: datetime) -> No
     try:
         ensure_not_terminal(session, raw_id, now=now)
     except LifecycleBlockedError as error:
-        raise FallbackValidationError(str(error)) from error
+        raise FallbackValidationError(str(error), code="material_closed") from error
 
 
 def _candidate_request(
@@ -428,7 +433,9 @@ def validate_fallback_candidate(
     if len(ids) != len(set(ids)) or raw_id not in ids:
         raise FallbackValidationError("Чужой или повторяющийся кандидат")
     if not timedelta(0) <= now - parsed.created_at <= REQUEST_TTL:
-        raise FallbackValidationError("Резервный запрос просрочен или датирован будущим")
+        raise FallbackValidationError(
+            "Резервный запрос просрочен или датирован будущим", code="request_expired",
+        )
     with session.no_autoflush:
         run = session.get(SchedulerRun, parsed.scheduler_run_id, populate_existing=True)
         batch = run.details.get("batch_preselection") if run is not None else None
@@ -463,7 +470,9 @@ def validate_fallback_candidate(
             or parsed.created_at < run.finished_at
             or (from_batch and not timedelta(0) <= now - run.finished_at <= REQUEST_TTL)
         ):
-            raise FallbackValidationError("Исходный сбой Gemini больше не подтверждён")
+            raise FallbackValidationError(
+                "Исходный сбой Gemini больше не подтверждён", code="primary_failure_unconfirmed",
+            )
         profile = load_city_profile("belgrade")
         if parsed.profile_sha256 != profile.sha256 or request["city_profile"] != profile.model_dump(
             mode="json"
@@ -495,7 +504,9 @@ def validate_fallback_candidate(
             if candidate.raw_item_id == raw_id
         )
         if requested.model_dump(mode="json") != expected:
-            raise FallbackValidationError("Снимок события или оформления изменился после запроса")
+            raise FallbackValidationError(
+                "Снимок события или оформления изменился после запроса", code="snapshot_changed",
+            )
         return parsed, profile, requested, expected
 
 
@@ -550,7 +561,9 @@ def validate_fallback_package(
             or now - review.reviewed_at > timedelta(hours=2 if package.urgent else 24)
             for review in package.reviews
         ):
-            raise FallbackValidationError("Нужны два новых независимых живых одобрения")
+            raise FallbackValidationError(
+                "Нужны два новых независимых живых одобрения", code="reviews_not_fresh",
+            )
         outcome = evaluate_package(package, now=now)
         if package.outcome.status != PublicationStatus.READY or outcome.reason not in {
             "package_independently_reviewed",
@@ -566,7 +579,9 @@ def validate_fallback_package(
                 canonical_json(package.model_dump(mode="json")).encode()
             ).hexdigest()
             if existing.outcome.get("_package_sha256") != fingerprint:
-                raise FallbackValidationError("Материал уже обработан другим результатом")
+                raise FallbackValidationError(
+                    "Материал уже обработан другим результатом", code="already_processed",
+                )
             post = (
                 session.get(Post, existing.post_id, populate_existing=True)
                 if existing.post_id
