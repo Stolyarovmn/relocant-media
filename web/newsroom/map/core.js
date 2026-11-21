@@ -53,6 +53,17 @@ export function safeLink(value) {
   }
 }
 
+const shareApp = "https://t.me/relocant_media_belgrade_bot";
+
+// Ссылка «Поделиться»: окно отправки Telegram с карточкой этой же карты.
+export function shareLink(id, title = "", places = false) {
+  if (typeof id !== "string" || !eventId.test(id)) return "";
+  const target = `${shareApp}?startapp=${places ? "places_" : ""}${id}`;
+  const text = typeof title === "string" ? title.trim().slice(0, 200) : "";
+  return `https://t.me/share/url?url=${encodeURIComponent(target)}`
+    + (text ? `&text=${encodeURIComponent(text)}` : "");
+}
+
 export function launchEvent(search, telegramParam) {
   const params = new URLSearchParams(search);
   return [params.get("event"), params.get("tgWebAppStartParam"), telegramParam]

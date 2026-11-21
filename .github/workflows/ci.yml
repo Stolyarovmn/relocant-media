@@ -1,11 +1,20 @@
 name: ci
 
 on:
+  # main получает свой push-прогон: рабочие workflow ищут именно его для точного SHA.
+  # Ветки с PR проверяются через pull_request, без второго такого же прогона на push.
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  # Прогон main никогда не отменяется; в PR остаётся только проверка последнего коммита.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:

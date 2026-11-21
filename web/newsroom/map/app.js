@@ -1,10 +1,10 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents,
+  incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=13";
+} from "./core.js?v=14";
 import { calendarLink } from "./calendar.js?v=4";
-import { setupPlaces } from "./places.js?v=12";
+import { setupPlaces } from "./places.js?v=13";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -278,6 +278,8 @@ function eventCard(incident, now) {
   }
   const links = make("div", "event-links");
   links.append(link(incident.source, "Источник ↗"));
+  const share = shareLink(incident.id, incident.title);
+  if (share) links.append(link(share, "Поделиться ↗"));
   const calendar = calendarLink(incident, now);
   if (calendar) links.append(calendar);
   if (incident.officialMap && incident.officialMap !== incident.source) {

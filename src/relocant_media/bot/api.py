@@ -1,6 +1,7 @@
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -13,6 +14,7 @@ from relocant_media.bot.formatting import (
 )
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
 from relocant_media.domain.map_links import is_map_event_url
+from relocant_media.domain.quiet_hours import silent_channel_post
 from relocant_media.domain.source_locations import is_public_https_url
 
 
@@ -46,11 +48,19 @@ class TelegramBot(Protocol):
 
 
 class TelegramBotAPI:
-    def __init__(self, token: str, client: httpx.AsyncClient) -> None:
+    def __init__(
+        self, token: str, client: httpx.AsyncClient, *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         if not token:
             raise ValueError("Telegram bot token is required")
         self._client = client
         self._base_url = f"https://api.telegram.org/bot{token}"
+        self._clock = clock
+
+    def _silent(self, chat_id: int | str) -> bool:
+        """Ночью пост в рабочий канал уходит без звука; содержание не меняется."""
+        return silent_channel_post(chat_id, self._clock)
 
     async def _call(self, method: str, payload: Mapping[str, object]) -> object:
         response = await self._client.post(f"{self._base_url}/{method}", json=dict(payload))
@@ -136,6 +146,8 @@ class TelegramBotAPI:
         self._caption(caption)
         upload = self._photo(photo)
         data = {"chat_id": str(chat_id), "caption": caption}
+        if self._silent(chat_id):
+            data["disable_notification"] = "true"
         if caption_entities:
             data["caption_entities"] = json.dumps(
                 list(caption_entities), ensure_ascii=False, separators=(",", ":")
@@ -164,6 +176,8 @@ class TelegramBotAPI:
             payload: dict[str, object] = {
                 "chat_id": chat_id, "rich_message": {"html": html},
             }
+            if self._silent(chat_id):
+                payload["disable_notification"] = True
             if reply_markup is not None:
                 payload["reply_markup"] = reply_markup
             if reply:
@@ -184,6 +198,8 @@ class TelegramBotAPI:
                 rich_message["skip_entity_detection"] = True
             data = {"chat_id": str(chat_id), "rich_message": json.dumps(
                 rich_message, ensure_ascii=False, separators=(",", ":"))}
+            if self._silent(chat_id):
+                data["disable_notification"] = "true"
             if reply_markup is not None:
                 data["reply_markup"] = json.dumps(
                     reply_markup, ensure_ascii=False, separators=(",", ":"),
@@ -239,10 +255,11 @@ class TelegramBotAPI:
                 if caption_entities:
                     item["caption_entities"] = list(caption_entities)
             media.append(item)
+        group = {"chat_id": str(chat_id), "media": json.dumps(media, ensure_ascii=False)}
+        if self._silent(chat_id):
+            group["disable_notification"] = "true"
         response = await self._client.post(
-            f"{self._base_url}/sendMediaGroup",
-            data={"chat_id": str(chat_id), "media": json.dumps(media, ensure_ascii=False)},
-            files=files,
+            f"{self._base_url}/sendMediaGroup", data=group, files=files,
         )
         result = self._result("sendMediaGroup", response)
         if not isinstance(result, list) or len(result) != len(photos):
@@ -283,6 +300,8 @@ class TelegramBotAPI:
         }
         if entities:
             payload["entities"] = list(entities)
+        if self._silent(chat_id):
+            payload["disable_notification"] = True
         result = await self._call("sendMessage", payload)
         if not isinstance(result, dict):
             raise TelegramAPIError("sendMessage returned no message object")
@@ -303,6 +322,8 @@ class TelegramBotAPI:
             "parse_mode": "HTML",
             "link_preview_options": {"url": source_url, "show_above_text": True},
         }
+        if self._silent(chat_id):
+            payload["disable_notification"] = True
         if map_url is not None:
             payload["reply_markup"] = map_reply_markup(map_url)
         if reply := self._reply(reply_to):
