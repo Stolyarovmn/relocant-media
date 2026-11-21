@@ -108,8 +108,40 @@ def _event_links(html: str, source: SourceConfig) -> list[str]:
         if len(links) > MAX_EVENTS:
             raise ValueError("unexpected TOB event count")
     if not links:
+        if _is_official_empty_listing(soup, heading):
+            return []
         raise ValueError("TOB event detail links missing")
     return links
+
+
+def _is_blank(element: Tag) -> bool:
+    return element.find() is None and not element.get_text(strip=True)
+
+
+def _is_official_empty_listing(soup: BeautifulSoup, heading: Tag) -> bool:
+    """Recognise the server-rendered empty state, distinct from an unknown layout.
+
+    The official page keeps the "Događaji" heading inside ``#mainbar`` and renders
+    event cards into ``#sort-holder``; with no scheduled events both the holder and
+    the "Ne propustite" featured list are rendered empty.
+    """
+    mainbar = heading.find_parent(id="mainbar")
+    if not isinstance(mainbar, Tag):
+        return False
+    holders = mainbar.select("#sort-holder")
+    if len(holders) != 1 or not _is_blank(holders[0]):
+        return False
+    featured = soup.select("#sidebar .featured-posts")
+    if len(featured) != 1:
+        return False
+    featured_heading = featured[0].find("h1")
+    featured_list = featured[0].find("ul")
+    return (
+        isinstance(featured_heading, Tag)
+        and featured_heading.get_text(" ", strip=True) == "Ne propustite"
+        and isinstance(featured_list, Tag)
+        and _is_blank(featured_list)
+    )
 
 
 def _parse_date(value: str, *, label: str) -> date:

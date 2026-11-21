@@ -28,6 +28,10 @@ _NEWS_PATH = re.compile(
 _DATE = re.compile(r"\b(?P<day>\d{2})-(?P<month>\d{2})-(?P<year>20\d{2})\b")
 _READ_MORE = {"опширније", "opsirnije", "read more"}
 _CARD_BOUNDARIES = {"body", "html", "main"}
+# The index truncates long card titles ("...наслов...") while the detail <h1>
+# keeps the full title; a truncated prefix must still be long enough to bind.
+_TRUNCATION_SUFFIXES = ("...", "\u2026")
+MIN_TRUNCATED_TITLE_PREFIX = 20
 _STOP_LINES = {
     "Секретаријат за јавни превоз",
     "Sekretarijat za javni prevoz",
@@ -91,6 +95,23 @@ def _news_identity(value: str, source: SourceConfig) -> tuple[str, str]:
         )
     )
     return slug, canonical
+
+
+def _normalize_title(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _title_matches_card(title: str, card_title: str) -> bool:
+    """Match the detail title to its card, allowing the index's visible truncation."""
+    full = _normalize_title(title)
+    card = _normalize_title(card_title)
+    if full == card:
+        return True
+    for suffix in _TRUNCATION_SUFFIXES:
+        if card.endswith(suffix):
+            prefix = card[: -len(suffix)].rstrip()
+            return len(prefix) >= MIN_TRUNCATED_TITLE_PREFIX and full.startswith(prefix)
+    return False
 
 
 def _parse_card_date(value: str) -> datetime | None:
@@ -193,7 +214,7 @@ def parse_bgprevoz_news_article(
     title = heading.get_text(" ", strip=True) if heading is not None else ""
     if not title:
         raise ValueError("Bgprevoz news title missing")
-    if " ".join(title.split()) != " ".join(expected_title.split()):
+    if not _title_matches_card(title, expected_title):
         raise ValueError("Bgprevoz news title does not match dated index card")
 
     lines = normalize_visible_text(html).splitlines()

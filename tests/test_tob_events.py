@@ -155,3 +155,49 @@ async def test_cross_host_redirect_is_rejected() -> None:
             await TobEventsCollector(source, client).collect()
 
     assert len(requested) == 1
+
+
+FIXTURES = Path("tests/fixtures")
+
+
+@pytest.mark.asyncio
+async def test_live_20261121_official_empty_listing_is_empty_not_error() -> None:
+    # Regression: source-health 2026-11-21 failed with "TOB event detail links
+    # missing" while the official page rendered no events at all.
+    empty = (FIXTURES / "tob_events_empty_20261121.html").read_text(encoding="utf-8")
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(200, text=empty)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = TobEventsCollector(_source(), client)
+        assert await collector.collect() == []
+    assert collector.item_failures == []
+    assert requested == ["https://www.tob.rs/sr/events"]
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    [
+        # Unknown cards inside the holder are a layout change, not an empty listing.
+        ('<div id="sort-holder">', '<div id="sort-holder"><div class="card">Novo</div>'),
+        # Featured events present while the main list has no recognised links.
+        ("<h1>Ne propustite</h1>\n    <ul>", "<h1>Ne propustite</h1>\n    <ul><li>X</li>"),
+        # Holder removed entirely: the structure is no longer recognised.
+        ('<div id="sort-holder">', '<div id="other-holder">'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unrecognised_listing_still_fails_closed(needle: str, replacement: str) -> None:
+    empty = (FIXTURES / "tob_events_empty_20261121.html").read_text(encoding="utf-8")
+    assert needle in empty
+    changed = empty.replace(needle, replacement, 1)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, text=changed))
+    ) as client:
+        collector = TobEventsCollector(_source(), client)
+        with pytest.raises(ValueError, match="TOB event detail links missing"):
+            await collector.collect()
