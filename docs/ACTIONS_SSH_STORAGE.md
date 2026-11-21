@@ -30,6 +30,11 @@ editorial at :17 and :47 and intake on two disjoint minute sets. Extra slots add
 writer: the single concurrency group serializes them and the cycle windows are
 idempotent, so a duplicate slot only finds nothing new to process.
 
+После успешного push CI актуального main отдельный workflow запускает штатный
+`mode=auto`. Перед отправкой запроса он повторно сверяет SHA ветки. Редакционный
+workflow сам проверяет CI и использует прежнюю общую очередь. Расписание остаётся
+резервным запуском, если событие CI не доставлено.
+
 ## Self-chaining
 
 Scheduled runs are best effort (one slot arrived in about three hours). With the variable
