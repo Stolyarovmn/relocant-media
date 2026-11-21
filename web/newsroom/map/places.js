@@ -1,7 +1,7 @@
 import {
   clusterMapPoints, incidentTimes, launchPlaces, placeCountdown, placeOptionLabel, placeStatus, readPlaces,
-  straightLineDistance, updateStamp,
-} from "./core.js?v=12";
+  shareLink, straightLineDistance, updateStamp,
+} from "./core.js?v=14";
 import { calendarLink } from "./calendar.js?v=4";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
@@ -142,6 +142,8 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     if (place.post) links.append(link(place.post, "Пост в Telegram ↗"));
     if (place.schedule) links.append(link(place.schedule, "Расписание ↗"));
     links.append(link(place.source, "Источник ↗"));
+    const share = place.sponsored ? "" : shareLink(place.id, place.title, true);
+    if (share) links.append(link(share, "Поделиться ↗"));
     const calendar = place.paidPlace || place.scheduleNote ? null : calendarLink(place, now);
     if (calendar) links.append(calendar);
     detail.replaceChildren(close, make("h3", "", place.title), ...describe(place, now));

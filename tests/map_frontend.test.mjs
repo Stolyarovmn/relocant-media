@@ -6,7 +6,7 @@ import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
   nextTransition, placeCountdown, placeOptionLabel, placeStatus,
-  pointsAtScale, readIncidents, readPlaces, searchAddresses, straightLineDistance, streetBounds,
+  pointsAtScale, readIncidents, readPlaces, searchAddresses, shareLink, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
 import { setupPlaces } from "../web/newsroom/map/places.js";
@@ -426,4 +426,21 @@ test("ссылка фестиваля открывает все площадки
   assert.match(unfolded, /LOCATION:Площадка2\\, Адрес/);
   assert.match(calendar, /DTSTART:20261205T190000Z/);
   assert.doesNotMatch(calendar, /DTEND/);
+});
+
+test("share link opens the Telegram share sheet with the same Mini App card", () => {
+  const link = new URL(shareLink(waterId, "  Нет воды на Врачаре  "));
+  assert.equal(link.origin + link.pathname, "https://t.me/share/url");
+  assert.equal(link.searchParams.get("url"), `https://t.me/relocant_media_belgrade_bot?startapp=${waterId}`);
+  assert.equal(link.searchParams.get("text"), "Нет воды на Врачаре");
+  assert.equal(new URL(shareLink(waterId, "", true)).searchParams.get("url"),
+    `https://t.me/relocant_media_belgrade_bot?startapp=places_${waterId}`);
+  assert.equal(new URL(shareLink(waterId)).searchParams.has("text"), false);
+  assert.equal(new URL(shareLink(waterId, "x".repeat(500))).searchParams.get("text").length, 200);
+  for (const bad of ["", "event_123", "javascript:alert(1)", null, `${waterId}&x=1`]) {
+    assert.equal(shareLink(bad, "Заголовок"), "");
+  }
+  const launched = launchMap("", new URL(new URL(shareLink(waterId, "", true)).searchParams.get("url"))
+    .searchParams.get("startapp"));
+  assert.deepEqual(launched, { mode: "places", id: waterId });
 });
