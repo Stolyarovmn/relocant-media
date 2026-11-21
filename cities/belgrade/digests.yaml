@@ -1,5 +1,6 @@
 starts_at: '2026-11-13T20:30'
-ends_before: '2026-11-27T20:30'
+# Owner decision 21.11.2026 (#321): digests continue indefinitely after the pilot.
+# Set ends_before only to schedule a deliberate stop.
 morning: '07:30'
 evening: '20:30'
 delivery_window_minutes: 45

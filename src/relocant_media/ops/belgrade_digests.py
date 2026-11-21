@@ -94,7 +94,7 @@ class Pilot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     starts_at: datetime
-    ends_before: datetime
+    ends_before: datetime | None = None
     morning: time
     evening: time
     delivery_window_minutes: int = Field(ge=5, le=60)
@@ -155,7 +155,9 @@ def due_slot(now: datetime) -> Slot | None:
     for kind in ("morning", "evening"):
         scheduled = datetime.combine(local.date(), getattr(policy, kind), tzinfo=zone)
         expires = scheduled + timedelta(minutes=policy.delivery_window_minutes)
-        if (policy.starts_at <= scheduled.replace(tzinfo=None) < policy.ends_before
+        naive = scheduled.replace(tzinfo=None)
+        if (policy.starts_at <= naive
+                and (policy.ends_before is None or naive < policy.ends_before)
                 and scheduled <= local < expires):
             return Slot(kind, scheduled, expires)
     if policy.reminders_from is not None and policy.reminders_from <= local.date():

@@ -47,6 +47,31 @@ def test_two_week_slots_use_belgrade_time():
     assert morning is not None and morning.kind == "morning"
     assert due_slot(datetime(2026, 11, 14, 7, 15, tzinfo=UTC)) is None
     assert due_slot(datetime(2026, 11, 27, 6, 30, tzinfo=UTC)) is not None
+
+
+def test_digests_continue_after_the_pilot_without_an_end_date():
+    """Owner decision 21.11.2026 (#321): the pilot end no longer stops digests."""
+    assert belgrade_digests._policy().ends_before is None
+    for now, kind in (
+        (datetime(2026, 11, 27, 19, 30, tzinfo=UTC), "evening"),
+        (datetime(2026, 11, 28, 6, 30, tzinfo=UTC), "morning"),
+        (datetime(2027, 1, 15, 6, 30, tzinfo=UTC), "morning"),
+        # Summer time: 07:30 and 20:30 in Belgrade are 05:30 and 18:30 UTC.
+        (datetime(2027, 7, 1, 5, 30, tzinfo=UTC), "morning"),
+        (datetime(2027, 7, 1, 18, 30, tzinfo=UTC), "evening"),
+    ):
+        slot = due_slot(now)
+        assert slot is not None and slot.kind == kind
+    assert due_slot(datetime(2027, 1, 15, 5, 30, tzinfo=UTC)) is None
+
+
+def test_explicit_end_date_still_stops_regular_digests(monkeypatch):
+    policy = belgrade_digests._policy()
+    monkeypatch.setattr(belgrade_digests, "_policy", lambda: policy.model_copy(update={
+        "ends_before": datetime(2026, 11, 27, 20, 30),
+    }))
+    assert due_slot(datetime(2026, 11, 27, 6, 30, tzinfo=UTC)).kind == "morning"
+    assert due_slot(datetime(2026, 11, 28, 6, 30, tzinfo=UTC)) is None
     reminder = due_slot(datetime(2026, 11, 27, 19, 30, tzinfo=UTC))
     assert reminder is not None and reminder.kind == "reminder"
 

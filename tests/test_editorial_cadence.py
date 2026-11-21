@@ -37,7 +37,7 @@ def test_redundant_schedules_route_editorial_and_intake_without_slot_overlap(tmp
     assert editorial == ["17 * * * *", "47 * * * *"]
     assert len(intake) == 2
     assert {cron for cron, mode in routed.items() if mode == "value=digest"} == {
-        "30 6 13-27 11 *", "30 18,19 * * *",
+        "30 5,6 * * *", "30 18,19 * * *",
     }
     editorial_minutes = {17, 47}
     intake_minutes = []
