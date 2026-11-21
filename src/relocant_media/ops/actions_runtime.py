@@ -555,9 +555,22 @@ def run_child(command: list[str], environment: dict[str, str]) -> int:
 
 
 def print_failure_coordinates(report: dict[str, Any]) -> None:
-    fields = {key: value for key in ("status", "error_type", "error_site", "backup_error_type")
+    fields: dict[str, Any] = {
+        key: value for key in ("status", "error_type", "error_site", "backup_error_type")
               if isinstance(value := report.get(key), str)
               and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
+    errors = report.get("processing_errors")
+    coordinates = []
+    for error in errors[:5] if isinstance(errors, list) else []:
+        if not isinstance(error, dict):
+            continue
+        safe = {key: value for key in ("stage", "error_type", "error_site")
+                if isinstance(value := error.get(key), str)
+                and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
+        if safe:
+            coordinates.append(safe)
+    if coordinates:
+        fields["processing_errors"] = coordinates
     print(json.dumps({"runtime_failure": fields}), file=sys.stderr)
 
 

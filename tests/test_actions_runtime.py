@@ -889,3 +889,32 @@ def test_private_checkpoint_precedes_projection_and_survives_failed_commit(
     assert store.state['status'] == 'busy'
     assert checkpoints[0]['state']['snapshot']['sha256']
     assert not (tmp_path / 'public.json').exists()
+
+
+@pytest.mark.parametrize('invalid', [None, {}, 'PRIVATE-TIP-TOKEN'])
+def test_failure_processing_errors_ignore_non_lists(capsys, invalid):
+    runtime.print_failure_coordinates({'status': 'PRIMARY_FAILED', 'processing_errors': invalid})
+    assert json.loads(capsys.readouterr().err) == {
+        'runtime_failure': {'status': 'PRIMARY_FAILED'},
+    }
+
+
+def test_failure_processing_coordinates_are_bounded_and_keep_private_fields_hidden(capsys):
+    error = {'stage': 'reject', 'error_type': 'ValueError',
+             'error_site': 'gpt_fallback.py:123', 'raw_item_id': 123456,
+             'message': 'PRIVATE-TIP-TOKEN', 'url': 'https://private.invalid/secret'}
+    runtime.print_failure_coordinates({
+        'status': 'PRIMARY_FAILED',
+        'processing_errors': [None, {'stage': 'PRIVATE TOKEN',
+                                    'error_type': 'https://private.invalid/secret'},
+                              error, error, error, error, error],
+    })
+    captured = capsys.readouterr()
+    assert captured.out == ''
+    assert 'PRIVATE' not in captured.err and 'private.invalid' not in captured.err
+    assert 'raw_item_id' not in captured.err
+    assert json.loads(captured.err)['runtime_failure'] == {
+        'status': 'PRIMARY_FAILED',
+        'processing_errors': [{'stage': 'reject', 'error_type': 'ValueError',
+                               'error_site': 'gpt_fallback.py:123'}] * 3,
+    }
