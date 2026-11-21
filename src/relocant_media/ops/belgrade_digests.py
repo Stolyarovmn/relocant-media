@@ -293,6 +293,17 @@ def _incident_content(
             printed_ranges.setdefault(key, []).append(row.number)
     districts: dict[str, None] = {}
     grouped: dict[tuple[str, str, datetime, datetime], list[str]] = {}
+    whole_streets: set[tuple[str, str, datetime, datetime]] = set()
+    for scope in notice.water_districts:
+        if scope.starts_at >= tomorrow or scope.ends_at <= now:
+            continue
+        districts[scope.municipality] = None
+        if scope.boundary:
+            block = f"квартал между улицами {', '.join(scope.boundary)}"
+            grouped[(scope.municipality, block, scope.starts_at, scope.ends_at)] = []
+        for street in scope.whole_streets:
+            whole_streets.add((scope.municipality, street, scope.starts_at, scope.ends_at))
+            grouped[(scope.municipality, street, scope.starts_at, scope.ends_at)] = []
     for row in active:
         districts[row.municipality] = None
         if isinstance(row, Settlement):
@@ -301,20 +312,26 @@ def _incident_content(
         else:
             place, number = row.street, row.number
         key = row.municipality, place, row.starts_at, row.ends_at
-        if isinstance(row, Address) and any(
+        if isinstance(row, Address) and (key in whole_streets or any(
             house_in_range(number, part.strip())
             for printed in printed_ranges.get(key, ()) for part in printed.split(",")
-        ):
+        )):
             continue
         grouped.setdefault(key, []).append(number)
-    if notice.kind == "water" and len(notice.windows) == 1:
-        window = notice.windows[0]
-        if window.starts_at < tomorrow and now < window.ends_at:
-            for segment in notice.segments:
+    if notice.kind == "water":
+        for segment in notice.segments:
+            periods = {(scope.starts_at, scope.ends_at) for scope in notice.water_districts
+                       if scope.municipality == segment.municipality}
+            if not periods and len(notice.windows) == 1:
+                window = notice.windows[0]
+                periods = {(window.starts_at, window.ends_at)}
+            if len(periods) != 1:
+                continue
+            (start, end), = periods
+            if start < tomorrow and now < end:
                 districts[segment.municipality] = None
                 place = f"{segment.street}, от {segment.start} до {segment.end}"
-                grouped.setdefault((segment.municipality, place, window.starts_at,
-                                    window.ends_at), [])
+                grouped.setdefault((segment.municipality, place, start, end), [])
     details = tuple(
         f"{district}, {place}{', ' + ', '.join(dict.fromkeys(numbers)) if any(numbers) else ''}"
         f" — {_outage_period(start, end, now)}"

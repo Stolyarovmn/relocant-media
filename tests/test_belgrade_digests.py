@@ -32,7 +32,14 @@ from relocant_media.ops.belgrade_digests import (
     due_slot,
     render,
 )
-from relocant_media.ops.map_export import Address, Incident, PrintedRange, Segment, Window
+from relocant_media.ops.map_export import (
+    Address,
+    Incident,
+    PrintedRange,
+    Segment,
+    WaterDistrict,
+    Window,
+)
 from relocant_media.sources.registry import load_source_file
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source
 
@@ -171,6 +178,36 @@ def test_morning_power_notice_keeps_every_current_address_and_its_interval():
     assert "33-43, 35" not in quote
     assert "MILUTINA MILANKOVIĆA, 1A-1K — 10:00–16:00" in quote
     assert "OLD" not in quote and "https://" not in quote
+
+
+def test_water_notice_keeps_each_district_with_its_own_hours():
+    now = datetime(2026, 11, 24, 7, 30, tzinfo=_ZONE)
+    tomorrow = datetime(2026, 11, 25, tzinfo=_ZONE)
+    source = "https://www.beograd.rs/example"
+    start = now.replace(hour=8, minute=0)
+    first = Window(starts_at=start, ends_at=now.replace(hour=15, minute=0))
+    second = Window(starts_at=start, ends_at=now.replace(hour=16, minute=0))
+    vozdovac = {**second.model_dump(), "municipality": "Voždovac"}
+    notice = Incident(
+        id=map_event_id(source), kind="water", title="Плановое отключение воды", source_url=source,
+        windows=(first, second), water_districts=(
+            WaterDistrict(**first.model_dump(), municipality="Savski venac",
+                          boundary=("Fabrisova", "Zvečanska", "Oblakovska")),
+            WaterDistrict(**vozdovac, whole_streets=("Rastka Petrovića",)),
+        ), ranges=(PrintedRange(**vozdovac, street="Brane Ćosića", number="16–42"),),
+        addresses=(Address(**vozdovac, street="Rastka Petrovića", number="37"),),
+        segments=(Segment(municipality="Voždovac", street="Medakovićeva",
+                          start="Zaplanjska", end="Katarine Ivanović"),),
+    )
+    text, rows = _incident_content(notice, now, tomorrow)
+    assert text == "Savski venac, Voždovac."
+    assert rows == (
+        "Savski venac, квартал между улицами Fabrisova, Zvečanska, Oblakovska — 08:00–15:00",
+        "Voždovac, Rastka Petrovića — 08:00–16:00",
+        "Voždovac, Brane Ćosića, 16–42 — 08:00–16:00",
+        "Voždovac, Medakovićeva, от Zaplanjska до Katarine Ivanović — 08:00–16:00",
+    )
+    assert _incident_content(notice, now.replace(hour=15), tomorrow) == ("Voždovac.", rows[1:])
 
 
 def test_long_address_quote_is_bounded_by_telegram_text_limit():
