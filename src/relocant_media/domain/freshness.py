@@ -167,6 +167,26 @@ def _event_deadlines(text: str, published: datetime) -> list[date]:
     return deadlines
 
 
+# #320: "трамваи снова ходят" через шесть часов — уже не новость. Маркер ищется только
+# в заголовке и первой фразе, чтобы «ранее восстановлено, а с понедельника…» не терялось.
+RESOLVED_DISRUPTION_AGE = timedelta(hours=2)
+_RESOLVED = re.compile(
+    r"(?<![^\W\d_])(?:"
+    r"(?:ponovo|поново)\s+(?:saobraća|саобраћа|radi|ради|ima|има|stigl|стигл)"
+    r"|uspostavljen|успостављен|normalizovan|нормализован"
+    r"|(?:otklonjen|отклоњен)\w*\s+(?:kvar|квар)"
+    r"|vraćen\w*\s+(?:u\s+)?redovn|враћен\w*\s+(?:у\s+)?редовн"
+    r"|возобнов|восстановлен|снова\s+(?:ходят|ходит|идут|работает|есть|дали)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def resolved_disruption(title: str, body: str) -> bool:
+    lead = re.split(r"(?<=[.!?])\s", body.strip(), maxsplit=1)[0][:300]
+    return bool(_RESOLVED.search(title) or _RESOLVED.search(lead))
+
+
 def freshness_decision(
     title: str,
     body: str,
@@ -196,6 +216,8 @@ def freshness_decision(
     if age > timedelta(days=7):
         return FreshnessDecision("discard", "publication_older_than_seven_days")
     text = f"{title}\n{body}"
+    if age >= RESOLVED_DISRUPTION_AGE and resolved_disruption(title, body):
+        return FreshnessDecision("discard", "disruption_already_resolved")
     local_published = published_at.astimezone(ZoneInfo(timezone_name))
     deadlines = _event_deadlines(text, local_published) + _relative_deadlines(
         text, published_at, timezone_name)
