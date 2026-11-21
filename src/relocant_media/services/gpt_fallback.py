@@ -365,9 +365,10 @@ def build_request(
                 verified_at=item.ingested_at, timezone_name=profile.timezone,
             ).action == "keep"
         }
-        # В пределах одного приоритета сначала восстанавливаем свежий цикл.
+        # В пределах одного приоритета сначала разбираем более ранний сбой:
+        # иначе каждый новый цикл может вытеснять открытые задания до истечения срока.
         windows.sort(key=lambda window: (
-            urgent.isdisjoint(window[1]), official.isdisjoint(window[1]),
+            urgent.isdisjoint(window[1]), official.isdisjoint(window[1]), window[0].id,
         ))
         for run, failed in windows:
             candidates: list[dict[str, Any]] = []
