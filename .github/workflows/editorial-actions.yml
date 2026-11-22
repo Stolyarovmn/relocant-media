@@ -12,6 +12,10 @@ on:
         type: choice
         options: [preview, editorial, intake, discovery, auto, recovery, fallback-preview, fallback, map-backfill, map-republish, map-republish-review, digest, digest-preview, drain, drain-close]
         default: preview
+      preflight_retry:
+        description: One replacement for a cycle stopped before opening state
+        type: boolean
+        default: false
       digest_preview_at:
         description: 'Digest preview only: timestamp with offset, e.g. 2026-11-14T07:30:00+01:00'
         type: string
@@ -112,6 +116,7 @@ jobs:
     outputs:
       projection: ${{ steps.projection.outputs.ready }}
       worker_mode: ${{ steps.mode.outputs.value }}
+      start_status: ${{ steps.start.outputs.status }}
       drain_continue: ${{ steps.runtime.outputs.drain_continue }}
       drain_next_delay_seconds: ${{ steps.runtime.outputs.drain_next_delay_seconds }}
       morning_watch_date: ${{ steps.runtime.outputs.morning_watch_date }}
@@ -137,23 +142,18 @@ jobs:
             echo 'value=intake' >> "$GITHUB_OUTPUT"
           fi
       - name: Verify exact main CI before any runtime side effect
+        id: start
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA: ${{ github.sha }}
-        run: |
-          python - <<'PY'
-          import json, os, subprocess
-          repo = 'Stolyarovmn/relocant-media'
-          sha = os.environ['EXPECTED_SHA']
-          def api(path):
-              return json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/{path}']))
-          assert api('git/ref/heads/main')['object']['sha'] == sha, 'main advanced; retry current main'
-          runs = api(f'actions/runs?head_sha={sha}&event=push&per_page=100')['workflow_runs']
-          ci = [r for r in runs if r['path'] == '.github/workflows/ci.yml'
-                and r['head_branch'] == 'main' and r['event'] == 'push']
-          assert ci and ci[0]['status'] == 'completed' and ci[0]['conclusion'] == 'success'
-          PY
+          WORKER_MODE: ${{ steps.mode.outputs.value }}
+          PREFLIGHT_RETRY: ${{ inputs.preflight_retry }}
+          PREFLIGHT_RETRY_ENABLED: >-
+            ${{ github.repository == 'Stolyarovmn/relocant-media' &&
+                vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
+                vars.ACTIONS_CUTOVER_CONFIRMED == 'true' }}
+        run: python src/relocant_media/ops/editorial_start.py gate
       - name: Prepare storage-only SSH identity
+        if: steps.start.outputs.status == 'ready'
         id: storage
         env:
           STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
@@ -183,7 +183,7 @@ jobs:
           echo "key_path=$identity/key" >> "$GITHUB_OUTPUT"
           echo "known_hosts_path=$identity/known_hosts" >> "$GITHUB_OUTPUT"
       - name: Restore, claim, process, save and export
-        if: steps.mode.outputs.value != 'recovery'
+        if: steps.start.outputs.status == 'ready' && steps.mode.outputs.value != 'recovery'
         id: runtime
         env:
           EDITORIAL_STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
@@ -232,7 +232,7 @@ jobs:
             --work "$RUNNER_TEMP/editorial-work" --output _site/data.json \
             --map-output _site/map/incidents.json
       - name: Reconcile interrupted writer from verified checkpoint
-        if: steps.mode.outputs.value == 'recovery'
+        if: steps.start.outputs.status == 'ready' && steps.mode.outputs.value == 'recovery'
         env:
           GH_TOKEN: ${{ github.token }}
           EDITORIAL_STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
@@ -263,7 +263,7 @@ jobs:
             --snapshot "$RUNNER_TEMP/editorial-work/saved/editorial.sqlite3"
       - name: Publish only sanitized projection
         if: >-
-          always() && steps.mode.outputs.value != 'recovery' &&
+          always() && steps.start.outputs.status == 'ready' && steps.mode.outputs.value != 'recovery' &&
           steps.mode.outputs.value != 'fallback-preview' &&
           steps.mode.outputs.value != 'digest-preview' && !startsWith(inputs.mode, 'map-')
         id: projection
@@ -293,6 +293,33 @@ jobs:
       - name: Remove private working files
         if: always()
         run: rm -rf "$RUNNER_TEMP/editorial-work" "$RUNNER_TEMP/editorial-storage-identity"
+  start_retry:
+    # Ожидание CI проходит после освобождения канонической очереди.
+    if: >-
+      github.repository == 'Stolyarovmn/relocant-media' && github.ref == 'refs/heads/main' &&
+      github.run_attempt == '1' && !inputs.preflight_retry &&
+      vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CUTOVER_CONFIRMED == 'true' &&
+      needs.cycle.result == 'success' &&
+      (needs.cycle.outputs.start_status == 'superseded' ||
+       needs.cycle.outputs.start_status == 'ci_pending')
+    needs: cycle
+    concurrency:
+      group: editorial-start-retry-${{ needs.cycle.outputs.worker_mode }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Дождаться точного CI и однократно поставить прежний режим в очередь
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_MODE: ${{ needs.cycle.outputs.worker_mode }}
+        run: python src/relocant_media/ops/editorial_start.py retry
   drain_chain:
     # Ожидание не занимает job с канонической блокировкой состояния.
     if: >-
@@ -348,6 +375,9 @@ jobs:
       always() && github.ref == 'refs/heads/main' &&
       (github.event_name != 'workflow_dispatch' || inputs.mode == 'auto') &&
       (needs.cycle.result == 'success' || needs.cycle.result == 'failure') &&
+      needs.cycle.outputs.start_status != 'superseded' &&
+      needs.cycle.outputs.start_status != 'ci_pending' &&
+      needs.cycle.outputs.start_status != 'ci_failed' &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true' &&
       inputs.mode != 'preview' && inputs.mode != 'recovery' &&
       inputs.mode != 'digest' && inputs.mode != 'digest-preview' &&
