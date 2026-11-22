@@ -78,9 +78,10 @@ class MaterialLifecycleRuntime:
         core.inherit_lifecycle(session, raw_id, replacement_id, now=self._time())
         return replacement_id
 
-    def reconcile(self) -> core.LifecycleSweep:
+    def reconcile(self, *, reissue_event_fallback: bool = False) -> core.LifecycleSweep:
         with Session(self.engine) as session:
-            sweep = core.sweep_materials(session, city=self.city, now=self._time())
+            sweep = core.sweep_materials(session, city=self.city, now=self._time(),
+                                         reissue_event_fallback=reissue_event_fallback)
             records = {row.details.get("raw_item_id"): row.details
                        for row in session.scalars(select(SchedulerRun).where(
                            SchedulerRun.city == self.city,
