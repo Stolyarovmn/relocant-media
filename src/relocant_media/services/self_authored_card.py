@@ -204,10 +204,16 @@ def create_self_authored_card_bundle(
 
     assets = output / "assets"
     assets.mkdir(parents=True, exist_ok=False)
-    png = render_card_png(
+    # Для отключения с проверенным расписанием карточка показывает вид работ, район и время;
+    # иначе остаётся абстрактная графика без фактического текста.
+    from relocant_media.services.notice_card import notice_card_text, render_notice_card
+
+    native_map = package.presentation.native_map if package.presentation is not None else None
+    card_text = notice_card_text(native_map)
+    png = (render_notice_card(card_text) if card_text is not None else render_card_png(
         category=package.outcome.ranking.category,
         package_sha256=package_sha256,
-    )
+    ))
     card = assets / CARD_FILE_NAME
     card.write_bytes(png)
     digest = hashlib.sha256(png).hexdigest()
@@ -238,6 +244,9 @@ def create_self_authored_card_bundle(
         "requires_independent_media_reviews": True,
         "publication_permitted": False,
         "telegram_io_performed": False,
+        "card_layout": "notice_text_v1" if card_text is not None else "abstract_v1",
+        # Ревью сверяют каждую строку с расписанием проверенного пакета.
+        "card_text": list(card_text.lines()) if card_text is not None else [],
     }
     (output / "generation.json").write_text(
         json.dumps(generation, ensure_ascii=False, indent=2, sort_keys=True),

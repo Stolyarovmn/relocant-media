@@ -51,6 +51,8 @@ async def test_self_authored_card_enters_existing_two_review_pipeline(
     assert result["requires_independent_media_reviews"] is True
     assert result["publication_permitted"] is False
     assert result["telegram_io_performed"] is False
+    assert result["card_layout"] == "abstract_v1"
+    assert result["card_text"] == []
     asset_values = json.loads((generated / "assets.json").read_text(encoding="utf-8"))["assets"]
     asset = MediaAsset.model_validate(asset_values[0])
     assert asset.origin == "self_authored_card"
@@ -102,3 +104,66 @@ def test_self_authored_card_refuses_after_delivery_claim(
 
     with pytest.raises(ValueError, match="before delivery"):
         create_self_authored_card_bundle(session, run.raw_item_id, tmp_path / "generated")
+
+
+def _notice_map(source_id: str = "bvk_planned_works", **extra) -> dict:
+    return {
+        "layout": "map_notice_v2",
+        "point": {"mode": "utility_map_review", "source_id": source_id,
+                  "source_url": "https://www.bvk.rs/planirani-radovi/1"},
+        "schedule": [
+            {"when": "24.11.2026 · 08:00–15:00",
+             "items": ["Fabrisova, 1 · Савски-Венац", "Zvečanska, 2 · Савски-Венац"],
+             "areas": []},
+            {"when": "24.11.2026 · 08:00–16:00",
+             "items": ["Brane Ćosića, 16 · Вождовац"], "areas": ["Медаковић · Вождовац"]},
+        ],
+        **extra,
+    }
+
+
+def test_notice_card_text_comes_only_from_reviewed_schedule() -> None:
+    from relocant_media.services.native_map import NOTICE_LAYOUT
+    from relocant_media.services.notice_card import notice_card_text
+
+    assert NOTICE_LAYOUT == "map_notice_v2"
+    text = notice_card_text(_notice_map())
+    assert text is not None
+    assert text.lines() == ("Отключение воды", "Савски-Венац, Вождовац",
+                            "24.11.2026 · 08:00–15:00 и ещё 1 интервал")
+    power = notice_card_text(_notice_map("eds_belgrade_outages_tomorrow"))
+    assert power is not None and power.headline == "Отключение света"
+    many = _notice_map()
+    many["schedule"][1]["items"] += ["X, 1 · Земун", "Y, 2 · Врачар"]
+    many_text = notice_card_text(many)
+    assert many_text is not None and many_text.places == "Савски-Венац, Вождовац и ещё 2 района"
+    # Неизвестный вид работ, другой макет или пустое расписание — без карточки.
+    city = _notice_map("city_beograd_news")
+    assert notice_card_text(city) is None
+    city["point"]["source_url"] = ("https://www.beograd.rs/lat/servisne-informacije/"
+                                   "vodovod-i-kanalizacija/a1/x.html")
+    city_text = notice_card_text(city)
+    assert city_text is not None and city_text.kind == "water"
+    assert notice_card_text(_notice_map(layout="map_notice_v1")) is None
+    assert notice_card_text(_notice_map(schedule=[])) is None
+    assert notice_card_text({**_notice_map(), "point": {"mode": "transport_map_review"}}) is None
+    assert notice_card_text(None) is None
+
+
+def test_notice_card_renders_deterministic_png() -> None:
+    from relocant_media.services.notice_card import (
+        CARD_HEIGHT as NOTICE_HEIGHT,
+    )
+    from relocant_media.services.notice_card import (
+        CARD_WIDTH as NOTICE_WIDTH,
+    )
+    from relocant_media.services.notice_card import notice_card_text, render_notice_card
+
+    text = notice_card_text(_notice_map())
+    assert text is not None
+    first = render_notice_card(text)
+    assert first == render_notice_card(text)
+    assert first != render_notice_card(text.model_copy(update={"places": "Земун"}))
+    assert first.startswith(b"\x89PNG\r\n\x1a\n")
+    assert struct.unpack(">II", first[16:24]) == (NOTICE_WIDTH, NOTICE_HEIGHT)
+    validate_telegram_photo(Path("notice-card.png"), first)
