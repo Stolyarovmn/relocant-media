@@ -73,6 +73,7 @@ from relocant_media.collectors.telegram_topics import (
 )
 from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.collectors.venue_feed import VenueFeedCollector
+from relocant_media.domain import quiet_hours
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
 from relocant_media.domain.dedup import event_key, find_repeated_publication
@@ -81,7 +82,7 @@ from relocant_media.domain.freshness import (
     evidence_freshness,
     freshness_decision,
 )
-from relocant_media.domain.pacing import pacing_hold
+from relocant_media.domain.pacing import morning_deadline, morning_release, pacing_hold
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
 from relocant_media.domain.presentation import (
     presentation_title,
@@ -1312,6 +1313,7 @@ async def publish_pending(
         before_delivery_attempt,
         delivery_deadline,
         delivery_failure,
+        hold_until_morning,
     )
     with Session(engine) as session:
         query = select(EditorialRun.raw_item_id).where(
@@ -1340,10 +1342,19 @@ async def publish_pending(
                     continue
                 ranking = run.outcome.get("ranking")
                 stored = run.outcome["_package"]
+                category = (str(ranking.get("category", "")) if isinstance(ranking, dict)
+                            else "")
+                urgent = isinstance(stored, dict) and stored.get("urgent") is True
+                release = morning_release(category=category, urgent=urgent,
+                                          now=quiet_hours.utc_now())
+                if release is not None:
+                    # Not a failure: the morning cycle re-checks freshness and sends it.
+                    hold_until_morning(session, raw_id, now=quiet_hours.utc_now(),
+                                       deadline=morning_deadline(release))
+                    session.commit()
+                    continue
                 if pacing_hold(
-                    category=str(ranking.get("category", "")) if isinstance(ranking, dict)
-                    else "",
-                    urgent=isinstance(stored, dict) and stored.get("urgent") is True,
+                    category=category, urgent=urgent,
                     now=datetime.now(UTC), last_sent_at=last_sent_at,
                     deadline_at=delivery_deadline(session, raw_id),
                 ):
