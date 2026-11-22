@@ -90,3 +90,55 @@ def test_ordinary_news_not_held(sources, title, body):
 def test_russian_search_wording_counts_as_active_search():
     assert personal_detail_reason(
         [], "Полиция ищет подростка", "Ищут 17-летнего подростка, страдающего аутизмом.") is None
+
+
+OLD_NOTICE = "Pronađi me: nestao 15-godišnji dečak sa Vračara"
+FOUND_NOTICE = "Pronađen maloletnik koji je nestao prošle nedelje"
+
+
+def test_confirmed_outcome_in_source_wins_over_russian_draft_wording():
+    assert personal_detail_reason(
+        [FOUND_NOTICE], "Подросток вернулся к семье",
+        "У 15-летнего подростка диагноз аутизм, родные благодарят полицию.",
+    ) == PERSONAL_DETAIL_REASON
+
+
+def test_old_search_notice_with_fresher_found_message_is_held():
+    assert personal_detail_reason(
+        [OLD_NOTICE, FOUND_NOTICE], "Пропавший на Врачаре подросток",
+        "Подросток страдает аутизмом, его искали неделю.",
+    ) == PERSONAL_DETAIL_REASON
+
+
+def test_active_search_notice_alone_stays_with_ordinary_review():
+    assert personal_detail_reason(
+        [OLD_NOTICE], "На Врачаре разыскивают 15-летнего подростка",
+        "Мальчик страдает аутизмом и может не отвечать на имя. Звоните 192.",
+    ) is None
+
+
+@pytest.mark.parametrize("body", [
+    "У него эпилепсия, родным важно, чтобы он вовремя получил лекарства.",
+    "Мальчик с особенностями развития вернулся домой.",
+])
+def test_found_person_health_detail_without_word_diagnosis_is_held(body):
+    assert personal_detail_reason(
+        [OLD_NOTICE, FOUND_NOTICE], "Подросток с Врачара нашёлся", body,
+    ) == PERSONAL_DETAIL_REASON
+
+
+def test_search_still_under_way_in_serbian_is_not_found():
+    assert personal_detail_reason(
+        ["Dečak sa Vračara još nije pronađen, potraga traje"], "Мальчика с Врачара всё ещё ищут",
+        "15-летний мальчик страдает эпилепсией, ему нужны лекарства.",
+    ) is None
+
+
+@pytest.mark.parametrize(("sources", "title", "body"), [
+    (["Sezona gripa u školama"], "В школах сезон гриппа",
+     "У школьников растёт заболеваемость, врачи советуют прививки."),
+    (["Kvar pronađen"], "Аптека снова работает",
+     "Неисправность найдена, лекарства выдают по рецептам."),
+])
+def test_general_health_news_not_held(sources, title, body):
+    assert personal_detail_reason(sources, title, body) is None

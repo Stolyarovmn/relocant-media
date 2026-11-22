@@ -81,15 +81,37 @@ def sensitive_topic_reason(texts: Iterable[str]) -> str | None:
 
 PERSONAL_DETAIL_REASON = "sensitive_personal_detail_in_draft"
 
-# The search is over: only the outcome is news, the person's details are not.
+# The search is over: only the outcome is news, the person's details are not. A
+# confirmed outcome in any source wins over an older search notice in another one.
 _FOUND = re.compile(
-    r"(?<![^\W\d_])(?<!не\s)(?<!ni\s)(?:найден|нашли|нашёл|нашел|обнаружен|отыскал|поиск\w*\s+заверш|"
-    r"розыск\w*\s+(?:прекращ|заверш)|pronađen|пронађен)",
+    r"(?<![^\W\d_])(?<!не\s)(?<!ni\s)(?<!nije\s)(?<!није\s)(?<!još\s)(?:"
+    r"найден|нашли|нашёл|нашел|нашлась|нашлись|обнаружен|отыскал|"
+    r"поиск\w*\s+(?:заверш|прекращ|окончен)|розыск\w*\s+(?:прекращ|заверш)|"
+    r"вернул(?:ся|ась|ись)\s+(?:домой|к\s+(?:семье|родным|родителям))|"
+    r"pronađen|пронађен|vratio\s+se|vratila\s+se|vraćen[aio]?\s+porodic|"
+    r"potrag\w*\s+(?:je\s+)?(?:završ|okonč)|потраг\w*\s+(?:је\s+)?(?:заврш|оконч))",
     re.IGNORECASE,
 )
 
-_SEARCH = re.compile(
-    r"(?<![^\W\d_])(?:ищ(?:ет|ут)|разыскива|traga|трага|potrag|потраг)", re.IGNORECASE)
+# Wording of a search still under way. A bare mention of a disappearance is not enough:
+# a later report about the same person repeats it.
+_ACTIVE_SEARCH = re.compile(
+    r"(?<![^\W\d_])(?:ищ(?:ет|ут)|разыскива|помогите\s+найти|просят\s+помочь|"
+    r"пока\s+не\s+(?:найден|нашли)|traga|трага|traži\s+se|тражи\s+се|"
+    r"pronađi\s+me|пронађи\s+ме|nije\s+pronađen|није\s+пронађен)",
+    re.IGNORECASE,
+)
+
+# Health details that need not say "diagnosis". Used only for the draft check below,
+# so it widens neither the general sensitive-topic review nor ordinary health news.
+_HEALTH_DETAIL = re.compile(
+    r"(?<![^\W\d_])(?:" + "|".join(_SIGNALS["health"]) + r"|аутист|autist|"
+    r"эпилеп|epilep|епилеп|диабет|dijabet|дијабет|инвалид|invalid|синдром|sindrom|"
+    r"болезн|заболеван|bolest|болест|лекарств|lekov|леков|психиатр|psihijatr|"
+    r"шизофрен|šizofren|депресс|depres|особенност\w*\s+развит|задержк\w*\s+развит|"
+    r"posebn\w*\s+potreb|посебн\w*\s+потреб|ментальн|умственн)",
+    re.IGNORECASE,
+)
 
 
 def personal_detail_reason(source_texts: Iterable[str], title: str, body: str) -> str | None:
@@ -98,14 +120,23 @@ def personal_detail_reason(source_texts: Iterable[str], title: str, body: str) -
     Only an active search may need such a detail, and then the owner decides it under the
     ordinary sensitive-topic review. A hold here is not owner-approvable: the text must be
     rewritten without the detail. Sources alone never trigger it; the draft must carry it.
+    A confirmed outcome in a source or the draft ends the search even when another source
+    is the original notice.
     """
-    sources = tuple(source_texts)
-    story = sensitive_signals(sources) | sensitive_signals((title, body))
-    draft = sensitive_signals((title, body))
-    if "health" not in draft or not story & {"minor", "missing"}:
+    sources = tuple(text for text in source_texts if text)
+    draft_texts = tuple(text for text in (title, body) if text)
+    texts = (*sources, *draft_texts)
+    story = sensitive_signals(texts)
+    if not story & {"minor", "missing"}:
         return None
-    searching = "missing" in story or any(
-        _SEARCH.search(text) for text in (*sources, title, body) if text)
-    if searching and not _FOUND.search(title + "\n" + body):
+    if any(_FOUND.search(text) for text in texts) and any(
+            _HEALTH_DETAIL.search(text) for text in draft_texts):
+        # The person is found: any health detail in the draft counts.
+        return PERSONAL_DETAIL_REASON
+    if "missing" in story or any(_ACTIVE_SEARCH.search(text) for text in texts):
         return None
-    return PERSONAL_DETAIL_REASON
+    # Outside a search only a named diagnosis of a minor is held: child-health news
+    # such as a flu season in schools is not about one child.
+    if "health" in sensitive_signals(draft_texts):
+        return PERSONAL_DETAIL_REASON
+    return None
