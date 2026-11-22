@@ -369,6 +369,15 @@ h1 {
   border-radius: 50%;
   background: radial-gradient(circle, currentColor 5%, transparent 70%);
 }
+.view-symbol-timeline {
+  width: 20px;
+  height: 15px;
+  border-left: 2px solid;
+  background:
+    linear-gradient(currentColor, currentColor) 3px 1px / 8px 2px no-repeat,
+    linear-gradient(currentColor, currentColor) 8px 6px / 9px 2px no-repeat,
+    linear-gradient(currentColor, currentColor) 4px 11px / 12px 2px no-repeat;
+}
 .picked-address {
   display: flex;
   align-items: center;
@@ -583,6 +592,56 @@ h1 {
   background: var(--city-tint);
   color: var(--city);
 }
+.incident-timeline {
+  margin: 2px 0 7px;
+  padding: 3px 10px 5px;
+  border: 1px solid var(--stroke);
+  border-radius: 9px;
+  background: var(--card);
+}
+.timeline-header {
+  display: flex;
+  min-height: 33px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+}
+.timeline-header output { color: var(--city); font-weight: 800; font-variant-numeric: tabular-nums; }
+.timeline-header button {
+  min-height: 30px;
+  padding: 1px 7px;
+  border: 1px solid var(--stroke);
+  border-radius: 5px;
+  background: var(--paper);
+  color: var(--link);
+  font-size: .78rem;
+  font-weight: 700;
+}
+.timeline-meter {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 5px;
+}
+.timeline-icons, .timeline-bands { display: grid; grid-auto-rows: 9px; gap: 4px; }
+.timeline-icons span { align-self: center; font-size: 10px; line-height: 1; text-align: center; }
+.timeline-bands { position: relative; }
+.timeline-track {
+  position: relative;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--kind-tint);
+}
+.timeline-segment { position: absolute; inset-block: 1px; border-radius: 2px; background: var(--kind); }
+.timeline-cursor {
+  position: absolute;
+  inset-block: -2px;
+  border-left: 2px solid var(--ink);
+  transform: translateX(-1px);
+}
+.timeline-scale { position: relative; padding-bottom: 12px; }
+.timeline-scale input { display: block; width: 100%; height: 26px; margin: 0; accent-color: var(--city); }
+.timeline-end { position: absolute; right: 0; bottom: 0; color: var(--muted); font-size: .68rem; line-height: 1; }
 #event-count { color: var(--muted); font-size: .84rem; font-weight: 600; }
 .places-count { color: var(--muted); font-size: .84rem; font-weight: 600; }
 .places-header { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
@@ -860,6 +919,10 @@ h1 {
     max-height: min(var(--announcement-height, 37dvh), 340px, max(45px, 100dvh - 314px));
     overflow: auto;
     overscroll-behavior: contain;
+  }
+  .incident-timeline { margin-top: 0; }
+  .incident-timeline:not([hidden]) ~ .announcement-body {
+    max-height: min(28dvh, 290px, max(32px, 100dvh - 365px));
   }
   .archive-filter { min-height: 34px; font-size: .81rem; }
   .event-list { gap: 5px; }
