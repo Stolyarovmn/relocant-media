@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from relocant_media.ops.newsroom_export import snapshot as public_catalog
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.services.editorial_flow import public_editorial_flow
+from relocant_media.services.kpi import public_kpi
 
 ZONE = ZoneInfo("Europe/Moscow")
 STATES = (
@@ -29,6 +30,33 @@ def _time(value: Any) -> datetime | None:
         return result if result.tzinfo is not None else None
     except ValueError:
         return None
+
+
+def _count(value: Any) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _delta(value: Any) -> int | None:
+    return value if type(value) is int else None
+
+
+def _rolling_kpi(recorded: dict[str, Any]) -> dict[str, Any]:
+    """Скользящие окна проекции; не календарные сутки и не выводятся из sent."""
+    kpi = public_kpi(recorded.get("kpi")) or {}
+    published = kpi.get("published") or {}
+    audience = kpi.get("subscribers") or {}
+    last = _time(published.get("last_published_at"))
+    measured = _time(audience.get("observed_at"))
+    return {
+        "window": "rolling", "observed_at": recorded.get("observed_at"),
+        "published_last_24h": _count(published.get("last_24h")),
+        "published_last_7d": _count(published.get("last_7d")),
+        "last_published_at": last.isoformat() if last else None,
+        "subscribers": _count(audience.get("count")),
+        "subscribers_observed_at": measured.isoformat() if measured else None,
+        "subscribers_delta_24h": _delta(audience.get("delta_24h")),
+        "subscribers_delta_7d": _delta(audience.get("delta_7d")),
+    }
 
 
 def build_status(
@@ -94,6 +122,7 @@ def build_status(
             "status": "unavailable" if not available else "stale" if stale else "available",
                      "observed_at": observed.isoformat() if observed else None,
                      "queue_counts": safe_counts if available else None},
+        "rolling_kpi": _rolling_kpi(recorded) if available else None,
         "daily_results": {"published_posts": None, "promotion": None,
                           "audience_metrics": None, "comment_signals": None,
                           "incoming_submissions": None},
@@ -115,12 +144,37 @@ def build_status(
     }
 
 
+def _shown(value: int | None) -> str:
+    return "нет данных" if value is None else str(value)
+
+
+def _signed(value: int | None) -> str:
+    return "нет данных" if value is None else f"{value:+d}"
+
+
+def _kpi_lines(kpi: dict[str, Any] | None) -> list[str]:
+    if kpi is None:
+        return ["Отдельные публикации и подписчики: нет данных."]
+    observed = _time(kpi["observed_at"])
+    stamp = observed.astimezone(ZONE).strftime("%d.%m %H:%M МСК") if observed else "неизвестно"
+    lines = [f"Отдельные публикации за скользящие 24 ч до {stamp}: "
+             f"{_shown(kpi['published_last_24h'])}; за 7 дней: "
+             f"{_shown(kpi['published_last_7d'])}."]
+    measured = _time(kpi["subscribers_observed_at"])
+    when = measured.astimezone(ZONE).strftime("%d.%m %H:%M МСК") if measured else "время неизвестно"
+    lines.append(f"Подписчики: {_shown(kpi['subscribers'])} ({when}); "
+                 f"за 24 ч {_signed(kpi['subscribers_delta_24h'])}, "
+                 f"за 7 дней {_signed(kpi['subscribers_delta_7d'])}.")
+    return lines
+
+
 def markdown(report: dict[str, Any]) -> str:
     observed = _time(report["snapshot"]["observed_at"])
     stamp = observed.astimezone(ZONE).strftime("%d.%m.%Y %H:%M МСК") if observed else "неизвестно"
     lines = [f"# Ежедневный статус · {report['report_date']} · {report['city']}", "",
              f"Состояние снимка: {report['snapshot']['status']}. Наблюдение БД: {stamp}.", "",
-             "Публикации за сутки: неизвестно. Продвижение и метрики аудитории: недоступны.",
+             *_kpi_lines(report.get("rolling_kpi")),
+             "Публикации за календарные сутки: неизвестно. Продвижение: недоступно.",
              "Сигналы комментариев и входящих обращений: недоступны.", ""]
     counts = report["snapshot"]["queue_counts"]
     if counts is not None:
