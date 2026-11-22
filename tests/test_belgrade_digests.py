@@ -5,6 +5,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from test_transport_map import _map_html
@@ -16,6 +17,8 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.collectors.rhmz_forecast import (
     FORECAST_URL,
     WARNING_URL,
+    _forecast_reading,
+    collect_weather,
     parse_forecast,
     parse_warning,
 )
@@ -30,6 +33,7 @@ from relocant_media.ops.belgrade_digests import (
     _road_text,
     deliver,
     due_slot,
+    morning_delivery,
     render,
 )
 from relocant_media.ops.map_export import (
@@ -90,8 +94,43 @@ def test_explicit_end_date_still_stops_regular_digests(monkeypatch):
     }))
     assert due_slot(datetime(2026, 11, 27, 6, 30, tzinfo=UTC)).kind == "morning"
     assert due_slot(datetime(2026, 11, 28, 6, 30, tzinfo=UTC)) is None
+    assert morning_delivery({"status": "ready"}, datetime(2026, 11, 28, 12, tzinfo=UTC)) is None
     reminder = due_slot(datetime(2026, 11, 27, 19, 30, tzinfo=UTC))
     assert reminder is not None and reminder.kind == "reminder"
+
+
+@pytest.mark.parametrize("cutoff", [
+    datetime(2026, 11, 22, 10, tzinfo=UTC),
+    datetime(2027, 7, 1, 9, tzinfo=UTC),
+])
+def test_morning_check_uses_the_end_of_the_same_local_slot(cutoff):
+    from datetime import timedelta
+
+    assert morning_delivery({"status": "ready"}, cutoff - timedelta(seconds=1)) is None
+    delivery = morning_delivery({"status": "ready"}, cutoff)
+    assert delivery is not None and delivery.slot.expires.hour == 11
+    assert (delivery.status, delivery.reason) == ("missed", "no_recorded_result")
+
+
+@pytest.mark.parametrize(("receipt", "status", "reason"), [
+    ({"state": "sent", "message_id": 152}, "sent", "confirmed"),
+    ({"state": "sent", "message_id": True}, "unconfirmed", "invalid_receipt"),
+    ({"state": "uncertain"}, "unconfirmed", "telegram_unconfirmed"),
+    ({"state": "sending"}, "unconfirmed", "telegram_unconfirmed"),
+])
+def test_morning_watch_checks_exact_receipt_for_that_day(receipt, status, reason):
+    now = datetime(2026, 11, 22, 10, tzinfo=UTC)
+    state = {"status": "busy", "digest_receipts": {
+        "belgrade:2026-11-22:morning": receipt,
+        "belgrade:2026-11-21:morning": {"state": "sent", "message_id": 151},
+    }, belgrade_digests.MORNING_ATTEMPT: {
+        "slot": "belgrade:2026-11-22:morning", "reason": "insufficient_items",
+    }}
+    delivery = morning_delivery(state, now)
+    assert (delivery.status, delivery.reason) == (status, reason)
+    del state["digest_receipts"]["belgrade:2026-11-22:morning"]
+    assert morning_delivery(state, now).reason == "insufficient_items"
+    assert morning_delivery(state, now.replace(day=23)).reason == "no_recorded_result"
 
 
 def test_forecast_uses_dated_belgrade_column_and_skips_stale_html():
@@ -106,6 +145,13 @@ def test_forecast_uses_dated_belgrade_column_and_skips_stale_html():
     assert forecast is not None and not forecast.hazardous
     assert forecast.text == "Днём до +9 °C, небольшая облачность."
     assert parse_forecast(html.replace("13.11. 12:18", "12.11. 12:18"), now) is None
+    assert _forecast_reading(html.replace("13.11. 12:18", "12.11. 12:18"), now) == (None, "stale")
+    assert _forecast_reading(html.replace("14.11. СУБОТА", "15.11. НЕДЕЉА"), now) == (
+        None, "today_missing",
+    )
+    assert _forecast_reading(html.replace("/prognoza/4.gif", "missing"), now) == (
+        None, "invalid_payload",
+    )
 
 
 def test_weather_warning_has_to_overlap_the_belgrade_day():
@@ -120,6 +166,35 @@ def test_weather_warning_has_to_overlap_the_belgrade_day():
     )
     assert parse_warning(alert.replace("Belgrade", "Novi Sad").encode(), now) is None
     assert parse_warning(alert.encode(), now.replace(hour=18)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("feed", "status", "has_warning"), [
+    ("", "none_active", False),
+    ("<entry/>", "invalid_payload", False),
+    ("<entry><cap:areaDesc>Belgrade</cap:areaDesc></entry>", "invalid_payload", False),
+    ("<entry><cap:areaDesc>Belgrade</cap:areaDesc><cap:event>Wind orange</cap:event>"
+     "<cap:effective>2026-11-14T07:00:00+00:00</cap:effective>"
+     "<cap:expires>2026-11-14T16:00:00+00:00</cap:expires></entry><entry/>",
+     "partial", True),
+])
+async def test_weather_accounts_for_missing_and_malformed_alerts(feed, status, has_warning):
+    now = datetime(2026, 11, 14, 6, 30, tzinfo=UTC)
+
+    def respond(request):
+        if str(request.url) == FORECAST_URL:
+            raise httpx.ReadTimeout("unavailable", request=request)
+        return httpx.Response(200, text=(
+            '<feed xmlns="http://www.w3.org/2005/Atom" '
+            'xmlns:cap="urn:oasis:names:tc:emergency:cap:1.2">'
+            f'{feed}</feed>'
+        ))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        weather = await collect_weather(client, now)
+    assert weather.forecast is None
+    assert bool(weather.warning) is has_warning
+    assert weather.statuses() == {"rhmz_forecast": "transport_error", "meteoalarm": status}
 
 
 def test_render_uses_compact_html_one_hashtag_and_grouped_map():
@@ -177,18 +252,49 @@ def test_morning_power_notice_keeps_every_current_address_and_its_interval():
                          number="1A-1K"),
         ),
     )
-    text, rows = _incident_content(incident, now, now.replace(day=15, hour=0, minute=0))
+    policy = belgrade_digests._policy()
+    text, rows = _incident_content(incident, now, now.replace(day=15, hour=0, minute=0), policy)
     digest = render(slot, [Entry("⚡ Отключения света", text, "https://t.me/eduvbelgrad/102",
                                  "Подробнее", address_rows=rows)])
     assert digest is not None
     lead, quote = digest.html.split("<blockquote expandable>", 1)
+    assert "Новый Белград, Савски-Венац." in lead
     assert "https://t.me/eduvbelgrad/102" in lead and "MASARIKOVA" not in lead
-    assert "MASARIKOVA, 2 — 08:00–13:00" in quote
-    assert "BULEVAR MIHAJLA PUPINA, 6 — 08:00–12:00" in quote
+    assert "Савски-Венац, MASARIKOVA, 2 — 08:00–13:00" in quote
+    assert "Новый Белград, BULEVAR MIHAJLA PUPINA, 6 — 08:00–12:00" in quote
     assert "MILENTIJA POPOVIĆA, 11-29, 33-43 — 10:00–16:00" in quote
     assert "33-43, 35" not in quote
     assert "MILUTINA MILANKOVIĆA, 1A-1K — 10:00–16:00" in quote
     assert "OLD" not in quote and "https://" not in quote
+
+
+def test_power_summary_groups_suburbs_under_unique_municipalities():
+    now = datetime(2026, 11, 19, 7, 30, tzinfo=_ZONE)
+    tomorrow = datetime(2026, 11, 20, tzinfo=_ZONE)
+    source = "https://www.beograd.rs/example"
+    first = Window(starts_at=now.replace(hour=8, minute=0),
+                   ends_at=now.replace(hour=13, minute=0))
+    second = Window(starts_at=now.replace(hour=9, minute=0),
+                    ends_at=now.replace(hour=14, minute=0))
+    addresses = (
+        Address(**first.model_dump(), municipality="Zemun", street="ПРВОМАЈСКА", number="4"),
+        Address(**second.model_dump(), municipality="Земун, насеље ALTINA",
+                street="UGRINOVAČKI PUT", number="12"),
+        Address(**first.model_dump(), municipality="Zvezdara, naselje MIRIJEVO",
+                street="MATICE SRPSKE", number="16"),
+        Address(**first.model_dump(), municipality="Čukarica, naselje ŽARKOVO",
+                street="TRGOVAČKA", number="8"),
+        Address(**second.model_dump(), municipality="Палилула", street="ВИШЊИЧКА", number="12"),
+        Address(**second.model_dump(), municipality="Novi Beograd", street="NEHRUOVA", number="2"),
+    )
+    incident = Incident(id=map_event_id(source), kind="power", title="Плановое отключение",
+                        source_url=source, windows=(first, second), addresses=addresses)
+    text, rows = _incident_content(incident, now, tomorrow, belgrade_digests._policy())
+    assert text == "Земун, Звездара, Чукарица и ещё 2 района."
+    assert len(rows) == len(addresses)
+    assert "Земун, ALTINA, UGRINOVAČKI PUT, 12 — 09:00–14:00" in rows
+    assert "Новый Белград, NEHRUOVA, 2 — 09:00–14:00" in rows
+    assert all("naselje" not in row and "насеље" not in row for row in rows)
 
 
 def test_water_notice_keeps_each_district_with_its_own_hours():
@@ -210,15 +316,18 @@ def test_water_notice_keeps_each_district_with_its_own_hours():
         segments=(Segment(municipality="Voždovac", street="Medakovićeva",
                           start="Zaplanjska", end="Katarine Ivanović"),),
     )
-    text, rows = _incident_content(notice, now, tomorrow)
-    assert text == "Savski venac, Voždovac."
+    policy = belgrade_digests._policy()
+    text, rows = _incident_content(notice, now, tomorrow, policy)
+    assert text == "Савски-Венац, Вождовац."
     assert rows == (
-        "Savski venac, квартал между улицами Fabrisova, Zvečanska, Oblakovska — 08:00–15:00",
-        "Voždovac, Rastka Petrovića — 08:00–16:00",
-        "Voždovac, Brane Ćosića, 16–42 — 08:00–16:00",
-        "Voždovac, Medakovićeva, от Zaplanjska до Katarine Ivanović — 08:00–16:00",
+        "Савски-Венац, квартал между улицами Fabrisova, Zvečanska, Oblakovska — 08:00–15:00",
+        "Вождовац, Rastka Petrovića — 08:00–16:00",
+        "Вождовац, Brane Ćosića, 16–42 — 08:00–16:00",
+        "Вождовац, Medakovićeva, от Zaplanjska до Katarine Ivanović — 08:00–16:00",
     )
-    assert _incident_content(notice, now.replace(hour=15), tomorrow) == ("Voždovac.", rows[1:])
+    assert _incident_content(notice, now.replace(hour=15), tomorrow, policy) == (
+        "Вождовац.", rows[1:],
+    )
 
 
 def test_long_address_quote_is_bounded_by_telegram_text_limit():
@@ -399,6 +508,7 @@ def test_next_morning_delivers_addresses_and_all_map_items_before_evening_remind
         "TELEGRAM_BOT_TOKEN": "test-token", "RELOCANT_MAP_TELEGRAM_APP": app,
     }))
     assert receipt["state"] == "sent" and len(sent) == 1
+    assert receipt["weather_sources"] == {"rhmz_forecast": "http_error", "meteoalarm": "http_error"}
     message = sent[0]
     html = message["text"]
     assert "<b>⚡ Отключения света</b>" in html

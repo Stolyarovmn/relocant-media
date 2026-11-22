@@ -1,10 +1,10 @@
 """Observe changes to already published sources; never rewrite evidence or Telegram posts."""
 from datetime import datetime, timedelta
-from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from relocant_media.ingestion.persistence import evidence_changed as evidence_changed
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 
@@ -22,8 +22,3 @@ def recent_source_load(session: Session, *, now: datetime) -> dict[str, int]:
         EditorialRun.raw_item_id == RawItem.id).join(Post, Post.id == EditorialRun.post_id).where(
             Post.city == "belgrade", Post.published_at >= now-timedelta(hours=24),
             EditorialRun.delivery_status == "sent").group_by(Source.id)).all())
-
-
-def evidence_changed(original: RawItem, current: Any) -> bool:
-    return any(getattr(original, key) != getattr(current, key)
-               for key in ("url", "title", "body", "published_at", "published_at_precision"))

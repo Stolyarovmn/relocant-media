@@ -20,6 +20,7 @@ from relocant_media.services.editorial import (
     _snapshot_member,
     _timestamp,
 )
+from relocant_media.services.flight_review import flight_review_reference
 from relocant_media.services.material_lifecycle import LifecycleBlockedError, ensure_not_terminal
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
@@ -38,6 +39,7 @@ class PackageConflictError(ValueError):
 def import_package(
     session: Session, package: EditorialPackage, *, now: datetime | None = None,
     replace_empty_hold: bool = False, replace_map_hold: bool = False,
+    replace_flight_hold: bool = False,
 ) -> EditorialRun:
     """Dedicated session required. Matching imports do not reset delivery receipts."""
     outcome = evaluate_package(package, now=now)
@@ -68,10 +70,16 @@ def import_package(
                 ensure_not_terminal(session, item.id, now=now or datetime.now(UTC))
             except LifecycleBlockedError as error:
                 raise PackageConflictError(str(error)) from error
+        flight_parent = (flight_review_reference(session, existing, city=package.city,
+                         now=now or datetime.now(UTC)) if replace_flight_hold else None)
+        if flight_parent is not None and (package.version != 2 or package.linked_update is None
+                                           or package.linked_update.parent != flight_parent):
+            raise PackageConflictError("flight update does not match the held parent")
         replacing = bool(existing is not None and package.version == 2 and (
             (replace_empty_hold and eligible_empty_policy_hold(session, item.id, now=now))
             or (replace_map_hold and (eligible_map_hold(session, item.id, now=now)
                                      or eligible_reader_category_hold(session, item.id, now=now)))
+            or flight_parent is not None
         ))
         if existing is not None and not replacing:
             # Both historical single-document runs and new bundles must keep
@@ -89,6 +97,9 @@ def import_package(
                 raise PackageConflictError("stored draft changed after package import")
             session.commit()
             return existing
+        from relocant_media.services.linked_updates import validate_linked_update
+
+        validate_linked_update(session, package, now=now or datetime.now(UTC))
         reviewed = _reviewed_event_item(session, anchor=item, anchor_source=source)
         if reviewed is not None:
             raise PackageConflictError(f"event already reviewed via raw item {reviewed.id}")

@@ -11,12 +11,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from relocant_media.bot.formatting import formatted_text_units
-from relocant_media.collectors.rhmz_forecast import (
-    FORECAST_URL,
-    WARNING_URL,
-    parse_forecast,
-    parse_warning,
-)
+from relocant_media.collectors.rhmz_forecast import collect_weather
+from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.ops.belgrade_digests import (
     _cover,
     _with_cover,
@@ -32,25 +28,14 @@ async def preview(database: Path, as_of: datetime, telegram_app: str) -> dict[st
     slot = due_slot(as_of)
     if slot is None or slot.kind != "morning":
         raise ValueError("choose a timestamp in the morning slot")
-    forecast = warning = None
-    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
-        try:
-            forecast = parse_forecast(
-                (await client.get(FORECAST_URL)).raise_for_status().text,
-                slot.scheduled,
-            )
-        except httpx.HTTPError:
-            pass
-        try:
-            warning = parse_warning(
-                (await client.get(WARNING_URL)).raise_for_status().content, slot.scheduled,
-            )
-        except httpx.HTTPError:
-            pass
+    async with httpx.AsyncClient(
+        timeout=12, follow_redirects=False, verify=source_ssl_context(),
+    ) as client:
+        weather = await collect_weather(client, slot.scheduled)
     engine = create_engine(f"sqlite:///{database.resolve().as_uri()}?mode=ro&uri=true")
     try:
         with Session(engine) as session:
-            entries = morning_entries(session, slot.scheduled, forecast, warning)
+            entries = morning_entries(session, slot.scheduled, weather.forecast, weather.warning)
     finally:
         engine.dispose()
     draft = render(slot, entries, telegram_app)
@@ -58,6 +43,7 @@ async def preview(database: Path, as_of: datetime, telegram_app: str) -> dict[st
     cover = _cover(slot) if photo else None
     return {
         "scheduled": slot.scheduled.isoformat(),
+        "weather_sources": weather.statuses(),
         "cover": str(photo) if photo else None,
         "cover_credit": cover[1] if cover else None,
         "caption_units": formatted_text_units(draft.html) if draft and photo else None,

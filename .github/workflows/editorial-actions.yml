@@ -1,4 +1,9 @@
 name: Editorial Actions
+run-name: >-
+  Editorial Actions · ${{ (inputs.mode == 'auto' ||
+  (github.event_name == 'schedule' &&
+   github.event.schedule != '30 5,6 * * *' && github.event.schedule != '30 18,19 * * *'))
+  && 'automatic' || inputs.mode || 'digest' }}
 on:
   workflow_dispatch:
     inputs:
@@ -109,6 +114,7 @@ jobs:
       worker_mode: ${{ steps.mode.outputs.value }}
       drain_continue: ${{ steps.runtime.outputs.drain_continue }}
       drain_next_delay_seconds: ${{ steps.runtime.outputs.drain_next_delay_seconds }}
+      morning_watch_date: ${{ steps.runtime.outputs.morning_watch_date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -337,13 +343,7 @@ jobs:
               '-f', f'drain_runs_left={left-1}'], check=True, stdout=subprocess.DEVNULL)
           PY
   chain:
-    # One-shot manual operations must release their workflow queue immediately.
-    # Only scheduled runs and the explicit auto loop book another cycle.
-    # Scheduled runs are best effort. A finished cycle books the next one, so the newsroom
-    # keeps running; a failed cycle (for example the exact-main-CI guard right after a merge)
-    # backs off for ten minutes instead of ending the chain. Cron slots remain the restart
-    # path and ACTIONS_CHAIN_ENABLED is the kill switch. The concurrency group still
-    # serializes the single canonical writer.
+    # Book the delay outside the writer workflow so it can release its queue.
     if: >-
       always() && github.ref == 'refs/heads/main' &&
       (github.event_name != 'workflow_dispatch' || inputs.mode == 'auto') &&
@@ -355,19 +355,62 @@ jobs:
       inputs.mode != 'fallback-preview' && inputs.mode != 'fallback' && !startsWith(inputs.mode, 'map-')
     needs: cycle
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     permissions:
       actions: write
     steps:
-      - name: Book the next cycle
+      - name: Запланировать следующий цикл
+        shell: python
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          CHAIN_DELAY_SECONDS: ${{ needs.cycle.result == 'success' && '120' || '600' }}
+          CYCLE_RESULT: ${{ needs.cycle.result }}
+          CYCLE_SHA: ${{ github.sha }}
+          CYCLE_RUN_ID: ${{ github.run_id }}
         run: |
-          set -euo pipefail
-          # The concurrency group keeps at most one pending run, so this cannot pile up.
-          sleep "$CHAIN_DELAY_SECONDS"
-          gh workflow run editorial-actions.yml --ref main -f mode=auto
+          import os
+          import subprocess
+
+          subprocess.run([
+              'gh', 'workflow', 'run', 'editorial-retry.yml', '-R', os.environ['GH_REPO'],
+              '--ref', 'main', '-f', f"result={os.environ['CYCLE_RESULT']}",
+              '-f', f"source_sha={os.environ['CYCLE_SHA']}",
+              '-f', f"source_run_id={os.environ['CYCLE_RUN_ID']}",
+          ], check=True)
+      - name: Проверить пропущенную утреннюю сводку
+        if: always() && needs.cycle.outputs.morning_watch_date != ''
+        continue-on-error: true
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MORNING_DATE: ${{ needs.cycle.outputs.morning_watch_date }}
+        run: |
+          import json
+          import os
+          import subprocess
+          from datetime import date
+
+          issue_date = os.environ['MORNING_DATE']
+          if date.fromisoformat(issue_date).isoformat() != issue_date:
+              raise SystemExit('Неверная дата утренней сводки')
+          repo = os.environ['GH_REPO']
+          workflow = 'editorial-watchdog.yml'
+          title = f'Утренняя сводка · {issue_date}'
+          recent = json.loads(subprocess.check_output([
+              'gh', 'run', 'list', '-R', repo, '--workflow', workflow, '--branch', 'main',
+              '--event', 'workflow_dispatch', '--limit', '20',
+              '--json', 'displayTitle,status,conclusion',
+          ], text=True, encoding='utf-8', timeout=40))
+          if any(run['displayTitle'] == title and (
+              run['status'] != 'completed' or run['conclusion'] == 'success'
+          ) for run in recent):
+              print('Проверка этой сводки уже запущена или завершена.')
+          else:
+              subprocess.run([
+                  'gh', 'workflow', 'run', workflow, '-R', repo, '--ref', 'main',
+                  '-f', 'dry_run=false', '-f', f'morning_date={issue_date}',
+              ], check=True, timeout=40)
   deploy:
     if: always() && needs.cycle.outputs.projection == 'true'
     needs: cycle

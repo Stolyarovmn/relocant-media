@@ -43,21 +43,17 @@ export function buildCalendar(item, now = Date.now()) {
     }), "END:VCALENDAR", ""].map(fold).join("\r\n");
 }
 
-/** Ссылка «Google Календарь» для первого будущего окна события или работ. */
 export function googleCalendarUrl(item, now = Date.now()) {
-  const [first] = calendarEvents(item, now);
-  if (!first) return "";
-  const end = first.end ?? instant(new Date(first.start.replace(
-    /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/, "$1-$2-$3T$4:$5:$6Z")).getTime() + 2 * 3_600_000);
+  const events = calendarEvents(item, now);
+  if (events.length !== 1 || !events[0].end) return "";
+  const [{ start, end }] = events;
   const params = new URLSearchParams({
-    action: "TEMPLATE",
-    text: String(item.title ?? "").slice(0, 200),
-    dates: `${first.start}/${end}`,
-    details: [item.reportedScope || "", item.source || ""].filter(Boolean).join("\n"),
+    action: "TEMPLATE", text: item.title, dates: `${start}/${end}`,
+    stz: "Europe/Belgrade", etz: "Europe/Belgrade",
+    details: [item.reportedScope, item.source].filter(Boolean).join("\n"),
+    location: [item.venue, item.address].filter(Boolean).join(", "),
   });
-  const location = [item.venue, item.address].filter(Boolean).join(", ");
-  if (location) params.set("location", location);
-  return `https://calendar.google.com/calendar/render?${params}`;
+  return `https://calendar.google.com/calendar/r/eventedit?${params}`;
 }
 
 export function calendarLink(item, now) {

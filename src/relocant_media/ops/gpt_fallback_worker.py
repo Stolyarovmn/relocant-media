@@ -24,10 +24,14 @@ from relocant_media.ai.models import (
     RankingResult,
 )
 from relocant_media.ai.package import EditorialPackage, canonical_json
+from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.ops import server_cycle, server_runtime
+from relocant_media.ops.gpt_export_receipt import require_public_documents
 from relocant_media.services.editorial import EditorialService
+from relocant_media.services.flight_review import flight_review_marker
 from relocant_media.services.gpt_batch_fallback import validate_batch_rank
 from relocant_media.services.gpt_fallback import (
+    build_request,
     validate_fallback_candidate,
     validate_fallback_package,
 )
@@ -49,6 +53,7 @@ class FallbackRejection(BaseModel):
     raw_item_id: int = Field(gt=0, lt=2**63)
     category: str = Field(min_length=1, max_length=40)
     rationale: str = Field(min_length=1, max_length=800)
+    duplicate_of_message_id: int | None = Field(default=None, gt=0, lt=2**63)
 
 
 class FallbackResult(BaseModel):
@@ -140,6 +145,22 @@ def _save_rejection(
     with Session(engine) as session:
         raw_id = rejection.raw_item_id
         _, profile, candidate, _ = validate_fallback_candidate(session, request, raw_id, now=now)
+        parent = candidate.flight_review_parent
+        if rejection.duplicate_of_message_id != (parent.message_id if parent else None):
+            raise ValueError("Решение о повторе должно ссылаться на исходную авиановость")
+        if parent is not None:
+            from relocant_media.services.material_lifecycle import confirm_flight_duplicate
+
+            run = session.get(EditorialRun, raw_id)
+            if run is None or "_package" not in run.outcome:
+                raise ValueError("Отсутствует пакет удержанной авиановости")
+            _check_live_evidence(EditorialPackage.model_validate_json(
+                canonical_json(run.outcome["_package"])))
+            validate_fallback_candidate(session, request, raw_id, now=now)
+            _claim_fallback(session, raw_id, now=now)
+            confirm_flight_duplicate(session, raw_id, now=now)
+            session.commit()
+            return
         if rejection.category not in {category for rubric in profile.rubrics
                                       for category in rubric.categories}:
             raise ValueError("Неизвестная категория отказа GPT")
@@ -241,6 +262,7 @@ def _check_live_evidence(package: EditorialPackage) -> None:
 
 async def _publish_imported(
     engine: Engine, raw_ids: set[int], blocked: list[dict[str, Any]],
+    scheduler_run_id: int | None,
 ) -> list[int]:
     # Применяем тот же расширенный live-fetch, что и основной server_runtime;
     # восстанавливаем модульный адаптер даже при неясном результате отправки.
@@ -249,6 +271,7 @@ async def _publish_imported(
     try:
         return await server_cycle.publish_pending(
             engine, enabled=True, only_raw_ids=raw_ids, blocked=blocked,
+            scheduler_run_id=scheduler_run_id,
         )
     finally:
         server_cycle.fetch_documents = previous_fetch
@@ -295,7 +318,7 @@ def run_worker(
                 )
                 phase = "import"
                 run = import_package(session, package, now=now, replace_empty_hold=True,
-                                     replace_map_hold=True)
+                                     replace_map_hold=True, replace_flight_hold=True)
                 from relocant_media.services.material_lifecycle import after_result
 
                 after_result(session, package.raw_item_id, now=now or datetime.now(UTC))
@@ -314,7 +337,10 @@ def run_worker(
     sent_count = 0
     if send_enabled is True and delivery_ids:
         try:
-            sent_count = len(asyncio.run(_publish_imported(engine, delivery_ids, blocked)))
+            cycle_id = payload.request.get("scheduler_run_id")
+            sent_count = len(asyncio.run(_publish_imported(
+                engine, delivery_ids, blocked, cycle_id if type(cycle_id) is int else None,
+            )))
         except Exception as error:
             errors.append({"stage": "publish", "error_type": _error_type(error)})
     candidates = payload.request.get("candidates", [])
@@ -330,9 +356,9 @@ def run_worker(
                 "ready", "human_review", "skipped", "blocked",
             }),
         )).all()
-        resolved = {raw_id for raw_id in saved_ids if not eligible_policy_reassessment(
-            session, raw_id, now=now,
-        )}
+        resolved = {raw_id for raw_id in saved_ids
+                    if flight_review_marker(session.get(EditorialRun, raw_id)) is None
+                    and not eligible_policy_reassessment(session, raw_id, now=now)}
     unresolved = len(requested_ids - resolved)
     status = ("PRIMARY_FAILED" if not (imported or declined) else
               "PRIMARY_PARTIAL" if rejected or errors or blocked or unresolved else "PRIMARY_OK")
@@ -341,6 +367,8 @@ def run_worker(
         "received": len(payload.result.packages), "imported": imported, "ready": ready,
         "rejected": rejected, "declined": declined, "sent_count": sent_count,
         "delivery_blocked": len(blocked),
+        "flight_review_pending": sum(
+            item.get("reason") == FLIGHT_REVIEW_REASON for item in blocked),
         "delivery_enabled": send_enabled is True, "processing_errors": errors,
         "unresolved": unresolved,
         "fallback_required": bool(unresolved or errors or blocked),
@@ -355,6 +383,7 @@ def main() -> None:
     args = parser.parse_args()
     engine = None
     output_created = False
+    stage = "input"
     try:
         args.output.mkdir(parents=True, exist_ok=False)
         output_created = True
@@ -369,6 +398,7 @@ def main() -> None:
         payload = None if rank_only or refresh is not None else FallbackInput.model_validate_json(
             exchange,
         )
+        stage = "database"
         url = make_url(os.environ["DATABASE_URL"])
         if (url.get_backend_name() != "sqlite" or not url.database or url.query
                 or not Path(url.database).is_file()):
@@ -376,6 +406,7 @@ def main() -> None:
         engine = create_engine(url)
         verify_sqlite_schema(engine)
         if refresh is not None:
+            stage = "refresh"
             request = refresh_gpt_evidence(engine, refresh)
             (args.output / "gpt-refreshed-request.json").write_text(
                 canonical_json(request), encoding="utf-8",
@@ -389,18 +420,37 @@ def main() -> None:
                 ),
             }
         elif payload is None:
+            stage = "batch_preselection"
             if set(value) != {"request", "result"} or not isinstance(value["request"], dict):
                 raise ValueError("Ожидался приватный запрос и результат отбора")
             report = save_batch_rank(
                 engine, value["request"], value["result"], now=datetime.now(UTC),
             )
         else:
+            stage = "import"
             report = run_worker(
                 engine, payload, send_enabled=os.environ.get("EDITORIAL_SEND_ENABLED") == "true",
             )
+            if report["flight_review_pending"]:
+                with Session(engine) as session:
+                    continuation = build_request(
+                        session, now=datetime.now(UTC),
+                        scheduler_run_id=payload.request["scheduler_run_id"],
+                    )
+                if continuation is not None:
+                    continuation["candidates"] = [
+                        candidate for candidate in continuation["candidates"]
+                        if "flight_review_parent" in candidate
+                    ]
+                    if continuation["candidates"]:
+                        require_public_documents(continuation)
+                        (args.output / "gpt-refreshed-request.json").write_text(
+                            canonical_json(continuation), encoding="utf-8",
+                        )
     except Exception as error:
         report = {"status": "PRIMARY_FAILED", "mode": "subscription_gpt_fallback",
                   "error_type": _error_type(error), "model_calls": 0,
+                  "processing_errors": [_error_entry(stage, error)],
                   "fallback_required": True}
     finally:
         if engine is not None:

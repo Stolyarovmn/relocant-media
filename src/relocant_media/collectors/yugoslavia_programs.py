@@ -26,6 +26,7 @@ _DAY = re.compile(
     r"(?P<end_day>\d{2})\.(?P<end_month>\d{2})\.(?P<year>20\d{2})\.$"
 )
 _TIME = re.compile(r"^Време:\s*(?P<hour>[01]\d|2[0-3]):(?P<minute>[0-5]\d)$")
+_PROGRAM_PLACE = re.compile(r"^(?:Где|Gde)\s*[?:]\s*(.+)$", re.IGNORECASE)
 
 
 def _item_error_message(error: BaseException) -> str:
@@ -125,12 +126,22 @@ def _parse_day(value: str) -> tuple[date, date]:
 
 
 def _program_location(title: Tag, day: Tag, source_url: str) -> str | None:
-    """Принимаем только явную ссылку места в метаданных, а не адрес из текста/подвала."""
+    """Площадка программы подтверждается метаданными или явным полем «Где?»."""
     locations: set[str] = set()
+    program_places: set[str] = set()
     for node in title.find_all_next():
         if node is day:
             break
-        if not isinstance(node, Tag) or node.name != "a" or node.find_parent("p"):
+        if not isinstance(node, Tag):
+            continue
+        if node.name == "p":
+            text = " ".join(node.get_text(" ", strip=True).split())
+            if match := _PROGRAM_PLACE.fullmatch(text):
+                place = match[1].removesuffix(".").strip()
+                if place:
+                    program_places.add(place)
+            continue
+        if node.name != "a" or node.find_parent("p"):
             continue
         href = node.get("href")
         if not isinstance(href, str):
@@ -155,7 +166,9 @@ def _program_location(title: Tag, day: Tag, source_url: str) -> str | None:
         locations.add(text)
     if len(locations) > 1:
         raise ValueError("Museum of Yugoslavia program location ambiguous")
-    return next(iter(locations)) if locations else None
+    if len(program_places) > 1:
+        return None
+    return next(iter(locations or program_places), None)
 
 
 def _detail_body(html: str, source_url: str) -> tuple[str, str]:

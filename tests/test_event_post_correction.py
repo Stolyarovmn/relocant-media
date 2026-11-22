@@ -113,7 +113,9 @@ def test_event_correction_is_audited_and_fail_closed(event_edit, tmp_path, mutat
         content = canonical_json(plan).encode()
         sha = hashlib.sha256(content).hexdigest()
         storage.blobs[sha] = content
-    card = ReviewedMapEvent.model_validate(record).card("belgrade", "Europe/Belgrade", NOW)
+    card = ReviewedMapEvent.model_validate(record).card(
+        "belgrade", "Europe/Belgrade", NOW, published_at=NOW,
+    )
     feed = EventsFeed(generated_at=NOW, events=() if mutation == "feed" else (card,))
     sends = []
 

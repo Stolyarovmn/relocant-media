@@ -527,7 +527,7 @@ def process_existing(
                 if ready:
                     slots = 2-deliveries_after
                     sent.extend(asyncio.run(publish_pending(engine, enabled=True, limit=slots,
-                        only_raw_ids=set(ready[:slots]))))
+                        only_raw_ids=set(ready[:slots]), scheduler_run_id=result.get("run_id"))))
             if result.get("status") in {"PRIMARY_BUSY", "PRIMARY_FAILED"}:
                 stop_reason = str(result["status"]).lower()
                 break

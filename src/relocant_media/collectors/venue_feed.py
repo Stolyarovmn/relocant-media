@@ -1,4 +1,5 @@
 """Bounded first-party RSS/Atom discovery and full-article evidence."""
+import asyncio
 import ipaddress
 import json
 import re
@@ -6,17 +7,35 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit
-from zoneinfo import ZoneInfo
 
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
 
 from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.kolarac_program import (
+    KOLARAC_SCHEDULE,
+    MAX_PROGRAM_BYTES,
+    linked_program,
+    parse_linked_program,
+)
+from relocant_media.domain.publication_time import BELGRADE, local_clock_precision
 from relocant_media.sources.registry import SourceConfig
 
 MAX_BYTES = 2_000_000
 MAX_ITEM_ERROR_MESSAGE = 200
+_KOLARAC_HALL = re.compile(
+    r"(?:велика дворана|velika dvorana|мала сала|mala sala|галерија|galerija)",
+    re.IGNORECASE,
+)
+_POSTER_STUBS = {"", "детаљније", "detaljnije"}
+_BIRN_COUNTRIES = {
+    "albania", "bosnia and herzegovina", "bulgaria", "croatia", "czechia", "czech republic",
+    "greece", "hungary", "kosovo", "moldova", "montenegro", "north macedonia", "poland",
+    "romania", "serbia", "slovakia", "turkey",
+}
+_BIRN_SECTION_SEPARATOR = re.compile(r"\s+[-–—]\s+")
+_SERBIAN_SCOPE = re.compile(r"\b(?:serbia|serbian|belgrade|beograd|novi\s+sad)\b", re.I)
 
 
 class PosterOnlyEvidence(ValueError):
@@ -60,7 +79,18 @@ def _allowed(url: str, source: SourceConfig) -> str:
     return url
 
 
-def parse_venue_feed(html_xml: str, source: SourceConfig) -> list[RawItem]:
+def _balkan_foreign_only(tags: list[dict[str, object]], context: str) -> bool:
+    terms = [" ".join(value.split()) for tag in tags if isinstance(value := tag.get("term"), str)]
+    countries = {
+        _BIRN_SECTION_SEPARATOR.split(term.casefold(), maxsplit=1)[0] for term in terms
+    } & _BIRN_COUNTRIES
+    # Явно зарубежные рубрики можно отсеять. Смешанные и неполные рубрики сохраняем.
+    return bool(countries and not _SERBIAN_SCOPE.search(" ".join((context, *terms))))
+
+
+def parse_venue_feed(
+    html_xml: str, source: SourceConfig, *, discover: bool = True,
+) -> list[RawItem]:
     """Only explicit content:encoded is full feed evidence; never use teasers."""
     if len(html_xml.encode("utf-8")) > MAX_BYTES or any(
         token in html_xml.upper() for token in ("<!DOCTYPE", "<!ENTITY")
@@ -85,6 +115,10 @@ def parse_venue_feed(html_xml: str, source: SourceConfig) -> list[RawItem]:
             continue
         if url in seen:
             continue
+        if (discover and source.id == "media_balkan_insight"
+                and _balkan_foreign_only(entry.get("tags", []),
+                                         f"{title} {entry.get('summary', '')[:2000]}")):
+            continue
         body = ""
         contents = entry.get("content", [])
         if contents:
@@ -92,7 +126,8 @@ def parse_venue_feed(html_xml: str, source: SourceConfig) -> list[RawItem]:
                 " ", strip=True)
             if len(body) < 120:
                 body = ""
-        result.append(RawItem(source.id, url, url, title, body, published))
+        result.append(RawItem(source.id, url, url, title, body, published,
+                              published_at_precision="instant"))
         seen.add(url)
     return result
 
@@ -111,10 +146,31 @@ def _rts_publication(soup: BeautifulSoup) -> datetime:
         published = datetime.strptime(" ".join(match.groups()), "%d.%m.%Y %H:%M")
     except ValueError as error:
         raise ValueError("RTS article publication date missing or invalid") from error
-    return published.replace(tzinfo=ZoneInfo("Europe/Belgrade")).astimezone(UTC)
+    return published.replace(tzinfo=BELGRADE)
 
 
-def _article(html: str, url: str, source: SourceConfig, fallback: datetime | None) -> RawItem:
+def _complete_kolarac_heading(title: str) -> bool:
+    schedules = list(KOLARAC_SCHEDULE.finditer(title))
+    if len(schedules) != 1:
+        return False
+    schedule = schedules[0]
+    if (not any(char.isalpha() for char in title[:schedule.start()])
+            or _KOLARAC_HALL.fullmatch(title[schedule.end():].strip()) is None):
+        return False
+    try:
+        datetime(
+            int(schedule["year"]), int(schedule["month"]), int(schedule["day"]),
+            int(schedule["hour"]), int(schedule["minute"] or "0"),
+        )
+    except ValueError:
+        return False
+    return True
+
+
+def _article(
+    html: str, url: str, source: SourceConfig, fallback: datetime | None,
+    *, program: tuple[str, str] | None = None,
+) -> RawItem:
     soup = BeautifulSoup(html, "html.parser")
     lead_text = ""
     if source.extraction.article_lead_selectors:
@@ -142,9 +198,9 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
             title = str(node.get("headline") or "")
             body = str(node.get("articleBody") or "")
             published = _date(node.get("datePublished"))
-    if not title:
-        heading = soup.select_one("h1")
-        title = heading.get_text(" ", strip=True) if heading else ""
+    heading = soup.select_one("h1")
+    heading_text = heading.get_text(" ", strip=True) if heading else ""
+    title = title or heading_text
     if published is None:
         meta = soup.select_one('meta[property="article:published_time"]')
         published = _date(str(meta.get("content", ""))) if meta else None
@@ -170,31 +226,52 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
                 body = article.get_text(" ", strip=True)
                 break
     body = BeautifulSoup(body, "html.parser").get_text(" ", strip=True)
-    if len(body) < 120 and source.id == "venue_kolarac" and urlsplit(url).path.startswith(
-        "/koncerti/",
-    ):
+    kolarac = source.id == "venue_kolarac"
+    kolarac_path = urlsplit(url).path if kolarac else ""
+    complete_schedule = False
+    if len(body) < 120 and kolarac_path.startswith("/koncerti/"):
         # Short official concert cards can put the full schedule only in the heading.
-        # A "Подробнее" stub without concert details still fails the normal check.
-        if (re.search(r"\b\d{1,2}\.\s*\d{1,2}\.\s*20\d{2}\.\s*у\s+\d{1,2}\b", title)
-                and re.search(r"\b(?:Програм|Улазнице)\s*:", body, re.IGNORECASE)
-                and title not in body):
+        normalized_heading = " ".join(heading_text.split())
+        complete_schedule = (
+            normalized_heading == " ".join(title.split())
+            and _complete_kolarac_heading(normalized_heading)
+        )
+        if complete_schedule:
+            # The official /koncerti/ section confirms the event type. Keep its
+            # label with the date so editorial freshness sees an actual concert.
+            schedule = f"Концерт: {normalized_heading}"
+            if body.casefold() in _POSTER_STUBS or " ".join(body.split()) == normalized_heading:
+                body = schedule
+            else:
+                body = f"{schedule}\n\n{body}"
+        elif (title not in body and KOLARAC_SCHEDULE.search(title)
+                and re.search(r"\b(?:Програм|Улазнице)\s*:", body, re.IGNORECASE)):
             body = f"{title}\n\n{body}"
     if lead_text and lead_text not in body:
         body = lead_text + " " + body
-    published = _rts_publication(soup) if source.id == "media_rts" else published or fallback
+    precision = "instant"
+    if source.id == "media_rts":
+        local = _rts_publication(soup)
+        precision = local_clock_precision(local)
+        published = local.astimezone(UTC)
+    else:
+        published = published or fallback
+    if program is not None:
+        title, body = program
+        complete_schedule = True
     if not title:
         raise ValueError("venue article title missing")
-    if len(body) < 120:
-        if (source.id == "venue_kolarac" and urlsplit(url).path.startswith("/predavanja/")
-                and body.casefold() in {"", "детаљније", "detaljnije"}
+    if len(body) < 120 and not complete_schedule:
+        if (kolarac_path.startswith(("/koncerti/", "/predavanja/"))
+                and body.casefold() in _POSTER_STUBS
                 and soup.select_one(".entry-content img[src]")):
-            raise PosterOnlyEvidence("official lecture poster has no textual event evidence")
+            raise PosterOnlyEvidence("official event poster has no sufficient textual schedule")
         raise ValueError("venue article body shorter than 120 characters")
     if published is None:
         raise ValueError("venue article publication date missing")
     if published > datetime.now(UTC):
         raise ValueError("venue article publication date is in the future")
-    return RawItem(source.id, url, url, title, body, published)
+    return RawItem(source.id, url, url, title, body, published, published_at_precision=precision)
 
 
 class VenueFeedCollector:
@@ -225,9 +302,26 @@ class VenueFeedCollector:
                 return data.decode(response.encoding or "utf-8")
         raise ValueError("venue redirect limit")
 
-    async def _entries(self) -> list[RawItem]:
+    async def _entries(self, *, discover: bool = True) -> list[RawItem]:
         url = self._source.extraction.feed_url or str(self._source.url)
-        return parse_venue_feed(await self._fetch(url), self._source)
+        return parse_venue_feed(await self._fetch(url), self._source, discover=discover)
+
+    async def _program_pdf(self, url: str) -> bytes:
+        _allowed(url, self._source)
+        async with self._client.stream(
+            "GET", url, follow_redirects=False, timeout=15,
+            headers={"User-Agent": "RelocantMedia source monitoring/1.0"},
+        ) as response:
+            response.raise_for_status()
+            media_type = response.headers.get("content-type", "").partition(";")[0]
+            if media_type.strip().lower() != "application/pdf":
+                raise ValueError("Kolarac program is not a PDF response")
+            data = bytearray()
+            async for chunk in response.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > MAX_PROGRAM_BYTES:
+                    raise ValueError("Kolarac program PDF too large")
+            return bytes(data)
 
     def _needs_page(self) -> bool:
         extraction = self._source.extraction
@@ -248,9 +342,21 @@ class VenueFeedCollector:
                 assert entry is not None
                 return entry
             raise
-        article = entry if use_feed else _article(
-            html, url, self._source, entry.published_at if entry else None,
-        )
+        published = entry.published_at if entry else None
+        try:
+            article = entry if use_feed else _article(html, url, self._source, published)
+        except PosterOnlyEvidence:
+            link = linked_program(html, url)
+            if link is None:
+                raise
+            program_url, starts_at = link
+            try:
+                async with asyncio.timeout(15):
+                    document = await self._program_pdf(program_url)
+            except TimeoutError as error:
+                raise ValueError("Kolarac program download exceeded 15 seconds") from error
+            program = parse_linked_program(document, program_url, starts_at)
+            article = _article(html, url, self._source, published, program=program)
         assert article is not None
         return replace(article, source_html=html) if keep_html else article
 
@@ -272,9 +378,8 @@ class VenueFeedCollector:
                     }
                 )
         if self.item_failures and not items:
-            # Kolarac publishes some lecture entries as image-only posters with a
-            # generic «Детаљније». An empty text-only batch is valid and keeps
-            # diagnostics; these entries never become publication evidence.
+            # A batch of official posters with no usable textual schedules can
+            # legitimately contain no publishable items. Preserve its diagnostics.
             posters_only = all(row["error_type"] == "PosterOnlyEvidence"
                                for row in self.item_failures)
             if not posters_only:
@@ -284,7 +389,8 @@ class VenueFeedCollector:
     async def collect_url(self, url: str, *, require_page: bool = False) -> RawItem:
         _allowed(url, self._source)
         try:
-            entry = next((item for item in await self._entries() if item.url == url), None)
+            entry = next((item for item in await self._entries(discover=False) if item.url == url),
+                         None)
         except (httpx.HTTPError, ValueError):
             if not require_page:
                 raise

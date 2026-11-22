@@ -103,6 +103,16 @@ def test_ranking_resumes_same_cycle_and_releases_unselected_candidates(batch):
     assert session.get(EditorialRun, other.id) is None
 
 
+def test_expired_batch_rank_has_distinct_reason(batch):
+    session, raw, _, run = batch
+    request = build_batch_request(session, now=NOW, scheduler_run_id=run.id)
+    rank = _rank(request, [raw.id])
+
+    with pytest.raises(gpt_fallback.FallbackValidationError) as stopped:
+        validate_batch_rank(session, request, rank, now=NOW + timedelta(days=1))
+    assert stopped.value.code == "request_expired"
+
+
 def test_terminal_gpt_declines_do_not_hold_remaining_or_direct_exports(batch):
     session, raw, other, run = batch
     run.details = {**run.details, "processing_errors": [], "batch_preselection": {

@@ -17,6 +17,7 @@ from typing import Any, Literal, cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.domain.freshness import FreshnessDecision, evidence_freshness
 from relocant_media.domain.policy import (
     AUTO_PUBLISH_CATEGORIES,
@@ -245,6 +246,8 @@ def _validate(data: dict[str, Any]) -> bool:
                 and type(data.get("attempts")) is int and 0 <= data["attempts"] <= PRIMARY_ATTEMPTS
                 and type(data.get("fallback_attempts")) is int
                 and 0 <= data["fallback_attempts"] <= FALLBACK_ATTEMPTS
+                and type(data.get("flight_review_attempts", 0)) is int
+                and 0 <= data.get("flight_review_attempts", 0) <= 1
                 and type(data.get("rejection_audits")) is int
                 and 0 <= data["rejection_audits"] <= AUDIT_ATTEMPTS
                 and type(data.get("audit_attempts")) is int
@@ -524,6 +527,8 @@ def before_attempt(session: Session, raw_id: int, *, now: datetime,
     counter, maximum = {"primary": ("attempts", PRIMARY_ATTEMPTS),
                         "fallback": ("fallback_attempts", FALLBACK_ATTEMPTS),
                         "rejection_audit": ("audit_attempts", AUDIT_ATTEMPTS)}[channel]
+    if channel == "fallback" and data.get("reason") == FLIGHT_REVIEW_REASON:
+        counter, maximum = "flight_review_attempts", 1
     if data[counter] >= maximum:
         if channel == "rejection_audit":
             _unconfirmed_rejection_fallback(session, record, run, post, now)
@@ -625,6 +630,54 @@ def delivery_failure(session: Session, raw_id: int, error_type: str, *,
     return dict(record.details)
 
 
+def request_flight_review(
+    session: Session, raw_id: int, *, parent_raw_id: int, parent_message_id: int, now: datetime,
+) -> str:
+    """Записать решение до отправки и передать его существующей резервной очереди."""
+    from relocant_media.services.flight_review import flight_review_reference
+
+    now = _now(now)
+    raw, source, run, post = _objects(session, raw_id)
+    record = _record(session, raw, source, now)
+    data = record.details
+    if (run is None or post is None or run.delivery_status != "pending"
+            or run.outcome.get("status") != "ready" or _has_receipt(run, post)
+            or data.get("state") != "processing" or data.get("attempt_kind") != "delivery"):
+        raise LifecycleBlockedError("Нет безопасно удержанной попытки доставки")
+    parent = {"raw_item_id": parent_raw_id, "message_id": parent_message_id}
+    run.outcome = {**run.outcome, "status": "human_review", "reason": FLIGHT_REVIEW_REASON,
+                   "_flight_review": parent}
+    post.status = "human_review"
+    record.details = {**data, "delivery_attempts": data["delivery_attempts"] - 1,
+                      "flight_review": parent}
+    try:
+        reference = flight_review_reference(session, run, city=source.city, now=now)
+    except ValueError:
+        reference = None
+    deadline = _stamp(data["deadline_at"])
+    if reference is None or now >= deadline or data.get("flight_review_attempts", 0):
+        _block(session, record, run, post, now=now, reason="flight_linked_review_unavailable")
+    else:
+        _set(record, now=now, state="waiting_fallback", action="fallback",
+             reason=FLIGHT_REVIEW_REASON, next_at=now, flight_review_attempts=0,
+             fallback_deadline_at=min(deadline, now + FALLBACK_WAIT).isoformat())
+    return str(record.details["reason"])
+
+
+def confirm_flight_duplicate(session: Session, raw_id: int, *, now: datetime) -> None:
+    from relocant_media.services.flight_review import flight_review_reference
+
+    now = _now(now)
+    raw, source, run, post = _objects(session, raw_id)
+    record = _record(session, raw, source, now)
+    if (record.details.get("state") != "processing"
+            or record.details.get("attempt_kind") != "fallback"
+            or record.details.get("flight_review_attempts") != 1
+            or flight_review_reference(session, run, city=source.city, now=now) is None):
+        raise LifecycleBlockedError("Материал не ожидает решения о повторе авиановости")
+    _block(session, record, run, post, now=now, reason="flight_duplicate_confirmed")
+
+
 delivery_failed = delivery_failure
 
 
@@ -634,6 +687,7 @@ def adopt_fallback_request(session: Session, raw_id: int, *, now: datetime) -> b
     record = _refresh(session, raw_id, now)
     data = record.details
     if (data.get("state") in TERMINAL_STATES or data.get("state") == "processing"
+            or data.get("reason") == FLIGHT_REVIEW_REASON
             or data.get("next_action") not in {"prepare", "retry_prepare", "repair", "fallback"}
             or data["fallback_attempts"] >= FALLBACK_ATTEMPTS):
         return False
@@ -886,6 +940,25 @@ def delivery_deadline(session: Session, raw_id: int) -> datetime | None:
         return _stamp(record.details["deadline_at"]) if record is not None else None
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def hold_until_morning(session: Session, raw_id: int, *, now: datetime,
+                       deadline: datetime) -> bool:
+    """Продлить срок жизни готового несрочного материала до утреннего выпуска (#359).
+
+    Только для проверенного материала в состоянии ready/deliver и только вперёд.
+    Свежесть, источник и ревью перепроверяются в обычной доставке утром.
+    """
+    now = _now(now)
+    record = _refresh(session, raw_id, now)
+    data = record.details
+    if data.get("state") != "ready" or data.get("next_action") != "deliver":
+        return False
+    if _stamp(data["deadline_at"]) < deadline:
+        record.details = {**data, "deadline_at": deadline.isoformat(),
+                          "morning_hold": {"at": now.isoformat(),
+                                           "previous_deadline_at": data["deadline_at"]}}
+    return True
 
 
 def _read_record(session: Session, raw_id: int) -> SchedulerRun | None:

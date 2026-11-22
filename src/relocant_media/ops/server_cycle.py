@@ -59,6 +59,7 @@ from relocant_media.collectors.cukarica_news import (
 )
 from relocant_media.collectors.factory import build_collector
 from relocant_media.collectors.news_discovery import (
+    NEWS_DISCOVERY_REGISTRY,
     collect_news_feed,
     load_verified_news_feeds,
 )
@@ -73,21 +74,30 @@ from relocant_media.collectors.telegram_topics import (
 )
 from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.collectors.venue_feed import VenueFeedCollector
+from relocant_media.domain import quiet_hours
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
 from relocant_media.domain.dedup import event_key, find_repeated_publication
+from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.domain.freshness import (
     GUIDE_SOURCE_TYPE,
     evidence_freshness,
     freshness_decision,
 )
-from relocant_media.domain.pacing import pacing_hold
+from relocant_media.domain.pacing import (
+    PendingDelivery,
+    delivery_order,
+    morning_deadline,
+    morning_release,
+    pacing_hold,
+)
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
 from relocant_media.domain.presentation import (
     presentation_title,
     title_instruction,
     valid_title_presentation,
 )
+from relocant_media.domain.publication_time import same_legacy_publication_time
 from relocant_media.domain.story_fingerprint import find_same_story
 from relocant_media.ingestion.persistence import (
     capture_collected_batch,
@@ -99,6 +109,7 @@ from relocant_media.ops.newsroom_status import summarize
 from relocant_media.ops.newsroom_triage import triage_queue
 from relocant_media.ops.primary_cycle import run_cycle
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
+from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.audience_observation import observe_audience
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
 from relocant_media.services.editorial import (
@@ -176,7 +187,6 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, S
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 SOURCES = Path("cities/belgrade/sources")
-NEWS_DISCOVERY = Path("docs/serbian-news-discovery.json")
 _SERVER_VENUE_STRATEGIES = frozenset({
     "venue_feed",
     "musicology_blog",
@@ -432,6 +442,18 @@ def _run_sync[T](coroutine: Coroutine[Any, Any, T]) -> T:
         return pool.submit(asyncio.run, coroutine).result()
 
 
+def _live_document(original: EvidenceDocument, item: CollectedRawItem) -> EvidenceDocument:
+    live = EvidenceDocument.model_validate(item, from_attributes=True)
+    if same_legacy_publication_time(
+        original.published_at, original.published_at_precision,
+        live.published_at, live.published_at_precision,
+    ):
+        # Existing packages were signed with the old label. The full live-document
+        # comparison still verifies source, URL, title, body and timestamp.
+        return live.model_copy(update={"published_at_precision": original.published_at_precision})
+    return live
+
+
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     documents = []
@@ -452,9 +474,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             if document.source_id in venues:
                 with _note_source_unavailable(document.source_id):
                     item = _run_sync(fetch_venue(venues[document.source_id], document.url))
-                documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
-                    title=item.title, body=item.body, published_at=item.published_at,
-                    published_at_precision=item.published_at_precision))
+                documents.append(_live_document(document, item))
                 verify_live_map(package.presentation, documents[-1], item.source_html)
                 continue
             if document.source_id not in {"city_beograd_news", "cukarica_news"}:
@@ -472,9 +492,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             parser = (parse_beograd_article if document.source_id == "city_beograd_news"
                       else parse_cukarica_article)
             item = parser(response.text, source, str(response.url))
-            documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
-                title=item.title, body=item.body, published_at=item.published_at,
-                    published_at_precision=item.published_at_precision))
+            documents.append(_live_document(document, item))
             verify_live_map(package.presentation, documents[-1], response.text)
     native = package.presentation.native_map if package.presentation else None
     point = native.get("point", {}) if native else {}
@@ -552,7 +570,7 @@ async def collect_sources(
     media = media_sources()
     guides = {} if submissions_only else guide_sources()
     discovery_venues = discovery_venue_sources()
-    news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY)
+    news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY_REGISTRY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
                for key in ("city_beograd_news", "cukarica_news", BVK_NEWS_SOURCE)}
     sources.update(runtime_venues)
@@ -584,6 +602,7 @@ async def collect_sources(
     channel_errors: list[dict[str, str]] = []
     channel_coverage: list[dict[str, Any]] = []
     news_errors: list[dict[str, str]] = []
+    news_feed_observations: list[dict[str, Any]] = []
     venue_errors: list[dict[str, str]] = []
     articles = []
     metadata_holds = []
@@ -885,8 +904,11 @@ async def collect_sources(
                     observation["status"] = "access_error"
 
         for feed in news_feeds:
+            observation = {"source_id": feed.source_id, "url": feed.feed_url,
+                           "status": "not_checked"}
+            news_feed_observations.append(observation)
             try:
-                news_leads = await collect_news_feed(feed, client, now=now)
+                news_leads = await collect_news_feed(feed, client, now=now, observation=observation)
                 for news_lead in news_leads[:20]:
                     result["news_leads"] += 1
                     resolution = await resolve_public_discovery(
@@ -908,6 +930,8 @@ async def collect_sources(
                         "discovery_gaps": list(resolution.discovery_gaps),
                         "primary_urls": list(resolution.primary_urls), "ai_calls": 0})
             except Exception as error:
+                if observation["status"] == "not_checked":
+                    observation["status"] = "error"
                 result["news_failures"] += 1
                 news_errors.append({"source_id": feed.source_id,
                                     "error_type": type(error).__name__})
@@ -1029,7 +1053,7 @@ async def collect_sources(
             "failures": channel_errors, "publication_evidence": False},
             ensure_ascii=False, indent=2), encoding="utf-8")
         (output / "news-topics.json").write_text(json.dumps({"topics": news_topics,
-            "failures": news_errors, "publication_evidence": False,
+            "feeds": news_feed_observations, "failures": news_errors, "publication_evidence": False,
             "requires_primary_verification": True}, ensure_ascii=False, indent=2),
             encoding="utf-8")
     return result
@@ -1300,26 +1324,57 @@ async def audience_observation() -> dict[str, Any]:
         return await observe_audience(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client))
 
 
+def _attach_flight_review(session: Session, cycle_id: int, raw_id: int) -> None:
+    cycle = session.get(SchedulerRun, cycle_id)
+    if (cycle is None or cycle.task_key != "editorial-primary:belgrade"
+            or cycle.task_type != "editorial_primary" or cycle.finished_at is None
+            or cycle.status not in {"success", "partial"}):
+        raise ValueError("Отсутствует завершённый цикл удержанной авиановости")
+    ids = dict.fromkeys([raw_id, *cycle.details.get("flight_review_ids", [])])
+    cycle.status = "partial"
+    cycle.details = {**cycle.details, "status": "PRIMARY_PARTIAL", "window_complete": False,
+                     "fallback_required": True, "flight_review_ids": list(ids)[:5]}
+
+
 async def publish_pending(
     engine: Engine, *, enabled: bool, limit: int = 2,
     blocked: list[dict[str, Any]] | None = None,
     only_raw_ids: set[int] | None = None,
+    scheduler_run_id: int | None = None,
 ) -> list[int]:
     if not enabled or only_raw_ids == set():
         return []
+    from relocant_media.services.flight_review import FlightReviewRequired
     from relocant_media.services.material_lifecycle import (
         after_result,
         before_delivery_attempt,
         delivery_deadline,
         delivery_failure,
+        hold_until_morning,
+        request_flight_review,
     )
     with Session(engine) as session:
-        query = select(EditorialRun.raw_item_id).where(
+        outcome = EditorialRun.outcome
+        package_fields = outcome["_package"]
+        query = select(
+            EditorialRun.raw_item_id,
+            RawItem.published_at,
+            outcome["ranking"]["category"].as_string().label("category"),
+            package_fields["urgent"].as_json().label("urgent"),
+            package_fields["presentation"]["event_place"].as_json().label("event_place"),
+        ).join(RawItem, RawItem.id == EditorialRun.raw_item_id).where(
             EditorialRun.delivery_status == "pending",
         )
         if only_raw_ids is not None:
             query = query.where(EditorialRun.raw_item_id.in_(only_raw_ids))
-        ids = list(session.scalars(query.order_by(EditorialRun.raw_item_id)))
+        ids = delivery_order(
+            (PendingDelivery(
+                raw_id=row.raw_item_id, published_at=row.published_at,
+                category=str(row.category or ""), urgent=row.urgent is True,
+                event_place=row.event_place,
+            ) for row in session.execute(query)),
+            now=quiet_hours.utc_now(),
+        )
         last_sent_at = session.scalar(select(func.max(Post.published_at)).join(
             EditorialRun, EditorialRun.post_id == Post.id).where(
                 EditorialRun.delivery_status == "sent",
@@ -1340,10 +1395,19 @@ async def publish_pending(
                     continue
                 ranking = run.outcome.get("ranking")
                 stored = run.outcome["_package"]
+                category = (str(ranking.get("category", "")) if isinstance(ranking, dict)
+                            else "")
+                urgent = isinstance(stored, dict) and stored.get("urgent") is True
+                release = morning_release(category=category, urgent=urgent,
+                                          now=quiet_hours.utc_now())
+                if release is not None:
+                    # Not a failure: the morning cycle re-checks freshness and sends it.
+                    hold_until_morning(session, raw_id, now=quiet_hours.utc_now(),
+                                       deadline=morning_deadline(release))
+                    session.commit()
+                    continue
                 if pacing_hold(
-                    category=str(ranking.get("category", "")) if isinstance(ranking, dict)
-                    else "",
-                    urgent=isinstance(stored, dict) and stored.get("urgent") is True,
+                    category=category, urgent=urgent,
                     now=datetime.now(UTC), last_sent_at=last_sent_at,
                     deadline_at=delivery_deadline(session, raw_id),
                 ):
@@ -1399,6 +1463,17 @@ async def publish_pending(
                 try:
                     result = await deliver_reviewed(session, raw_id, publisher,
                         target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
+                except FlightReviewRequired as error:
+                    reason = request_flight_review(
+                        session, raw_id, parent_raw_id=error.parent.raw_item_id,
+                        parent_message_id=error.parent.message_id, now=datetime.now(UTC))
+                    if reason == FLIGHT_REVIEW_REASON and scheduler_run_id is not None:
+                        _attach_flight_review(session, scheduler_run_id, raw_id)
+                    session.commit()
+                    if blocked is not None:
+                        blocked.append({"raw_item_id": raw_id, "reason": reason,
+                                        "parent_message_id": error.parent.message_id})
+                    continue
                 except DeliveryBlockedError as error:
                     failed(type(error).__name__)
                     if blocked is not None:
@@ -1555,8 +1630,11 @@ def main() -> None:
             blocked: list[dict[str, Any]] = []
             result["sent_message_ids"] = asyncio.run(
                 publish_pending(engine, enabled=enabled, blocked=blocked,
-                    only_raw_ids=allowed_items() if args.submissions_only else None))
+                    only_raw_ids=allowed_items() if args.submissions_only else None,
+                    scheduler_run_id=None if args.submissions_only else result["run_id"]))
             result["channel_blocked"] = blocked
+            if any(item["reason"] == FLIGHT_REVIEW_REASON for item in blocked):
+                result.update(status="PRIMARY_PARTIAL", window_complete=False)
             result["fallback_required"] = result["fallback_required"] or bool(blocked)
             if enabled:
                 result["pin_maintenance"] = asyncio.run(cleanup_news_pins(engine))

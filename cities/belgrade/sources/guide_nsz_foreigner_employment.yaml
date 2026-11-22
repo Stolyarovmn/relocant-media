@@ -13,6 +13,7 @@ categories:
 extraction:
   strategy: official_guide
   status: inactive
+  inactive_reason: 'Отключено владельцем 28.10.2026: канал новостной, справочные материалы не публикуются.'
   article_selectors:
   - article
   approved_hosts:

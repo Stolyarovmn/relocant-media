@@ -27,8 +27,7 @@ from relocant_media.collectors.rhmz_forecast import (
     FORECAST_URL,
     WARNING_URL,
     Forecast,
-    parse_forecast,
-    parse_warning,
+    collect_weather,
 )
 from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.domain.city_profile import load_city_profile
@@ -53,7 +52,12 @@ from relocant_media.services.published_text import effective_published_text
 from relocant_media.services.road_scope import resolve_road_segments
 from relocant_media.services.transport_map import SOURCE_ID, _signature
 from relocant_media.services.transport_map_source import _notice_id, extract_transport_map
-from relocant_media.services.utility_scope import extract_power_scopes, house_in_range
+from relocant_media.services.utility_geography import _name as serbian_name_key
+from relocant_media.services.utility_scope import (
+    extract_power_scopes,
+    house_in_range,
+    split_settlement_context,
+)
 from relocant_media.services.water_outage_scope import (
     extract_water_outage_scopes,
     reported_water_places,
@@ -65,6 +69,8 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 _CITY = "belgrade"
 _CHANNEL = "https://t.me/eduvbelgrad"
 _HISTORY = "digest_receipts"
+MORNING_ATTEMPT = "last_morning_digest_attempt"
+MORNING_SKIP_REASONS = frozenset({"insufficient_items", "window_closed"})
 _PERIOD = re.compile(r"Период измене: (\d{2}\.\d{2}\.\d{4})–(\d{2}\.\d{2}\.\d{4})\.")
 _MONTHS = ("января февраля марта апреля мая июня июля августа сентября октября ноября декабря"
            .split())
@@ -110,6 +116,7 @@ class Pilot(BaseModel):
     # any later cycle in this window delivers it once (slot key keeps it idempotent).
     morning_catch_up_until: time | None = None
     reminders_from: date | None = None
+    municipality_labels: dict[str, str] = Field(default_factory=dict)
     official_reminder_sources: dict[date, tuple[str, ...]] = Field(default_factory=dict)
     transport_briefs: dict[str, TransportBrief] = Field(default_factory=dict)
 
@@ -123,6 +130,13 @@ class Slot:
     @property
     def key(self) -> str:
         return f"{_CITY}:{self.scheduled.date()}:{self.kind}"
+
+
+@dataclass(frozen=True)
+class MorningDelivery:
+    slot: Slot
+    status: Literal["sent", "unconfirmed", "missed"]
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -157,29 +171,66 @@ def _policy() -> Pilot:
     ))
 
 
-def due_slot(now: datetime) -> Slot | None:
+def _local_clock(now: datetime) -> datetime:
     if now.utcoffset() is None:
         raise ValueError("digest clock requires a timezone")
+    return now.astimezone(ZoneInfo(load_city_profile(_CITY).timezone))
+
+
+def _regular_slot(
+    policy: Pilot, local: datetime, kind: Literal["morning", "evening"],
+) -> Slot | None:
+    scheduled = datetime.combine(local.date(), getattr(policy, kind), tzinfo=local.tzinfo)
+    naive = scheduled.replace(tzinfo=None)
+    if naive < policy.starts_at or (policy.ends_before is not None and naive >= policy.ends_before):
+        return None
+    expires = scheduled + timedelta(minutes=policy.delivery_window_minutes)
+    if kind == "morning" and policy.morning_catch_up_until is not None:
+        expires = max(expires, datetime.combine(
+            local.date(), policy.morning_catch_up_until, tzinfo=local.tzinfo))
+    return Slot(kind, scheduled, expires)
+
+
+def due_slot(now: datetime) -> Slot | None:
     policy = _policy()
-    zone = ZoneInfo(load_city_profile(_CITY).timezone)
-    local = now.astimezone(zone)
+    local = _local_clock(now)
     for kind in ("morning", "evening"):
-        scheduled = datetime.combine(local.date(), getattr(policy, kind), tzinfo=zone)
-        expires = scheduled + timedelta(minutes=policy.delivery_window_minutes)
-        naive = scheduled.replace(tzinfo=None)
-        if kind == "morning" and policy.morning_catch_up_until is not None:
-            expires = max(expires, datetime.combine(
-                local.date(), policy.morning_catch_up_until, tzinfo=zone))
-        if (policy.starts_at <= naive
-                and (policy.ends_before is None or naive < policy.ends_before)
-                and scheduled <= local < expires):
-            return Slot(kind, scheduled, expires)
+        slot = _regular_slot(policy, local, kind)
+        if slot is not None and slot.scheduled <= local < slot.expires:
+            return slot
     if policy.reminders_from is not None and policy.reminders_from <= local.date():
-        scheduled = datetime.combine(local.date(), policy.evening, tzinfo=zone)
+        scheduled = datetime.combine(local.date(), policy.evening, tzinfo=local.tzinfo)
         expires = scheduled + timedelta(minutes=policy.delivery_window_minutes)
         if scheduled <= local < expires:
             return Slot("reminder", scheduled, expires)
     return None
+
+
+def morning_delivery(state: dict[str, Any], now: datetime) -> MorningDelivery | None:
+    if state.get("status") not in ("ready", "busy"):
+        return None
+    local = _local_clock(now)
+    slot = _regular_slot(_policy(), local, "morning")
+    if slot is None or local < slot.expires:
+        return None
+    receipts = state.get(_HISTORY, {})
+    if not isinstance(receipts, dict):
+        return MorningDelivery(slot, "unconfirmed", "invalid_receipt")
+    if slot.key in receipts:
+        receipt = receipts[slot.key]
+        if isinstance(receipt, dict):
+            message_id = receipt.get("message_id")
+            if receipt.get("state") == "sent" and type(message_id) is int and message_id > 0:
+                return MorningDelivery(slot, "sent", "confirmed")
+            if receipt.get("state") in ("sending", "uncertain"):
+                return MorningDelivery(slot, "unconfirmed", "telegram_unconfirmed")
+        return MorningDelivery(slot, "unconfirmed", "invalid_receipt")
+    attempt = state.get(MORNING_ATTEMPT)
+    if isinstance(attempt, dict) and attempt.get("slot") == slot.key:
+        reason = attempt.get("reason")
+        if isinstance(reason, str) and reason in MORNING_SKIP_REASONS:
+            return MorningDelivery(slot, "missed", reason)
+    return MorningDelivery(slot, "missed", "no_recorded_result")
 
 
 def _clip_text(value: str, limit: int) -> str:
@@ -227,7 +278,7 @@ def _incidents(session: Session, now: datetime, policy: Pilot) -> list[Entry]:
             continue
         if notice.kind == "road" and (notice.starts_on is None or notice.ends_on is None):
             continue
-        text, address_rows = _incident_content(notice, now, tomorrow)
+        text, address_rows = _incident_content(notice, now, tomorrow, policy)
         if notice.kind == "road" and not text:
             source = session.scalar(select(RawItem).where(
                 RawItem.source_id == SOURCE_ID, RawItem.url == notice.source_map_url,
@@ -286,13 +337,18 @@ def _outage_period(start: datetime, end: datetime, now: datetime) -> str:
     return f"{begin}–{finish}"
 
 
+def _municipality_label(value: str, policy: Pilot) -> str:
+    key = serbian_name_key(value).removeprefix("градска општина ").removeprefix("општина ")
+    return policy.municipality_labels.get(key, value)
+
+
 def _incident_content(
-    notice: Incident, now: datetime, tomorrow: datetime,
+    notice: Incident, now: datetime, tomorrow: datetime, policy: Pilot,
 ) -> tuple[str, tuple[str, ...]]:
     if notice.kind == "road":
         return _road_text(notice, notice.segments), ()
     if notice.reported_scope and notice.starts_at and notice.ends_at:
-        district = notice.reported_scope.partition(":")[0]
+        district = _municipality_label(notice.reported_scope.partition(":")[0], policy)
         period = _outage_period(notice.starts_at, notice.ends_at, now)
         return f"{district} — {period}.", (notice.reported_scope,)
     rows: list[Settlement | Address | PrintedRange] = [
@@ -305,13 +361,11 @@ def _incident_content(
         if isinstance(row, PrintedRange):
             key = row.municipality, row.street, row.starts_at, row.ends_at
             printed_ranges.setdefault(key, []).append(row.number)
-    districts: dict[str, None] = {}
     grouped: dict[tuple[str, str, datetime, datetime], list[str]] = {}
     whole_streets: set[tuple[str, str, datetime, datetime]] = set()
     for scope in notice.water_districts:
         if scope.starts_at >= tomorrow or scope.ends_at <= now:
             continue
-        districts[scope.municipality] = None
         if scope.boundary:
             block = f"квартал между улицами {', '.join(scope.boundary)}"
             grouped[(scope.municipality, block, scope.starts_at, scope.ends_at)] = []
@@ -319,7 +373,6 @@ def _incident_content(
             whole_streets.add((scope.municipality, street, scope.starts_at, scope.ends_at))
             grouped[(scope.municipality, street, scope.starts_at, scope.ends_at)] = []
     for row in active:
-        districts[row.municipality] = None
         if isinstance(row, Settlement):
             place = f"{row.name} ({row.parent})" if row.parent else f"{row.name} целиком"
             number = ""
@@ -343,15 +396,26 @@ def _incident_content(
                 continue
             (start, end), = periods
             if start < tomorrow and now < end:
-                districts[segment.municipality] = None
                 place = f"{segment.street}, от {segment.start} до {segment.end}"
                 grouped.setdefault((segment.municipality, place, start, end), [])
-    details = tuple(
-        f"{district}, {place}{', ' + ', '.join(dict.fromkeys(numbers)) if any(numbers) else ''}"
-        f" — {_outage_period(start, end, now)}"
-        for (district, place, start, end), numbers in grouped.items()
-    )
-    return (_short(", ".join(districts)) + ".", details) if details else ("", ())
+    districts: dict[str, None] = {}
+    details: list[str] = []
+    for (scope_name, place, start, end), numbers in grouped.items():
+        municipality, settlement = split_settlement_context(scope_name)
+        district = _municipality_label(municipality, policy)
+        districts[district] = None
+        address = ", ".join(part for part in (district, settlement, place, *dict.fromkeys(numbers))
+                            if part)
+        details.append(f"{address} — {_outage_period(start, end, now)}")
+    names = list(districts)
+    if not names:
+        return "", ()
+    lead = ", ".join(names[:3])
+    other = len(names) - 3
+    if other > 0:
+        word = "район" if other == 1 else "района" if 2 <= other <= 4 else "районов"
+        lead += f" и ещё {other} {word}"
+    return lead + ".", tuple(details)
 
 
 def _routes(session: Session, today: date, policy: Pilot) -> list[Entry]:
@@ -578,7 +642,7 @@ async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | 
             text = f"{reported[0]} — {starts:%H:%M}–{ends:%H:%M}."
             address_rows = (f"Посёлки: {', '.join(reported[1])}", f"Улицы: {reported[2]}")
         elif same:
-            updated_text, address_rows = _incident_content(notice, day_start, next_day)
+            updated_text, address_rows = _incident_content(notice, day_start, next_day, _policy())
             text = updated_text or text
         else:
             return None
@@ -777,17 +841,11 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
         now = datetime.now(UTC).astimezone(slot.scheduled.tzinfo)
         forecast = None
         warning = None
+        weather_details: dict[str, Any] = {}
         if slot.kind == "morning":
-            try:
-                response = await client.get(FORECAST_URL)
-                forecast = parse_forecast(response.raise_for_status().text, now)
-            except httpx.HTTPError:
-                pass
-            try:
-                response = await client.get(WARNING_URL)
-                warning = parse_warning(response.raise_for_status().content, now)
-            except httpx.HTTPError:
-                pass
+            weather = await collect_weather(client, now)
+            forecast, warning = weather.forecast, weather.warning
+            weather_details["weather_sources"] = weather.statuses()
         engine = create_engine(f"sqlite:///{database.resolve().as_uri()}?mode=ro&uri=true")
         try:
             with Session(engine) as session:
@@ -822,7 +880,8 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
         if (priority_missing or candidates and not confirmed) and (
             len(entries) < 2 or now < slot.expires - timedelta(minutes=15)
         ):
-            return {"state": "reminder_source_unconfirmed", "items": len(candidates)}
+            return {"state": "reminder_source_unconfirmed", "items": len(candidates),
+                    **weather_details}
         if confirmed:
             reply_to = reply_target(slot, confirmed, originals)
             for index, item in enumerate(confirmed):
@@ -835,12 +894,13 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
         telegram_app = environment.get("RELOCANT_MAP_TELEGRAM_APP")
         digest = render(slot, entries, telegram_app)
         if digest is None:
-            return {"state": "insufficient_items", "items": len(entries)}
+            return {"state": "insufficient_items", "items": len(entries), **weather_details}
         digest, photo = _with_cover(slot, entries, digest, telegram_app)
         if datetime.now(UTC) >= slot.expires:
-            return {"state": "window_closed"}
+            return {"state": "window_closed", **weather_details}
         bot = TelegramBotAPI(environment["TELEGRAM_BOT_TOKEN"], client)
-        return await deliver(slot, digest, state, sha, commit, lambda: bot.send_digest_message(
+        receipt = await deliver(slot, digest, state, sha, commit, lambda: bot.send_digest_message(
             APPROVED_CHANNEL_ID, digest.html, map_url=digest.map_url,
             reply_to=reply_to, photo=photo,
         ))
+        return {**receipt, **weather_details}
