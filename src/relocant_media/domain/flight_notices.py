@@ -56,6 +56,16 @@ def _notice(title: str, body: str, reference: datetime) -> tuple[object, ...] | 
     return ("air_serbia", next(iter(routes)), dates)
 
 
+def flight_cancellation_key(
+    title: str, body: str, *, published_at: datetime | None,
+) -> tuple[object, ...] | None:
+    """Ключ одного события для сводки, с днём недели от времени самого поста.
+
+    Отсутствующие/неоднозначные признаки не объединяются. Это не меняет отдельные
+    посты, их исходники, оценки новизны, опубликованные квитанции или правила отправки.
+    """
+    return None if published_at is None else _notice(title, body, published_at)
+
 def find_related_flight_cancellation(
     title: str, body: str,
     publications: Iterable[tuple[int, str, str, datetime | None]], *, now: datetime,
