@@ -161,3 +161,30 @@ def test_unavailable_city_has_no_kpi():
     report = build_status(snapshot(), city="novi_sad", now=NOW)
     assert report["rolling_kpi"] is None
     assert "Отдельные публикации и подписчики: нет данных." in markdown(report)
+
+
+@pytest.mark.parametrize(("age", "delta_24h", "delta_7d"), [
+    ({"hours": 2}, 0, -1),
+    ({"hours": 24}, None, -1),
+    ({"hours": 30}, None, -1),
+    ({"days": 7}, None, None),
+    ({"days": 9}, None, None),
+])
+def test_stale_subscriber_reading_has_no_delta_but_keeps_count(age, delta_24h, delta_7d):
+    from datetime import timedelta
+
+    value = snapshot()
+    value["cities"][0]["kpi"] = {"subscribers": {
+        "count": 2, "observed_at": (NOW - timedelta(**age)).isoformat(),
+        "delta_24h": 0, "delta_7d": -1}}
+    kpi = build_status(value, city="belgrade", now=NOW)["rolling_kpi"]
+    assert kpi["subscribers"] == 2
+    assert (kpi["subscribers_delta_24h"], kpi["subscribers_delta_7d"]) == (delta_24h, delta_7d)
+
+
+def test_unknown_subscriber_time_has_no_delta():
+    value = snapshot()
+    value["cities"][0]["kpi"] = {"subscribers": {"count": 2, "delta_24h": 0, "delta_7d": 0}}
+    report = build_status(value, city="belgrade", now=NOW)
+    assert report["rolling_kpi"]["subscribers_delta_24h"] is None
+    assert "за 24 ч нет данных, за 7 дней нет данных" in markdown(report)

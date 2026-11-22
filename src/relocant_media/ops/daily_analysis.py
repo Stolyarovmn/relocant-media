@@ -47,6 +47,14 @@ def _rolling_kpi(recorded: dict[str, Any]) -> dict[str, Any]:
     audience = kpi.get("subscribers") or {}
     last = _time(published.get("last_published_at"))
     measured = _time(audience.get("observed_at"))
+    reference = _time(recorded.get("observed_at"))
+
+    def change(key: str, window: timedelta) -> int | None:
+        # A reading at or before the window start can be its own baseline: "+0" by one reading.
+        if measured is None or reference is None or measured <= reference - window:
+            return None
+        return _delta(audience.get(key))
+
     return {
         "window": "rolling", "observed_at": recorded.get("observed_at"),
         "published_last_24h": _count(published.get("last_24h")),
@@ -54,8 +62,8 @@ def _rolling_kpi(recorded: dict[str, Any]) -> dict[str, Any]:
         "last_published_at": last.isoformat() if last else None,
         "subscribers": _count(audience.get("count")),
         "subscribers_observed_at": measured.isoformat() if measured else None,
-        "subscribers_delta_24h": _delta(audience.get("delta_24h")),
-        "subscribers_delta_7d": _delta(audience.get("delta_7d")),
+        "subscribers_delta_24h": change("delta_24h", timedelta(hours=24)),
+        "subscribers_delta_7d": change("delta_7d", timedelta(days=7)),
     }
 
 
