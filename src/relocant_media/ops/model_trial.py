@@ -5,7 +5,8 @@ latest published posts with stored reviewed packages and runs the current and th
 model bundles on the same items: a new draft and a fresh review of the published draft.
 Nothing is written back to canonical state, no Telegram API is used, and every package linked
 to a reader submission is excluded because free-tier model input may be used by the provider.
-The output is an anonymized summary: counts, error types, time and sizes, no texts or reasons.
+The uploaded file is an anonymized summary: counts, error types, time and sizes per model;
+per-item rows stay in memory of the runner and are never written or uploaded.
 """
 from __future__ import annotations
 
@@ -27,7 +28,8 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.independent_reviews import reviewed_package
 from relocant_media.ai.model_roles import RoleRoutedProvider, role_for, role_models
-from relocant_media.ai.package import EditorialPackage
+from relocant_media.ai.models import EditorialOutcome, PublicationStatus
+from relocant_media.ai.package import EditorialPackage, PackageOutcome
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.domain.city_profile import load_city_profile
@@ -135,12 +137,51 @@ def _verdicts(audit: list[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _placeholders(package: EditorialPackage) -> EditorialPackage:
+    return package.model_copy(update={"reviews": tuple(review.model_copy(update={
+        "verdict": "hold", "score": 0, "flags": (), "live_source_checked": False,
+        "facts_check": None}) for review in package.reviews)})
+
+
+def _review(package: EditorialPackage, documents: tuple[Any, ...], when: datetime,
+            provider: StructuredAIProvider) -> dict[str, Any]:
+    """Both independent reviews; a review failure is recorded and counts as not approved."""
+    audit: list[dict[str, Any]] = []
+    result: dict[str, Any] = {}
+    try:
+        reviewed_package(_placeholders(package), provider, lambda: documents, now=when,
+                         audit=audit.append)
+    except Exception as error:
+        result["error_type"] = type(error).__name__
+    result["reviews"] = _verdicts(audit)
+    result["double_approval"] = ("error_type" not in result and bool(audit) and all(
+        entry.get("verdict") == "approve" for entry in audit))
+    return result
+
+
+def _with_new_draft(package: EditorialPackage, outcome: EditorialOutcome) -> EditorialPackage:
+    """The published package carrying the bundle's own outcome and draft."""
+    new_outcome = PackageOutcome.model_validate_json(outcome.model_dump_json())
+    presentation = package.presentation
+    if presentation is not None:
+        from relocant_media.services.native_map import bind_native_map_draft
+
+        presentation = bind_native_map_draft(presentation, new_outcome.draft)
+    return package.model_copy(update={"outcome": new_outcome, "presentation": presentation})
+
+
 def trial_bundle(package: EditorialPackage, when: datetime, provider: StructuredAIProvider,
                  log: CallLog) -> dict[str, Any]:
-    """One model bundle on one published package: draft status and both review verdicts."""
+    """One model bundle on one published package.
+
+    ``published`` compares reviewers only: both reviews of the already published draft.
+    ``full`` is the whole bundle: its own new draft and both reviews of that draft; a
+    generation failure or a draft that is not ready counts as not approved.
+    """
     first = len(log.calls)
     documents = tuple(package.event.documents) if package.event is not None else ()
     result: dict[str, Any] = {}
+    outcome: EditorialOutcome | None = None
     try:
         outcome = EditorialPipeline(provider, city_profile=load_city_profile(package.city)).run(
             city=package.city, documents=documents, now=when)
@@ -148,18 +189,15 @@ def trial_bundle(package: EditorialPackage, when: datetime, provider: Structured
     except Exception as error:
         result["draft_status"] = "error"
         result["draft_error_type"] = type(error).__name__
-    placeholders = tuple(review.model_copy(update={
-        "verdict": "hold", "score": 0, "flags": (), "live_source_checked": False,
-        "facts_check": None}) for review in package.reviews)
-    audit: list[dict[str, Any]] = []
-    try:
-        reviewed_package(package.model_copy(update={"reviews": placeholders}), provider,
-                         lambda: documents, now=when, audit=audit.append)
-    except Exception as error:
-        result["review_error_type"] = type(error).__name__
-    result["reviews"] = _verdicts(audit)
-    result["double_approval"] = ("review_error_type" not in result and bool(audit) and all(
-        entry.get("verdict") == "approve" for entry in audit))
+    result["published"] = _review(package, documents, when, provider)
+    full: dict[str, Any] = {"double_approval": False, "reviews": {}}
+    if (outcome is not None and outcome.status is PublicationStatus.READY
+            and outcome.draft is not None):
+        try:
+            full = _review(_with_new_draft(package, outcome), documents, when, provider)
+        except Exception as error:
+            full["error_type"] = type(error).__name__
+    result["full"] = full
     calls = log.calls[first:]
     result["seconds"] = round(sum(call["seconds"] for call in calls), 2)
     result["calls"] = len(calls)
@@ -179,7 +217,7 @@ def trial_item(post: Post, package: EditorialPackage,
                             "category": package.outcome.ranking.category}
     for bundle, provider in providers.items():
         item[bundle] = trial_bundle(package, when, provider, log)
-    facts = {bundle: item[bundle]["reviews"].get("facts", {}).get("verdict")
+    facts = {bundle: item[bundle]["published"]["reviews"].get("facts", {}).get("verdict")
              for bundle in providers}
     item["facts_verdicts_differ"] = len(set(facts.values())) > 1
     return item
@@ -195,28 +233,52 @@ def _median(values: list[float]) -> float | None:
     return round((ordered[middle - 1] + ordered[middle]) / 2, 2)
 
 
-def summarize(items: list[dict[str, Any]], bundles: Iterable[str]) -> dict[str, Any]:
+def _facts_flags(review: dict[str, Any]) -> int:
+    return int(review["reviews"].get("facts", {}).get("flags", 0))
+
+
+def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
+              calls: list[dict[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {"items": len(items), "bundles": {}}
     for bundle in bundles:
         rows = [item[bundle] for item in items]
         errors: dict[str, int] = {}
         for row in rows:
-            for key in ("draft_error_type", "review_error_type"):
-                if key in row:
-                    errors[row[key]] = errors.get(row[key], 0) + 1
+            for key in (row.get("draft_error_type"), row["published"].get("error_type"),
+                        row["full"].get("error_type")):
+                if key:
+                    errors[key] = errors.get(key, 0) + 1
+        by_model: dict[str, dict[str, int]] = {}
+        for call in calls:
+            if call["bundle"] != bundle:
+                continue
+            stats = by_model.setdefault(f"{call['role']}:{call['model']}", {
+                "calls": 0, "errors": 0, "input_chars": 0, "output_chars": 0})
+            stats["calls"] += 1
+            stats["errors"] += 1 if "error_type" in call else 0
+            stats["input_chars"] += call["input_chars"]
+            stats["output_chars"] += call["output_chars"]
         result["bundles"][bundle] = {
-            "double_approval": sum(1 for row in rows if row["double_approval"]),
+            "full_double_approval": sum(1 for row in rows if row["full"]["double_approval"]),
+            "published_double_approval": sum(
+                1 for row in rows if row["published"]["double_approval"]),
             "drafts_ready": sum(1 for row in rows if row["draft_status"] == "ready"),
-            "facts_flags": sum(row["reviews"].get("facts", {}).get("flags", 0) for row in rows),
+            "full_facts_flags": sum(_facts_flags(row["full"]) for row in rows),
+            "published_facts_flags": sum(_facts_flags(row["published"]) for row in rows),
             "call_errors": sum(row["call_errors"] for row in rows),
             "error_types": errors,
             "median_seconds_per_item": _median([row["seconds"] for row in rows]),
             "median_input_chars_per_item": _median([row["input_chars"] for row in rows]),
             "median_output_chars_per_item": _median([row["output_chars"] for row in rows]),
+            "by_role_and_model": by_model,
         }
-    result["facts_verdicts_differ"] = [item["raw_item_id"] for item in items
-                                       if item["facts_verdicts_differ"]]
+    result["facts_verdicts_differ"] = sum(1 for item in items if item["facts_verdicts_differ"])
     return result
+
+
+def public_result(result: dict[str, Any]) -> dict[str, Any]:
+    """The only object written to the uploaded artifact: no per-item data or ids."""
+    return {key: result[key] for key in ("version", "generated_at", "models", "summary")}
 
 
 def run_trial(database: Path, bundles: dict[str, dict[str, str]],
@@ -235,26 +297,42 @@ def run_trial(database: Path, bundles: dict[str, dict[str, str]],
     finally:
         engine.dispose()
     return {"version": 2, "generated_at": datetime.now(UTC).isoformat(), "models": bundles,
-            "summary": summarize(items, bundles), "items": items}
+            "summary": summarize(items, bundles, log.calls), "items": items}
 
 
 def markdown(result: dict[str, Any]) -> str:
     summary = result["summary"]
     lines = ["## Проба моделей (#312)", "", f"Материалов в паре: {summary['items']}", "",
-             "| Связка | Модели | Оба ревью одобрили | Черновик готов | Флаги фактов | "
+             "| Связка | Модели | Полная связка: оба ревью одобрили | Черновик готов | "
+             "Флаги фактов в новом черновике | Ревью опубликованного: оба одобрили | "
              "Ошибки вызовов | Медиана, с | Медиана ввода, симв. | Медиана вывода, симв. |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for name, stats in summary["bundles"].items():
         models = ", ".join(f"{role}={model}" for role, model in result["models"][name].items())
         lines.append(
-            f"| {name} | {models} | {stats['double_approval']} | {stats['drafts_ready']} | "
-            f"{stats['facts_flags']} | {stats['call_errors']} | "
+            f"| {name} | {models} | {stats['full_double_approval']} | "
+            f"{stats['drafts_ready']} | {stats['full_facts_flags']} | "
+            f"{stats['published_double_approval']} | {stats['call_errors']} | "
             f"{stats['median_seconds_per_item']} | {stats['median_input_chars_per_item']} | "
             f"{stats['median_output_chars_per_item']} |")
-    differ = summary["facts_verdicts_differ"]
-    lines += ["", "Расхождения вердикта фактов (raw_item_id): "
-              + (", ".join(str(value) for value in differ) if differ else "нет")]
+    lines += ["", "| Связка | Роль и модель | Вызовы | Ошибки | Ввод, симв. | Вывод, симв. |",
+              "|---|---|---|---|---|---|"]
+    for name, stats in summary["bundles"].items():
+        for model, usage in stats["by_role_and_model"].items():
+            lines.append(f"| {name} | {model} | {usage['calls']} | {usage['errors']} | "
+                         f"{usage['input_chars']} | {usage['output_chars']} |")
+    lines += ["", f"Расхождений вердикта фактов по опубликованным: "
+              f"{summary['facts_verdicts_differ']}"]
     return "\n".join(lines) + "\n"
+
+
+def write_outputs(result: dict[str, Any], output: Path, step_summary: str | None) -> None:
+    """Write the uploaded artifact (public part only) and the job summary table."""
+    output.write_text(json.dumps(public_result(result), ensure_ascii=False, indent=2),
+                      encoding="utf-8")
+    if step_summary:
+        with Path(step_summary).open("a", encoding="utf-8") as handle:
+            handle.write(markdown(result))
 
 
 def main() -> None:
@@ -284,12 +362,7 @@ def main() -> None:
         result = run_trial(database, bundles,
                            lambda model: IsolatedGeminiProvider(api_key, model=model),
                            limit=args.limit)
-        args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2),
-                               encoding="utf-8")
-        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-        if summary_path:
-            with Path(summary_path).open("a", encoding="utf-8") as handle:
-                handle.write(markdown(result))
+        write_outputs(result, args.output, os.environ.get("GITHUB_STEP_SUMMARY"))
         print(json.dumps({"model_trial": result["summary"]}, ensure_ascii=False))
     except Exception as error:
         # Exception text can contain URLs, credentials or response bodies.

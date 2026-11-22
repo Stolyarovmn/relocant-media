@@ -3,7 +3,7 @@ name: Model trial
 # Restores the verified snapshot into a private copy; never claims or writes state,
 # never calls Telegram and never sends reader-linked material to a model. The current
 # and the candidate bundles run on the same posts; the artifact is an anonymized summary
-# (counts, error types, time, sizes, raw_item_id of disagreements) without texts or reasons.
+# (counts, error types, time, sizes per model) without per-item data, texts or reasons.
 on:
   workflow_dispatch:
     inputs:
