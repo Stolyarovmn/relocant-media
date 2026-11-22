@@ -72,6 +72,7 @@ class BvkOutageNewsCollector:
         self._source = source
         self._client = client
         self.item_failures: list[dict[str, str]] = []
+        self.empty_reason: str | None = None
 
     async def _get(self, url: str, **params: str) -> bytes:
         content = bytearray()
@@ -100,6 +101,7 @@ class BvkOutageNewsCollector:
 
     async def collect(self) -> list[RawItem]:
         self.item_failures.clear()
+        self.empty_reason = None
         since = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
         rows = await self._rows(after=since)
         items: list[RawItem] = []
@@ -119,6 +121,8 @@ class BvkOutageNewsCollector:
             raise ArticleBatchError(
                 "all water outage articles failed extraction", self.item_failures,
             )
+        if not items:
+            self.empty_reason = "empty_index"
         return items
 
     async def collect_url(self, url: str) -> RawItem:

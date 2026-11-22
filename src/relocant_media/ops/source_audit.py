@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from relocant_media.collectors.base import ArticleBatchError
+from relocant_media.collectors.base import ArticleBatchError, RawItem
 from relocant_media.collectors.factory import build_collector
 from relocant_media.collectors.tls import (
     MISSING_INTERMEDIATE_HINT,
@@ -32,14 +32,14 @@ def _error_message(error: BaseException) -> str:
 async def _collect_with_transport_retry(
     source: SourceConfig,
     client: httpx.AsyncClient,
-) -> tuple[list[Any], list[dict[str, str]], int]:
+) -> tuple[list[RawItem], list[dict[str, str]], int, str | None]:
     """Retry bounded transport failures; extraction/data errors remain immediate."""
     for attempt in range(1, _TRANSPORT_ATTEMPTS + 1):
         collector = build_collector(source, client)
         try:
             items = await collector.collect()
             failures = getattr(collector, "item_failures", [])
-            return items, failures, attempt
+            return items, failures, attempt, getattr(collector, "empty_reason", None)
         except httpx.TransportError:
             if attempt >= _TRANSPORT_ATTEMPTS:
                 raise
@@ -75,10 +75,10 @@ async def audit_sources(
             }
             if row["status"] == "configured" and online:
                 try:
-                    items, item_failures, attempts = await _collect_with_transport_retry(
-                        source,
-                        client,
+                    items, item_failures, attempts, empty_reason = (
+                        await _collect_with_transport_retry(source, client)
                     )
+                    now = datetime.now(UTC)
                     fresh = [
                         item
                         for item in items
@@ -86,7 +86,7 @@ async def audit_sources(
                             item.title,
                             item.body,
                             item.published_at,
-                            datetime.now(UTC),
+                            now,
                             published_at_precision=item.published_at_precision,
                         ).action
                         == "keep"
@@ -110,6 +110,12 @@ async def audit_sources(
                     row["item_failures"] = item_failures
                     if item_failures:
                         row["status"] = "partial"
+                    elif not fresh:
+                        if any(item.published_at is None or item.published_at.tzinfo is None
+                               for item in items):
+                            row["empty_reason"] = "publication_date_unknown"
+                        elif items or empty_reason:
+                            row["empty_reason"] = "empty_fresh" if items else empty_reason
                 except httpx.TransportError as error:
                     row.update(
                         status="transport_error",
@@ -199,8 +205,15 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
                 details += f" ({row['tls_hint']})"
         elif row.get("status") == "partial":
             details = f"item_failures={len(row.get('item_failures', []))}"
-        elif row.get("attempts", 1) > 1:
-            details = f"attempts={row['attempts']}"
+        else:
+            parts = []
+            if row.get("empty_reason"):
+                parts.append(str(row["empty_reason"]))
+                if row.get("fetched_items"):
+                    parts.append(f"fetched={row['fetched_items']}")
+            if row.get("attempts", 1) > 1:
+                parts.append(f"attempts={row['attempts']}")
+            details = ", ".join(parts)
         lines.append(
             "| {id} | {status} | {fresh} | {details} |".format(
                 id=row.get("id", "unknown"),
