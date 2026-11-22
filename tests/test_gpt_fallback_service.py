@@ -831,3 +831,99 @@ def test_http_urls_cannot_hide_credentials_controls_or_ports(url):
 
 def test_registry_http_endpoint_uses_same_public_checks():
     assert gpt_fallback._public_host("http://www.beograd.rs:80/page") == "beograd.rs"
+
+
+@pytest.mark.parametrize("failure", [None, "network", "transaction"])
+def test_refresh_preserves_unconfirmed_rejection_history_and_original_budget(
+    fallback_session, monkeypatch, failure,
+):
+    from relocant_media.services import material_lifecycle as core
+    from relocant_media.services.editorial import _snapshot_member
+
+    session, raw, scheduler = fallback_session
+    raw_id = raw.id
+    source = session.get(Source, raw.source_id)
+    snapshot = _snapshot_member(raw, source)
+    assert core.before_attempt(session, raw_id, now=NOW)
+    previous = EditorialRun(
+        raw_item_id=raw_id, delivery_status="pending", created_at=NOW,
+        evidence={**snapshot, "documents": [snapshot]},
+        outcome={"status": "skipped", "reason": "ranking_rejected",
+                 "ranking": {"category": "transport"}},
+    )
+    session.add(previous)
+    session.flush()
+    core.after_result(session, raw_id, now=NOW)
+    now = NOW
+    for _ in range(2):
+        assert core.before_attempt(session, raw_id, now=now, channel="rejection_audit")
+        core.after_error(session, raw_id, "TimeoutError", now=now, channel="rejection_audit")
+        now += timedelta(minutes=5)
+    before = copy.deepcopy(core.lifecycle_state(session, raw_id, now=now))
+    assert before["next_action"] == "fallback"
+    assert before["unconfirmed_rejection_fallback"] is True
+    old_outcome = copy.deepcopy(previous.outcome)
+    old_evidence = copy.deepcopy(previous.evidence)
+    scheduler.details = {"processing_errors": [], "lifecycle_fallback_ids": [raw_id]}
+    session.commit()
+    request = gpt_fallback.build_request(session, now=now)
+    assert request is not None
+    gpt_fallback.validate_fallback_candidate(session, request, raw_id, now=now)
+    exchange = _refresh_exchange(request, raw_id, [])
+    article = CollectedRawItem(
+        raw.source_id, raw.external_id, raw.url, raw.title, raw.body, raw.published_at,
+        published_at_precision="instant",
+    )
+    session.rollback()
+
+    async def collect(_links):
+        if failure == "network":
+            raise TimeoutError("Не получен ответ источника")
+        return [article]
+
+    monkeypatch.setattr(gpt_refresh, "_collect", collect)
+    if failure == "transaction":
+        def fail_after_capture(*args, **kwargs):
+            raise ValueError("Ошибка после сохранения источника")
+        monkeypatch.setattr(gpt_refresh, "_candidate_request", fail_after_capture)
+    if failure:
+        with pytest.raises((TimeoutError, ValueError)):
+            gpt_refresh.refresh_gpt_evidence(session.get_bind(), exchange, now=now)
+        session.expire_all()
+        assert session.get(EditorialRun, raw_id).outcome == old_outcome
+        assert session.get(EditorialRun, raw_id).evidence == old_evidence
+        assert core.lifecycle_state(session, raw_id, now=now) == before
+        assert "gpt_evidence_refresh" not in session.get(SchedulerRun, scheduler.id).details
+        return
+    refreshed = gpt_refresh.refresh_gpt_evidence(session.get_bind(), exchange, now=now)
+    session.expire_all()
+    assert session.get(EditorialRun, raw_id) is None
+    after = core.lifecycle_state(session, raw_id, now=now)
+    for key in ("attempts", "audit_attempts", "rejection_audits", "fallback_attempts",
+                "first_seen_at", "deadline_at", "fallback_deadline_at", "next_action"):
+        assert after[key] == before[key]
+    archived = after["attempt_records"][-1]
+    assert archived["outcome"] == old_outcome and archived["evidence"] == old_evidence
+    gpt_fallback.validate_fallback_candidate(session, refreshed, raw_id, now=now)
+
+
+@pytest.mark.parametrize("guard", ["sent", "sending", "uncertain", "package", "owner"])
+def test_refresh_does_not_archive_protected_editorial_snapshots(fallback_session, guard):
+    from relocant_media.services import material_lifecycle as core
+
+    session, raw, _ = fallback_session
+    core.lifecycle_state(session, raw.id, now=NOW)
+    outcome = {"status": "human_review", "reason": "review_required"}
+    if guard in {"package", "owner"}:
+        outcome["_package" if guard == "package" else "_owner_review"] = {}
+    previous = EditorialRun(
+        raw_item_id=raw.id, delivery_status=guard if guard in {"sent", "sending", "uncertain"}
+        else "pending", outcome=outcome, evidence={}, created_at=NOW,
+    )
+    session.add(previous)
+    session.commit()
+    before = copy.deepcopy(core.lifecycle_state(session, raw.id, now=NOW))
+    with pytest.raises(gpt_fallback.FallbackValidationError):
+        gpt_refresh._require_unresolved(session, raw.id, now=NOW)
+    assert session.get(EditorialRun, raw.id) is previous
+    assert core.lifecycle_state(session, raw.id, now=NOW) == before
