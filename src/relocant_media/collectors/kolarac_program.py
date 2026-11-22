@@ -39,6 +39,11 @@ _HALL = re.compile(
     r"мал(?:а сала|ој сали)|mal(?:a sala|oj sali))\s+"
     r"(?:коларчеве задужбине|kolarčeve zadužbine)\b", re.I,
 )
+_CHANGE = re.compile(
+    r"\b(?:отказан\w*|отказуј\w*|одложен\w*|премештен\w*|"
+    r"otkazan\w*|otkazuj\w*|odlo[žz]en\w*|preme[šs]ten\w*)\b", re.I,
+)
+_PROGRAM_ATTRIBUTION = "\n\nПрограмма организатора (PDF) "
 
 
 def linked_program(html: str, page_url: str) -> tuple[str, datetime] | None:
@@ -48,6 +53,9 @@ def linked_program(html: str, page_url: str) -> tuple[str, datetime] | None:
     if not page.path.startswith("/predavanja/"):
         return None
     soup = BeautifulSoup(html, "html.parser")
+    if any(_CHANGE.search(node.get_text(" ", strip=True))
+           for node in soup.select(".entry-content")):
+        return None
     headings = soup.select("h1")
     if len(headings) != 1 or not (
         schedule := KOLARAC_SCHEDULE.fullmatch(headings[0].get_text(" ", strip=True))
@@ -98,10 +106,17 @@ def parse_linked_program(data: bytes, url: str, expected_start: datetime) -> tup
             text = "\n".join(page.extract_text() for page in reader.pages).strip()
     except Exception as error:
         raise ValueError("unreadable Kolarac program PDF") from error
+    title, body, _ = _program_document(text, url, expected_start)
+    return title, body
+
+
+def _program_document(text: str, url: str, expected_start: datetime) -> tuple[str, str, str]:
     if not text or len(text) > _MAX_TEXT_LENGTH:
         raise ValueError("Kolarac program requires bounded selectable text")
 
     flattened = " ".join(text.split())
+    if _CHANGE.search(flattened):
+        raise ValueError("Kolarac program may have changed")
     matches = list(_PROGRAM_SCHEDULE.finditer(flattened))
     if len(matches) != 1:
         raise ValueError("Kolarac program schedule missing or ambiguous")
@@ -113,9 +128,10 @@ def parse_linked_program(data: bytes, url: str, expected_start: datetime) -> tup
         raise ValueError("invalid Kolarac program schedule") from error
     if start != expected_start:
         raise ValueError("Kolarac program schedule differs from the event page")
-    hall = _HALL.search(flattened, match.end(), match.end() + 160)
-    if hall is None:
-        raise ValueError("Kolarac program has no explicit lecture hall")
+    halls = list(_HALL.finditer(flattened, match.end(), match.end() + 160))
+    if len(halls) != 1:
+        raise ValueError("Kolarac program hall missing or ambiguous")
+    hall = halls[0][0]
     lines = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
     title = lines[0]
     for line in lines[1:3]:
@@ -124,5 +140,24 @@ def parse_linked_program(data: bytes, url: str, expected_start: datetime) -> tup
         title += " " + line
     if not 8 <= len(title) <= 260 or not any(char.isalpha() for char in title):
         raise ValueError("Kolarac program title missing or invalid")
-    schedule = f"Предавање ће се одржати {start:%d.%m.%Y.} у {start:%H:%M} · {hall[0]}"
-    return title, f"{schedule}\n\n{text}\n\nПрограмма организатора (PDF) {url}"
+    schedule = f"Предавање ће се одржати {start:%d.%m.%Y.} у {start:%H:%M} · {hall}"
+    return title, f"{schedule}\n\n{text}{_PROGRAM_ATTRIBUTION}{url}", hall
+
+
+def saved_linked_program(
+    html: str, page_url: str, title: str, body: str,
+) -> tuple[str, datetime, str] | None:
+    """Сверить сохранённый текст программы с точной ссылкой, датой и залом из источника."""
+    link = linked_program(html, page_url)
+    if link is None:
+        return None
+    url, start = link
+    _, separator, content = body.partition("\n\n")
+    text, attribution, credited_url = content.rpartition(_PROGRAM_ATTRIBUTION)
+    if not separator or not attribution or credited_url != url:
+        return None
+    try:
+        source_title, source_body, hall = _program_document(text, url, start)
+    except ValueError:
+        return None
+    return (url, start, hall) if (title, body) == (source_title, source_body) else None
