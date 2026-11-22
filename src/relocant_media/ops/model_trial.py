@@ -26,6 +26,7 @@ import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.diagnostics import AI_PHASES
 from relocant_media.ai.independent_reviews import reviewed_package
 from relocant_media.ai.model_roles import RoleRoutedProvider, role_for, role_models
 from relocant_media.ai.models import EditorialOutcome, PublicationStatus
@@ -37,6 +38,13 @@ from relocant_media.storage.models import EditorialRun, Post, Submission
 
 MAX_ITEMS = 15
 _MODEL = r"[a-z0-9][a-z0-9.\-]{1,63}"
+# The trial shares the API key quota with the working newsroom. It waits out a
+# server-requested pause at most once per call and within one budget for the whole run;
+# when a pause does not fit, it stops instead of competing with the newsroom for quota.
+WAIT_BUDGET_SECONDS = 600.0
+MAX_PAUSE_SECONDS = 120.0
+INVALID_ERROR_SHARE = 0.5
+_QUOTA_PHASES = frozenset({"http_error_429", "quota_cooldown"})
 
 
 @dataclass
@@ -44,22 +52,70 @@ class CallLog:
     calls: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass
+class WaitBudget:
+    """Shared pause budget of one run; ``stopped`` ends the run after the current item."""
+
+    remaining: float = WAIT_BUDGET_SECONDS
+    max_pause: float = MAX_PAUSE_SECONDS
+    sleep: Callable[[float], None] = time.sleep
+    stopped: bool = False
+
+
+class TrialStopped(RuntimeError):
+    """The quota pause did not fit the budget; no further model calls are made."""
+
+
+def _phase(error: BaseException) -> str:
+    phase = getattr(error, "phase", None)
+    return phase if isinstance(phase, str) and phase in AI_PHASES else "unknown"
+
+
+def _retry_seconds(error: BaseException) -> float | None:
+    quota = getattr(error, "quota", None)
+    delay = quota.get("retry_seconds") if isinstance(quota, dict) else None
+    return float(delay) if isinstance(delay, int | float) and delay >= 0 else None
+
+
 class TimedProvider:
     """Record bundle, task, model, duration, sizes and success of each call.
 
-    Prompt and answer text are never kept: only their lengths, as a cost proxy.
+    Prompt and answer text are never kept: only their lengths, as a cost proxy. The error
+    record holds the exception class and a phase from the closed ``AI_PHASES`` list.
     """
 
-    def __init__(self, inner: RoleRoutedProvider, log: CallLog, bundle: str) -> None:
+    def __init__(self, inner: RoleRoutedProvider, log: CallLog, bundle: str,
+                 budget: WaitBudget | None = None) -> None:
         self._inner, self._log, self._bundle = inner, log, bundle
+        self._budget = budget if budget is not None else WaitBudget()
 
     def generate_json(self, *, task: str, system_instruction: str, prompt: str,
                       response_schema: dict[str, Any]) -> str:
+        try:
+            return self._attempt(task, system_instruction, prompt, response_schema, False)
+        except TrialStopped:
+            raise
+        except Exception as error:
+            if _phase(error) not in _QUOTA_PHASES:
+                raise
+            delay = _retry_seconds(error)
+            budget = self._budget
+            if delay is None or delay > min(budget.max_pause, budget.remaining):
+                budget.stopped = True
+                raise TrialStopped("quota pause does not fit the trial budget") from None
+            budget.remaining -= delay
+            budget.sleep(delay)
+            return self._attempt(task, system_instruction, prompt, response_schema, True)
+
+    def _attempt(self, task: str, system_instruction: str, prompt: str,
+                 response_schema: dict[str, Any], retry: bool) -> str:
+        if self._budget.stopped:
+            raise TrialStopped("trial stopped to keep the newsroom quota")
         started = time.monotonic()
         entry: dict[str, Any] = {"bundle": self._bundle, "task": task, "role": role_for(task),
                                  "model": self._inner.model_for(task),
                                  "input_chars": len(system_instruction) + len(prompt),
-                                 "output_chars": 0}
+                                 "output_chars": 0, "retry": retry}
         try:
             result = self._inner.generate_json(
                 task=task, system_instruction=system_instruction, prompt=prompt,
@@ -67,6 +123,7 @@ class TimedProvider:
             entry["output_chars"] = len(result)
         except Exception as error:
             entry["error_type"] = type(error).__name__
+            entry["phase"] = _phase(error)
             raise
         finally:
             entry["seconds"] = round(time.monotonic() - started, 2)
@@ -219,7 +276,7 @@ def trial_item(post: Post, package: EditorialPackage,
         item[bundle] = trial_bundle(package, when, provider, log)
     facts = {bundle: item[bundle]["published"]["reviews"].get("facts", {}).get("verdict")
              for bundle in providers}
-    item["facts_verdicts_differ"] = len(set(facts.values())) > 1
+    item["facts_verdicts_differ"] = None not in facts.values() and len(set(facts.values())) > 1
     return item
 
 
@@ -238,7 +295,8 @@ def _facts_flags(review: dict[str, Any]) -> int:
 
 
 def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
-              calls: list[dict[str, Any]]) -> dict[str, Any]:
+              calls: list[dict[str, Any]], *, unavailable: int = 0,
+              stopped: bool = False) -> dict[str, Any]:
     result: dict[str, Any] = {"items": len(items), "bundles": {}}
     for bundle in bundles:
         rows = [item[bundle] for item in items]
@@ -249,9 +307,11 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
                 if key:
                     errors[key] = errors.get(key, 0) + 1
         by_model: dict[str, dict[str, int]] = {}
-        for call in calls:
-            if call["bundle"] != bundle:
-                continue
+        phases: dict[str, int] = {}
+        bundle_calls = [call for call in calls if call["bundle"] == bundle]
+        for call in bundle_calls:
+            if "phase" in call:
+                phases[call["phase"]] = phases.get(call["phase"], 0) + 1
             stats = by_model.setdefault(f"{call['role']}:{call['model']}", {
                 "calls": 0, "errors": 0, "input_chars": 0, "output_chars": 0})
             stats["calls"] += 1
@@ -267,13 +327,33 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
             "published_facts_flags": sum(_facts_flags(row["published"]) for row in rows),
             "call_errors": sum(row["call_errors"] for row in rows),
             "error_types": errors,
+            "error_phases": phases,
+            "retries": sum(1 for call in bundle_calls if call.get("retry")),
+            "call_error_share": (round(sum(1 for call in bundle_calls if "error_type" in call)
+                                       / len(bundle_calls), 2) if bundle_calls else None),
             "median_seconds_per_item": _median([row["seconds"] for row in rows]),
             "median_input_chars_per_item": _median([row["input_chars"] for row in rows]),
             "median_output_chars_per_item": _median([row["output_chars"] for row in rows]),
             "by_role_and_model": by_model,
         }
+    names = list(result["bundles"])
+    result["pairs_published_reviewed"] = sum(
+        1 for item in items if all(_reviewed(item[name]["published"]) for name in names))
+    result["pairs_full_reviewed"] = sum(
+        1 for item in items if all(_reviewed(item[name]["full"]) for name in names))
     result["facts_verdicts_differ"] = sum(1 for item in items if item["facts_verdicts_differ"])
+    result["unavailable"] = unavailable
+    result["stopped_for_quota"] = stopped
+    result["valid"] = not stopped and all(
+        (stats["call_error_share"] or 0) <= INVALID_ERROR_SHARE
+        for stats in result["bundles"].values())
     return result
+
+
+def _reviewed(review: dict[str, Any]) -> bool:
+    """Both reviews ran to a verdict without a technical error."""
+    return "error_type" not in review and bool(review["reviews"]) and all(
+        entry.get("verdict") is not None for entry in review["reviews"].values())
 
 
 def public_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -282,27 +362,48 @@ def public_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_trial(database: Path, bundles: dict[str, dict[str, str]],
-              factory: Callable[[str], Any], *, limit: int) -> dict[str, Any]:
-    """Run every model bundle on the same published packages of a private snapshot copy."""
+              factory: Callable[[str], Any], *, limit: int,
+              budget: WaitBudget | None = None) -> dict[str, Any]:
+    """Run every model bundle on the same published packages of a private snapshot copy.
+
+    When a quota pause does not fit the budget, the item in progress is counted as
+    technically unavailable and the remaining items are not started.
+    """
     log = CallLog()
+    budget = budget if budget is not None else WaitBudget()
     providers: dict[str, StructuredAIProvider] = {
-        name: TimedProvider(RoleRoutedProvider(validate_models(models), factory), log, name)
+        name: TimedProvider(RoleRoutedProvider(validate_models(models), factory), log, name,
+                            budget)
         for name, models in bundles.items()}
     engine = create_engine(f"sqlite:///{database}")
+    items: list[dict[str, Any]] = []
+    unavailable = 0
     try:
         with Session(engine) as session:
-            selected = published_packages(session, limit)
-            items = [trial_item(post, package, providers, log) for post, package in selected]
+            for post, package in published_packages(session, limit):
+                item = trial_item(post, package, providers, log)
+                if budget.stopped:
+                    unavailable += 1
+                    break
+                items.append(item)
             session.rollback()
     finally:
         engine.dispose()
-    return {"version": 2, "generated_at": datetime.now(UTC).isoformat(), "models": bundles,
-            "summary": summarize(items, bundles, log.calls), "items": items}
+    return {"version": 3, "generated_at": datetime.now(UTC).isoformat(), "models": bundles,
+            "summary": summarize(items, bundles, log.calls, unavailable=unavailable,
+                                 stopped=budget.stopped),
+            "items": items}
 
 
 def markdown(result: dict[str, Any]) -> str:
     summary = result["summary"]
-    lines = ["## Проба моделей (#312)", "", f"Материалов в паре: {summary['items']}", "",
+    verdict = "действительна" if summary["valid"] else "недействительна"
+    lines = ["## Проба моделей (#312)", "", f"Материалов в паре: {summary['items']}",
+             f"Пар, где обе связки дошли до вердикта: опубликованный черновик "
+             f"{summary['pairs_published_reviewed']}, новый черновик "
+             f"{summary['pairs_full_reviewed']}",
+             f"Технически недоступно: {summary['unavailable']}; остановлена из-за квоты: "
+             f"{'да' if summary['stopped_for_quota'] else 'нет'}; проба {verdict}", "",
              "| Связка | Модели | Полная связка: оба ревью одобрили | Черновик готов | "
              "Флаги фактов в новом черновике | Ревью опубликованного: оба одобрили | "
              "Ошибки вызовов | Медиана, с | Медиана ввода, симв. | Медиана вывода, симв. |",
@@ -321,6 +422,11 @@ def markdown(result: dict[str, Any]) -> str:
         for model, usage in stats["by_role_and_model"].items():
             lines.append(f"| {name} | {model} | {usage['calls']} | {usage['errors']} | "
                          f"{usage['input_chars']} | {usage['output_chars']} |")
+    lines += ["", "| Связка | Повторы | Доля ошибок | Этапы ошибок |", "|---|---|---|---|"]
+    for name, stats in summary["bundles"].items():
+        phases = ", ".join(f"{phase}={count}" for phase, count in stats["error_phases"].items())
+        lines.append(f"| {name} | {stats['retries']} | {stats['call_error_share']} | "
+                     f"{phases or '—'} |")
     lines += ["", f"Расхождений вердикта фактов по опубликованным: "
               f"{summary['facts_verdicts_differ']}"]
     return "\n".join(lines) + "\n"
