@@ -136,7 +136,7 @@ def test_registration_and_foreign_location_links_are_not_venue_evidence() -> Non
     assert "Место:" not in item.body
 
 
-def test_current_calendar_program_with_only_list_anchor_keeps_partial_evidence() -> None:
+def test_current_calendar_program_reads_explicit_lecture_hall_from_announcement() -> None:
     html = Path("tests/fixtures/yugoslavia_current_program_20261111.html").read_text(
         encoding="utf-8",
     )
@@ -147,10 +147,23 @@ def test_current_calendar_program_with_only_list_anchor_keeps_partial_evidence()
         _source(),
     )
     assert item.title == "Разговори о Југославији: Југословенски авио-саобраћај"
-    assert "Место:" not in item.body
+    assert "Место: Биоскопска сала Музеја Југославије" in item.body
     assert "Листа програма" not in item.body
     assert any(line.startswith("Дан:") for line in item.body.splitlines())
     assert item.published_at is None
+
+
+def test_program_with_different_session_venues_has_no_single_location() -> None:
+    html = _detail().replace(
+        "<ul>",
+        "<p><b>Где?</b> Биоскопска сала Музеја Југославије.</p>"
+        "<p><b>Где?</b> Аутономни културни центар Матријаршија.</p><ul>",
+    )
+    item = parse_yugoslavia_program(html, DETAIL_URL, _source())
+
+    assert "Место:" not in item.body
+    assert "Биоскопска сала Музеја Југославије" in item.body
+    assert "Матријаршија" in item.body
 
 
 def test_captured_program_collects_partial_evidence_with_explicit_audit() -> None:
