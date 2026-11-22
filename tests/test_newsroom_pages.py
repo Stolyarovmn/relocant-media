@@ -205,13 +205,17 @@ def test_archive_export_does_not_refresh_observation_time(tmp_path: Path) -> Non
         session.commit()
     engine.dispose()
     output = tmp_path / 'public.json'
-    observed = '2026-01-01T00:00:00+00:00'
+    observed = '2026-01-01T23:30:00+00:00'
     result = subprocess.run([sys.executable, '-m', 'relocant_media.ops.newsroom_export',
         '--database', str(database), '--output', str(output), '--observed-at', observed],
         capture_output=True, text=True)
     assert result.returncode == 0
-    bg, ns = json.loads(output.read_text())['cities']
+    bg, ns = json.loads(output.read_text(encoding='utf-8'))['cities']
     assert bg['observed_at'] == observed
+    flow = bg['editorial_flow']
+    assert datetime.fromisoformat(flow['observed_at']) == datetime.fromisoformat(observed)
+    assert flow['timezone'] == 'Europe/Belgrade'
+    assert flow['days'][-1]['local_date'] == '2026-01-02'
     assert ns['observed_at'] is None and ns['runtime_status'] == 'unavailable'
 
 

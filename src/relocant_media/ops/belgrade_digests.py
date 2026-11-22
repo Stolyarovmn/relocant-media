@@ -65,6 +65,8 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 _CITY = "belgrade"
 _CHANNEL = "https://t.me/eduvbelgrad"
 _HISTORY = "digest_receipts"
+MORNING_ATTEMPT = "last_morning_digest_attempt"
+MORNING_SKIP_REASONS = frozenset({"insufficient_items", "window_closed"})
 _PERIOD = re.compile(r"Период измене: (\d{2}\.\d{2}\.\d{4})–(\d{2}\.\d{2}\.\d{4})\.")
 _MONTHS = ("января февраля марта апреля мая июня июля августа сентября октября ноября декабря"
            .split())
@@ -126,6 +128,13 @@ class Slot:
 
 
 @dataclass(frozen=True)
+class MorningDelivery:
+    slot: Slot
+    status: Literal["sent", "unconfirmed", "missed"]
+    reason: str
+
+
+@dataclass(frozen=True)
 class Entry:
     label: str
     text: str
@@ -157,29 +166,66 @@ def _policy() -> Pilot:
     ))
 
 
-def due_slot(now: datetime) -> Slot | None:
+def _local_clock(now: datetime) -> datetime:
     if now.utcoffset() is None:
         raise ValueError("digest clock requires a timezone")
+    return now.astimezone(ZoneInfo(load_city_profile(_CITY).timezone))
+
+
+def _regular_slot(
+    policy: Pilot, local: datetime, kind: Literal["morning", "evening"],
+) -> Slot | None:
+    scheduled = datetime.combine(local.date(), getattr(policy, kind), tzinfo=local.tzinfo)
+    naive = scheduled.replace(tzinfo=None)
+    if naive < policy.starts_at or (policy.ends_before is not None and naive >= policy.ends_before):
+        return None
+    expires = scheduled + timedelta(minutes=policy.delivery_window_minutes)
+    if kind == "morning" and policy.morning_catch_up_until is not None:
+        expires = max(expires, datetime.combine(
+            local.date(), policy.morning_catch_up_until, tzinfo=local.tzinfo))
+    return Slot(kind, scheduled, expires)
+
+
+def due_slot(now: datetime) -> Slot | None:
     policy = _policy()
-    zone = ZoneInfo(load_city_profile(_CITY).timezone)
-    local = now.astimezone(zone)
+    local = _local_clock(now)
     for kind in ("morning", "evening"):
-        scheduled = datetime.combine(local.date(), getattr(policy, kind), tzinfo=zone)
-        expires = scheduled + timedelta(minutes=policy.delivery_window_minutes)
-        naive = scheduled.replace(tzinfo=None)
-        if kind == "morning" and policy.morning_catch_up_until is not None:
-            expires = max(expires, datetime.combine(
-                local.date(), policy.morning_catch_up_until, tzinfo=zone))
-        if (policy.starts_at <= naive
-                and (policy.ends_before is None or naive < policy.ends_before)
-                and scheduled <= local < expires):
-            return Slot(kind, scheduled, expires)
+        slot = _regular_slot(policy, local, kind)
+        if slot is not None and slot.scheduled <= local < slot.expires:
+            return slot
     if policy.reminders_from is not None and policy.reminders_from <= local.date():
-        scheduled = datetime.combine(local.date(), policy.evening, tzinfo=zone)
+        scheduled = datetime.combine(local.date(), policy.evening, tzinfo=local.tzinfo)
         expires = scheduled + timedelta(minutes=policy.delivery_window_minutes)
         if scheduled <= local < expires:
             return Slot("reminder", scheduled, expires)
     return None
+
+
+def morning_delivery(state: dict[str, Any], now: datetime) -> MorningDelivery | None:
+    if state.get("status") not in ("ready", "busy"):
+        return None
+    local = _local_clock(now)
+    slot = _regular_slot(_policy(), local, "morning")
+    if slot is None or local < slot.expires:
+        return None
+    receipts = state.get(_HISTORY, {})
+    if not isinstance(receipts, dict):
+        return MorningDelivery(slot, "unconfirmed", "invalid_receipt")
+    if slot.key in receipts:
+        receipt = receipts[slot.key]
+        if isinstance(receipt, dict):
+            message_id = receipt.get("message_id")
+            if receipt.get("state") == "sent" and type(message_id) is int and message_id > 0:
+                return MorningDelivery(slot, "sent", "confirmed")
+            if receipt.get("state") in ("sending", "uncertain"):
+                return MorningDelivery(slot, "unconfirmed", "telegram_unconfirmed")
+        return MorningDelivery(slot, "unconfirmed", "invalid_receipt")
+    attempt = state.get(MORNING_ATTEMPT)
+    if isinstance(attempt, dict) and attempt.get("slot") == slot.key:
+        reason = attempt.get("reason")
+        if isinstance(reason, str) and reason in MORNING_SKIP_REASONS:
+            return MorningDelivery(slot, "missed", reason)
+    return MorningDelivery(slot, "missed", "no_recorded_result")
 
 
 def _clip_text(value: str, limit: int) -> str:

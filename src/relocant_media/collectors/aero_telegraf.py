@@ -60,6 +60,7 @@ class AeroTelegrafCollector:
             raise ValueError("aviation source registry differs")
         self.client = client
         self.item_failures: list[dict[str, str]] = []
+        self.empty_reason: str | None = None
 
     async def _read(self, url: str) -> str:
         data = bytearray()
@@ -78,6 +79,7 @@ class AeroTelegrafCollector:
 
     async def collect(self) -> list[RawItem]:
         self.item_failures.clear()
+        self.empty_reason = None
         soup = BeautifulSoup(await self._read(INDEX), "html.parser")
         urls: dict[str, str] = {}
         recognized = False
@@ -110,4 +112,6 @@ class AeroTelegrafCollector:
             raise ArticleBatchError(
                 "all local aviation articles failed extraction", self.item_failures,
             )
+        if not items:
+            self.empty_reason = "empty_fresh" if parsed_count else "empty_relevant"
         return items

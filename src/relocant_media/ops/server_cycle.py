@@ -95,6 +95,7 @@ from relocant_media.domain.presentation import (
     title_instruction,
     valid_title_presentation,
 )
+from relocant_media.domain.publication_time import same_legacy_publication_time
 from relocant_media.domain.story_fingerprint import find_same_story
 from relocant_media.ingestion.persistence import (
     capture_collected_batch,
@@ -439,6 +440,18 @@ def _run_sync[T](coroutine: Coroutine[Any, Any, T]) -> T:
         return pool.submit(asyncio.run, coroutine).result()
 
 
+def _live_document(original: EvidenceDocument, item: CollectedRawItem) -> EvidenceDocument:
+    live = EvidenceDocument.model_validate(item, from_attributes=True)
+    if same_legacy_publication_time(
+        original.published_at, original.published_at_precision,
+        live.published_at, live.published_at_precision,
+    ):
+        # Existing packages were signed with the old label. The full live-document
+        # comparison still verifies source, URL, title, body and timestamp.
+        return live.model_copy(update={"published_at_precision": original.published_at_precision})
+    return live
+
+
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     documents = []
@@ -459,9 +472,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             if document.source_id in venues:
                 with _note_source_unavailable(document.source_id):
                     item = _run_sync(fetch_venue(venues[document.source_id], document.url))
-                documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
-                    title=item.title, body=item.body, published_at=item.published_at,
-                    published_at_precision=item.published_at_precision))
+                documents.append(_live_document(document, item))
                 verify_live_map(package.presentation, documents[-1], item.source_html)
                 continue
             if document.source_id not in {"city_beograd_news", "cukarica_news"}:
@@ -479,9 +490,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             parser = (parse_beograd_article if document.source_id == "city_beograd_news"
                       else parse_cukarica_article)
             item = parser(response.text, source, str(response.url))
-            documents.append(EvidenceDocument(source_id=item.source_id, url=item.url,
-                title=item.title, body=item.body, published_at=item.published_at,
-                    published_at_precision=item.published_at_precision))
+            documents.append(_live_document(document, item))
             verify_live_map(package.presentation, documents[-1], response.text)
     native = package.presentation.native_map if package.presentation else None
     point = native.get("point", {}) if native else {}

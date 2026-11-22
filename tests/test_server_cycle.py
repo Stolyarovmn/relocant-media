@@ -544,7 +544,8 @@ def _live_package(*documents):
     from types import SimpleNamespace
 
     return SimpleNamespace(presentation=None, event=SimpleNamespace(documents=[
-        SimpleNamespace(source_id=source_id, url=url) for source_id, url in documents
+        EvidenceDocument(source_id=source_id, url=url, title="Title", body="Body")
+        for source_id, url in documents
     ]))
 
 
@@ -577,6 +578,28 @@ def test_live_check_covers_media_and_guide_sources_but_still_refuses_unknown_one
         ("media_rts", "Naslov", None), ("guide_nsz_foreigner_employment", "Guide", None)]
     with pytest.raises(ValueError, match="unsupported live source"):
         server_cycle.fetch_documents(_live_package(("telegram_unknown", "https://t.me/x/1")))
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_live_media_keeps_legacy_label_only_for_the_same_timestamp(monkeypatch, changed):
+    from dataclasses import replace
+
+    published = datetime(2026, 10, 15, 8, tzinfo=UTC)
+    source_id, url = "media_danas", "https://www.danas.rs/vesti/drustvo/vest/"
+    item = CollectedItem(source_id, url, url, "Title", "Body", published,
+                         published_at_precision="instant")
+    package = _live_package((source_id, url))
+    package.event.documents[0].published_at = published
+    if changed:
+        item = replace(item, published_at=published + timedelta(minutes=1))
+
+    async def fetch(_source, _url, _client):
+        return item
+
+    monkeypatch.setattr(server_cycle, "fetch_public_article", fetch)
+    live, = server_cycle.fetch_documents(package)
+    assert live.published_at == item.published_at
+    assert live.published_at_precision == ("instant" if changed else "unknown")
 
 
 @pytest.mark.asyncio

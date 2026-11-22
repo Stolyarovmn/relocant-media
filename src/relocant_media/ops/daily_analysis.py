@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from relocant_media.ops.newsroom_export import snapshot as public_catalog
 from relocant_media.ops.newsroom_merge import merge
+from relocant_media.services.editorial_flow import public_editorial_flow
 
 ZONE = ZoneInfo("Europe/Moscow")
 STATES = (
@@ -60,6 +61,9 @@ def build_status(
             reason = item.get("reason_code")
             if isinstance(reason, str) and re.fullmatch(r"[a-z][a-z0-9_:-]{0,159}", reason):
                 reasons[reason] += 1
+    sources = {row["id"] for row in recorded.get("sources", [])
+               if isinstance(row, dict) and isinstance(row.get("id"), str)}
+    flow = public_editorial_flow(recorded.get("editorial_flow"), sources) if available else None
     actions = []
     if not available:
         actions.append("Восстановить наблюдение канонической очереди; "
@@ -98,6 +102,7 @@ def build_status(
                         {"reason_code": key, "occurrences": value}
                         for key, value in reasons.most_common(5) if value > 1],
                     "trend_confirmed": False},
+        "editorial_flow": flow,
         "next_actions": actions[:5],
         "limitations": [
             "Количество sent относится к снимку очереди, а не к публикациям за сутки.",
@@ -126,6 +131,37 @@ def markdown(report: dict[str, Any]) -> str:
     lines.extend(["Причины, повторяющиеся в показанной выборке:", ""])
     lines.extend([f"- {row['reason_code']}: {row['occurrences']}" for row in repeated]
                  or ["Недостаточно наблюдений; временной тренд не установлен."])
+    flow = report.get("editorial_flow")
+    lines.extend(["", "## Очередь и скорость выпуска", ""])
+    if flow is None:
+        lines.append("Для этого снимка агрегаты редакции недоступны.")
+    else:
+        zone = ZoneInfo(flow["timezone"])
+        measured_at = datetime.fromisoformat(flow["observed_at"]).astimezone(zone)
+        lines.append(f"Срез на {measured_at:%d.%m.%Y %H:%M} ({flow['timezone']}).")
+        lines.extend(["", "| День | Истекло до полного разбора | Источники и причины |",
+                      "| --- | ---: | --- |"])
+        for day in flow["days"]:
+            expired = day["expired_unreviewed"]
+            breakdown = ", ".join(
+                f"{row['source_id']} — {row['count']} ({row['reason']})" for row in expired
+            ) or "—"
+            date_label = day["local_date"]
+            if date_label == measured_at.date().isoformat():
+                date_label += " (неполный)"
+            lines.append(f"| {date_label} | {sum(row['count'] for row in expired)} | {breakdown} |")
+        lines.extend(["", "| День | Рубрика | Медиана, мин | С точным временем | Без времени |",
+                      "| --- | --- | ---: | ---: | ---: |"])
+        for day in flow["days"]:
+            for latency in day["delivery_latency"]:
+                minutes = latency["median_minutes"]
+                label = "—" if minutes is None else str(minutes)
+                lines.append(
+                    f"| {day['local_date']} | {latency['category']} | {label} | "
+                    f"{latency['samples']} | {latency['missing_timestamp']} |"
+                )
+        if not any(day["delivery_latency"] for day in flow["days"]):
+            lines.append("| — | — | — | — | — |")
     lines.extend(["", "Следующие действия:", ""])
     lines.extend(f"{index}. {action}" for index, action in enumerate(report["next_actions"], 1))
     lines.extend(["", "Ограничения:", ""])

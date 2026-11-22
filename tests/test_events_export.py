@@ -160,6 +160,8 @@ def test_feed_only_exposes_allowlisted_published_fields_and_keeps_archive_id(ses
     assert len(first.events) == 1
     event = first.events[0]
     assert event.post_url == "https://t.me/eduvbelgrad/100"
+    assert event.published_at == post.published_at
+    assert event.published_at != event.starts_at
     assert event.ends_at is None and not event.archived
     later = export_events(session, observed_at=NOW + timedelta(days=20))
     assert later.events[0].archived and later.events[0].id == event.id
@@ -237,6 +239,7 @@ def test_reviewed_event_matches_a_sent_post_even_when_the_article_is_media(sessi
     event, = feed.events
     assert event.id == map_event_id(record["source_url"])
     assert event.post_url == "https://t.me/eduvbelgrad/121"
+    assert event.published_at == post.published_at
     assert event.visitor_hours == "Ежедневно 12:00–20:00"
     assert not event.archived and export_events(session, observed_at=checked + timedelta(
         days=20,

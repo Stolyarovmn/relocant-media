@@ -83,6 +83,7 @@ def test_detail_uses_explicit_publication_metadata_and_full_body() -> None:
 
     assert item.published_at is not None
     assert item.published_at.isoformat() == "2026-10-14T09:30:00+02:00"
+    assert item.published_at_precision == "instant"
     assert "Datum događaja: 04. novembar 2026." in item.body
     assert "starosno ograničenje 18+" in item.body
     assert "Ovaj tekst ne sme" not in item.body

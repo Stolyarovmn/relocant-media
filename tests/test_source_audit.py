@@ -140,6 +140,8 @@ def test_aviation_health_distinguishes_broken_and_old_articles(monkeypatch, scen
     assert row["status"] == status
     if scenario == "article_changed":
         assert row["item_failures"][0]["url"] == article
+    if scenario == "old_article":
+        assert row["empty_reason"] == "empty_fresh"
 
 
 @pytest.mark.parametrize(("scenario", "status"), [
@@ -178,3 +180,56 @@ def test_water_source_keeps_valid_notices_and_reports_errors(monkeypatch, scenar
         assert [(failure["url"], failure["error_type"]) for failure in row["item_failures"]] == [
             (broken["link"], "ValueError"),
         ]
+    else:
+        assert row["empty_reason"] == "empty_index"
+
+
+@pytest.mark.parametrize(("row_html", "status"), [
+    ("", "empty"),
+    ("<tr><td>Земун</td><td>08:30 - 14:30</td><td>Улица 5</td></tr>", "empty"),
+    ("<tr><td>Земун</td><td>08:30 - 14:30</td><td></td></tr>", "error"),
+    ("<tr><td>Земун</td><td>08:30 - 14:30</td><td>Улица 5</td></tr>"
+     "<tr><td>Врачар</td><td>?</td><td>Улица 3</td></tr>", "partial"),
+])
+def test_eds_health_distinguishes_empty_table_from_dropped_rows(monkeypatch, row_html, status):
+    def handler(request):
+        html = (
+            "Планирана искључења за датум: 2026-11-24"
+            "<table><tr><td>Navigation</td></tr></table>"
+            "<table><tr><th>Општина</th><th>Време</th><th>Улице</th></tr>"
+            f"{row_html}</table>"
+        )
+        return httpx.Response(200, text=html, request=request)
+
+    row = _audit_with_response(monkeypatch, "eds_belgrade_outages_today", handler)
+    assert row["status"] == status
+    if status == "empty":
+        assert row["empty_reason"] == ("publication_date_unknown" if row_html else "empty_index")
+        assert row["item_failures"] == []
+    else:
+        assert len(row["item_failures"]) == 1
+        assert row["item_failures"][0]["url"] == row["url"]
+        assert row["item_failures"][0]["error_message"].startswith("invalid EDS schedule row ")
+    if status == "partial":
+        assert row["fetched_items"] == 1
+
+
+@pytest.mark.parametrize(("second_body", "status"), [
+    ("", "error"),
+    ("Због планираних радова на водоводу потрошачи ће остати без воде.", "partial"),
+])
+def test_bvk_planned_works_health_reports_missing_notice_body(monkeypatch, second_body, status):
+    def handler(request):
+        html = (
+            "<h1>Планирани радови</h1>"
+            "<h2>24.11.2026. Планирани радови у Вождовцу</h2>"
+            "<h2>24.11.2026. Планирани радови на Врачару</h2>"
+            f"<p>{second_body}</p><h3>Инфо</h3>"
+        )
+        return httpx.Response(200, text=html, request=request)
+
+    row = _audit_with_response(monkeypatch, "bvk_planned_works", handler)
+    assert row["status"] == status
+    assert len(row["item_failures"]) == (1 if second_body else 2)
+    if status == "partial":
+        assert row["fetched_items"] == 1
