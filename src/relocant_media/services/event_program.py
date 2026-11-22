@@ -3,7 +3,7 @@
 import json
 import re
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from relocant_media.ai.models import EvidenceDocument
@@ -25,6 +25,14 @@ _DATE = re.compile(
 _CLOCK = re.compile(r"\bод (\d{1,2})(?:[.:](\d{2}))? час(?:ова|а)?\b", re.I)
 
 
+def registered_event_venues(profile: CityEditorialProfile) -> list[dict[str, Any]]:
+    path = DEFAULT_CITIES_ROOT / profile.city_id / "event-venues.json"
+    registry = json.loads(path.read_text(encoding="utf-8"))
+    if registry["version"] != 1 or not isinstance(registry["venues"], list):
+        raise ValueError("invalid event venue registry")
+    return cast(list[dict[str, Any]], registry["venues"])
+
+
 def festival_program(
     document: EvidenceDocument, *, profile: CityEditorialProfile,
 ) -> dict[str, Any] | None:
@@ -38,11 +46,7 @@ def festival_program(
             or re.search(r"отказан|одложен|премештен", text)):
         return None
     try:
-        registered = json.loads((DEFAULT_CITIES_ROOT / profile.city_id / "event-venues.json")
-                                .read_text(encoding="utf-8"))
-        if registered["version"] != 1:
-            return None
-        venues = registered["venues"]
+        venues = registered_event_venues(profile)
         published = document.published_at.astimezone(ZoneInfo(profile.timezone))
         month = MONTHS.index(period[3]) + 1
         first = datetime(published.year, month, int(period[1]))

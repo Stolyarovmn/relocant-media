@@ -13,13 +13,16 @@ from pypdf.generic import (
     NumberObject,
 )
 
+from relocant_media.ai.models import EvidenceDocument
 from relocant_media.collectors.kolarac_program import (
     MAX_PROGRAM_BYTES,
     linked_program,
     parse_linked_program,
 )
 from relocant_media.collectors.venue_feed import VenueFeedCollector
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.freshness import freshness_decision
+from relocant_media.services.event_place import resolve_event_place
 from relocant_media.sources.registry import load_source_registry
 
 ARTICLE = "https://www.kolarac.rs/predavanja/23-11-2026-u-18/"
@@ -97,6 +100,27 @@ def test_pdf_requires_unambiguous_matching_start_and_hall(contents):
 ])
 def test_unrelated_or_ambiguous_page_does_not_supply_pdf(modify):
     assert linked_program(modify(PAGE), ARTICLE) is None
+
+
+def test_saved_program_needs_exact_link_text_time_and_hall_for_map():
+    title, body = parse_linked_program(_pdf(TITLE, f"23. novembra u 18, u {HALL}."), PROGRAM, START)
+    document = EvidenceDocument(source_id="venue_kolarac", url=ARTICLE, title=title, body=body)
+    profile = load_city_profile("belgrade")
+    place = resolve_event_place(document, PAGE, profile=profile)
+    assert place is not None
+    assert place["starts_at"] == "2026-11-23T18:00:00+01:00" and place["ends_at"] is None
+    assert place["schedule_source_url"] == PROGRAM
+    assert place["venue"]["name"] == "Kolarac · Velika dvorana"
+    assert place["venue"]["address"] == "Studentski trg 5, Beograd"
+    another_program = PAGE.replace(PATH, "/wp-content/uploads/2026/11/other.pdf")
+    assert resolve_event_place(document, another_program, profile=profile) is None
+    assert resolve_event_place(document, PAGE.replace("у 18", "у 19"), profile=profile) is None
+    assert resolve_event_place(document, PAGE.replace("</div>", "Предавање је одложено.</div>"),
+                               profile=profile) is None
+    for tampered in (body.replace(HALL, "Nepoznata sala"), body.replace("18:00", "19:00"),
+                     body.replace("u " + HALL, "Predavanje je otkazano, u " + HALL)):
+        changed = document.model_copy(update={"body": tampered})
+        assert resolve_event_place(changed, PAGE, profile=profile) is None
 
 
 @pytest.mark.asyncio
