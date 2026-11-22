@@ -222,7 +222,7 @@ export function readPlaces(document) {
       scheduleNote: textValue(item.schedule_note), venueNote: textValue(item.venue_note), lat, lon,
       courses: paidPlace ? [] : readPlaceCourses(item.courses),
       paidPlace, sponsored: paidPlace || item.sponsored === true,
-      archived: item.archived === true, start, end, expires }];
+      archived: item.archived === true, published: parseTime(item.published_at), start, end, expires }];
   });
 }
 

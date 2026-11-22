@@ -1,7 +1,7 @@
 import {
   agendaDays, belgradeDate, clusterMapPoints, incidentTimes, launchPlaces, placeCategory, placeCountdown,
   placeKinds, placeOnDay, placeOptionLabel, placeStatus, readPlaces, shareLink, straightLineDistance, updateStamp,
-} from "./core.js?v=16";
+} from "./core.js?v=17";
 import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
 import { agendaFavorites } from "./favorites.js?v=1";
 import { snapshotNotice } from "./snapshots.js?v=1";
@@ -15,6 +15,30 @@ const courseStyles = [
   { color: "#155a9a", weight: 4, dashArray: "3 6" },
   { color: "#9c3c02", weight: 4, dashArray: "12 5 3 5" },
 ];
+
+export function agendaVisit(getStorage = () => localStorage) {
+  const key = "relocant-agenda-viewed-at";
+  let previous = NaN;
+  let shownAt = NaN;
+  try {
+    previous = Date.parse(getStorage().getItem(key));
+  } catch { /* The agenda also works without device storage. */ }
+  return {
+    observe(generatedAt) {
+      const stamp = Date.parse(generatedAt);
+      if (!Number.isFinite(stamp) || stamp === shownAt) return;
+      shownAt = stamp;
+      try {
+        const storage = getStorage();
+        const saved = Date.parse(storage.getItem(key));
+        if (!Number.isFinite(saved) || stamp > saved) storage.setItem(key, generatedAt);
+      } catch { /* Keep the current visit in memory. */ }
+    },
+    hasNew(publishedAt) {
+      return Number.isFinite(publishedAt) && publishedAt > previous && publishedAt <= shownAt;
+    },
+  };
+}
 
 function distanceLabel(origin, place) {
   const meters = straightLineDistance(origin, place);
@@ -87,7 +111,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     entries: [], selected: "", pending: "", group: "", enabled: false, loading: false,
     loaded: false, failed: false, stamp: "", origin: null, day: "",
     favorites: new Set(), favoritesOnly: false, favoritesLoaded: false, favoritesLoading: false,
-    saving: false,
+    saving: false, visit: null, snapshotDate: null,
   };
   let clock;
   let retry;
@@ -167,6 +191,9 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     const when = make("span", "place-when", placeTimes(place));
     const venue = make("span", "place-venue", place.venue);
     const parts = place.paidPlace ? [venue] : [countdown, when, venue];
+    if (!place.paidPlace && placeStatus(place, now) !== "closed" && state.visit?.hasNew(place.published)) {
+      parts.unshift(make("span", "place-new", "Новое"));
+    }
     if (place.visitorHours) parts.push(make("span", "place-when", place.visitorHours));
     if (place.scheduleNote) parts.push(make("span", "place-when", place.scheduleNote));
     if (place.sponsored) parts.unshift(make("span", "place-ad", "★ Реклама"));
@@ -465,6 +492,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     try {
       const { entries, generatedAt, cached } = await loadSnapshot("./events.json", readPlaces);
       state.entries = entries;
+      state.snapshotDate = generatedAt;
       state.stamp = updateStamp(generatedAt);
       state.loaded = true;
       state.failed = cached;
@@ -482,6 +510,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   }
 
   function show() {
+    state.visit?.observe(state.snapshotDate);
     const selected = state.pending && state.entries.find((place) => place.id === state.pending);
     const group = launchPlaces(state.entries, state.pending);
     if (selected) {
@@ -555,6 +584,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   return {
     enter(id = "") {
       state.enabled = true;
+      state.visit ||= agendaVisit();
       state.group = "";
       state.selected = "";
       if (id) {

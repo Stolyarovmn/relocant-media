@@ -494,6 +494,17 @@ h1 {
 }
 .place-favorite { grid-column: 1 / -1; justify-self: start; }
 .place-saved { grid-column: 1 / -1; color: var(--places); font-size: .8rem; font-weight: 750; }
+.place-new {
+  grid-column: 1 / -1;
+  justify-self: start;
+  padding: 1px 7px;
+  border: 1px solid var(--stroke);
+  border-radius: 5px;
+  background: var(--city-tint);
+  color: var(--city);
+  font-size: .78rem;
+  font-weight: 750;
+}
 .places-list { display: grid; gap: 5px; padding: 3px; }
 .place-card, .place-detail {
   display: grid;
