@@ -16,6 +16,8 @@ _WINDOW = timedelta(hours=72)
 _AIRLINE = re.compile(r"\b(?:air\s+serbia|er\s+srbija|[эе]р\s+серби[яи])\b", re.I)
 _ROUTE = re.compile(
     r"\b(?:между|из)\s+([А-ЯЁ][а-яё-]{3,})\s+(?:и|в)\s+([А-ЯЁ][а-яё-]{3,})\b")
+_DIRECTION = re.compile(r"\bиз\s+([А-ЯЁ][а-яё-]{3,})\s+в\s+([А-ЯЁ][а-яё-]{3,})\b")
+_BOTH_DIRECTIONS = re.compile(r"\b(?:в обоих направлениях|вс[её] (?:авиа)?рейсы между)\b", re.I)
 _WEEKDAYS = ("понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресень")
 # Отбор сводки строже удержания: разные перевозчики не становятся одной карточкой.
 _DIGEST_CARRIERS = {
@@ -29,7 +31,7 @@ _DIGEST_CARRIERS = {
 
 def _city(value: str) -> str:
     # Только падежи односоставных русских названий, без свободной геокодировки.
-    return re.sub(r"(?:ом|ем|а|е|у|ь)$", "", value.casefold())
+    return re.sub(r"(?:ом|ем|а|я|е|у|ю|ь)$", "", value.casefold())
 
 
 def _notice(title: str, body: str, reference: datetime) -> tuple[object, ...] | None:
@@ -66,11 +68,11 @@ def _notice(title: str, body: str, reference: datetime) -> tuple[object, ...] | 
 
 def flight_cancellation_key(
     title: str, body: str, *, published_at: datetime | None,
-) -> tuple[object, ...] | None:
-    """Ключ одного события для сводки, с днём недели от времени самого поста.
+) -> tuple[tuple[object, ...], frozenset[tuple[str, str]]] | None:
+    """Авиасюжет и направления, которые прямо охватывает опубликованный текст.
 
-    Отсутствующие/неоднозначные признаки не объединяются. Это не меняет отдельные
-    посты, их исходники, оценки новизны, опубликованные квитанции или правила отправки.
+    День недели относится ко времени поста. Одно упоминание пары городов
+    без явно указанного охвата оставляет множество направлений пустым.
     """
     if published_at is None:
         return None
@@ -80,7 +82,14 @@ def flight_cancellation_key(
     if len(carriers) != 1:
         return None
     notice = _notice(title, body, published_at)
-    return (carriers.pop(), notice) if notice is not None else None
+    if notice is None:
+        return None
+    text = title + "\n" + body
+    directions = {(_city(a), _city(b)) for a, b in _DIRECTION.findall(text)}
+    if _BOTH_DIRECTIONS.search(text):
+        for a, b in _ROUTE.findall(text):
+            directions.update(((_city(a), _city(b)), (_city(b), _city(a))))
+    return (carriers.pop(), notice), frozenset(directions)
 
 def find_related_flight_cancellation(
     title: str, body: str,
