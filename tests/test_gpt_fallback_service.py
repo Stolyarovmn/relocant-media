@@ -205,13 +205,15 @@ def test_unattempted_expired_event_fallback_reissues_only_a_fresh_request(fallba
     assert early_presentation.get("event_place") is None
     blocked = lifecycle_state(session, raw_id, now=later)
     assert blocked["reason"] == "fallback_deadline_exceeded" and blocked["fallback_attempts"] == 0
-    assert sweep_materials(session, city="belgrade", now=later, raw_ids={raw_id}).fallback_ids == ()
+    assert sweep_materials(session, city="belgrade", now=later, raw_ids={raw_id},
+                           reissue_event_fallback=True).fallback_ids == ()
 
     capture_collected_batch(session, [replace(item, source_html=PAGE)])
     assert gpt_fallback.build_request(session, now=later, scheduler_run_id=cycle.id) is None
-    assert sweep_materials(session, city="belgrade", now=later, raw_ids={raw_id}).fallback_ids == (
-        raw_id,
-    )
+    assert sweep_materials(session, city="belgrade", now=later, raw_ids={raw_id}).fallback_ids == ()
+    sweep = sweep_materials(session, city="belgrade", now=later, raw_ids={raw_id},
+                            reissue_event_fallback=True)
+    assert sweep.fallback_ids == (raw_id,)
     reissued = lifecycle_state(session, raw_id, now=later)
     assert reissued["deadline_at"] == blocked["deadline_at"]
     assert reissued["previous_fallback_deadline_at"] == blocked["fallback_deadline_at"]
@@ -226,7 +228,8 @@ def test_unattempted_expired_event_fallback_reissues_only_a_fresh_request(fallba
 
     again = later + timedelta(minutes=31)
     assert lifecycle_state(session, raw_id, now=again)["reason"] == "fallback_deadline_exceeded"
-    assert sweep_materials(session, city="belgrade", now=again, raw_ids={raw_id}).fallback_ids == ()
+    assert sweep_materials(session, city="belgrade", now=again, raw_ids={raw_id},
+                           reissue_event_fallback=True).fallback_ids == ()
 
 
 def _refresh_exchange(request: dict, raw_id: int, urls: list[str]):

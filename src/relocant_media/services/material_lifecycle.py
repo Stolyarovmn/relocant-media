@@ -1096,7 +1096,8 @@ def inherit_lifecycle(session: Session, original_id: int, replacement_id: int, *
 
 
 def sweep_materials(session: Session, *, city: str, now: datetime,
-                    raw_ids: set[int] | None = None) -> LifecycleSweep:
+                    raw_ids: set[int] | None = None,
+                    reissue_event_fallback: bool = False) -> LifecycleSweep:
     now = _now(now)
     query = (select(RawItem, Source, EditorialRun, Post).join(Source)
              .outerjoin(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
@@ -1112,7 +1113,8 @@ def sweep_materials(session: Session, *, city: str, now: datetime,
             continue
         if record.details.get("reason") == "separate_publication_approval_required":
             _restore_unqueued_utility(session, record, now=now)
-        elif record.details.get("reason") == "fallback_deadline_exceeded":
+        elif (reissue_event_fallback
+                and record.details.get("reason") == "fallback_deadline_exceeded"):
             _reissue_unattempted_event_fallback(session, record, now=now)
     session.flush()
     closed_ids = {row.details["raw_item_id"] for row in records.values()
