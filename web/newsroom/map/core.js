@@ -356,27 +356,54 @@ export function unexpired(window, now, archive = false) {
   return archive || !window || now < window.end;
 }
 
+export function incidentInPeriod(incident, now, hours = null) {
+  if (hours === null) return incident;
+  if (incident.archived) return null;
+  const until = now + hours * 3_600_000;
+  const overlaps = ({ start, end }) => Number.isFinite(start) && start <= until
+    && (end === null ? start > now : end > now);
+  const windows = incident.windows.filter(overlaps);
+  if (incident.windows.length ? !windows.length : !overlaps(incident)) return null;
+  const matches = (window) => !window || overlaps(window);
+  const inPeriod = (entries) => entries.filter(({ window }) => matches(window));
+  return {
+    ...incident,
+    windows,
+    points: incident.points.filter(({ address }) => matches(address?.window)),
+    lines: inPeriod(incident.lines),
+    areas: incident.areas.filter(({ window, address }) => matches(window || address?.window)),
+    addresses: inPeriod(incident.addresses),
+    ranges: inPeriod(incident.ranges),
+    waterDistricts: inPeriod(incident.waterDistricts),
+    settlements: inPeriod(incident.settlements),
+  };
+}
+
 export function visibleMapLines(incident, now, archive = false) {
   const fallback = incident.end === null ? null : incident;
   return incident.lines.filter(({ window }) => unexpired(window || fallback, now, archive));
 }
 
-export function nextTransition(incidents, now) {
+export function nextTransition(incidents, now, hours = 0) {
   let closest = Infinity;
   const consider = (value) => {
     if (value !== null && value > now && value < closest) closest = value;
   };
+  const considerStart = (value) => {
+    consider(value);
+    if (hours && value !== null) consider(value - hours * 3_600_000);
+  };
   for (const incident of incidents) {
     if (incident.archived) continue;
-    consider(incident.start);
+    considerStart(incident.start);
     consider(incident.end);
     for (const window of incident.windows) {
-      consider(window.start);
+      considerStart(window.start);
       consider(window.end);
     }
     for (const { window } of incident.lines) {
       if (!window) continue;
-      consider(window.start);
+      considerStart(window.start);
       consider(window.end);
     }
   }

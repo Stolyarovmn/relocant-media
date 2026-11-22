@@ -1,10 +1,10 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
+  incidentInPeriod, incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=15";
+} from "./core.js?v=16";
 import { calendarLink } from "./calendar.js?v=5";
-import { setupPlaces } from "./places.js?v=14";
+import { setupPlaces } from "./places.js?v=15";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -13,6 +13,7 @@ const eventList = byId("event-list");
 const feedback = byId("feedback");
 const mapFrame = byId("map").parentElement;
 const layerButtons = [...byId("layer-filter").querySelectorAll("button")];
+const periodButtons = [...byId("incident-periods").querySelectorAll("button")];
 const announcementBody = byId("announcement-body");
 const announcementToggle = byId("toggle-announcements");
 const selectedPreview = byId("selected-preview");
@@ -26,6 +27,7 @@ const animate = !matchMedia("(prefers-reduced-motion: reduce)").matches;
 const enabled = new Set(Object.keys(kinds));
 const state = {
   incidents: [],
+  period: null,
   selected: "",
   previewArchive: "",
   refocusEvent: "",
@@ -185,7 +187,8 @@ function showMapNote() {
 function visibleIncidents(now) {
   return state.incidents.filter((incident) => enabled.has(incident.kind)
     && (!state.digestIds.length || state.digestIds.includes(incident.id))
-    && (showsArchived(incident) || incidentStatus(incident, now) !== "closed"));
+    && (showsArchived(incident) || incidentStatus(incident, now) !== "closed"))
+    .map((incident) => incidentInPeriod(incident, now, state.period)).filter(Boolean);
 }
 
 function showsArchived(incident) {
@@ -339,7 +342,8 @@ function renderList(now) {
     ? state.loaded ? "Обновление недоступно. Показана сохранённая версия." : "Список объявлений не загрузился."
     : state.deepPending && state.loaded ? "Объявление из ссылки пока отсутствует в выгрузке."
       : !state.loaded ? "Загружаем данные."
-        : !items.length ? "В выбранных слоях пока нет объявлений." : "";
+        : !items.length ? state.period === null ? "В выбранных слоях пока нет объявлений."
+          : "На выбранный период объявлений нет." : "";
   feedback.textContent = message;
   feedback.hidden = !message;
 }
@@ -529,11 +533,13 @@ function renderAddress() {
   if (!value) return;
   byId("picked-label").textContent = addressLabel(value);
   const now = Date.now();
-  const matches = state.incidents.filter((event) => incidentStatus(event, now) !== "closed"
-    && addressHits(event, value).some((address) => unexpired(address.window, now)));
+  const matches = state.incidents.filter((event) => incidentStatus(event, now) !== "closed")
+    .map((incident) => incidentInPeriod(incident, now, state.period))
+    .filter((event) => event && addressHits(event, value).some((address) => unexpired(address.window, now)));
+  const scope = state.period === null ? "актуальных объявлениях" : "выбранном периоде";
   byId("picked-match").textContent = matches.length
-    ? `Точных совпадений в актуальных объявлениях: ${matches.length}`
-    : "В актуальных объявлениях точного совпадения пока нет.";
+    ? `Точных совпадений в ${scope}: ${matches.length}`
+    : `Точных совпадений в ${scope} пока нет.`;
   if (!state.map) return;
   globalThis.L.circleMarker([value.lat, value.lon], {
     radius: 10, color: "#19362d", weight: 3, fillColor: "#f4eea8", fillOpacity: 1,
@@ -549,11 +555,13 @@ function render() {
   renderPoints(now);
 }
 
-function focusIncident(incident) {
+function focusIncident(item) {
   if (!state.map) return false;
+  const now = Date.now();
+  const incident = incidentInPeriod(item, now, state.period);
+  if (!incident) return false;
   state.map.closePopup();
   state.map.invalidateSize({ pan: false });
-  const now = Date.now();
   const includeExpired = showsArchived(incident);
   const locations = exactMapPoints(state.index, incident, now, includeExpired)
     .map(({ lat, lon }) => [lat, lon]);
@@ -646,13 +654,15 @@ let refreshTimer;
 let clockTimer;
 let deepAttempts = 0;
 function updateCountdowns(now) {
+  const incidents = new Map(visibleIncidents(now).map((incident) => [incident.id, incident]));
   for (const card of eventList.children) {
-    const incident = state.incidents.find((entry) => entry.id === card.dataset.id);
+    const incident = incidents.get(card.dataset.id);
+    if (!incident) continue;
     const countdown = card.querySelector(".event-countdown");
     countdown.textContent = incidentCountdown(incident, now);
     countdown.hidden = !countdown.textContent;
   }
-  const selected = state.incidents.find((entry) => entry.id === state.selected);
+  const selected = incidents.get(state.selected);
   byId("selected-countdown").textContent = selected ? incidentCountdown(selected, now) : "";
 }
 
@@ -660,7 +670,7 @@ function scheduleClock() {
   clearTimeout(clockTimer);
   if (state.mode !== "incidents" || document.hidden) return;
   const now = Date.now();
-  const boundary = nextTransition(state.incidents, now);
+  const boundary = nextTransition(state.incidents, now, state.period ?? 0);
   const nextMinute = 60_000 - now % 60_000;
   clockTimer = setTimeout(() => {
     const current = Date.now();
@@ -853,6 +863,29 @@ for (const button of layerButtons) {
     }
     button.setAttribute("aria-pressed", String(enabled.has(kind)));
     render();
+  });
+}
+for (const button of periodButtons) {
+  button.addEventListener("click", () => {
+    const period = button.dataset.hours === "" ? null : Number(button.dataset.hours);
+    if (period === state.period) return;
+    state.period = period;
+    for (const option of periodButtons) {
+      option.setAttribute("aria-pressed", String(option === button));
+    }
+    const selected = visibleIncidents(Date.now()).find((incident) => incident.id === state.selected);
+    if (!selected) {
+      state.selected = "";
+      state.previewArchive = "";
+      state.refocusEvent = "";
+      state.keepSelectedInView = false;
+      state.focusNote = "";
+      showMapNote();
+    }
+    state.map?.closePopup();
+    render();
+    if (selected && !state.address) focusIncident(selected);
+    scheduleClock();
   });
 }
 document.addEventListener("visibilitychange", () => {
