@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.base import ArticleBatchError, RawItem, article_failure
 from relocant_media.collectors.page_snapshot import normalize_visible_text
 from relocant_media.domain.dedup import normalize_text
 from relocant_media.sources.registry import SourceConfig
@@ -142,6 +142,7 @@ def parse_beoelektrane_network_works(
     source: SourceConfig,
     *,
     page_url: str | None = None,
+    item_failures: list[dict[str, str]] | None = None,
 ) -> list[RawItem]:
     """Split the current official page into one stable item per municipality/district."""
     if len(html.encode("utf-8")) > MAX_BYTES:
@@ -187,14 +188,18 @@ def parse_beoelektrane_network_works(
     public_url = page_url or str(source.url)
     items: list[RawItem] = []
     seen_areas: set[str] = set()
-    for area, body_lines in records:
+    failures: list[dict[str, str]] = []
+    for index, (area, body_lines) in enumerate(records, 1):
         area_key = normalize_text(area)
         if area_key in seen_areas:
             raise ValueError("duplicate Beogradske elektrane district heading")
         seen_areas.add(area_key)
         body = "\n".join(body_lines).strip()
         if len(body) < 20:
-            raise ValueError("Beogradske elektrane district lacks usable works details")
+            failures.append(article_failure(
+                public_url, ValueError(f"heating district {index} has no usable works details"),
+            ))
+            continue
         external_id = _notice_id(published_at, area)
         title = f"Radovi na toplovodnoj mreži – {area}"
         items.append(
@@ -208,6 +213,10 @@ def parse_beoelektrane_network_works(
                 canonical_url=_internal_canonical_url(public_url, external_id),
             )
         )
+    if not items:
+        raise ArticleBatchError("all heating districts failed extraction", failures)
+    if item_failures is not None:
+        item_failures.extend(failures)
     return items
 
 
@@ -238,6 +247,7 @@ class BeoelektraneNetworkWorksCollector:
             raise ValueError(source.extraction.strategy)
         self._source = source
         self._client = client
+        self.item_failures: list[dict[str, str]] = []
         _allowed_url(str(source.url), source)
 
     async def _get(self, value: str) -> httpx.Response:
@@ -260,9 +270,11 @@ class BeoelektraneNetworkWorksCollector:
         raise ValueError("Beogradske elektrane redirect limit")
 
     async def collect(self) -> list[RawItem]:
+        self.item_failures.clear()
         response = await self._get(str(self._source.url))
         return parse_beoelektrane_network_works(
             response.text,
             self._source,
             page_url=str(response.url),
+            item_failures=self.item_failures,
         )

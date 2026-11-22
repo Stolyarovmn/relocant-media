@@ -142,6 +142,30 @@ def test_weather_sources_are_visible_in_audit_without_changing_news_counts(monke
     assert "MeteoAlarm: `invalid_payload`" in summary
 
 
+def test_discovery_audit_marks_unreadable_feed_without_counting_it_as_news(monkeypatch):
+    client = httpx.AsyncClient
+
+    def respond(request):
+        if request.url.host == "www.rts.rs":
+            return httpx.Response(200, text="<html>Maintenance</html>")
+        assert "wp-json/wp/v2/posts" in request.url.path
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(source_audit.httpx, "AsyncClient", lambda **kwargs: client(
+        transport=httpx.MockTransport(respond), **kwargs,
+    ))
+    report = asyncio.run(source_audit.audit_sources(
+        Path("cities/belgrade/sources"), online=True, source_ids=("bvk_outage_news",),
+        check_news_discovery=True,
+    ))
+    assert report["active_count"] == 1 and report["error_count"] == 0
+    assert report["news_discovery_feeds"] == [{
+        "source_id": "rts_news", "url": "https://www.rts.rs/vesti/rss.html",
+        "item_failures": [], "status": "error", "error_type": "ValueError",
+    }]
+    assert "| rts_news | error | - | 0 |" in render_source_health_markdown(report)
+
+
 @pytest.mark.parametrize(("scenario", "status"), [
     ("index_changed", "error"), ("article_changed", "error"), ("old_article", "empty"),
 ])

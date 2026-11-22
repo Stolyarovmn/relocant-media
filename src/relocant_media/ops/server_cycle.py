@@ -59,6 +59,7 @@ from relocant_media.collectors.cukarica_news import (
 )
 from relocant_media.collectors.factory import build_collector
 from relocant_media.collectors.news_discovery import (
+    NEWS_DISCOVERY_REGISTRY,
     collect_news_feed,
     load_verified_news_feeds,
 )
@@ -184,7 +185,6 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, S
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 SOURCES = Path("cities/belgrade/sources")
-NEWS_DISCOVERY = Path("docs/serbian-news-discovery.json")
 _SERVER_VENUE_STRATEGIES = frozenset({
     "venue_feed",
     "musicology_blog",
@@ -568,7 +568,7 @@ async def collect_sources(
     media = media_sources()
     guides = {} if submissions_only else guide_sources()
     discovery_venues = discovery_venue_sources()
-    news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY)
+    news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY_REGISTRY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
                for key in ("city_beograd_news", "cukarica_news", BVK_NEWS_SOURCE)}
     sources.update(runtime_venues)
@@ -600,6 +600,7 @@ async def collect_sources(
     channel_errors: list[dict[str, str]] = []
     channel_coverage: list[dict[str, Any]] = []
     news_errors: list[dict[str, str]] = []
+    news_feed_observations: list[dict[str, Any]] = []
     venue_errors: list[dict[str, str]] = []
     articles = []
     metadata_holds = []
@@ -901,8 +902,11 @@ async def collect_sources(
                     observation["status"] = "access_error"
 
         for feed in news_feeds:
+            observation = {"source_id": feed.source_id, "url": feed.feed_url,
+                           "status": "not_checked"}
+            news_feed_observations.append(observation)
             try:
-                news_leads = await collect_news_feed(feed, client, now=now)
+                news_leads = await collect_news_feed(feed, client, now=now, observation=observation)
                 for news_lead in news_leads[:20]:
                     result["news_leads"] += 1
                     resolution = await resolve_public_discovery(
@@ -924,6 +928,8 @@ async def collect_sources(
                         "discovery_gaps": list(resolution.discovery_gaps),
                         "primary_urls": list(resolution.primary_urls), "ai_calls": 0})
             except Exception as error:
+                if observation["status"] == "not_checked":
+                    observation["status"] = "error"
                 result["news_failures"] += 1
                 news_errors.append({"source_id": feed.source_id,
                                     "error_type": type(error).__name__})
@@ -1045,7 +1051,7 @@ async def collect_sources(
             "failures": channel_errors, "publication_evidence": False},
             ensure_ascii=False, indent=2), encoding="utf-8")
         (output / "news-topics.json").write_text(json.dumps({"topics": news_topics,
-            "failures": news_errors, "publication_evidence": False,
+            "feeds": news_feed_observations, "failures": news_errors, "publication_evidence": False,
             "requires_primary_verification": True}, ensure_ascii=False, indent=2),
             encoding="utf-8")
     return result
