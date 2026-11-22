@@ -43,6 +43,23 @@ export function buildCalendar(item, now = Date.now()) {
     }), "END:VCALENDAR", ""].map(fold).join("\r\n");
 }
 
+/** Ссылка «Google Календарь» для первого будущего окна события или работ. */
+export function googleCalendarUrl(item, now = Date.now()) {
+  const [first] = calendarEvents(item, now);
+  if (!first) return "";
+  const end = first.end ?? instant(new Date(first.start.replace(
+    /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/, "$1-$2-$3T$4:$5:$6Z")).getTime() + 2 * 3_600_000);
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: String(item.title ?? "").slice(0, 200),
+    dates: `${first.start}/${end}`,
+    details: [item.reportedScope || "", item.source || ""].filter(Boolean).join("\n"),
+  });
+  const location = [item.venue, item.address].filter(Boolean).join(", ");
+  if (location) params.set("location", location);
+  return `https://calendar.google.com/calendar/render?${params}`;
+}
+
 export function calendarLink(item, now) {
   const contents = buildCalendar(item, now);
   if (!contents) return null;

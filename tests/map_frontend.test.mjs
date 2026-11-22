@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildCalendar } from "../web/newsroom/map/calendar.js";
+import { buildCalendar, googleCalendarUrl } from "../web/newsroom/map/calendar.js";
+import {
+  autoTheme, dayStrip, eventCategory, markerSvg, nextThemeSwitch, placeOnDay, resolveTheme,
+} from "../web/newsroom/map/ui.js";
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
@@ -443,4 +446,73 @@ test("share link opens the Telegram share sheet with the same Mini App card", ()
   const launched = launchMap("", new URL(new URL(shareLink(waterId, "", true)).searchParams.get("url"))
     .searchParams.get("startapp"));
   assert.deepEqual(launched, { mode: "places", id: waterId });
+});
+
+test("категория афиши определяется по заголовку", () => {
+  assert.equal(eventCategory("Концерт джаз-бэнда в Доме омладине"), "concert");
+  assert.equal(eventCategory("Izložba fotografija"), "exhibition");
+  assert.equal(eventCategory("Белградский полумарафон"), "sport");
+  assert.equal(eventCategory("Фестиваль уличной еды"), "festival");
+  assert.equal(eventCategory("Ярмарка выходного дня"), "event");
+  assert.equal(eventCategory(undefined), "event");
+});
+
+test("значок: контур для запланированного, счётчик и экранированная подпись", () => {
+  const filled = markerSvg("water");
+  assert.match(filled, /class="mk"/);
+  assert.match(filled, /aria-hidden="true"/);
+  assert.doesNotMatch(filled, /mk-count/);
+  const planned = markerSvg("power", { outline: true, count: 120, label: 'Свет <"А">' });
+  assert.match(planned, /mk mk-outline/);
+  assert.match(planned, /<text[^>]*>99\+<\/text>/);
+  assert.match(planned, /<title>Свет &lt;&quot;А&quot;&gt;<\/title>/);
+  assert.match(markerSvg("unknown"), /mk-glyph/);
+});
+
+test("авто-тема по белградскому времени и ручной выбор", () => {
+  assert.equal(autoTheme(Date.parse("2026-11-22T06:59:00+01:00")), "dark");
+  assert.equal(autoTheme(Date.parse("2026-11-22T07:00:00+01:00")), "light");
+  assert.equal(autoTheme(Date.parse("2026-07-01T18:59:00+02:00")), "light");
+  assert.equal(autoTheme(Date.parse("2026-07-01T19:00:00+02:00")), "dark");
+  const night = Date.parse("2026-11-22T23:00:00+01:00");
+  assert.equal(resolveTheme("light", night), "light");
+  assert.equal(resolveTheme("auto", night), "dark");
+  assert.equal(resolveTheme("bogus", night), "dark");
+  assert.equal(nextThemeSwitch(night), Date.parse("2026-11-23T07:00:00+01:00"));
+  assert.equal(nextThemeSwitch(Date.parse("2026-11-22T12:30:20+01:00")), Date.parse("2026-11-22T19:00:00+01:00"));
+});
+
+test("полоса дней считает события афиши и выходные", () => {
+  const now = Date.parse("2026-11-20T10:00:00+01:00");
+  const at = (text) => Date.parse(text);
+  const items = [
+    { title: "Джаз-концерт", start: at("2026-11-21T20:00:00+01:00") },
+    { title: "Выставка графики", start: at("2026-11-20T10:00:00+01:00"), end: at("2026-11-22T18:00:00+01:00") },
+    { title: "Реклама кафе", start: at("2026-11-20T09:00:00+01:00"), paidPlace: true },
+    { title: "Поздний сет", start: at("2026-11-21T23:30:00+01:00") },
+  ];
+  assert.equal(placeOnDay(items[1], "2026-11-22"), true);
+  assert.equal(placeOnDay(items[1], "2026-11-23"), false);
+  assert.equal(placeOnDay(items[0], "2026-11-22"), false);
+  assert.equal(placeOnDay({ title: "x" }, "2026-11-20"), false);
+  const days = dayStrip(items, now, 4);
+  assert.deepEqual(days.map((day) => day.key), ["2026-11-20", "2026-11-21", "2026-11-22", "2026-11-23"]);
+  assert.deepEqual(days.map((day) => day.count), [1, 3, 1, 0]);
+  assert.deepEqual(days[1].categories, ["concert", "exhibition", "event"]);
+  assert.equal(days[1].weekend, true);
+  assert.equal(days[0].weekend, false);
+  assert.match(days[0].label, /^Сегодня, 20 ноября/);
+});
+
+test("ссылка Google Календаря несёт время, место и источник", () => {
+  const now = Date.parse("2026-11-19T00:00:00Z");
+  const url = new URL(googleCalendarUrl({
+    id: "place_x", title: "Концерт", start: Date.parse("2026-11-21T20:00:00+01:00"),
+    venue: "Дом омладине", address: "Македонска 22", source: "https://example.org/e",
+  }, now));
+  assert.equal(url.hostname, "calendar.google.com");
+  assert.equal(url.searchParams.get("text"), "Концерт");
+  assert.match(url.searchParams.get("dates"), /^20261121T190000Z\/20261121T210000Z$/);
+  assert.equal(url.searchParams.get("location"), "Дом омладине, Македонска 22");
+  assert.match(url.searchParams.get("details"), /example\.org/);
 });

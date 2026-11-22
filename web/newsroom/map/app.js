@@ -3,8 +3,9 @@ import {
   incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
 } from "./core.js?v=14";
-import { calendarLink } from "./calendar.js?v=4";
-import { setupPlaces } from "./places.js?v=13";
+import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
+import { setupPlaces } from "./places.js?v=14";
+import { markerSvg, nextThemeSwitch, resolveTheme } from "./ui.js?v=1";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -186,6 +187,7 @@ function eventCard(incident, now) {
   const category = make("span", "event-type");
   const dot = make("i");
   dot.setAttribute("aria-hidden", "true");
+  dot.innerHTML = markerSvg(incident.kind, { outline: status === "planned" });
   category.append(dot, kinds[incident.kind].label);
   const badge = make("span", "event-state", status === "planned" ? "⏰ Запланировано"
     : incident.archived ? "Архив" : statuses[status]);
@@ -281,7 +283,11 @@ function eventCard(incident, now) {
   const share = shareLink(incident.id, incident.title);
   if (share) links.append(link(share, "Поделиться ↗"));
   const calendar = calendarLink(incident, now);
-  if (calendar) links.append(calendar);
+  if (calendar) {
+    links.append(calendar);
+    const google = googleCalendarUrl(incident, now);
+    if (google) links.append(link(google, "Google Календарь ↗"));
+  }
   if (incident.officialMap && incident.officialMap !== incident.source) {
     links.append(link(incident.officialMap,
       incident.kind === "road" ? "Схема секретариата ↗" : "Официальная карта ↗"));
@@ -344,13 +350,21 @@ function drawCluster(points, zoom) {
   const [first] = points;
   const location = [first.lat, first.lon];
   const kindsInCluster = new Set(points.map(({ incident }) => incident.kind));
-  const badge = make("span", "map-cluster-count", String(points.length));
-  badge.setAttribute("aria-hidden", "true");
-  if (kindsInCluster.size === 1) badge.dataset.kind = first.incident.kind;
   const title = `Метки на карте · ${points.length}`;
   const size = mobile.matches ? 44 : 38;
+  let html;
+  if (kindsInCluster.size === 1) {
+    const now = Date.now();
+    const planned = points.every(({ incident }) => incidentStatus(incident, now) === "planned");
+    html = `<span class="map-marker" data-kind="${first.incident.kind}">`
+      + `${markerSvg(first.incident.kind, { outline: planned, count: points.length })}</span>`;
+  } else {
+    const badge = make("span", "map-cluster-count", String(points.length));
+    badge.setAttribute("aria-hidden", "true");
+    html = badge;
+  }
   const icon = leaflet.divIcon({
-    className: "map-cluster", html: badge, iconSize: [size, size],
+    className: "map-cluster", html, iconSize: [size, size],
   });
   const marker = leaflet.marker(location, { icon, title, alt: title, riseOnHover: true });
   marker.on("add", () => marker.getElement()?.setAttribute("aria-label", title));
@@ -385,6 +399,13 @@ function drawCluster(points, zoom) {
   marker.addTo(state.pointLayer);
 }
 
+function kindIcon(kind, size, className, outline) {
+  return globalThis.L.divIcon({
+    className, iconSize: [size, size], iconAnchor: [size / 2, size / 2],
+    html: `<span class="map-marker" data-kind="${kind}">${markerSvg(kind, { outline })}</span>`,
+  });
+}
+
 function roadLineWeight(zoom, selected) {
   return Math.max(7, 7 + (zoom - 13) * 2) + (selected ? 3 : 0);
 }
@@ -409,21 +430,19 @@ function renderPointClusters() {
     }
     const [point] = group;
     const { lat, lon, label, address, window, fromRegister, incident, archived, now } = point;
+    const planned = incidentStatus(incident, now) === "planned";
     if (point.approximate && !archived) {
-      const planned = incidentStatus(incident, now) === "planned";
-      const icon = leaflet.divIcon({ className: "outage-reference",
-        html: planned ? "⏰" : "💧", iconSize: [26, 26], iconAnchor: [13, 13] });
-      bindFeature(leaflet.marker([lat, lon], { icon, title: label }), state.pointLayer,
-        incident, `${label} · ориентир`, window, false);
+      bindFeature(leaflet.marker([lat, lon], { icon: kindIcon(incident.kind, 30, "outage-reference", planned),
+        title: label }), state.pointLayer, incident, `${label} · ориентир`, window, false);
       continue;
     }
     const selected = incident.id === state.selected;
-    const expired = !unexpired(window || address?.window, now);
-    bindFeature(leaflet.circleMarker([lat, lon], {
-      radius: selected ? 8 : 6, color: "#fffef9", weight: selected ? 3 : 2,
-      fillColor: kinds[incident.kind].color, fillOpacity: archived || expired ? .58 : .96,
-      className: "outage-point",
-    }), state.pointLayer, incident, label, window || address?.window, fromRegister);
+    const expired = archived || !unexpired(window || address?.window, now);
+    const size = selected ? 30 : mobile.matches ? 24 : 22;
+    const className = `outage-point${expired ? " is-expired" : ""}${selected ? " is-selected" : ""}`;
+    bindFeature(leaflet.marker([lat, lon], { icon: kindIcon(incident.kind, size, className, planned),
+      title: label, riseOnHover: true, zIndexOffset: selected ? 500 : 0 }),
+    state.pointLayer, incident, label, window || address?.window, fromRegister);
   }
 }
 
@@ -876,6 +895,51 @@ function showMode(mode, id = "") {
     void loadAddressIndex();
   }
 }
+
+for (const button of layerButtons) {
+  const dot = button.querySelector("i");
+  if (dot) dot.innerHTML = markerSvg(button.dataset.kind);
+}
+
+const themeButton = byId("theme-toggle");
+const themeNames = { auto: "авто", light: "светлая", dark: "тёмная" };
+let themeTimer = 0;
+function storedTheme() {
+  try {
+    const value = localStorage.getItem("map-theme");
+    return value === "light" || value === "dark" ? value : "auto";
+  } catch {
+    return "auto";
+  }
+}
+function applyTheme() {
+  clearTimeout(themeTimer);
+  const now = Date.now();
+  const choice = storedTheme();
+  const theme = resolveTheme(choice, now);
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.themeChoice = choice;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#10161d" : "#19362d");
+  themeButton.setAttribute("aria-label", `Тема: ${themeNames[choice]}. Переключить`);
+  themeButton.title = `Тема: ${themeNames[choice]}`;
+  if (choice === "auto") themeTimer = setTimeout(applyTheme, Math.max(60_000, nextThemeSwitch(now) - now));
+}
+themeButton.addEventListener("click", () => {
+  const order = ["auto", "light", "dark"];
+  const choice = storedTheme();
+  // Из авто — сразу в противоположную текущей теме, чтобы нажатие всегда меняло вид.
+  const next = choice === "auto"
+    ? resolveTheme("auto", Date.now()) === "dark" ? "light" : "dark"
+    : order[(order.indexOf(choice) + 1) % order.length];
+  try {
+    if (next === "auto") localStorage.removeItem("map-theme");
+    else localStorage.setItem("map-theme", next);
+  } catch {
+    // Без хранилища тема остаётся автоматической.
+  }
+  applyTheme();
+});
+applyTheme();
 
 setupMap();
 const places = setupPlaces({ map: state.map, mobile, animate, telegram, byId, make, link, readJSON, onSync: syncFeed });
