@@ -1,8 +1,10 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+import yaml
 
 from relocant_media.ops import editorial_watchdog as watchdog
 from relocant_media.ops.ssh_state_client import SSHStorageError
@@ -83,3 +85,24 @@ def test_notification_requires_exact_private_owner(monkeypatch):
     monkeypatch.setenv("EDITORIAL_OWNER_USER_ID", "43")
     with pytest.raises(ValueError, match="private owner"):
         asyncio.run(watchdog.notify_owner(watchdog.Check("busy", "123")))
+
+
+def test_failed_current_main_cycle_can_wake_the_storage_watchdog():
+    path = Path(__file__).resolve().parents[1] / ".github/workflows/editorial-watchdog.yml"
+    workflow = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert workflow["on"]["workflow_run"] == {
+        "workflows": ["Editorial Actions"], "branches": ["main"], "types": ["completed"],
+    }
+    assert "github.event_name != 'workflow_run'" in workflow["jobs"]["intake"]["if"]
+    job = workflow["jobs"]["check"]
+    assert all(clause in job["if"] for clause in (
+        "github.event.workflow_run.head_repository.full_name == github.repository",
+        "github.event.workflow_run.head_branch == 'main'",
+        "github.event.workflow_run.head_sha == github.sha",
+        "github.event.workflow_run.path == '.github/workflows/editorial-actions.yml'",
+        "github.event.workflow_run.conclusion == 'failure'",
+        "github.event.workflow_run.conclusion == 'timed_out'",
+        "vars.ACTIONS_CUTOVER_CONFIRMED == 'true'",
+    ))
+    assert workflow["permissions"] == {"actions": "read", "contents": "read"}
+    assert all("artifact" not in step.get("uses", "") for step in job["steps"])

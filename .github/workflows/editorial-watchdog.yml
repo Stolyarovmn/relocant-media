@@ -2,6 +2,10 @@ name: Editorial Watchdog
 on:
   schedule:
     - cron: '4,14,24,34,44,54 * * * *'
+  workflow_run:
+    workflows: [Editorial Actions]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -25,6 +29,7 @@ jobs:
   intake:
     if: >-
       github.ref == 'refs/heads/main' &&
+      github.event_name != 'workflow_run' &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
       vars.ACTIONS_CUTOVER_CONFIRMED == 'true'
     runs-on: ubuntu-latest
@@ -63,6 +68,13 @@ jobs:
   check:
     if: >-
       github.ref == 'refs/heads/main' &&
+      (github.event_name != 'workflow_run' ||
+        (github.event.workflow_run.head_repository.full_name == github.repository &&
+         github.event.workflow_run.head_branch == 'main' &&
+         github.event.workflow_run.head_sha == github.sha &&
+         github.event.workflow_run.path == '.github/workflows/editorial-actions.yml' &&
+         (github.event.workflow_run.conclusion == 'failure' ||
+          github.event.workflow_run.conclusion == 'timed_out'))) &&
       !(github.event_name == 'workflow_dispatch' && inputs.test_intake_notification) &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
       vars.ACTIONS_CUTOVER_CONFIRMED == 'true' &&
