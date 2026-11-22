@@ -208,13 +208,16 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
             normalized_heading == " ".join(title.split())
             and _complete_kolarac_heading(normalized_heading)
         )
-        if complete_schedule and body.casefold() in _POSTER_STUBS:
-            body = normalized_heading
-        elif title not in body and (
-            complete_schedule
-            or (_KOLARAC_SCHEDULE.search(title)
-                and re.search(r"\b(?:Програм|Улазнице)\s*:", body, re.IGNORECASE))
-        ):
+        if complete_schedule:
+            # The official /koncerti/ section confirms the event type. Keep its
+            # label with the date so editorial freshness sees an actual concert.
+            schedule = f"Концерт: {normalized_heading}"
+            if body.casefold() in _POSTER_STUBS or " ".join(body.split()) == normalized_heading:
+                body = schedule
+            else:
+                body = f"{schedule}\n\n{body}"
+        elif (title not in body and _KOLARAC_SCHEDULE.search(title)
+                and re.search(r"\b(?:Програм|Улазнице)\s*:", body, re.IGNORECASE)):
             body = f"{title}\n\n{body}"
     if lead_text and lead_text not in body:
         body = lead_text + " " + body

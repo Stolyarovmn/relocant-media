@@ -116,15 +116,24 @@ def test_short_kolarac_concert_uses_date_from_heading(source):
 
 def test_complete_kolarac_concert_heading_is_evidence_with_image_only_body(source):
     from relocant_media.collectors.venue_feed import _article
+    from relocant_media.domain.freshness import freshness_decision
 
     source = source.model_copy(update={"id": "venue_kolarac"})
     title = "БЕОГРАДСКЕ ПРОМЕНАДЕ 22. 11. 2026. у 11 Велика дворана"
     html = f'<h1>{title}</h1><div class="entry-content"><img src="/poster.jpg"></div>'
     url = "https://www.kolarac.rs/koncerti/beogradske-promenade/"
-    published = datetime.now(UTC) - timedelta(hours=1)
+    published = datetime.fromisoformat("2026-11-19T17:40:13+00:00")
     item = _article(html, url, source, published)
-    assert item.body == title
+    assert item.body == f"Концерт: {title}"
     assert item.published_at == published
+    day_of_concert = datetime.fromisoformat("2026-11-22T08:20:00+00:00")
+    keep = freshness_decision(item.title, item.body, item.published_at, day_of_concert)
+    assert keep.action == "keep"
+    assert keep.reason == "dated_event_still_relevant"
+    discard = freshness_decision(
+        item.title, item.body, item.published_at, day_of_concert + timedelta(days=1),
+    )
+    assert discard.reason == "event_expired"
 
 
 @pytest.mark.parametrize("title", [
