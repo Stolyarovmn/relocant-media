@@ -17,6 +17,16 @@ from relocant_media.sources.registry import SourceConfig
 
 MAX_BYTES = 2_000_000
 MAX_ITEM_ERROR_MESSAGE = 200
+_KOLARAC_SCHEDULE = re.compile(
+    r"(?<!\d)(?P<day>\d{1,2})\.\s*(?P<month>\d{1,2})\.\s*(?P<year>20\d{2})\.\s+"
+    r"[уu]\s+(?P<hour>\d{1,2})(?:[.:](?P<minute>\d{2}))?(?![\d.:])",
+    re.IGNORECASE,
+)
+_KOLARAC_HALL = re.compile(
+    r"(?:велика дворана|velika dvorana|мала сала|mala sala|галерија|galerija)",
+    re.IGNORECASE,
+)
+_POSTER_STUBS = {"", "детаљније", "detaljnije"}
 
 
 class PosterOnlyEvidence(ValueError):
@@ -114,6 +124,24 @@ def _rts_publication(soup: BeautifulSoup) -> datetime:
     return published.replace(tzinfo=ZoneInfo("Europe/Belgrade")).astimezone(UTC)
 
 
+def _complete_kolarac_heading(title: str) -> bool:
+    schedules = list(_KOLARAC_SCHEDULE.finditer(title))
+    if len(schedules) != 1:
+        return False
+    schedule = schedules[0]
+    if (not any(char.isalpha() for char in title[:schedule.start()])
+            or _KOLARAC_HALL.fullmatch(title[schedule.end():].strip()) is None):
+        return False
+    try:
+        datetime(
+            int(schedule["year"]), int(schedule["month"]), int(schedule["day"]),
+            int(schedule["hour"]), int(schedule["minute"] or "0"),
+        )
+    except ValueError:
+        return False
+    return True
+
+
 def _article(html: str, url: str, source: SourceConfig, fallback: datetime | None) -> RawItem:
     soup = BeautifulSoup(html, "html.parser")
     lead_text = ""
@@ -142,9 +170,9 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
             title = str(node.get("headline") or "")
             body = str(node.get("articleBody") or "")
             published = _date(node.get("datePublished"))
-    if not title:
-        heading = soup.select_one("h1")
-        title = heading.get_text(" ", strip=True) if heading else ""
+    heading = soup.select_one("h1")
+    heading_text = heading.get_text(" ", strip=True) if heading else ""
+    title = title or heading_text
     if published is None:
         meta = soup.select_one('meta[property="article:published_time"]')
         published = _date(str(meta.get("content", ""))) if meta else None
@@ -170,25 +198,34 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
                 body = article.get_text(" ", strip=True)
                 break
     body = BeautifulSoup(body, "html.parser").get_text(" ", strip=True)
-    if len(body) < 120 and source.id == "venue_kolarac" and urlsplit(url).path.startswith(
-        "/koncerti/",
-    ):
+    kolarac = source.id == "venue_kolarac"
+    kolarac_path = urlsplit(url).path if kolarac else ""
+    complete_schedule = False
+    if len(body) < 120 and kolarac_path.startswith("/koncerti/"):
         # Short official concert cards can put the full schedule only in the heading.
-        # A "Подробнее" stub without concert details still fails the normal check.
-        if (re.search(r"\b\d{1,2}\.\s*\d{1,2}\.\s*20\d{2}\.\s*у\s+\d{1,2}\b", title)
-                and re.search(r"\b(?:Програм|Улазнице)\s*:", body, re.IGNORECASE)
-                and title not in body):
+        normalized_heading = " ".join(heading_text.split())
+        complete_schedule = (
+            normalized_heading == " ".join(title.split())
+            and _complete_kolarac_heading(normalized_heading)
+        )
+        if complete_schedule and body.casefold() in _POSTER_STUBS:
+            body = normalized_heading
+        elif title not in body and (
+            complete_schedule
+            or (_KOLARAC_SCHEDULE.search(title)
+                and re.search(r"\b(?:Програм|Улазнице)\s*:", body, re.IGNORECASE))
+        ):
             body = f"{title}\n\n{body}"
     if lead_text and lead_text not in body:
         body = lead_text + " " + body
     published = _rts_publication(soup) if source.id == "media_rts" else published or fallback
     if not title:
         raise ValueError("venue article title missing")
-    if len(body) < 120:
-        if (source.id == "venue_kolarac" and urlsplit(url).path.startswith("/predavanja/")
-                and body.casefold() in {"", "детаљније", "detaljnije"}
+    if len(body) < 120 and not complete_schedule:
+        if (kolarac_path.startswith(("/koncerti/", "/predavanja/"))
+                and body.casefold() in _POSTER_STUBS
                 and soup.select_one(".entry-content img[src]")):
-            raise PosterOnlyEvidence("official lecture poster has no textual event evidence")
+            raise PosterOnlyEvidence("official event poster has no sufficient textual schedule")
         raise ValueError("venue article body shorter than 120 characters")
     if published is None:
         raise ValueError("venue article publication date missing")
@@ -272,9 +309,8 @@ class VenueFeedCollector:
                     }
                 )
         if self.item_failures and not items:
-            # Kolarac publishes some lecture entries as image-only posters with a
-            # generic «Детаљније». An empty text-only batch is valid and keeps
-            # diagnostics; these entries never become publication evidence.
+            # A batch of official posters with no usable textual schedules can
+            # legitimately contain no publishable items. Preserve its diagnostics.
             posters_only = all(row["error_type"] == "PosterOnlyEvidence"
                                for row in self.item_failures)
             if not posters_only:

@@ -108,8 +108,39 @@ def test_short_kolarac_concert_uses_date_from_heading(source):
     published = datetime.now(UTC) - timedelta(hours=1)
     assert "Велика дворана" in _article(article, url, source, published).body
     with pytest.raises(ValueError, match="shorter than"):
-        _article(article.split("<article>")[0] + "<article>ДЕТАЉНИЈЕ</article>",
-                 url, source, published)
+        _article(
+            "<h1>НИКОЛАЈ ЛУГАНСКИ 13. 11. 2026. у 20</h1><article>ДЕТАЉНИЈЕ</article>",
+            url, source, published,
+        )
+
+
+def test_complete_kolarac_concert_heading_is_evidence_with_image_only_body(source):
+    from relocant_media.collectors.venue_feed import _article
+
+    source = source.model_copy(update={"id": "venue_kolarac"})
+    title = "БЕОГРАДСКЕ ПРОМЕНАДЕ 22. 11. 2026. у 11 Велика дворана"
+    html = f'<h1>{title}</h1><div class="entry-content"><img src="/poster.jpg"></div>'
+    url = "https://www.kolarac.rs/koncerti/beogradske-promenade/"
+    published = datetime.now(UTC) - timedelta(hours=1)
+    item = _article(html, url, source, published)
+    assert item.body == title
+    assert item.published_at == published
+
+
+@pytest.mark.parametrize("title", [
+    "ДЕЧЈИ КОНЦЕРТИ У ДЕЦЕМБРУ",
+    "Концерт 31. 11. 2026. у 11 Велика дворана",
+    "Концерт 22. 11. 2026. у 11:99 Велика дворана",
+    "22. 11. 2026. у 11 Велика дворана",
+    "Концерт 22. 11. 2026. у 11 и 23. 11. 2026. у 11 Велика дворана",
+])
+def test_incomplete_kolarac_concert_poster_is_diagnostic(source, title):
+    from relocant_media.collectors.venue_feed import PosterOnlyEvidence, _article
+
+    source = source.model_copy(update={"id": "venue_kolarac"})
+    html = f'<h1>{title}</h1><div class="entry-content"><img src="/poster.jpg"></div>'
+    with pytest.raises(PosterOnlyEvidence, match="poster"):
+        _article(html, "https://www.kolarac.rs/koncerti/test/", source, datetime.now(UTC))
 
 
 @pytest.mark.asyncio
