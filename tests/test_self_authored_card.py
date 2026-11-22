@@ -127,16 +127,13 @@ def test_notice_card_text_comes_only_from_reviewed_schedule() -> None:
     from relocant_media.services.notice_card import notice_card_text
 
     assert NOTICE_LAYOUT == "map_notice_v2"
+    # Пост №149: у каждого района своё окно — время привязано к району.
     text = notice_card_text(_notice_map())
-    assert text is not None
-    assert text.lines() == ("Отключение воды", "Савски-Венац, Вождовац",
-                            "24.11.2026 · 08:00–15:00 и ещё 1 интервал")
+    assert text is not None and text.layout == "per_district"
+    assert text.lines() == ("Отключение воды", "24.11.2026",
+                            "Савски-Венац · 08:00–15:00", "Вождовац · 08:00–16:00")
     power = notice_card_text(_notice_map("eds_belgrade_outages_tomorrow"))
     assert power is not None and power.headline == "Отключение света"
-    many = _notice_map()
-    many["schedule"][1]["items"] += ["X, 1 · Земун", "Y, 2 · Врачар"]
-    many_text = notice_card_text(many)
-    assert many_text is not None and many_text.places == "Савски-Венац, Вождовац и ещё 2 района"
     # Неизвестный вид работ, другой макет или пустое расписание — без карточки.
     city = _notice_map("city_beograd_news")
     assert notice_card_text(city) is None
@@ -148,6 +145,37 @@ def test_notice_card_text_comes_only_from_reviewed_schedule() -> None:
     assert notice_card_text(_notice_map(schedule=[])) is None
     assert notice_card_text({**_notice_map(), "point": {"mode": "transport_map_review"}}) is None
     assert notice_card_text(None) is None
+
+
+def test_notice_card_shared_interval_only_when_all_districts_match() -> None:
+    from relocant_media.services.notice_card import notice_card_text
+
+    shared = _notice_map(schedule=[{
+        "when": "24.11.2026 · 08:00–15:00",
+        "items": ["A, 1 · Савски-Венац", "B, 2 · Вождовац", "C, 3 · Земун", "D, 4 · Врачар"],
+        "areas": [],
+    }])
+    text = notice_card_text(shared)
+    assert text is not None and text.layout == "shared_window"
+    assert text.body == ("Савски-Венац, Вождовац и ещё 2 района", "24.11.2026 · 08:00–15:00")
+
+
+def test_notice_card_falls_back_to_map_note_when_rows_do_not_fit() -> None:
+    from relocant_media.services.notice_card import MAP_NOTE, notice_card_text
+
+    many = _notice_map()
+    many["schedule"][1]["items"] += ["X, 1 · Земун", "Y, 2 · Врачар"]
+    text = notice_card_text(many)
+    assert text is not None and text.layout == "see_map"
+    assert text.body == ("24.11.2026", MAP_NOTE)
+    # Один район в двух окнах — тоже без общего времени.
+    repeated = _notice_map()
+    repeated["schedule"][1]["items"].append("Z, 3 · Савски-Венац")
+    assert notice_card_text(repeated).layout == "see_map"  # type: ignore[union-attr]
+    two_days = _notice_map()
+    two_days["schedule"][1]["when"] = "25.11.2026 · 08:00–16:00"
+    days = notice_card_text(two_days)
+    assert days is not None and days.body == ("24.11.2026 – 25.11.2026", MAP_NOTE)
 
 
 def test_notice_card_renders_deterministic_png() -> None:
@@ -163,20 +191,32 @@ def test_notice_card_renders_deterministic_png() -> None:
     assert text is not None
     first = render_notice_card(text)
     assert first == render_notice_card(text)
-    assert first != render_notice_card(text.model_copy(update={"places": "Земун"}))
+    changed = text.model_copy(update={"body": ("24.11.2026", "Земун · 08:00–15:00")})
+    assert first != render_notice_card(changed)
     assert first.startswith(b"\x89PNG\r\n\x1a\n")
     assert struct.unpack(">II", first[16:24]) == (NOTICE_WIDTH, NOTICE_HEIGHT)
     validate_telegram_photo(Path("notice-card.png"), first)
 
 
 def test_notice_card_backgrounds_exist_and_long_text_wraps() -> None:
-    from relocant_media.services.notice_card import NoticeCardText, _background, render_notice_card
-
-    for kind in ("water", "power", "heating", "road"):
-        assert _background(kind).size == (1280, 720)
-    long_text = NoticeCardText(
-        kind="power", headline="Отключение света",
-        places="Палилула, Нови-Београд и ещё 12 районов",
-        when="24.11.2026 · 08:00–15:00 и ещё 14 интервалов",
+    from relocant_media.services.notice_card import (
+        MAP_NOTE,
+        NoticeCardText,
+        _background,
+        render_notice_card,
     )
-    assert render_notice_card(long_text).startswith(b"\x89PNG\r\n\x1a\n")
+
+    for kind in ("water", "power", "heating"):
+        assert _background(kind).size == (1280, 720)
+    cards = (
+        NoticeCardText(kind="power", layout="shared_window", headline="Отключение света",
+                       body=("Палилула, Нови-Београд и ещё 12 районов",
+                             "24.11.2026 · 08:00–15:00")),
+        NoticeCardText(kind="heating", layout="per_district", headline="Отключение отопления",
+                       body=("24.11.2026", "Нови-Београд · 08:00–15:00",
+                             "Савски-Венац · 09:00–16:00", "Звездара · 10:00–17:00")),
+        NoticeCardText(kind="water", layout="see_map", headline="Отключение воды",
+                       body=("24.11.2026 – 25.11.2026", MAP_NOTE)),
+    )
+    for card in cards:
+        assert render_notice_card(card).startswith(b"\x89PNG\r\n\x1a\n")

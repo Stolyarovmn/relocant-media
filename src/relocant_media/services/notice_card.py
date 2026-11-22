@@ -55,18 +55,28 @@ _CITY_URL_KINDS: tuple[tuple[str, NoticeKind], ...] = (
 )
 
 
+CardLayout = Literal["shared_window", "per_district", "see_map"]
+MAP_NOTE = "Адреса и время на карте"
+MAX_DISTRICT_ROWS = 3
+
+
 class NoticeCardText(BaseModel):
-    """Весь видимый текст карточки; сохраняется в generation.json для ревью."""
+    """Весь видимый текст карточки; сохраняется в generation.json для ревью.
+
+    Время показывается только там, где оно однозначно относится к району:
+    общий интервал — когда он одинаков у всех перечисленных районов, иначе
+    отдельная строка «район · время» или подпись «Адреса и время на карте».
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     kind: NoticeKind
+    layout: CardLayout
     headline: str = Field(min_length=1, max_length=40)
-    places: str = Field(min_length=1, max_length=80)
-    when: str = Field(min_length=1, max_length=60)
+    body: tuple[str, ...] = Field(min_length=2, max_length=1 + MAX_DISTRICT_ROWS)
 
-    def lines(self) -> tuple[str, str, str]:
-        return self.headline, self.places, self.when
+    def lines(self) -> tuple[str, ...]:
+        return (self.headline, *self.body)
 
 
 def _kind(point: Mapping[str, Any]) -> NoticeKind | None:
@@ -104,26 +114,40 @@ def notice_card_text(native_map: Mapping[str, Any] | None) -> NoticeCardText | N
     schedule = native_map.get("schedule")
     if kind is None or not isinstance(schedule, list) or not schedule:
         return None
-    windows = [section.get("when") for section in schedule if isinstance(section, Mapping)]
-    if not windows or not all(isinstance(value, str) and value for value in windows):
-        return None
-    places: list[str] = []
+    # Район -> окна, в которых он упомянут, в порядке расписания.
+    windows_by_place: dict[str, list[str]] = {}
     for section in schedule:
+        when = section.get("when") if isinstance(section, Mapping) else None
+        if not isinstance(when, str) or " · " not in when:
+            return None
         for entry in (*section.get("items", ()), *section.get("areas", ())):
             name = _municipality(entry) if isinstance(entry, str) else None
-            if name and name not in places:
-                places.append(name)
-    if not places:
+            if name:
+                windows = windows_by_place.setdefault(name, [])
+                if when not in windows:
+                    windows.append(when)
+    if not windows_by_place:
         return None
-    shown = ", ".join(places[:MAX_PLACES])
-    if len(places) > MAX_PLACES:
-        shown += _more(len(places) - MAX_PLACES, "район", "района", "районов")
-    when = str(windows[0])
-    if len(windows) > 1:
-        when += _more(len(windows) - 1, "интервал", "интервала", "интервалов")
-    if len(shown) > 80 or len(when) > 60:
-        return None
-    return NoticeCardText(kind=kind, headline=_HEADLINES[kind], places=shown, when=when)
+    places = list(windows_by_place)
+    all_windows = {when for windows in windows_by_place.values() for when in windows}
+    dates = sorted({when.split(" · ", 1)[0] for when in all_windows},
+                   key=lambda value: value.split(".")[::-1])
+    headline = _HEADLINES[kind]
+    if len(all_windows) == 1:
+        shown = ", ".join(places[:MAX_PLACES])
+        if len(places) > MAX_PLACES:
+            shown += _more(len(places) - MAX_PLACES, "район", "района", "районов")
+        return NoticeCardText(kind=kind, layout="shared_window", headline=headline,
+                              body=(shown, next(iter(all_windows))))
+    one_window_each = all(len(windows) == 1 for windows in windows_by_place.values())
+    if one_window_each and len(places) <= MAX_DISTRICT_ROWS and len(dates) == 1:
+        rows = tuple(f"{place} · {windows_by_place[place][0].split(' · ', 1)[1]}"
+                     for place in places)
+        return NoticeCardText(kind=kind, layout="per_district", headline=headline,
+                              body=(dates[0], *rows))
+    date = dates[0] if len(dates) == 1 else f"{dates[0]} – {dates[-1]}"
+    return NoticeCardText(kind=kind, layout="see_map", headline=headline,
+                          body=(date, MAP_NOTE))
 
 
 @cache
@@ -177,9 +201,17 @@ def render_notice_card(text: NoticeCardText) -> bytes:
     image = _background(text.kind).copy()
     draw = ImageDraw.Draw(image)
     left, width, y = 88, 640, 96
-    blocks = ((text.headline, "Bold", 88, accent, 2, 28),
-              (text.places, "Bold", 60, _WHITE, 2, 22),
-              (text.when, "Medium", 48, _WHITE, 2, 0))
+    first, *rest = text.body
+    # (текст, начертание, кегль, цвет, максимум строк, отступ после блока)
+    blocks: list[tuple[str, str, int, tuple[int, int, int], int, int]] = [
+        (text.headline, "Bold", 88, accent, 2, 28)]
+    if text.layout == "shared_window":
+        blocks += [(first, "Bold", 60, _WHITE, 2, 22), (rest[0], "Medium", 48, _WHITE, 2, 0)]
+    elif text.layout == "per_district":
+        blocks.append((first, "Medium", 48, _WHITE, 1, 14))
+        blocks += [(row, "Bold", 48, _WHITE, 1, 6) for row in rest]
+    else:
+        blocks += [(first, "Bold", 60, _WHITE, 1, 22), (rest[0], "Medium", 48, _WHITE, 1, 0)]
     for value, weight, size, colour, max_lines, gap in blocks:
         font, lines = _wrap(draw, value, weight, size, width, max_lines)
         line_height = round(font.size * 1.18)
@@ -187,6 +219,8 @@ def render_notice_card(text: NoticeCardText) -> bytes:
             draw.text((left, y), line, fill=colour, font=font)
             y += line_height
         y += gap
+    if y > CARD_HEIGHT - 104:
+        raise ValueError("notice card text does not fit")
     draw.text((left, CARD_HEIGHT - 96), "Еду в Белград · время Белграда", fill=accent,
               font=_font("Medium", 30))
     output = io.BytesIO()
