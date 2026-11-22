@@ -186,7 +186,9 @@ class ReviewedMapEvent(PublicModel):
     schedule_note: Label | None = None
     evidence_urls: tuple[str, ...] = ()
 
-    def card(self, city: str, timezone: str, now: datetime, published_at: datetime) -> PublicEvent:
+    def card(
+        self, city: str, timezone: str, now: datetime, *, published_at: datetime | None = None,
+    ) -> PublicEvent:
         if not 44.2 <= self.venue.latitude <= 45.2 or not 19.8 <= self.venue.longitude <= 21.1:
             raise ValueError("reviewed venue outside the supported Belgrade map")
         expires = self.ends_at or datetime.combine(
@@ -466,7 +468,7 @@ def _reviewed_events(
             .limit(1)
         )
         if published_at is not None:
-            card = record.card(city, timezone, now, published_at)
+            card = record.card(city, timezone, now, published_at=published_at)
             events[card.id] = card
     return events
 
