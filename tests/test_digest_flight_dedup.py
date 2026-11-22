@@ -141,7 +141,8 @@ def test_digest_uses_city_registry_for_aliases_and_distinct_carriers():
     first = flight_cancellation_key(title.replace("Air Serbia", "Pegasus"), body, published_at=NOW)
     same = flight_cancellation_key(
         title.replace("Air Serbia", "Пегасус"), body, published_at=NOW)
-    other = flight_cancellation_key(title.replace("Air Serbia", "Lufthansa"), body, published_at=NOW)
+    other = flight_cancellation_key(
+        title.replace("Air Serbia", "Lufthansa"), body, published_at=NOW)
     unknown = flight_cancellation_key(
         title.replace("Air Serbia", "Неизвестный перевозчик"), body, published_at=NOW)
     assert first is not None and first == same

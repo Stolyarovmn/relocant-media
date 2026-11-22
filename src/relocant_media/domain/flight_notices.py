@@ -24,6 +24,8 @@ _ROUTE = re.compile(
 _DIRECTION = re.compile(r"\bиз\s+([А-ЯЁ][а-яё-]{3,})\s+в\s+([А-ЯЁ][а-яё-]{3,})\b")
 _BOTH_DIRECTIONS = re.compile(r"\b(?:в обоих направлениях|вс[её] (?:авиа)?рейсы между)\b", re.I)
 _WEEKDAYS = ("понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресень")
+
+
 @lru_cache(maxsize=8)
 def city_carriers(city: str) -> Mapping[str, re.Pattern[str]]:
     path = DEFAULT_CITIES_ROOT / city / "carriers.json"
