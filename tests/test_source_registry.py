@@ -38,14 +38,16 @@ def test_venue_sources_are_explicit_first_party_events():
     assert len(venues) == 8
     assert all(s.ownership == "official" and s.categories == ("events",) for s in venues)
     assert all(s.verification.checked_at is not None for s in venues)
-    assert all(s.extraction.status == "active" for s in venues)
+    assert all(s.extraction.status == "active" for s in venues
+               if s.id != "venue_belgrade_marathon")
 
     natural_history = next(s for s in venues if s.id == "venue_natural_history")
     yugoslavia = next(s for s in venues if s.id == "venue_yugoslavia")
     marathon = next(s for s in venues if s.id == "venue_belgrade_marathon")
 
-    assert marathon.extraction.strategy == "belgrade_marathon"
-    assert marathon.policy.auto_publish is False
+    # Страница одного прошедшего забега: источник отключён, кода под него нет (#396).
+    assert marathon.extraction.status == "inactive"
+    assert marathon.extraction.inactive_reason
 
     assert natural_history.extraction.strategy == "natural_history_news"
     assert natural_history.extraction.feed_url is None

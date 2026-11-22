@@ -511,7 +511,7 @@ def evening_entries(session: Session, now: datetime) -> list[Entry]:
         if published_at is not None and published_at.tzinfo is None:
             published_at = published_at.replace(tzinfo=UTC)
         flight = flight_cancellation_key(
-            published.title, published.body, published_at=published_at)
+            published.title, published.body, published_at=published_at, city=_CITY)
         if flight is not None:
             identity, directions = flight
             if directions:

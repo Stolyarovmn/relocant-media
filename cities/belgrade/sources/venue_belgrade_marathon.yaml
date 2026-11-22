@@ -10,7 +10,8 @@ check_every: 3h
 categories: [events]
 extraction:
   strategy: belgrade_marathon
-  status: active
+  status: inactive
+  inactive_reason: 'Страница одного забега (полумарафон 22.11.2026), событие прошло. Отдельный код под одно событие удалён (#396).'
 policy:
   auto_publish: false
   high_risk: false

@@ -23,7 +23,6 @@ from relocant_media.ops.map_backfill import plan_event_buttons
 from relocant_media.ops.newsroom_publish import EVENTS_PATH, _publish_events
 from relocant_media.ops.pages_assets import copy_assets
 from relocant_media.services.event_place import resolve_saved_event_place
-from relocant_media.services.event_place_adapters import _CUKARICA_POST_2026, _DOB_INTERVIEW_2026
 from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source, Submission
 
@@ -248,37 +247,36 @@ def test_reviewed_event_matches_a_sent_post_even_when_the_article_is_media(sessi
     assert export_events(session, observed_at=limit + timedelta(seconds=1)).events == ()
 
 
-def test_published_cukarica_event_without_html_uses_corroborated_program(session, monkeypatch):
-    article = document().model_copy(update={
-        "source_id": "cukarica_news",
-        "url": _CUKARICA_POST_2026,
-        "title": "Кабаре „Да, то су били дани“",
-        "body": (
-            "Кабаре ће бити изведено на великој сцени Културног центра „Чукарица“ "
-            "24. новембра, са почетком у 20 часова."
-        ),
-    })
-    item, _, post, _ = seed(session, doc=article, attested=False)
+@pytest.mark.parametrize("message_id", [100, 104, 141])
+def test_former_one_off_adapters_are_served_from_reviewed_registry(
+    session, monkeypatch, message_id,
+):
+    # Карточки, раньше зашитые в код под одну новость, живут в общем реестре (#396).
+    registry = Path("cities/belgrade/reviewed-map-events.json")
+    record = next(row for row in json.loads(registry.read_text(encoding="utf-8"))
+                  if row["message_id"] == message_id)
+    item, _, post, _ = seed(session)
     session.delete(session.get(RawItemMediaSnapshot, item.id))
-    post.telegram_message_id = 104
+    item.url = record["source_url"]
+    post.title = record["post_title"]
+    post.telegram_message_id = message_id
     session.commit()
-
-    feed = export_events(session, observed_at=NOW)
-    assert len(feed.events) == 1
-    event = feed.events[0]
-    assert event.post_url == "https://t.me/eduvbelgrad/104"
-    assert event.starts_at.isoformat() == "2026-11-24T20:00:00+01:00"
-    assert event.venue.address == "Turgenjevljeva 5, Beograd"
-    monkeypatch.setattr(
-        "relocant_media.ops.map_backfill.export_events",
-        lambda session, observed_at: export_events(session, observed_at=NOW),
-    )
-    app = "https://t.me/relocant_media_belgrade_bot"
-    assert plan_event_buttons(session, {104: event.id}, feed, app) == {
-        104: f"{app}?startapp=places_{event.id}",
-    }
-    with pytest.raises(ValueError, match="confirmed afisha card"):
-        plan_event_buttons(session, {103: event.id}, feed, app)
+    observed = datetime(2026, 11, 13, 12, tzinfo=UTC) + timedelta(days=10)
+    feed = export_events(session, observed_at=observed)
+    event, = feed.events
+    assert event.post_url == f"https://t.me/eduvbelgrad/{message_id}"
+    assert event.starts_at.isoformat() == record["starts_at"]
+    assert event.schedule_source_url == record["schedule_source_url"]
+    assert len(event.courses) == len(record.get("courses", ()))
+    if message_id == 104:
+        monkeypatch.setattr(
+            "relocant_media.ops.map_backfill.export_events",
+            lambda session, observed_at: export_events(session, observed_at=observed),
+        )
+        app = "https://t.me/relocant_media_belgrade_bot"
+        assert plan_event_buttons(session, {104: event.id}, feed, app) == {
+            104: f"{app}?startapp=places_{event.id}",
+        }
 
 
 def test_published_gallery_backfill_requires_reviewed_time_and_saved_exact_article(session):
@@ -297,27 +295,16 @@ def test_published_gallery_backfill_requires_reviewed_time_and_saved_exact_artic
     assert export_events(session, observed_at=NOW).events == ()
 
 
-@pytest.mark.parametrize("verified_time", [True, False])
-def test_legacy_concert_requires_grounded_published_time_without_saved_html(session, verified_time):
-    article = _source(_DOB_INTERVIEW_2026)
-    body = (
+def test_published_item_without_saved_html_is_not_mapped_by_story_specific_code(session):
+    article = _source().model_copy(update={"body": (
         "Publika će 16. novembra od 20 časova u Domu omladine Beograda "
         "imati priliku da doživi El Sonido de la Vida."
-    )
-    if not verified_time:
-        body = body.replace("20 časova", "18 časova")
-    article = article.model_copy(update={"body": body})
+    )})
     item, _, _, _ = seed(session, doc=article, attested=False)
     session.delete(session.get(RawItemMediaSnapshot, item.id))
     session.commit()
-
     assert resolve_saved_event_place(session, article, [item.id], profile=PROFILE) is None
-    feed = export_events(session, observed_at=NOW)
-    if verified_time:
-        assert len(feed.events) == 1 and feed.events[0].starts_at.hour == 20
-        assert feed.events[0].schedule_source_url
-    else:
-        assert feed.events == ()
+    assert export_events(session, observed_at=NOW).events == ()
 
 
 @pytest.mark.parametrize(
@@ -491,3 +478,80 @@ def test_cafe_appears_only_inside_approved_paid_map_campaign():
     assert cards[0].post_url == "https://t.me/eduvbelgrad/112"
     end = datetime.fromisoformat(row["ends_at"])
     assert not _sponsored_places({"advertisements": [row]}, "belgrade", zone, end)
+
+
+def _group_record(key: str, latitude: float, start: str) -> dict:
+    return {
+        "message_id": 300, "post_title": "Фестиваль на двух площадках",
+        "title": "Фестиваль", "source_url": "https://example.org/festival",
+        "starts_at": start, "venue": {"name": f"Площадка {key}", "address": "Beograd",
+                                      "latitude": latitude, "longitude": 20.45},
+        "coordinate_source_url": "https://example.org/map",
+        "venue_source_url": "https://example.org/venue",
+        "schedule_source_url": "https://example.org/festival",
+        "occurrence_key": key,
+    }
+
+
+def test_reviewed_points_of_one_post_are_linked_as_one_event():
+    from relocant_media.ops.events_export import ReviewedMapEvent, validate_reviewed_groups
+
+    records = tuple(ReviewedMapEvent.model_validate(_group_record(*row)) for row in (
+        ("a-20261202", 44.80, "2026-12-02T20:00:00+01:00"),
+        ("b-20261203", 44.81, "2026-12-03T20:00:00+01:00"),
+    ))
+    validate_reviewed_groups(records)
+    cards = [record.card("belgrade", "Europe/Belgrade", NOW) for record in records]
+    assert len({card.id for card in cards}) == 2
+    assert {card.group_id for card in cards} == {map_event_id("https://example.org/festival")}
+
+
+@pytest.mark.parametrize("change", [
+    "lone_key", "missing_key", "other_source", "same_place", "other_post", "other_post_tracked",
+])
+def test_reviewed_group_rejects_points_that_are_not_one_event(change):
+    from relocant_media.ops.events_export import ReviewedMapEvent, validate_reviewed_groups
+
+    first = _group_record("a", 44.80, "2026-12-02T20:00:00+01:00")
+    second = _group_record("b", 44.81, "2026-12-03T20:00:00+01:00")
+    rows = [first, second]
+    if change == "lone_key":
+        rows = [first]
+    elif change == "missing_key":
+        second.pop("occurrence_key")
+    elif change == "other_source":
+        second["source_url"] = "https://example.org/other"
+    elif change == "same_place":
+        second.update(venue=first["venue"], starts_at=first["starts_at"])
+    else:
+        # Две публикации одной программы не могут делить ID группы и сеансов.
+        third = {**_group_record("a", 44.82, "2026-12-04T20:00:00+01:00"), "message_id": 301}
+        fourth = {**_group_record("b", 44.83, "2026-12-05T20:00:00+01:00"), "message_id": 301}
+        if change == "other_post_tracked":
+            for row in (third, fourth):
+                row["source_url"] += "?utm_source=telegram"
+        rows = [first, second, third, fourth]
+    records = tuple(ReviewedMapEvent.model_validate(row) for row in rows)
+    with pytest.raises(ValueError):
+        validate_reviewed_groups(records)
+
+
+def test_committed_reviewed_registry_has_valid_groups():
+    from pydantic import TypeAdapter
+
+    from relocant_media.ops.events_export import ReviewedMapEvent, validate_reviewed_groups
+
+    registry = Path("cities/belgrade/reviewed-map-events.json")
+    validate_reviewed_groups(
+        TypeAdapter(tuple[ReviewedMapEvent, ...]).validate_json(registry.read_bytes()))
+
+
+def test_single_reviewed_cards_keep_their_source_based_id():
+    registry = Path("cities/belgrade/reviewed-map-events.json")
+    from pydantic import TypeAdapter
+
+    from relocant_media.ops.events_export import ReviewedMapEvent
+
+    for record in TypeAdapter(tuple[ReviewedMapEvent, ...]).validate_json(registry.read_bytes()):
+        card = record.card("belgrade", "Europe/Belgrade", NOW)
+        assert card.id == map_event_id(record.source_url) and card.group_id is None

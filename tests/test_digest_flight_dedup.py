@@ -136,17 +136,15 @@ def test_unknown_date_or_missing_timestamp_does_not_produce_digest_key():
     assert flight_cancellation_key(title, "Отмена на понедельник.", published_at=None) is None
 
 
-def test_digest_does_not_merge_carriers_when_related_story_hold_is_broader(monkeypatch):
-    from relocant_media.domain import flight_notices
-
-    # Hold вправе требовать проверку одной причины отмены для разных компаний;
-    # сводка не вправе удалять отдельное последствие для другого перевозчика.
-    monkeypatch.setattr(
-        flight_notices, "_notice", lambda *a: ("flight_cancellation", "route", "day"))
-    first = flight_cancellation_key(POSTS[-1][1], POSTS[-1][2], published_at=NOW)
-    other = flight_cancellation_key(POSTS[-1][1].replace("Air Serbia", "Lufthansa"),
-                                    POSTS[-1][2], published_at=NOW)
-    unknown = flight_cancellation_key(POSTS[-1][1].replace("Air Serbia", "Неизвестный перевозчик"),
-                                      POSTS[-1][2], published_at=NOW)
-    assert first is not None and other is not None and first != other
+def test_digest_uses_city_registry_for_aliases_and_distinct_carriers():
+    _, title, body, _ = POSTS[-1]
+    first = flight_cancellation_key(title.replace("Air Serbia", "Pegasus"), body, published_at=NOW)
+    same = flight_cancellation_key(
+        title.replace("Air Serbia", "Пегасус"), body, published_at=NOW)
+    other = flight_cancellation_key(
+        title.replace("Air Serbia", "Lufthansa"), body, published_at=NOW)
+    unknown = flight_cancellation_key(
+        title.replace("Air Serbia", "Неизвестный перевозчик"), body, published_at=NOW)
+    assert first is not None and first == same
+    assert other is not None and first != other
     assert unknown is None
