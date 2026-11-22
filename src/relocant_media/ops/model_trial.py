@@ -329,6 +329,8 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
             "error_types": errors,
             "error_phases": phases,
             "retries": sum(1 for call in bundle_calls if call.get("retry")),
+            "call_count": len(bundle_calls),
+            "call_error_count": sum(1 for call in bundle_calls if "error_type" in call),
             "call_error_share": (round(sum(1 for call in bundle_calls if "error_type" in call)
                                        / len(bundle_calls), 2) if bundle_calls else None),
             "median_seconds_per_item": _median([row["seconds"] for row in rows]),
@@ -344,16 +346,23 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
     result["facts_verdicts_differ"] = sum(1 for item in items if item["facts_verdicts_differ"])
     result["unavailable"] = unavailable
     result["stopped_for_quota"] = stopped
-    result["valid"] = not stopped and all(
-        (stats["call_error_share"] or 0) <= INVALID_ERROR_SHARE
-        for stats in result["bundles"].values())
+    # Exact counts decide; the rounded share is for display only.
+    errors_ok = all(stats["call_error_count"] <= stats["call_count"] * INVALID_ERROR_SHARE
+                    for stats in result["bundles"].values())
+    usable = not stopped and errors_ok
+    result["published_comparable"] = usable and result["pairs_published_reviewed"] > 0
+    result["full_comparable"] = usable and result["pairs_full_reviewed"] > 0
+    result["valid"] = result["published_comparable"] or result["full_comparable"]
     return result
 
 
+REVIEW_ROLES = ("facts", "utility")
+
+
 def _reviewed(review: dict[str, Any]) -> bool:
-    """Both reviews ran to a verdict without a technical error."""
-    return "error_type" not in review and bool(review["reviews"]) and all(
-        entry.get("verdict") is not None for entry in review["reviews"].values())
+    """Facts and utility reviews both reached a verdict without a technical error."""
+    return "error_type" not in review and all(
+        review["reviews"].get(role, {}).get("verdict") is not None for role in REVIEW_ROLES)
 
 
 def public_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -403,7 +412,10 @@ def markdown(result: dict[str, Any]) -> str:
              f"{summary['pairs_published_reviewed']}, новый черновик "
              f"{summary['pairs_full_reviewed']}",
              f"Технически недоступно: {summary['unavailable']}; остановлена из-за квоты: "
-             f"{'да' if summary['stopped_for_quota'] else 'нет'}; проба {verdict}", "",
+             f"{'да' if summary['stopped_for_quota'] else 'нет'}; проба {verdict}",
+             f"Пригодно к сравнению: опубликованный черновик "
+             f"{'да' if summary['published_comparable'] else 'нет'}, новый черновик "
+             f"{'да' if summary['full_comparable'] else 'нет'}", "",
              "| Связка | Модели | Полная связка: оба ревью одобрили | Черновик готов | "
              "Флаги фактов в новом черновике | Ревью опубликованного: оба одобрили | "
              "Ошибки вызовов | Медиана, с | Медиана ввода, симв. | Медиана вывода, симв. |",

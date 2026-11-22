@@ -340,3 +340,42 @@ def test_trial_is_invalid_when_most_calls_fail(reviewed, fakes, monkeypatch):
     assert summary["bundles"]["candidate"]["call_error_share"] == 1.0
     assert summary["valid"] is False and summary["pairs_published_reviewed"] == 0
     assert "недействительна" in model_trial.markdown(result)
+
+
+def _summary_with(calls_by_bundle, pairs=1):
+    """Сводка из готовых строк: обе связки дошли до вердиктов фактов и полезности."""
+    reviews = {"facts": {"verdict": "approve", "flags": 0},
+               "utility": {"verdict": "approve", "flags": 0}}
+    row = {"draft_status": "ready", "seconds": 1, "input_chars": 1, "output_chars": 1,
+           "call_errors": 0, "published": {"reviews": reviews, "double_approval": True},
+           "full": {"reviews": reviews, "double_approval": True}}
+    items = [{"current": row, "candidate": row, "facts_verdicts_differ": False}] * pairs
+    calls = [{"bundle": bundle, "role": "review", "model": "m", "input_chars": 1,
+              "output_chars": 1, **({"error_type": "X", "phase": "unknown"} if failed else {})}
+             for bundle, (total, errors) in calls_by_bundle.items()
+             for failed in [True] * errors + [False] * (total - errors)]
+    return model_trial.summarize(items, ["current", "candidate"], calls)
+
+
+def test_error_threshold_uses_exact_counts_not_rounded_share():
+    over = _summary_with({"current": (101, 0), "candidate": (101, 51)})
+    assert over["bundles"]["candidate"]["call_error_share"] == 0.5  # только для показа
+    assert over["valid"] is False and over["published_comparable"] is False
+    exact_half = _summary_with({"current": (100, 0), "candidate": (100, 50)})
+    assert exact_half["valid"] is True
+
+
+def test_run_without_comparable_pairs_is_not_valid():
+    summary = _summary_with({"current": (4, 0), "candidate": (4, 0)}, pairs=0)
+    assert summary["pairs_published_reviewed"] == 0 and summary["pairs_full_reviewed"] == 0
+    assert summary["valid"] is False
+    assert summary["published_comparable"] is False and summary["full_comparable"] is False
+
+
+def test_pair_needs_facts_and_utility_verdicts_from_both_bundles():
+    summary = _summary_with({"current": (4, 0), "candidate": (4, 0)})
+    assert summary["pairs_published_reviewed"] == 1 and summary["valid"] is True
+    only_facts = {"facts": {"verdict": "approve", "flags": 0}}
+    assert model_trial._reviewed({"reviews": only_facts}) is False
+    assert model_trial._reviewed({"reviews": {**only_facts, "utility": {"verdict": None}}}) \
+        is False
