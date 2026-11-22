@@ -31,7 +31,9 @@ from relocant_media.services.gpt_fallback import (
     validate_fallback_candidate,
 )
 from relocant_media.services.material_lifecycle import (
+    archive_for_retry,
     authorize_refreshed_evidence,
+    can_retry_snapshot,
     inherit_lifecycle,
 )
 from relocant_media.services.primary_discovery import source_for_url
@@ -187,15 +189,20 @@ def _require_unresolved(session: Session, raw_id: int, *,
         ensure_not_terminal,
     )
 
+    now = now or datetime.now(UTC)
     try:
-        ensure_not_terminal(session, raw_id, now=now or datetime.now(UTC))
+        ensure_not_terminal(session, raw_id, now=now)
     except LifecycleBlockedError as error:
-        raise FallbackValidationError(str(error)) from error
+        raise FallbackValidationError(str(error), code="material_closed") from error
     raw = session.get(RawItem, raw_id, populate_existing=True)
     source = session.get(Source, raw.source_id) if raw is not None else None
-    if (raw is None or source is None or session.get(EditorialRun, raw_id) is not None
+    existing = session.get(EditorialRun, raw_id, populate_existing=True)
+    if (raw is None or source is None
+            or existing is not None and not can_retry_snapshot(session, raw_id, now=now)
             or _reviewed_event_item(session, anchor=raw, anchor_source=source) is not None):
-        raise FallbackValidationError("Материал уже имеет редакционное решение")
+        raise FallbackValidationError(
+            "Материал уже имеет редакционное решение", code="material_closed",
+        )
     return raw, source
 
 
@@ -217,9 +224,13 @@ def refresh_gpt_evidence(
         attempts = receipt.get("attempts", 0) if isinstance(receipt, dict) else None
         if (not isinstance(receipt, dict) or type(attempts) is not int
                 or not 0 <= attempts < MAX_REFRESHES):
-            raise FallbackValidationError("Лимит пересъёмов для этого задания достигнут")
+            raise FallbackValidationError(
+                "Лимит пересъёмов для этого задания достигнут", code="refresh_limit_reached",
+            )
         if receipt.get("request_sha256") == payload.result.request_sha256:
-            raise FallbackValidationError("Этот запрос на пересъём уже обработан")
+            raise FallbackValidationError(
+                "Этот запрос на пересъём уже обработан", code="refresh_already_applied",
+            )
         existing = [(registry[doc.source_id], doc.url) for doc in candidate.documents]
         seen = {canonicalize_url(url) for _, url in existing}
         alternatives = [
@@ -241,21 +252,32 @@ def refresh_gpt_evidence(
         len(articles) != len(planned)
         or any(not same_event(anchor, _collected_candidate(item)) for item in articles)
     ):
-        raise FallbackValidationError("Снимок события неполный или не совпадает с заданием")
+        raise FallbackValidationError(
+            "Снимок события неполный или не совпадает с заданием", code="snapshot_changed",
+        )
     with Session(engine) as session:
         now = now or datetime.now(UTC)
         validate_fallback_candidate(session, payload.request, raw_id, now=now)
         raw, _ = _require_unresolved(session, raw_id, now=now)
+        # Сохраняем прежний безопасный отказ только в атомарной фазе записи.
+        # Проверки до сети не меняют историю; rollback не теряет старый снимок.
+        if (session.get(EditorialRun, raw_id) is not None
+                and not archive_for_retry(session, raw_id, now=now)):
+            raise FallbackValidationError("Прежний снимок нельзя безопасно архивировать")
         target_id = raw_id
         if original_unavailable:
             if origin_id != raw_id:
-                raise FallbackValidationError("Ранее выбранный первоисточник недоступен")
+                raise FallbackValidationError(
+                    "Ранее выбранный первоисточник недоступен", code="source_unavailable",
+                )
             replacement = next((item for item in articles if can_replace_source(
                 session, original=raw, replacement=item, config=registry[item.source_id],
                 now=now, profile=profile,
             )), None)
             if replacement is None:
-                raise FallbackValidationError("Нет доступного проверенного первоисточника события")
+                raise FallbackValidationError(
+                    "Нет доступного проверенного первоисточника события", code="source_unavailable",
+                )
             target_id = record_source_replacement(
                 session, original=raw, replacement=replacement,
                 config=registry[replacement.source_id], now=now, profile=profile,

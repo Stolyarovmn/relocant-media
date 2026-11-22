@@ -6,14 +6,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
 
+from relocant_media.collectors.base import ArticleBatchError, article_failure
+
 MAX_BYTES = 2_000_000
 MAX_LEADS = 20
+NEWS_DISCOVERY_REGISTRY = Path("docs/serbian-news-discovery.json")
+_MAX_FAILURES = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +88,10 @@ def _date(value: object) -> datetime | None:
             result = parsedate_to_datetime(raw)
         except (TypeError, ValueError):
             return None
-    return result.astimezone(UTC) if result.tzinfo is not None else None
+    try:
+        return result.astimezone(UTC) if result.tzinfo is not None else None
+    except (OverflowError, ValueError):
+        return None
 
 
 def load_verified_news_feeds(path: Path) -> tuple[NewsDiscoveryFeed, ...]:
@@ -130,6 +138,7 @@ def parse_news_feed(
     now: datetime,
     *,
     max_age: timedelta = timedelta(hours=24),
+    observation: dict[str, Any] | None = None,
 ) -> list[NewsLead]:
     if len(xml.encode("utf-8")) > MAX_BYTES or any(
         marker in xml.upper() for marker in ("<!DOCTYPE", "<!ENTITY")
@@ -138,25 +147,33 @@ def parse_news_feed(
     parsed = feedparser.parse(
         xml.encode("utf-8"), sanitize_html=False, resolve_relative_uris=False
     )
-    if parsed.get("bozo"):
+    if parsed.get("bozo") or not parsed.version or not (parsed.feed or parsed.entries):
         raise ValueError("invalid news discovery feed")
 
     observed = now.astimezone(UTC)
     leads: list[NewsLead] = []
     seen: set[str] = set()
-    for entry in parsed.entries:
-        title = str(entry.get("title", "")).strip()
-        link = str(entry.get("link", "")).strip()
+    readable = 0
+    failures: list[dict[str, str]] = []
+    for index, entry in enumerate(parsed.entries, 1):
+        title = str(entry.get("title") or "").strip()
+        link = str(entry.get("link") or "").strip()
         published = _date(dict.get(entry, "published"))
-        if not title or not link or published is None:
-            continue
-        if published > observed or published < observed - max_age:
-            continue
         try:
+            if not title or not link:
+                raise ValueError("missing title or article link")
+            if published is None:
+                raise ValueError("missing or invalid publication timestamp")
             article_url = _same_publisher_host(urljoin(feed.feed_url, link), feed)
-        except ValueError:
+        except ValueError as error:
+            if len(failures) < _MAX_FAILURES:
+                failures.append(article_failure(
+                    feed.feed_url, ValueError(f"news entry {index}: {error}"[:120]),
+                ))
             continue
-        if article_url in seen:
+        readable += 1
+        if (published > observed or published < observed - max_age
+                or article_url in seen or len(leads) >= MAX_LEADS):
             continue
 
         summary_html = str(entry.get("summary", ""))
@@ -164,8 +181,8 @@ def parse_news_feed(
         text = " ".join(part for part in (title, summary) if part)[:8000]
         outgoing: list[str] = []
         for anchor in BeautifulSoup(summary_html, "html.parser").select("a[href]"):
-            href = urljoin(article_url, str(anchor.get("href", "")))
             try:
+                href = urljoin(article_url, str(anchor.get("href", "")))
                 _safe_https(href)
             except ValueError:
                 continue
@@ -182,18 +199,22 @@ def parse_news_feed(
             )
         )
         seen.add(article_url)
-        if len(leads) >= MAX_LEADS:
-            break
+    if observation is not None:
+        status = ("error" if failures and not readable else "partial" if failures
+                  else "ok" if leads else "empty_fresh" if readable else "empty_index")
+        observation.update(
+            status=status, fetched_items=len(parsed.entries), fresh_items=len(leads),
+            item_failures=failures,
+        )
+    if failures and not readable:
+        raise ArticleBatchError("all news discovery entries failed extraction", failures)
     return leads
 
 
-async def collect_news_feed(
+async def _read_news_feed(
     feed: NewsDiscoveryFeed,
     client: httpx.AsyncClient,
-    *,
-    now: datetime | None = None,
-    max_age: timedelta = timedelta(hours=24),
-) -> list[NewsLead]:
+) -> str:
     url = feed.feed_url
     for _ in range(5):
         _same_publisher_host(url, feed)
@@ -216,6 +237,29 @@ async def collect_news_feed(
                 data.extend(chunk)
                 if len(data) > MAX_BYTES:
                     raise ValueError("news discovery response too large")
-            xml = data.decode(response.encoding or "utf-8")
-            return parse_news_feed(xml, feed, now or datetime.now(UTC), max_age=max_age)
+            return data.decode(response.encoding or "utf-8")
     raise ValueError("news discovery redirect limit")
+
+
+async def collect_news_feed(
+    feed: NewsDiscoveryFeed,
+    client: httpx.AsyncClient,
+    *,
+    now: datetime | None = None,
+    max_age: timedelta = timedelta(hours=24),
+    observation: dict[str, Any] | None = None,
+) -> list[NewsLead]:
+    if observation is not None:
+        observation.update(source_id=feed.source_id, url=feed.feed_url, item_failures=[])
+    try:
+        xml = await _read_news_feed(feed, client)
+        return parse_news_feed(
+            xml, feed, now or datetime.now(UTC), max_age=max_age, observation=observation,
+        )
+    except (httpx.HTTPError, ValueError) as error:
+        if observation is not None:
+            observation.update(
+                status="transport_error" if isinstance(error, httpx.TransportError) else "error",
+                error_type=type(error).__name__,
+            )
+        raise

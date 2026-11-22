@@ -180,3 +180,43 @@ def test_n1_video_programmes_are_not_treated_as_text_articles():
     assert [item.url for item in parse_venue_feed(xml, source)] == [base + 'vesti/flight-delays/']
     with pytest.raises(ValueError, match='content path'):
         _allowed(base + 'video/dnevnik/example/', source)
+
+
+@pytest.mark.parametrize(
+    ('source_id', 'base', 'excluded', 'kept'),
+    [
+        ('media_n1_srbija', 'https://n1info.rs/',
+         ('najave-emisija/gledajte-uzivo-dnevnik-u-19/', 'svet/izbori-u-izraelu/',
+          'region/bih-vlada/', 'english/news/rem-licence/'),
+         ('vesti/beograd-voda/', 'biznis/cene-goriva/', 'sport/polumaraton/')),
+        ('media_danas', 'https://www.danas.rs/',
+         ('svet/misija-evropskog-parlamenta/', 'vesti/politika/skupstina-sednica/'),
+         ('vesti/drustvo/gimnazija/', 'sport/beogradski-polumaraton/', 'kultura/izlozba/')),
+        ('media_nova', 'https://nova.rs/',
+         ('vesti/svet/netanjahu/', 'vesti/politika/izbori/'),
+         ('vesti/drustvo/gimnazija/', 'kultura/program/', 'sport/fudbal/derbi/')),
+        ('media_rts', 'https://www.rts.rs/',
+         ('vesti/svet/6070001', 'lat/vesti/svet/6070002', 'vesti/politika/6070684',
+          'lat/vesti/politika/6070685'),
+         ('vesti/hronika/6070572', 'lat/vesti/beograd/6070003', 'lat/vesti/drustvo/6070004')),
+    ],
+)
+def test_national_feeds_skip_world_politics_and_tv_sections_before_any_fetch(
+    source_id, base, excluded, kept,
+):
+    # #326/#327: world, regional and political sections of national media never reach
+    # the editorial queue; city, society, culture and sport stay (owner, 19.11.2026).
+    from datetime import UTC, datetime
+
+    from relocant_media.collectors.venue_feed import _allowed
+
+    source = _registry()[source_id]
+    date = datetime.now(UTC).isoformat()
+    xml = '<rss><channel>' + ''.join(
+        f'<item><title>Test</title><link>{base}{path}</link><pubDate>{date}</pubDate></item>'
+        for path in (*excluded, *kept)
+    ) + '</channel></rss>'
+    assert [item.url for item in parse_venue_feed(xml, source)] == [base + path for path in kept]
+    for path in excluded:
+        with pytest.raises(ValueError, match='content path'):
+            _allowed(base + path, source)

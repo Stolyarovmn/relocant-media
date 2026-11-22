@@ -1,4 +1,5 @@
 """Bounded first-party RSS/Atom discovery and full-article evidence."""
+import asyncio
 import ipaddress
 import json
 import re
@@ -6,22 +7,23 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit
-from zoneinfo import ZoneInfo
 
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
 
 from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.kolarac_program import (
+    KOLARAC_SCHEDULE,
+    MAX_PROGRAM_BYTES,
+    linked_program,
+    parse_linked_program,
+)
+from relocant_media.domain.publication_time import BELGRADE, local_clock_precision
 from relocant_media.sources.registry import SourceConfig
 
 MAX_BYTES = 2_000_000
 MAX_ITEM_ERROR_MESSAGE = 200
-_KOLARAC_SCHEDULE = re.compile(
-    r"(?<!\d)(?P<day>\d{1,2})\.\s*(?P<month>\d{1,2})\.\s*(?P<year>20\d{2})\.\s+"
-    r"[уu]\s+(?P<hour>\d{1,2})(?:[.:](?P<minute>\d{2}))?(?![\d.:])",
-    re.IGNORECASE,
-)
 _KOLARAC_HALL = re.compile(
     r"(?:велика дворана|velika dvorana|мала сала|mala sala|галерија|galerija)",
     re.IGNORECASE,
@@ -102,7 +104,8 @@ def parse_venue_feed(html_xml: str, source: SourceConfig) -> list[RawItem]:
                 " ", strip=True)
             if len(body) < 120:
                 body = ""
-        result.append(RawItem(source.id, url, url, title, body, published))
+        result.append(RawItem(source.id, url, url, title, body, published,
+                              published_at_precision="instant"))
         seen.add(url)
     return result
 
@@ -121,11 +124,11 @@ def _rts_publication(soup: BeautifulSoup) -> datetime:
         published = datetime.strptime(" ".join(match.groups()), "%d.%m.%Y %H:%M")
     except ValueError as error:
         raise ValueError("RTS article publication date missing or invalid") from error
-    return published.replace(tzinfo=ZoneInfo("Europe/Belgrade")).astimezone(UTC)
+    return published.replace(tzinfo=BELGRADE)
 
 
 def _complete_kolarac_heading(title: str) -> bool:
-    schedules = list(_KOLARAC_SCHEDULE.finditer(title))
+    schedules = list(KOLARAC_SCHEDULE.finditer(title))
     if len(schedules) != 1:
         return False
     schedule = schedules[0]
@@ -142,7 +145,10 @@ def _complete_kolarac_heading(title: str) -> bool:
     return True
 
 
-def _article(html: str, url: str, source: SourceConfig, fallback: datetime | None) -> RawItem:
+def _article(
+    html: str, url: str, source: SourceConfig, fallback: datetime | None,
+    *, program: tuple[str, str] | None = None,
+) -> RawItem:
     soup = BeautifulSoup(html, "html.parser")
     lead_text = ""
     if source.extraction.article_lead_selectors:
@@ -216,12 +222,21 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
                 body = schedule
             else:
                 body = f"{schedule}\n\n{body}"
-        elif (title not in body and _KOLARAC_SCHEDULE.search(title)
+        elif (title not in body and KOLARAC_SCHEDULE.search(title)
                 and re.search(r"\b(?:Програм|Улазнице)\s*:", body, re.IGNORECASE)):
             body = f"{title}\n\n{body}"
     if lead_text and lead_text not in body:
         body = lead_text + " " + body
-    published = _rts_publication(soup) if source.id == "media_rts" else published or fallback
+    precision = "instant"
+    if source.id == "media_rts":
+        local = _rts_publication(soup)
+        precision = local_clock_precision(local)
+        published = local.astimezone(UTC)
+    else:
+        published = published or fallback
+    if program is not None:
+        title, body = program
+        complete_schedule = True
     if not title:
         raise ValueError("venue article title missing")
     if len(body) < 120 and not complete_schedule:
@@ -234,7 +249,7 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
         raise ValueError("venue article publication date missing")
     if published > datetime.now(UTC):
         raise ValueError("venue article publication date is in the future")
-    return RawItem(source.id, url, url, title, body, published)
+    return RawItem(source.id, url, url, title, body, published, published_at_precision=precision)
 
 
 class VenueFeedCollector:
@@ -269,6 +284,23 @@ class VenueFeedCollector:
         url = self._source.extraction.feed_url or str(self._source.url)
         return parse_venue_feed(await self._fetch(url), self._source)
 
+    async def _program_pdf(self, url: str) -> bytes:
+        _allowed(url, self._source)
+        async with self._client.stream(
+            "GET", url, follow_redirects=False, timeout=15,
+            headers={"User-Agent": "RelocantMedia source monitoring/1.0"},
+        ) as response:
+            response.raise_for_status()
+            media_type = response.headers.get("content-type", "").partition(";")[0]
+            if media_type.strip().lower() != "application/pdf":
+                raise ValueError("Kolarac program is not a PDF response")
+            data = bytearray()
+            async for chunk in response.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > MAX_PROGRAM_BYTES:
+                    raise ValueError("Kolarac program PDF too large")
+            return bytes(data)
+
     def _needs_page(self) -> bool:
         extraction = self._source.extraction
         return bool(extraction.article_lead_selectors or extraction.page_text)
@@ -288,9 +320,21 @@ class VenueFeedCollector:
                 assert entry is not None
                 return entry
             raise
-        article = entry if use_feed else _article(
-            html, url, self._source, entry.published_at if entry else None,
-        )
+        published = entry.published_at if entry else None
+        try:
+            article = entry if use_feed else _article(html, url, self._source, published)
+        except PosterOnlyEvidence:
+            link = linked_program(html, url)
+            if link is None:
+                raise
+            program_url, starts_at = link
+            try:
+                async with asyncio.timeout(15):
+                    document = await self._program_pdf(program_url)
+            except TimeoutError as error:
+                raise ValueError("Kolarac program download exceeded 15 seconds") from error
+            program = parse_linked_program(document, program_url, starts_at)
+            article = _article(html, url, self._source, published, program=program)
         assert article is not None
         return replace(article, source_html=html) if keep_html else article
 

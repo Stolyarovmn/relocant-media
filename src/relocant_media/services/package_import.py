@@ -89,6 +89,9 @@ def import_package(
                 raise PackageConflictError("stored draft changed after package import")
             session.commit()
             return existing
+        from relocant_media.services.linked_updates import validate_linked_update
+
+        validate_linked_update(session, package, now=now or datetime.now(UTC))
         reviewed = _reviewed_event_item(session, anchor=item, anchor_source=source)
         if reviewed is not None:
             raise PackageConflictError(f"event already reviewed via raw item {reviewed.id}")

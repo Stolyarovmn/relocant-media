@@ -157,7 +157,10 @@ async def deliver_reviewed(
                 package, publisher, prepared_media, editorial_text=preview.text)
         except ValueError as error:
             raise DeliveryBlockedError(str(error)) from error
-        reply_to = revision_reply_target(session, raw_item_id, city)
+        try:
+            reply_to = revision_reply_target(session, raw_item_id, city)
+        except ValueError as error:
+            raise DeliveryBlockedError("linked publication requires reconciliation") from error
         reply_publisher = getattr(publisher, "publish_followup", None)
         if reply_to is not None and native is None and (
             prepared_media is not None or not callable(reply_publisher)

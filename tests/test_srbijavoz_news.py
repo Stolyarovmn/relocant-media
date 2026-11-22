@@ -97,6 +97,7 @@ def test_article_uses_full_body_canonical_and_published_time() -> None:
     assert item.url == url
     assert item.canonical_url == url
     assert item.published_at == datetime(2026, 9, 4, 8, 15, tzinfo=BELGRADE_TZ)
+    assert item.published_at_precision == "instant"
     assert "Тошин бунар" in item.body
     assert item.source_html == html
 
@@ -117,6 +118,7 @@ def test_article_falls_back_to_visible_serbian_publication_date() -> None:
     item = parse_srbijavoz_article(html, _source(), url)
 
     assert item.published_at == datetime(2026, 10, 9, tzinfo=BELGRADE_TZ)
+    assert item.published_at_precision == "day"
     assert "организацију" in item.body
 
 

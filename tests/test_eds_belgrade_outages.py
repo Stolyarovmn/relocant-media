@@ -47,6 +47,18 @@ def test_street_text_change_keeps_stable_identity_for_revision_detection() -> No
     assert changed[0].body != original[0].body
 
 
+def test_broken_address_does_not_rename_another_row_with_same_interval() -> None:
+    source = load_source_file(SOURCE_PATH)
+    html = FIXTURE.read_text(encoding="utf-8")
+    original = parse_eds_belgrade_outages(html, source)
+    changed = parse_eds_belgrade_outages(
+        html.replace("САМАРАНОВА УЛИЦА: 2, ВОЈНИ ПУТ 1: 630/1,", ""),
+        source,
+    )
+
+    assert changed == [original[0], original[2]]
+
+
 def test_valid_empty_schedule_returns_no_items_but_broken_structure_fails() -> None:
     source = load_source_file(SOURCE_PATH)
     assert parse_eds_belgrade_outages(

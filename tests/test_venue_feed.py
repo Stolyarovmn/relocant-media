@@ -27,6 +27,7 @@ def test_discovery_never_uses_teaser_as_evidence(source: SourceConfig) -> None:
     item = parse_venue_feed(feed("Tue, 20 Oct 2026 12:00:00 +0000"), source)[0]
     assert item.body == ""
     assert item.published_at == datetime(2026, 10, 20, 12, tzinfo=UTC)
+    assert item.published_at_precision == "instant"
 
 
 @pytest.mark.parametrize("xml", [
@@ -45,7 +46,8 @@ def test_updated_is_not_publication(source: SourceConfig) -> None:
     assert parse_venue_feed(xml, source) == []
 
 
-@pytest.mark.parametrize("date,title", [("unknown", "A"), ("2026-10-20T12:00:00", "A"),
+@pytest.mark.parametrize("date,title", [("unknown", "A"), ("2026-10-20", "A"),
+                                        ("2026-10-20T12:00:00", "A"),
                                         ("2026-10-20T12:00:00Z", "")])
 def test_missing_title_or_real_date_is_skipped(source: SourceConfig, date: str, title: str) -> None:
     assert parse_venue_feed(feed(date, title), source) == []
@@ -82,6 +84,7 @@ async def test_full_article_and_stable_feed_date(source: SourceConfig) -> None:
     assert items == [live]
     assert live.title == "Full title"
     assert live.published_at == date
+    assert live.published_at_precision == "instant"
     assert "Verified full announcement" in live.body
     assert live.source_html == article
 
@@ -249,6 +252,7 @@ async def test_jsonld_publication_date_when_entry_has_disappeared(source: Source
     async with httpx.AsyncClient(trust_env=False, transport=httpx.MockTransport(handler)) as client:
         item = await VenueFeedCollector(source, client).collect_url('https://museum.example/event/')
     assert item.published_at == datetime(2026, 10, 1, 8, 15, tzinfo=UTC)
+    assert item.published_at_precision == "instant"
     assert item.title == 'Full title'
 
 
