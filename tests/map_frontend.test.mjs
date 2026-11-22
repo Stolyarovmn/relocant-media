@@ -12,7 +12,41 @@ import {
 } from "../web/newsroom/map/core.js";
 import { agendaVisit, setupPlaces } from "../web/newsroom/map/places.js";
 import { agendaFavorites } from "../web/newsroom/map/favorites.js";
+import { corridorCaps, heatCells, heatOverview, layerView } from "../web/newsroom/map/layer-views.js";
 import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
+
+test("тепловой обзор сохраняет точную геометрию на крупном масштабе и при точном поиске", () => {
+  assert.equal(layerView("unrecognized"), "detail");
+  assert.equal(layerView("corridor"), "corridor");
+  assert.equal(layerView("heat"), "heat");
+  assert.equal(heatOverview("heat", 14, false), true);
+  assert.equal(heatOverview("heat", 15, false), false);
+  assert.equal(heatOverview("heat", 12, true), false);
+  assert.equal(heatOverview("detail", 12, false), false);
+});
+
+test("плотность считает объявления в ячейке и пропускает приблизительные ориентиры", () => {
+  const water = { id: "water", kind: "water" };
+  const power = { id: "power", kind: "power" };
+  const road = { id: "road", kind: "road" };
+  const project = ([lat, lon]) => ({ x: lon, y: lat });
+  const point = (lat, lon, incident, approximate = false) => ({ lat, lon, incident, approximate });
+  const result = heatCells([
+    point(22, 15, water), point(20, 30, water), point(22, 21, power), point(32, 19, road, true),
+    point(20, 80, water),
+  ], project, 64);
+  assert.deepEqual(result, [
+    { x: 32, y: 32, incidents: [water, power] },
+    { x: 96, y: 32, incidents: [water] },
+  ]);
+});
+
+test("концы участков берутся с исходной линии и скрываются, если знаки наложатся", () => {
+  const line = [[1, 1], [8, 20], [2, 24]];
+  const project = ([lat, lon]) => ({ x: lon, y: lat });
+  assert.deepEqual(corridorCaps(line, project), [[1, 1], [2, 24]]);
+  assert.deepEqual(corridorCaps(line, ([lat, lon]) => ({ x: lon / 2, y: lat / 2 })), []);
+});
 
 test("новые события отсчитываются от последней просмотренной версии афиши", () => {
   const old = "2026-11-22T08:00:00Z";
