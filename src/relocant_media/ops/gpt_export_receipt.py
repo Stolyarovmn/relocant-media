@@ -87,6 +87,9 @@ def require_public_documents(request: Mapping[str, Any]) -> None:
         documents = candidate.get("documents") if isinstance(candidate, Mapping) else None
         if not isinstance(documents, list) or not 1 <= len(documents) <= 8:
             raise ValueError("Нет ограниченного публичного набора документов")
+        if ("flight_review_parent" in candidate
+                and candidate["flight_review_parent"] not in references):
+            raise ValueError("Исходная авиановость отсутствует в публичном контексте")
         for document in documents:
             if (not isinstance(document, Mapping)
                     or not isinstance(document.get("ownership"), str)

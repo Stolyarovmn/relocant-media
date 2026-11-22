@@ -27,6 +27,7 @@ from relocant_media.services.gpt_fallback import (
     MAX_CANDIDATES,
     REQUEST_TTL,
     FallbackValidationError,
+    _apply_request_references,
     _bounded_json,
     _candidate_request,
     _ensure_fallback_open,
@@ -400,11 +401,13 @@ def build_ranked_request(
                                   if candidate["raw_item_id"] in protected_ids)
                 # Конверт с привязкой к пакету немного больше обычного.
                 while candidates:
+                    _apply_request_references(request, references)
                     try:
                         _bounded_json(request)
                         break
                     except ValueError:
                         candidates.pop()
+                _apply_request_references(request, references)
         used = {candidate["raw_item_id"] for candidate in candidates}
         for origin_id, raw_id in targets.items():
             if raw_id in used:
@@ -428,10 +431,12 @@ def build_ranked_request(
             except ValueError:
                 continue
             candidates.append(candidate)
+            _apply_request_references(request, references)
             try:
                 _bounded_json(request)
             except ValueError:
                 candidates.pop()
+                _apply_request_references(request, references)
             else:
                 used.add(raw_id)
         return request if candidates else None

@@ -219,7 +219,7 @@ def test_delivery_uses_cohort_and_at_most_two_claims_in_entire_hop(state, monkey
             session.commit()
         return {"raw_item_id": raw_id}
 
-    async def publish(engine, *, enabled, limit, only_raw_ids):
+    async def publish(engine, *, enabled, limit, only_raw_ids, scheduler_run_id=None):
         assert enabled and len(only_raw_ids) <= limit <= 2
         result = []
         for raw_id in sorted(only_raw_ids):

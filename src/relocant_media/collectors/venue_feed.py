@@ -29,6 +29,13 @@ _KOLARAC_HALL = re.compile(
     re.IGNORECASE,
 )
 _POSTER_STUBS = {"", "детаљније", "detaljnije"}
+_BIRN_COUNTRIES = {
+    "albania", "bosnia and herzegovina", "bulgaria", "croatia", "czechia", "czech republic",
+    "greece", "hungary", "kosovo", "moldova", "montenegro", "north macedonia", "poland",
+    "romania", "serbia", "slovakia", "turkey",
+}
+_BIRN_SECTION_SEPARATOR = re.compile(r"\s+[-–—]\s+")
+_SERBIAN_SCOPE = re.compile(r"\b(?:serbia|serbian|belgrade|beograd|novi\s+sad)\b", re.I)
 
 
 class PosterOnlyEvidence(ValueError):
@@ -72,7 +79,18 @@ def _allowed(url: str, source: SourceConfig) -> str:
     return url
 
 
-def parse_venue_feed(html_xml: str, source: SourceConfig) -> list[RawItem]:
+def _balkan_foreign_only(tags: list[dict[str, object]], context: str) -> bool:
+    terms = [" ".join(value.split()) for tag in tags if isinstance(value := tag.get("term"), str)]
+    countries = {
+        _BIRN_SECTION_SEPARATOR.split(term.casefold(), maxsplit=1)[0] for term in terms
+    } & _BIRN_COUNTRIES
+    # Явно зарубежные рубрики можно отсеять. Смешанные и неполные рубрики сохраняем.
+    return bool(countries and not _SERBIAN_SCOPE.search(" ".join((context, *terms))))
+
+
+def parse_venue_feed(
+    html_xml: str, source: SourceConfig, *, discover: bool = True,
+) -> list[RawItem]:
     """Only explicit content:encoded is full feed evidence; never use teasers."""
     if len(html_xml.encode("utf-8")) > MAX_BYTES or any(
         token in html_xml.upper() for token in ("<!DOCTYPE", "<!ENTITY")
@@ -96,6 +114,10 @@ def parse_venue_feed(html_xml: str, source: SourceConfig) -> list[RawItem]:
         except ValueError:
             continue
         if url in seen:
+            continue
+        if (discover and source.id == "media_balkan_insight"
+                and _balkan_foreign_only(entry.get("tags", []),
+                                         f"{title} {entry.get('summary', '')[:2000]}")):
             continue
         body = ""
         contents = entry.get("content", [])
@@ -280,9 +302,9 @@ class VenueFeedCollector:
                 return data.decode(response.encoding or "utf-8")
         raise ValueError("venue redirect limit")
 
-    async def _entries(self) -> list[RawItem]:
+    async def _entries(self, *, discover: bool = True) -> list[RawItem]:
         url = self._source.extraction.feed_url or str(self._source.url)
-        return parse_venue_feed(await self._fetch(url), self._source)
+        return parse_venue_feed(await self._fetch(url), self._source, discover=discover)
 
     async def _program_pdf(self, url: str) -> bytes:
         _allowed(url, self._source)
@@ -367,7 +389,8 @@ class VenueFeedCollector:
     async def collect_url(self, url: str, *, require_page: bool = False) -> RawItem:
         _allowed(url, self._source)
         try:
-            entry = next((item for item in await self._entries() if item.url == url), None)
+            entry = next((item for item in await self._entries(discover=False) if item.url == url),
+                         None)
         except (httpx.HTTPError, ValueError):
             if not require_page:
                 raise

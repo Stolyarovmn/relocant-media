@@ -1,5 +1,47 @@
 export function layerView(value) {
-  return value === "corridor" || value === "heat" ? value : "detail";
+  return ["corridor", "heat", "timeline"].includes(value) ? value : "detail";
+}
+
+export const timelineSteps = 48;
+const halfHour = 30 * 60_000;
+const hourLabel = new Intl.DateTimeFormat("ru", {
+  timeZone: "Europe/Belgrade", day: "numeric", month: "short",
+  hour: "2-digit", minute: "2-digit",
+});
+
+export function timelineInstant(origin, step) {
+  if (step === 0) return origin;
+  const next = Math.floor(origin / halfHour) * halfHour + halfHour;
+  return next + (Math.min(timelineSteps, Math.max(1, step)) - 1) * halfHour;
+}
+
+export function timelineLabel(instant, current) {
+  return current ? "Сейчас" : hourLabel.format(instant);
+}
+
+export function timelineBands(incidents, origin, end) {
+  const byKind = new Map();
+  for (const incident of incidents) {
+    if (incident.archived) continue;
+    for (const span of incident.windows.length ? incident.windows : [incident]) {
+      if (!Number.isFinite(span.start) || !Number.isFinite(span.end)) continue;
+      const start = Math.max(origin, span.start);
+      const finish = Math.min(end, span.end);
+      if (start >= finish) continue;
+      if (!byKind.has(incident.kind)) byKind.set(incident.kind, []);
+      byKind.get(incident.kind).push([start, finish]);
+    }
+  }
+  for (const [kind, spans] of byKind) {
+    const bands = [];
+    for (const [start, end] of spans.sort((a, b) => a[0] - b[0])) {
+      const previous = bands.at(-1);
+      if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
+      else bands.push([start, end]);
+    }
+    byKind.set(kind, bands);
+  }
+  return byKind;
 }
 
 export function heatOverview(view, zoom, preciseRoute) {

@@ -149,12 +149,18 @@ def settlement_name_key(value: str) -> str:
     return (osm_name(value).removeprefix("мз ").removeprefix("месна заједница "))
 
 
+def split_settlement_context(municipality: str) -> tuple[str, str]:
+    """Община и явно указанный в адресе населённый пункт."""
+    parts = _AREA_CONTEXT.split(municipality, maxsplit=1)
+    return parts[0], parts[1] if len(parts) == 2 else ""
+
+
 def settlement_matches_context(place: SettlementScope, municipality: str) -> bool:
     """Совпадение с явно указанным поселением, а не только с общиной."""
-    parts = _AREA_CONTEXT.split(municipality, maxsplit=1)
-    return (len(parts) == 2 and place.parent is None
-            and osm_name(parts[0]) == osm_name(place.municipality)
-            and settlement_name_key(parts[1]) == settlement_name_key(place.name))
+    district, settlement = split_settlement_context(municipality)
+    return (bool(settlement) and place.parent is None
+            and osm_name(district) == osm_name(place.municipality)
+            and settlement_name_key(settlement) == settlement_name_key(place.name))
 
 
 def _explicit_whole_area(municipality: str, text: str) -> SettlementScope | None:

@@ -32,6 +32,7 @@ from relocant_media.collectors.rhmz_forecast import (
 from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.draft_language import serbian_cyrillic_words
+from relocant_media.domain.flight_notices import flight_cancellation_key
 from relocant_media.domain.map_links import map_digest_url, map_event_url
 from relocant_media.domain.topic_tags import strip_draft_tags
 from relocant_media.ops.events_export import export_events
@@ -52,7 +53,12 @@ from relocant_media.services.published_text import effective_published_text
 from relocant_media.services.road_scope import resolve_road_segments
 from relocant_media.services.transport_map import SOURCE_ID, _signature
 from relocant_media.services.transport_map_source import _notice_id, extract_transport_map
-from relocant_media.services.utility_scope import extract_power_scopes, house_in_range
+from relocant_media.services.utility_geography import _name as serbian_name_key
+from relocant_media.services.utility_scope import (
+    extract_power_scopes,
+    house_in_range,
+    split_settlement_context,
+)
 from relocant_media.services.water_outage_scope import (
     extract_water_outage_scopes,
     reported_water_places,
@@ -111,6 +117,7 @@ class Pilot(BaseModel):
     # any later cycle in this window delivers it once (slot key keeps it idempotent).
     morning_catch_up_until: time | None = None
     reminders_from: date | None = None
+    municipality_labels: dict[str, str] = Field(default_factory=dict)
     official_reminder_sources: dict[date, tuple[str, ...]] = Field(default_factory=dict)
     transport_briefs: dict[str, TransportBrief] = Field(default_factory=dict)
 
@@ -272,7 +279,7 @@ def _incidents(session: Session, now: datetime, policy: Pilot) -> list[Entry]:
             continue
         if notice.kind == "road" and (notice.starts_on is None or notice.ends_on is None):
             continue
-        text, address_rows = _incident_content(notice, now, tomorrow)
+        text, address_rows = _incident_content(notice, now, tomorrow, policy)
         if notice.kind == "road" and not text:
             source = session.scalar(select(RawItem).where(
                 RawItem.source_id == SOURCE_ID, RawItem.url == notice.source_map_url,
@@ -331,13 +338,18 @@ def _outage_period(start: datetime, end: datetime, now: datetime) -> str:
     return f"{begin}–{finish}"
 
 
+def _municipality_label(value: str, policy: Pilot) -> str:
+    key = serbian_name_key(value).removeprefix("градска општина ").removeprefix("општина ")
+    return policy.municipality_labels.get(key, value)
+
+
 def _incident_content(
-    notice: Incident, now: datetime, tomorrow: datetime,
+    notice: Incident, now: datetime, tomorrow: datetime, policy: Pilot,
 ) -> tuple[str, tuple[str, ...]]:
     if notice.kind == "road":
         return _road_text(notice, notice.segments), ()
     if notice.reported_scope and notice.starts_at and notice.ends_at:
-        district = notice.reported_scope.partition(":")[0]
+        district = _municipality_label(notice.reported_scope.partition(":")[0], policy)
         period = _outage_period(notice.starts_at, notice.ends_at, now)
         return f"{district} — {period}.", (notice.reported_scope,)
     rows: list[Settlement | Address | PrintedRange] = [
@@ -350,13 +362,11 @@ def _incident_content(
         if isinstance(row, PrintedRange):
             key = row.municipality, row.street, row.starts_at, row.ends_at
             printed_ranges.setdefault(key, []).append(row.number)
-    districts: dict[str, None] = {}
     grouped: dict[tuple[str, str, datetime, datetime], list[str]] = {}
     whole_streets: set[tuple[str, str, datetime, datetime]] = set()
     for scope in notice.water_districts:
         if scope.starts_at >= tomorrow or scope.ends_at <= now:
             continue
-        districts[scope.municipality] = None
         if scope.boundary:
             block = f"квартал между улицами {', '.join(scope.boundary)}"
             grouped[(scope.municipality, block, scope.starts_at, scope.ends_at)] = []
@@ -364,7 +374,6 @@ def _incident_content(
             whole_streets.add((scope.municipality, street, scope.starts_at, scope.ends_at))
             grouped[(scope.municipality, street, scope.starts_at, scope.ends_at)] = []
     for row in active:
-        districts[row.municipality] = None
         if isinstance(row, Settlement):
             place = f"{row.name} ({row.parent})" if row.parent else f"{row.name} целиком"
             number = ""
@@ -388,15 +397,26 @@ def _incident_content(
                 continue
             (start, end), = periods
             if start < tomorrow and now < end:
-                districts[segment.municipality] = None
                 place = f"{segment.street}, от {segment.start} до {segment.end}"
                 grouped.setdefault((segment.municipality, place, start, end), [])
-    details = tuple(
-        f"{district}, {place}{', ' + ', '.join(dict.fromkeys(numbers)) if any(numbers) else ''}"
-        f" — {_outage_period(start, end, now)}"
-        for (district, place, start, end), numbers in grouped.items()
-    )
-    return (_short(", ".join(districts)) + ".", details) if details else ("", ())
+    districts: dict[str, None] = {}
+    details: list[str] = []
+    for (scope_name, place, start, end), numbers in grouped.items():
+        municipality, settlement = split_settlement_context(scope_name)
+        district = _municipality_label(municipality, policy)
+        districts[district] = None
+        address = ", ".join(part for part in (district, settlement, place, *dict.fromkeys(numbers))
+                            if part)
+        details.append(f"{address} — {_outage_period(start, end, now)}")
+    names = list(districts)
+    if not names:
+        return "", ()
+    lead = ", ".join(names[:3])
+    other = len(names) - 3
+    if other > 0:
+        word = "район" if other == 1 else "района" if 2 <= other <= 4 else "районов"
+        lead += f" и ещё {other} {word}"
+    return lead + ".", tuple(details)
 
 
 def _routes(session: Session, today: date, policy: Pilot) -> list[Entry]:
@@ -474,26 +494,45 @@ def evening_entries(session: Session, now: datetime) -> list[Entry]:
         Post.city == _CITY, Post.telegram_message_id > 0, Post.published_at >= since,
         Post.published_at <= now, EditorialRun.delivery_status == "sent",
         ~Post.title.startswith("[тестовый запуск]"),
-    ).order_by(Post.published_at.desc()).limit(30)).all()
-    seen = set()
-    entries = []
-    for post, run, source_url in sorted(posts, key=lambda row: _PRIORITY.get(row[0].category, 4)):
+    ).order_by(Post.published_at.desc(), Post.id.desc()).limit(30)).all()
+    covered_flights: dict[tuple[object, ...], set[tuple[str, str]]] = {}
+    candidates = []
+    for post, run, source_url in posts:
         published = effective_published_text(post, run)
         if "_published_correction" in run.outcome and not published.corrected:
             continue
         if published.body.lstrip().startswith("Реклама\n") or published.title.startswith("Реклама"):
             continue
         title = _short(_recap_text(published.title))
-        key = re.sub(r"[^\w]+", " ", title.casefold()).strip()
-        if not key or key in seen:
+        title_key = re.sub(r"[^\w]+", " ", title.casefold()).strip()
+        if not title_key:
             continue
-        seen.add(key)
+        published_at = post.published_at
+        if published_at is not None and published_at.tzinfo is None:
+            published_at = published_at.replace(tzinfo=UTC)
+        flight = flight_cancellation_key(
+            published.title, published.body, published_at=published_at)
+        if flight is not None:
+            identity, directions = flight
+            if directions:
+                covered = covered_flights.setdefault(identity, set())
+                if directions <= covered:
+                    continue
+                covered.update(directions)
         lead = _recap_text(published.body.partition("\n\n")[0])
         if (len(lead) > 240 or len(lead.split()) > 36 or published.body.lstrip().startswith("#")
                 or "https://" in lead or lead.casefold().rstrip(".") == title.casefold()):
             lead = ""
-        entries.append(Entry(title, lead, f"{_CHANNEL}/{post.telegram_message_id}", "Подробнее",
-                             source_url=source_url))
+        entry = Entry(title, lead, f"{_CHANNEL}/{post.telegram_message_id}", "Подробнее",
+                      source_url=source_url)
+        candidates.append((_PRIORITY.get(post.category, 4), (title_key, flight), entry))
+    seen = set()
+    entries = []
+    for _, dedup_key, entry in sorted(candidates, key=lambda row: row[0]):
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        entries.append(entry)
     return entries[:4]
 
 
@@ -623,7 +662,7 @@ async def _confirm_reminder(client: httpx.AsyncClient, entry: Entry) -> Entry | 
             text = f"{reported[0]} — {starts:%H:%M}–{ends:%H:%M}."
             address_rows = (f"Посёлки: {', '.join(reported[1])}", f"Улицы: {reported[2]}")
         elif same:
-            updated_text, address_rows = _incident_content(notice, day_start, next_day)
+            updated_text, address_rows = _incident_content(notice, day_start, next_day, _policy())
             text = updated_text or text
         else:
             return None
