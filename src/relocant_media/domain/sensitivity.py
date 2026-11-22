@@ -77,3 +77,35 @@ def sensitive_signals(texts: Iterable[str]) -> frozenset[str]:
 
 def sensitive_topic_reason(texts: Iterable[str]) -> str | None:
     return SENSITIVE_TOPIC_REASON if sensitive_signals(texts) else None
+
+
+PERSONAL_DETAIL_REASON = "sensitive_personal_detail_in_draft"
+
+# The search is over: only the outcome is news, the person's details are not.
+_FOUND = re.compile(
+    r"(?<![^\W\d_])(?<!не\s)(?<!ni\s)(?:найден|нашли|нашёл|нашел|обнаружен|отыскал|поиск\w*\s+заверш|"
+    r"розыск\w*\s+(?:прекращ|заверш)|pronađen|пронађен)",
+    re.IGNORECASE,
+)
+
+_SEARCH = re.compile(
+    r"(?<![^\W\d_])(?:ищ(?:ет|ут)|разыскива|traga|трага|potrag|потраг)", re.IGNORECASE)
+
+
+def personal_detail_reason(source_texts: Iterable[str], title: str, body: str) -> str | None:
+    """Hold a draft that names health details of a minor or of a person no longer missing.
+
+    Only an active search may need such a detail, and then the owner decides it under the
+    ordinary sensitive-topic review. A hold here is not owner-approvable: the text must be
+    rewritten without the detail. Sources alone never trigger it; the draft must carry it.
+    """
+    sources = tuple(source_texts)
+    story = sensitive_signals(sources) | sensitive_signals((title, body))
+    draft = sensitive_signals((title, body))
+    if "health" not in draft or not story & {"minor", "missing"}:
+        return None
+    searching = "missing" in story or any(
+        _SEARCH.search(text) for text in (*sources, title, body) if text)
+    if searching and not _FOUND.search(title + "\n" + body):
+        return None
+    return PERSONAL_DETAIL_REASON
