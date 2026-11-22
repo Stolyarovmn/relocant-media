@@ -244,3 +244,138 @@ def test_trial_rejects_state_that_is_not_ready():
     with pytest.raises(ValueError):
         model_trial.wait_ready(lambda: {"status": "failed"}, validate, attempts=3,
                                sleep=lambda pause: None)
+
+
+class Quota(RuntimeError):
+    def __init__(self, phase="http_error_429", retry=30):
+        super().__init__("secret quota body")
+        self.phase, self.quota = phase, {"retry_seconds": retry}
+
+
+def _flaky(failures, error):
+    """Candidate models fail ``failures`` times with ``error``, then answer."""
+    left = {"count": failures}
+
+    class Provider(FakeProvider):
+        def generate_json(self, **kwargs):
+            if self.model != "gemini-3.5-flash-lite" and left["count"] > 0:
+                left["count"] -= 1
+                raise error()
+            return super().generate_json(**kwargs)
+
+    return Provider
+
+
+def test_quota_pause_is_waited_once_and_recorded_with_phase(reviewed, fakes):
+    session, run = reviewed
+    _sent(session, run)
+    pauses = []
+    budget = model_trial.WaitBudget(remaining=100, sleep=pauses.append)
+    result = model_trial.run_trial(session.get_bind().url.database, BUNDLES,
+                                   _flaky(1, Quota), limit=1, budget=budget)
+    summary = result["summary"]
+    candidate = summary["bundles"]["candidate"]
+    assert pauses == [30] and budget.remaining == 70
+    assert candidate["retries"] == 1 and candidate["error_phases"] == {"http_error_429": 1}
+    assert summary["items"] == 1 and summary["unavailable"] == 0
+    assert summary["pairs_published_reviewed"] == 1 and summary["stopped_for_quota"] is False
+    assert "secret quota body" not in json.dumps(result)
+
+
+def test_second_quota_error_on_retry_is_not_waited_again(reviewed, fakes):
+    session, run = reviewed
+    _sent(session, run)
+    pauses = []
+    budget = model_trial.WaitBudget(remaining=100, sleep=pauses.append)
+    result = model_trial.run_trial(session.get_bind().url.database, BUNDLES,
+                                   _flaky(2, Quota), limit=1, budget=budget)
+    candidate = result["summary"]["bundles"]["candidate"]
+    # Повтор черновика снова получил 429: второй паузы и второго повтора нет.
+    assert pauses == [30] and candidate["retries"] == 1
+    assert candidate["error_phases"] == {"http_error_429": 2}
+    assert result["items"][0]["candidate"]["draft_status"] == "error"
+
+
+def test_pause_longer_than_budget_stops_trial_and_spares_quota(reviewed, fakes):
+    session, run = reviewed
+    _sent(session, run)
+    calls = []
+
+    class Counting(FakeProvider):
+        def generate_json(self, **kwargs):
+            calls.append(self.model)
+            if self.model != "gemini-3.5-flash-lite":
+                raise Quota(retry=500)
+            return super().generate_json(**kwargs)
+
+    pauses = []
+    budget = model_trial.WaitBudget(remaining=600, sleep=pauses.append)
+    result = model_trial.run_trial(session.get_bind().url.database, BUNDLES, Counting,
+                                   limit=1, budget=budget)
+    summary = result["summary"]
+    assert pauses == [] and budget.stopped
+    assert summary["items"] == 0 and summary["unavailable"] == 1
+    assert summary["stopped_for_quota"] is True and summary["valid"] is False
+    # После остановки к кандидату больше никто не обращается.
+    assert calls.count("gemini-3.8-flash") == 1 and "gemini-3.6-flash" not in calls
+
+
+def test_non_quota_errors_are_not_retried_and_unknown_phase_is_closed(reviewed, fakes):
+    session, run = reviewed
+    _sent(session, run)
+    budget = model_trial.WaitBudget(sleep=lambda pause: pytest.fail("no pause expected"))
+    result = model_trial.run_trial(session.get_bind().url.database, BUNDLES,
+                                   _flaky(1, lambda: Quota(phase="free text <script>")),
+                                   limit=1, budget=budget)
+    candidate = result["summary"]["bundles"]["candidate"]
+    assert candidate["retries"] == 0 and candidate["error_phases"] == {"unknown": 1}
+
+
+def test_trial_is_invalid_when_most_calls_fail(reviewed, fakes, monkeypatch):
+    session, run = reviewed
+    _sent(session, run)
+    result = model_trial.run_trial(session.get_bind().url.database, BUNDLES,
+                                   _flaky(100, lambda: RuntimeError("x")), limit=1)
+    summary = result["summary"]
+    assert summary["bundles"]["candidate"]["call_error_share"] == 1.0
+    assert summary["valid"] is False and summary["pairs_published_reviewed"] == 0
+    assert "недействительна" in model_trial.markdown(result)
+
+
+def _summary_with(calls_by_bundle, pairs=1):
+    """Сводка из готовых строк: обе связки дошли до вердиктов фактов и полезности."""
+    reviews = {"facts": {"verdict": "approve", "flags": 0},
+               "utility": {"verdict": "approve", "flags": 0}}
+    row = {"draft_status": "ready", "seconds": 1, "input_chars": 1, "output_chars": 1,
+           "call_errors": 0, "published": {"reviews": reviews, "double_approval": True},
+           "full": {"reviews": reviews, "double_approval": True}}
+    items = [{"current": row, "candidate": row, "facts_verdicts_differ": False}] * pairs
+    calls = [{"bundle": bundle, "role": "review", "model": "m", "input_chars": 1,
+              "output_chars": 1, **({"error_type": "X", "phase": "unknown"} if failed else {})}
+             for bundle, (total, errors) in calls_by_bundle.items()
+             for failed in [True] * errors + [False] * (total - errors)]
+    return model_trial.summarize(items, ["current", "candidate"], calls)
+
+
+def test_error_threshold_uses_exact_counts_not_rounded_share():
+    over = _summary_with({"current": (101, 0), "candidate": (101, 51)})
+    assert over["bundles"]["candidate"]["call_error_share"] == 0.5  # только для показа
+    assert over["valid"] is False and over["published_comparable"] is False
+    exact_half = _summary_with({"current": (100, 0), "candidate": (100, 50)})
+    assert exact_half["valid"] is True
+
+
+def test_run_without_comparable_pairs_is_not_valid():
+    summary = _summary_with({"current": (4, 0), "candidate": (4, 0)}, pairs=0)
+    assert summary["pairs_published_reviewed"] == 0 and summary["pairs_full_reviewed"] == 0
+    assert summary["valid"] is False
+    assert summary["published_comparable"] is False and summary["full_comparable"] is False
+
+
+def test_pair_needs_facts_and_utility_verdicts_from_both_bundles():
+    summary = _summary_with({"current": (4, 0), "candidate": (4, 0)})
+    assert summary["pairs_published_reviewed"] == 1 and summary["valid"] is True
+    only_facts = {"facts": {"verdict": "approve", "flags": 0}}
+    assert model_trial._reviewed({"reviews": only_facts}) is False
+    assert model_trial._reviewed({"reviews": {**only_facts, "utility": {"verdict": None}}}) \
+        is False
