@@ -452,6 +452,28 @@ h1 {
   transform: rotate(-135deg);
 }
 .list-header button[aria-expanded="false"] i { transform: rotate(45deg); }
+.incident-periods {
+  display: flex;
+  gap: 5px;
+  margin: 3px 0 7px;
+}
+.incident-periods button {
+  flex: 1;
+  min-height: 36px;
+  padding: 4px 6px;
+  border: 1px solid var(--stroke);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--muted);
+  white-space: nowrap;
+  font-size: .87rem;
+  font-weight: 700;
+}
+.incident-periods button[aria-pressed="true"] {
+  border-color: var(--city);
+  background: var(--city-tint);
+  color: var(--city);
+}
 #event-count { color: var(--muted); font-size: .84rem; font-weight: 600; }
 .places-count { color: var(--muted); font-size: .84rem; font-weight: 600; }
 .places-list { display: grid; gap: 5px; padding: 3px; }

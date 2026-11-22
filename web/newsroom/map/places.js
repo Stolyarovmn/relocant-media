@@ -1,7 +1,7 @@
 import {
   agendaDays, belgradeDate, clusterMapPoints, incidentTimes, launchPlaces, placeCategory, placeCountdown,
   placeKinds, placeOnDay, placeOptionLabel, placeStatus, readPlaces, shareLink, straightLineDistance, updateStamp,
-} from "./core.js?v=15";
+} from "./core.js?v=16";
 import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { buildCalendar, googleCalendarUrl } from "../web/newsroom/map/calendar.js";
 import {
   addressHits, addressWindowText, agendaDays, belgradeDate, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
+  incidentInPeriod, incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
   mapTheme, nextTransition, placeCategory, placeCountdown, placeOnDay, placeOptionLabel, placeStatus,
   pointsAtScale, readIncidents, readPlaces, searchAddresses, shareLink, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
@@ -71,6 +71,39 @@ function incident(record = {}) {
     source_url: "https://www.beograd.rs/vesti/", ...record,
   }] })[0];
 }
+
+test("фильтр текущих работ оставляет только район со своим активным графиком", () => {
+  const first = { starts_at: "2026-11-24T08:00:00+01:00", ends_at: "2026-11-24T15:00:00+01:00" };
+  const second = { starts_at: first.starts_at, ends_at: "2026-11-24T16:00:00+01:00" };
+  const road = (window, label) => ({ ...window, label, coordinates: [[44.8, 20.4], [44.81, 20.4]] });
+  const item = incident({
+    starts_at: first.starts_at, ends_at: second.ends_at, windows: [first, second],
+    water_districts: [{ ...first, municipality: "Savski venac" }, { ...second, municipality: "Voždovac" }],
+    addresses: [{ ...first, street: "Fabrisova", number: "1" }, { ...second, street: "Brane Ćosića", number: "16" }],
+    lines: [road(first, "Fabrisova"), road(second, "Brane Ćosića")],
+  });
+  const now = Date.parse(first.ends_at);
+  const current = incidentInPeriod(item, now, 0);
+  assert.deepEqual(current.waterDistricts.map((district) => district.municipality), ["Voždovac"]);
+  assert.deepEqual(current.lines.map((line) => line.label), ["Brane Ćosića"]);
+  assert.deepEqual(current.addresses.map((address) => address.number), ["16"]);
+  assert.equal(incidentInPeriod(item, now).lines.length, 2);
+});
+
+test("фильтр периода учитывает будущие окна, точную границу срока и неизвестное время", () => {
+  const planned = incident({ starts_at: "2026-11-24T08:00:00+01:00", ends_at: "2026-11-24T16:00:00+01:00" });
+  const now = Date.parse("2026-11-23T07:00:00+01:00");
+  assert.equal(incidentInPeriod(planned, now, 0), null);
+  assert.equal(incidentInPeriod(planned, now, 24), null);
+  assert.ok(incidentInPeriod(planned, now, 168));
+  const boundary = nextTransition([planned], now, 24);
+  assert.equal(boundary, Date.parse("2026-11-23T08:00:00+01:00"));
+  assert.ok(incidentInPeriod(planned, boundary, 24));
+  assert.equal(incidentInPeriod(planned, Date.parse("2026-11-24T16:00:00+01:00"), 168), null);
+  const unknown = incident();
+  assert.equal(incidentInPeriod(unknown, now, 168), null);
+  assert.equal(incidentInPeriod(unknown, now), unknown);
+});
 
 test("открытие объявления по ссылке браузера и Telegram", () => {
   assert.equal(launchEvent(`?event=${waterId}`, roadId), waterId);
