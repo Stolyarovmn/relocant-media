@@ -12,6 +12,7 @@ on:
       - "requirements/**"
       - "scripts/install_python.py"
       - "cities/belgrade/sources/**"
+      - "docs/serbian-news-discovery.json"
       - "src/relocant_media/collectors/**"
       - "src/relocant_media/ops/source_audit.py"
       - "src/relocant_media/ops/changed_source_ids.py"
@@ -35,6 +36,7 @@ jobs:
           python -m relocant_media.ops.source_audit \
             --online \
             --check-belgrade-weather \
+            --check-news-discovery \
             --fail-on-error \
             --require-active \
             --summary "$GITHUB_STEP_SUMMARY"

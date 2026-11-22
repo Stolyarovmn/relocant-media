@@ -11,6 +11,11 @@ import httpx
 
 from relocant_media.collectors.base import ArticleBatchError, RawItem
 from relocant_media.collectors.factory import build_collector
+from relocant_media.collectors.news_discovery import (
+    NEWS_DISCOVERY_REGISTRY,
+    collect_news_feed,
+    load_verified_news_feeds,
+)
 from relocant_media.collectors.rhmz_forecast import collect_weather
 from relocant_media.collectors.tls import (
     MISSING_INTERMEDIATE_HINT,
@@ -54,6 +59,7 @@ async def audit_sources(
     online: bool = False,
     source_ids: tuple[str, ...] = (),
     check_belgrade_weather: bool = False,
+    check_news_discovery: bool = False,
 ) -> dict[str, Any]:
     sources = load_source_registry(directory)
     if source_ids:
@@ -139,6 +145,15 @@ async def audit_sources(
         weather = (await collect_weather(client, datetime.now(UTC))).statuses() if (
             online and check_belgrade_weather
         ) else None
+        discovery_rows: list[dict[str, Any]] = []
+        if online and check_news_discovery:
+            for feed in load_verified_news_feeds(NEWS_DISCOVERY_REGISTRY):
+                observation: dict[str, Any] = {}
+                try:
+                    await collect_news_feed(feed, client, observation=observation)
+                except (httpx.HTTPError, ValueError):
+                    pass
+                discovery_rows.append(observation)
 
     return {
         "checked_at": datetime.now(UTC).isoformat(),
@@ -151,6 +166,7 @@ async def audit_sources(
         "transport_error_count": sum(row["status"] == "transport_error" for row in rows),
         "error_count": sum(row["status"] == "error" for row in rows),
         **({"weather_sources": weather} if weather is not None else {}),
+        **({"news_discovery_feeds": discovery_rows} if online and check_news_discovery else {}),
     }
 
 
@@ -234,6 +250,17 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
             f"- РХМЗ: `{weather['rhmz_forecast']}`",
             f"- MeteoAlarm: `{weather['meteoalarm']}`",
         ))
+    if "news_discovery_feeds" in result:
+        lines.extend((
+            "", "## Новостные ленты для поиска поводов", "",
+            "| Источник | Состояние | Свежие | Ошибки записей |",
+            "|---|---|---:|---:|",
+        ))
+        for feed in result["news_discovery_feeds"]:
+            lines.append("| {source_id} | {status} | {fresh} | {errors} |".format(
+                source_id=feed["source_id"], status=feed["status"],
+                fresh=feed.get("fresh_items", "-"), errors=len(feed["item_failures"]),
+            ))
     return "\n".join(lines) + "\n"
 
 
@@ -243,6 +270,7 @@ def main() -> None:
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--source-id", action="append", default=[])
     parser.add_argument("--check-belgrade-weather", action="store_true")
+    parser.add_argument("--check-news-discovery", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--summary", type=Path)
     parser.add_argument("--fail-on-error", action="store_true")
@@ -257,6 +285,7 @@ def main() -> None:
             online=args.online,
             source_ids=tuple(args.source_id),
             check_belgrade_weather=args.check_belgrade_weather,
+            check_news_discovery=args.check_news_discovery,
         )
     )
     if args.output:
