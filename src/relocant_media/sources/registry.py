@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field, HttpUrl
 class ExtractionConfig(BaseModel):
     strategy: str
     status: str | None = None
+    # Why a non-active source is not collected: shown in source-health (#328).
+    inactive_reason: str | None = None
     feed_url: str | None = None
     article_selectors: tuple[str, ...] = (".entry-content", "article .content", "article")
     article_lead_selectors: tuple[str, ...] = ()
