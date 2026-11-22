@@ -19,6 +19,13 @@ import httpx
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.ops.actions_recovery import recover
 from relocant_media.ops.actions_runtime import EDITORIAL_INTERVAL, REPO
+from relocant_media.ops.editorial_failure_streak import (
+    ALERT_THRESHOLD,
+    CAUSES,
+    STREAK_LIMIT,
+    FailureStreak,
+    recent_failure_streak,
+)
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient, SSHStorageError
 
 RUN_URL = f"https://github.com/{REPO}/actions/runs/"
@@ -47,11 +54,13 @@ MESSAGES = {
 class Check:
     status: str
     run_id: str | None = None
+    streak: FailureStreak | None = None
 
     @property
     def key(self) -> str:
         # Cache contains only this digest; no Telegram IDs, state, or snapshot metadata.
-        return hashlib.sha256(f"{self.status}:{self.run_id}".encode()).hexdigest()
+        identity = self.streak.cause if self.streak else self.run_id
+        return hashlib.sha256(f"{self.status}:{identity}".encode()).hexdigest()
 
 
 def gh(*args: str) -> str:
@@ -127,6 +136,14 @@ def should_notify(check: Check, previous: str) -> bool:
     return True
 
 
+def check_failure_streak(check: Check) -> Check:
+    if check.status in {"healthy", "stale", "storage", "storage_capacity", "busy"}:
+        streak = recent_failure_streak(REPO)
+        if streak and streak.count >= ALERT_THRESHOLD:
+            return Check("repeated_failure", streak.run_id, streak)
+    return check
+
+
 async def notify_owner(check: Check) -> None:
     chat_id = int(os.environ["EDITORIAL_OWNER_CHAT_ID"])
     if chat_id <= 0 or chat_id != int(os.environ["EDITORIAL_OWNER_USER_ID"]):
@@ -134,9 +151,17 @@ async def notify_owner(check: Check) -> None:
     link = RUN_URL + check.run_id if check.run_id else (
         f"https://github.com/{REPO}/actions/workflows/editorial-actions.yml"
     )
+    if check.streak:
+        amount = str(check.streak.count)
+        if check.streak.count >= STREAK_LIMIT:
+            amount = f"не менее {STREAK_LIMIT}"
+        message = (f"Серия сбоев редакции Белграда. Число сбоев подряд — {amount}. "
+                   f"Причина — {CAUSES[check.streak.cause]}.")
+    else:
+        message = MESSAGES[check.status]
     async with httpx.AsyncClient(timeout=18, trust_env=False) as http:
         bot = TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], http)
-        await bot.send_message(chat_id, f"{MESSAGES[check.status]}\n{link}")
+        await bot.send_message(chat_id, f"{message}\n{link}")
 
 
 def current_main_passed_ci() -> bool:
@@ -160,6 +185,7 @@ def main() -> None:
         client = SSHStateClient(SSHConfig.from_environment(os.environ))
         check = inspect(client, datetime.now(UTC), args.work,
                         allow_recovery=not args.dry_run and current_main_passed_ci())
+        check = check_failure_streak(check)
         print(json.dumps({"watchdog": check.status, "run_id": check.run_id,
                           "dry_run": args.dry_run}))
         if args.dry_run or check.status == "running":

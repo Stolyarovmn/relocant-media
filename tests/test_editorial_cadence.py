@@ -135,8 +135,10 @@ def test_chain_survives_a_failed_cycle_but_backs_off():
     assert "always()" in chain["if"]
     assert "needs.cycle.result == 'failure'" in chain["if"]
     assert "needs.cycle.result == 'cancelled'" not in chain["if"]
-    delay = retry_workflow()["jobs"]["retry"]["steps"][0]["env"]["CHAIN_DELAY_SECONDS"]
-    assert delay == "${{ inputs.result == 'success' && '120' || '600' }}"
+    delay = retry_workflow()["jobs"]["retry"]["steps"][-2]["env"]["CHAIN_DELAY_SECONDS"]
+    assert delay == (
+        "${{ inputs.result == 'success' && '120' || steps.failure-delay.outputs.seconds || '600' }}"
+    )
 
 
 def test_chain_books_the_next_cycle_only_after_a_finished_main_cycle():
@@ -217,12 +219,14 @@ def test_chain_books_the_retry_without_waiting_in_the_writer_queue(monkeypatch, 
     monkeypatch.setenv("GH_REPO", "Stolyarovmn/relocant-media")
     monkeypatch.setenv("CYCLE_RESULT", result)
     monkeypatch.setenv("CYCLE_SHA", "a" * 40)
+    monkeypatch.setenv("CYCLE_RUN_ID", "123")
     commands = []
     monkeypatch.setattr(subprocess, "run", lambda args, *, check: commands.append(args))
     exec(step["run"], {})
     assert commands == [[
         "gh", "workflow", "run", "editorial-retry.yml", "-R", "Stolyarovmn/relocant-media",
         "--ref", "main", "-f", f"result={result}", "-f", f"source_sha={'a' * 40}",
+        "-f", "source_run_id=123",
     ]]
 
 
@@ -236,13 +240,17 @@ def test_retry_has_its_own_queue_and_cancels_only_previous_waits():
     assert "inputs.source_sha == github.sha" in job["if"]
     assert "refs/heads/main" in job["if"]
     assert "vars.ACTIONS_CHAIN_ENABLED == 'true'" in job["if"]
-    assert all("uses" not in step for step in job["steps"])
+    checkout, detect, *_ = job["steps"]
+    assert checkout["with"]["persist-credentials"] == "false"
+    assert checkout["if"] == detect["if"]
+    assert detect["if"] == "inputs.result == 'failure' && inputs.source_run_id != ''"
+    assert checkout["continue-on-error"] == detect["continue-on-error"] == "true"
 
 
 @pytest.mark.parametrize("advanced", [False, True])
-@pytest.mark.parametrize("delay", [120, 600])
+@pytest.mark.parametrize("delay", [120, 600, 1200, 1800])
 def test_retry_waits_and_resumes_only_the_current_version(monkeypatch, delay, advanced):
-    wait, launch = retry_workflow()["jobs"]["retry"]["steps"]
+    wait, launch = retry_workflow()["jobs"]["retry"]["steps"][-2:]
     monkeypatch.setenv("CHAIN_DELAY_SECONDS", str(delay))
     monkeypatch.setenv("GH_REPO", "Stolyarovmn/relocant-media")
     monkeypatch.setenv("GITHUB_SHA", "a" * 40)

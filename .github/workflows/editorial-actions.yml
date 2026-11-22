@@ -1,4 +1,9 @@
 name: Editorial Actions
+run-name: >-
+  Editorial Actions · ${{ (inputs.mode == 'auto' ||
+  (github.event_name == 'schedule' &&
+   github.event.schedule != '30 5,6 * * *' && github.event.schedule != '30 18,19 * * *'))
+  && 'automatic' || inputs.mode || 'digest' }}
 on:
   workflow_dispatch:
     inputs:
@@ -360,6 +365,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           CYCLE_RESULT: ${{ needs.cycle.result }}
           CYCLE_SHA: ${{ github.sha }}
+          CYCLE_RUN_ID: ${{ github.run_id }}
         run: |
           import os
           import subprocess
@@ -368,6 +374,7 @@ jobs:
               'gh', 'workflow', 'run', 'editorial-retry.yml', '-R', os.environ['GH_REPO'],
               '--ref', 'main', '-f', f"result={os.environ['CYCLE_RESULT']}",
               '-f', f"source_sha={os.environ['CYCLE_SHA']}",
+              '-f', f"source_run_id={os.environ['CYCLE_RUN_ID']}",
           ], check=True)
   deploy:
     if: always() && needs.cycle.outputs.projection == 'true'
