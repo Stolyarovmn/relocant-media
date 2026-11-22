@@ -21,6 +21,7 @@ class _TopicTagRules(BaseModel):
 _RULES_V1 = _TopicTagRules.model_validate(yaml.safe_load(
     files(__package__).joinpath("publication_tags_v1.yaml").read_text(encoding="utf-8"),
 ))
+TOPIC_CATEGORIES = frozenset(_RULES_V1.categories)
 _LEGACY_EVENT_TAGS = "#События #Досуг"
 _TAG_LINES = frozenset((*_RULES_V1.categories.values(), _RULES_V1.fallback, _LEGACY_EVENT_TAGS))
 _TAG = re.compile(r"#[А-Яа-яЁё]+")
