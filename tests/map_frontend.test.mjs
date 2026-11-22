@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
 import { buildCalendar, googleCalendarUrl } from "../web/newsroom/map/calendar.js";
@@ -10,6 +11,7 @@ import {
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
 import { setupPlaces } from "../web/newsroom/map/places.js";
+import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
 
 test("the automatic theme changes at seven and nineteen in Belgrade", () => {
   assert.equal(mapTheme("auto", Date.parse("2026-11-22T05:59:00Z")), "dark");
@@ -71,6 +73,62 @@ function incident(record = {}) {
     source_url: "https://www.beograd.rs/vesti/", ...record,
   }] })[0];
 }
+
+test("карта возвращает проверенный снимок после ошибки сети и повреждённого файла", async () => {
+  const responses = new Map();
+  const cache = {
+    match: async (url) => responses.get(url)?.clone(),
+    put: async (url, response) => responses.set(url, response.clone()),
+  };
+  const storage = { open: async () => cache };
+  const url = "./incidents.json";
+  const generated_at = "2026-11-22T07:00:00Z";
+  const data = { version: 1, generated_at, incidents: [] };
+  const online = await loadSnapshot(url, readIncidents, { storage, fetcher: async () => Response.json(data) });
+  assert.equal(online.cached, false);
+  assert.equal(online.generatedAt, generated_at);
+  for (const fetcher of [
+    async () => { throw new TypeError("network"); },
+    async () => Response.json({ version: 1, events: [] }),
+    async () => Response.json({ ...data, generated_at: "2026-11-21T07:00:00Z" }),
+  ]) {
+    const saved = await loadSnapshot(url, readIncidents, { storage, fetcher });
+    assert.equal(saved.cached, true);
+    assert.equal(saved.generatedAt, generated_at);
+  }
+  const recovered = await loadSnapshot(url, readIncidents, {
+    storage, fetcher: async () => Response.json({ ...data, generated_at: "2026-11-22T08:00:00Z" }),
+  });
+  assert.equal(recovered.cached, false);
+  assert.equal(recovered.generatedAt, "2026-11-22T08:00:00Z");
+  assert.equal(responses.size, 1);
+});
+
+test("кэш выключен в некоторых браузерах, свежие данные всё равно открываются", async () => {
+  const storage = { open: async () => { throw new Error("storage blocked"); } };
+  const readable = await loadSnapshot("./events.json", readPlaces, {
+    storage, fetcher: async () => Response.json({ version: 1, events: [] }),
+  });
+  assert.deepEqual(readable.entries, []);
+  assert.equal(readable.cached, false);
+  await assert.rejects(loadSnapshot("./events.json", readPlaces, {
+    storage, fetcher: async () => new Response(null, { status: 503 }),
+  }));
+});
+
+test("офлайн-оболочка содержит текущие версии модулей и стилей карты", async () => {
+  const fromMap = (file) => readFile(new URL(`../web/newsroom/map/${file}`, import.meta.url), "utf8");
+  const [worker, ...sources] = await Promise.all(
+    ["offline-worker.js", "index.html", "app.js", "places.js"].map(fromMap),
+  );
+  for (const source of sources) {
+    for (const [asset] of source.matchAll(/[\w-]+\.(?:js|css)\?v=\d+/g)) {
+      assert.ok(worker.includes(`"./${asset}"`), asset);
+    }
+  }
+  assert.ok(!worker.includes("tile.openstreetmap.org"));
+  assert.ok(!worker.includes("telegram.org"));
+});
 
 test("фильтр текущих работ оставляет только район со своим активным графиком", () => {
   const first = { starts_at: "2026-11-24T08:00:00+01:00", ends_at: "2026-11-24T15:00:00+01:00" };
@@ -255,7 +313,8 @@ test("ссылка на событие показывает обе трассы 
   const places = setupPlaces({
     map, mobile: { matches: true, addEventListener() {} }, animate: false, byId, make,
     link: (_url, title) => make("a", "", title),
-    readJSON: async () => ({ version: 1, events: [race] }), onSync() {},
+    loadSnapshot: async (_path, decode) => ({ entries: decode({ version: 1, events: [race] }), cached: false }),
+    onSync() {},
   });
   places.enter(roadId);
   await new Promise(setImmediate);

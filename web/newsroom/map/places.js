@@ -3,6 +3,7 @@ import {
   placeKinds, placeOnDay, placeOptionLabel, placeStatus, readPlaces, shareLink, straightLineDistance, updateStamp,
 } from "./core.js?v=16";
 import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
+import { snapshotNotice } from "./snapshots.js?v=1";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 const agendaDate = new Intl.DateTimeFormat("ru", { timeZone: "UTC", day: "numeric", month: "long" });
@@ -64,7 +65,7 @@ function requestPosition(telegram) {
   });
 }
 
-export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, readJSON, onSync }) {
+export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, loadSnapshot, onSync }) {
   const list = byId("places-list");
   const detail = byId("place-detail");
   const count = byId("places-count");
@@ -321,7 +322,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     renderDetail(selected, now);
     renderCourses(selected);
     const message = state.failed
-      ? state.loaded ? "Афиша не обновилась. Показана предыдущая версия." : "Афиша не загрузилась. Попробуйте обновить."
+      ? state.loaded ? snapshotNotice(state.stamp) : "Афиша недоступна. Повторите загрузку при подключении."
       : !state.loaded ? "Загружаем события."
         : state.pending ? "Событие из ссылки пока отсутствует в афише."
           : !entries.length ? state.day ? "На этот день событий пока нет." : "В афише пока нет предстоящих событий."
@@ -390,11 +391,11 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     state.loading = true;
     if (state.enabled) onSync(state);
     try {
-      const data = await readJSON("./events.json", { cache: "no-cache" });
-      state.entries = readPlaces(data);
-      state.stamp = updateStamp(data.generated_at);
+      const { entries, generatedAt, cached } = await loadSnapshot("./events.json", readPlaces);
+      state.entries = entries;
+      state.stamp = updateStamp(generatedAt);
       state.loaded = true;
-      state.failed = false;
+      state.failed = cached;
       if (!state.enabled) updateAgendaCount(Date.now());
     } catch {
       state.failed = true;
