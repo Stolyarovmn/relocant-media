@@ -3,6 +3,7 @@
 import configparser
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,11 @@ def _chain():
     return workflow()["jobs"]["chain"]
 
 
+def retry_workflow():
+    path = WORKFLOW.with_name("editorial-retry.yml")
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
 def chain_enabled(*, event, mode="", result="success", enabled=True, branch="main"):
     """Evaluate the actual job gate with bounded literal contexts, without a runner."""
     gate = _chain()["if"]
@@ -129,8 +135,10 @@ def test_chain_survives_a_failed_cycle_but_backs_off():
     assert "always()" in chain["if"]
     assert "needs.cycle.result == 'failure'" in chain["if"]
     assert "needs.cycle.result == 'cancelled'" not in chain["if"]
-    delay = chain["steps"][0]["env"]["CHAIN_DELAY_SECONDS"]
-    assert "needs.cycle.result == 'success'" in delay and "'120'" in delay and "'600'" in delay
+    delay = retry_workflow()["jobs"]["retry"]["steps"][-2]["env"]["CHAIN_DELAY_SECONDS"]
+    assert delay == (
+        "${{ inputs.result == 'success' && '120' || steps.failure-delay.outputs.seconds || '600' }}"
+    )
 
 
 def test_chain_books_the_next_cycle_only_after_a_finished_main_cycle():
@@ -204,24 +212,63 @@ def test_published_correction_is_manual_main_only_and_shares_state_lock():
     assert not any("uses" in step and "upload-" in step["uses"] for step in steps)
 
 
-def _run_chain(tmp_path, queued):
-    script = next(step for step in _chain()["steps"])["run"]
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(parents=True)
-    calls = tmp_path / "calls"
-    stub = ["#!/bin/sh", 'echo "$@" >> "$CALLS"', '[ "$1" = run ] && echo "$QUEUED"', "exit 0", ""]
-    (bin_dir / "gh").write_text(chr(10).join(stub), encoding="utf-8")
-    (bin_dir / "gh").chmod(0o755)
-    subprocess.run(["bash", "-eu", "-c", script], check=True, env={
-        **os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "CALLS": str(calls),
-        "QUEUED": str(queued), "CHAIN_DELAY_SECONDS": "0",
-    })
-    return calls.read_text().splitlines()
+@pytest.mark.parametrize("result", ["success", "failure"])
+def test_chain_books_the_retry_without_waiting_in_the_writer_queue(monkeypatch, result):
+    step = _chain()["steps"][0]
+    assert step["shell"] == "python" and "sleep" not in step["run"]
+    monkeypatch.setenv("GH_REPO", "Stolyarovmn/relocant-media")
+    monkeypatch.setenv("CYCLE_RESULT", result)
+    monkeypatch.setenv("CYCLE_SHA", "a" * 40)
+    monkeypatch.setenv("CYCLE_RUN_ID", "123")
+    commands = []
+    monkeypatch.setattr(subprocess, "run", lambda args, *, check: commands.append(args))
+    exec(step["run"], {})
+    assert commands == [[
+        "gh", "workflow", "run", "editorial-retry.yml", "-R", "Stolyarovmn/relocant-media",
+        "--ref", "main", "-f", f"result={result}", "-f", f"source_sha={'a' * 40}",
+        "-f", "source_run_id=123",
+    ]]
 
 
-def test_chain_books_the_next_cycle_even_when_a_cron_run_is_already_waiting(tmp_path):
-    """The concurrency group keeps one pending run, so booking again can never pile up;
-    a waiting cron run is a normal moment of every cycle and must not break the chain."""
-    for queued in (0, 1, 3):
-        calls = _run_chain(tmp_path / f"queued{queued}", queued)
-        assert calls[-1] == "workflow run editorial-actions.yml --ref main -f mode=auto"
+def test_retry_has_its_own_queue_and_cancels_only_previous_waits():
+    data = retry_workflow()
+    assert set(data["on"]) == {"workflow_dispatch"}
+    assert data["permissions"] == {}
+    job = data["jobs"]["retry"]
+    assert job["concurrency"] == {"group": "editorial-retry-clock", "cancel-in-progress": "true"}
+    assert job["permissions"] == {"actions": "write", "contents": "read"}
+    assert "inputs.source_sha == github.sha" in job["if"]
+    assert "refs/heads/main" in job["if"]
+    assert "vars.ACTIONS_CHAIN_ENABLED == 'true'" in job["if"]
+    checkout, detect, *_ = job["steps"]
+    assert checkout["with"]["persist-credentials"] == "false"
+    assert checkout["if"] == detect["if"]
+    assert detect["if"] == "inputs.result == 'failure' && inputs.source_run_id != ''"
+    assert checkout["continue-on-error"] == detect["continue-on-error"] == "true"
+
+
+@pytest.mark.parametrize("advanced", [False, True])
+@pytest.mark.parametrize("delay", [120, 600, 1200, 1800])
+def test_retry_waits_and_resumes_only_the_current_version(monkeypatch, delay, advanced):
+    wait, launch = retry_workflow()["jobs"]["retry"]["steps"][-2:]
+    monkeypatch.setenv("CHAIN_DELAY_SECONDS", str(delay))
+    monkeypatch.setenv("GH_REPO", "Stolyarovmn/relocant-media")
+    monkeypatch.setenv("GITHUB_SHA", "a" * 40)
+    timeline = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: timeline.append(("sleep", seconds)))
+
+    def read_head(args, *, text):
+        timeline.append(("read", args))
+        return ("b" if advanced else "a") * 40 + "\n"
+
+    monkeypatch.setattr(subprocess, "check_output", read_head)
+    monkeypatch.setattr(subprocess, "run", lambda args, *, check: timeline.append(("run", args)))
+    exec(wait["run"], {})
+    exec(launch["run"], {})
+    assert timeline[:2] == [("sleep", delay), ("read", [
+        "gh", "api", "repos/Stolyarovmn/relocant-media/git/ref/heads/main", "--jq", ".object.sha",
+    ])]
+    assert timeline[2:] == ([] if advanced else [("run", [
+        "gh", "workflow", "run", "editorial-actions.yml", "-R", "Stolyarovmn/relocant-media",
+        "--ref", "main", "-f", "mode=auto",
+    ])])

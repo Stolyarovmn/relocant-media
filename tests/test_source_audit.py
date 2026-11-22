@@ -6,11 +6,13 @@ from typing import Any
 import httpx
 import pytest
 
+from relocant_media.collectors.rhmz_forecast import FORECAST_URL, WARNING_URL
 from relocant_media.ops import source_audit
 from relocant_media.ops.source_audit import (
     render_source_health_markdown,
     source_health_exit_code,
 )
+from relocant_media.sources.registry import load_source_registry
 
 
 def _result(
@@ -89,7 +91,7 @@ def test_render_source_health_markdown_exposes_degraded_sources() -> None:
             "attempts": 3,
         },
         {"id": "broken", "status": "error", "error_type": "ValueError"},
-        {"id": "future", "status": "planned"},
+        {"id": "future", "status": "planned", "inactive_reason": "Ждём официальный RSS."},
     ]
 
     rendered = render_source_health_markdown(result)
@@ -100,7 +102,8 @@ def test_render_source_health_markdown_exposes_degraded_sources() -> None:
     assert "| partial | partial | 1 | item_failures=1 |" in rendered
     assert "| network | transport_error | - | ConnectError after 3 attempts |" in rendered
     assert "| broken | error | - | ValueError |" in rendered
-    assert "future" not in rendered
+    assert "| future |" not in rendered
+    assert "- planned `future` — Ждём официальный RSS." in rendered
 
 
 def _audit_with_response(monkeypatch, source_id, handler):
@@ -112,6 +115,86 @@ def _audit_with_response(monkeypatch, source_id, handler):
         Path("cities/belgrade/sources"), online=True, source_ids=(source_id,),
     ))
     return report["sources"][0]
+
+
+def test_weather_sources_are_visible_in_audit_without_changing_news_counts(monkeypatch):
+    client = httpx.AsyncClient
+
+    def respond(request):
+        if str(request.url) == FORECAST_URL:
+            return httpx.Response(503)
+        if str(request.url) == WARNING_URL:
+            return httpx.Response(200, text="<html>Changed response</html>")
+        assert "wp-json/wp/v2/posts" in request.url.path
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(source_audit.httpx, "AsyncClient", lambda **kwargs: client(
+        transport=httpx.MockTransport(respond), **kwargs,
+    ))
+    report = asyncio.run(source_audit.audit_sources(
+        Path("cities/belgrade/sources"), online=True, source_ids=("bvk_outage_news",),
+        check_belgrade_weather=True,
+    ))
+    assert report["active_count"] == 1 and report["error_count"] == 0
+    assert report["weather_sources"] == {
+        "rhmz_forecast": "http_error", "meteoalarm": "invalid_payload",
+    }
+    summary = render_source_health_markdown(report)
+    assert "РХМЗ: `http_error`" in summary
+    assert "MeteoAlarm: `invalid_payload`" in summary
+
+
+def test_discovery_audit_marks_unreadable_feed_without_counting_it_as_news(monkeypatch):
+    client = httpx.AsyncClient
+
+    def respond(request):
+        if request.url.host == "www.rts.rs":
+            return httpx.Response(200, text="<html>Maintenance</html>")
+        assert "wp-json/wp/v2/posts" in request.url.path
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(source_audit.httpx, "AsyncClient", lambda **kwargs: client(
+        transport=httpx.MockTransport(respond), **kwargs,
+    ))
+    report = asyncio.run(source_audit.audit_sources(
+        Path("cities/belgrade/sources"), online=True, source_ids=("bvk_outage_news",),
+        check_news_discovery=True,
+    ))
+    assert report["active_count"] == 1 and report["error_count"] == 0
+    assert report["news_discovery_feeds"] == [{
+        "source_id": "rts_news", "url": "https://www.rts.rs/vesti/rss.html",
+        "item_failures": [], "status": "error", "error_type": "ValueError",
+    }]
+    assert "| rts_news | error | - | 0 |" in render_source_health_markdown(report)
+
+
+def test_renderer_keeps_prolonged_silence_separate_from_failures(monkeypatch, tmp_path):
+    client = httpx.AsyncClient
+    monkeypatch.setattr(source_audit.httpx, "AsyncClient", lambda **kwargs: client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=[])),
+        **kwargs,
+    ))
+    now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(source_audit, "datetime", Clock)
+    for _ in range(15):
+        report = asyncio.run(source_audit.audit_sources(
+            Path("cities/belgrade/sources"), online=True,
+            source_ids=("bvk_outage_news",), silence_state=tmp_path / "state.json",
+        ))
+        now += timedelta(days=1)
+
+    assert report["silence_history_saved"] is True
+    assert report["partial_count"] == 1
+    assert report["error_count"] == 0
+    assert report["sources"][0]["empty_reason"] == "empty_index"
+    assert "prolonged_silence, empty_index, тишина 336 ч" in render_source_health_markdown(report)
+    assert source_health_exit_code(report, fail_on_error=True) == 0
 
 
 @pytest.mark.parametrize(("scenario", "status"), [
@@ -140,6 +223,8 @@ def test_aviation_health_distinguishes_broken_and_old_articles(monkeypatch, scen
     assert row["status"] == status
     if scenario == "article_changed":
         assert row["item_failures"][0]["url"] == article
+    if scenario == "old_article":
+        assert row["empty_reason"] == "empty_fresh"
 
 
 @pytest.mark.parametrize(("scenario", "status"), [
@@ -178,3 +263,78 @@ def test_water_source_keeps_valid_notices_and_reports_errors(monkeypatch, scenar
         assert [(failure["url"], failure["error_type"]) for failure in row["item_failures"]] == [
             (broken["link"], "ValueError"),
         ]
+    else:
+        assert row["empty_reason"] == "empty_index"
+
+
+@pytest.mark.parametrize(("row_html", "status"), [
+    ("", "empty"),
+    ("<tr><td>Земун</td><td>08:30 - 14:30</td><td>Улица 5</td></tr>", "empty"),
+    ("<tr><td>Земун</td><td>08:30 - 14:30</td><td></td></tr>", "error"),
+    ("<tr><td>Земун</td><td>08:30 - 14:30</td><td>Улица 5</td></tr>"
+     "<tr><td>Врачар</td><td>?</td><td>Улица 3</td></tr>", "partial"),
+])
+def test_eds_health_distinguishes_empty_table_from_dropped_rows(monkeypatch, row_html, status):
+    def handler(request):
+        html = (
+            "Планирана искључења за датум: 2026-11-24"
+            "<table><tr><td>Navigation</td></tr></table>"
+            "<table><tr><th>Општина</th><th>Време</th><th>Улице</th></tr>"
+            f"{row_html}</table>"
+        )
+        return httpx.Response(200, text=html, request=request)
+
+    row = _audit_with_response(monkeypatch, "eds_belgrade_outages_today", handler)
+    assert row["status"] == status
+    if status == "empty":
+        assert row["empty_reason"] == ("publication_date_unknown" if row_html else "empty_index")
+        assert row["item_failures"] == []
+    else:
+        assert len(row["item_failures"]) == 1
+        assert row["item_failures"][0]["url"] == row["url"]
+        assert row["item_failures"][0]["error_message"].startswith("invalid EDS schedule row ")
+    if status == "partial":
+        assert row["fetched_items"] == 1
+
+
+@pytest.mark.parametrize(("second_body", "status"), [
+    ("", "error"),
+    ("Због планираних радова на водоводу потрошачи ће остати без воде.", "partial"),
+])
+def test_bvk_planned_works_health_reports_missing_notice_body(monkeypatch, second_body, status):
+    def handler(request):
+        html = (
+            "<h1>Планирани радови</h1>"
+            "<h2>24.11.2026. Планирани радови у Вождовцу</h2>"
+            "<h2>24.11.2026. Планирани радови на Врачару</h2>"
+            f"<p>{second_body}</p><h3>Инфо</h3>"
+        )
+        return httpx.Response(200, text=html, request=request)
+
+    row = _audit_with_response(monkeypatch, "bvk_planned_works", handler)
+    assert row["status"] == status
+    assert len(row["item_failures"]) == (1 if second_body else 2)
+    if status == "partial":
+        assert row["fetched_items"] == 1
+
+
+def test_every_non_active_source_explains_why_it_is_not_collected():
+    for source in load_source_registry(Path("cities/belgrade/sources")):
+        if source.extraction.status != "active":
+            assert source.extraction.inactive_reason, source.id
+
+
+@pytest.mark.asyncio
+async def test_disabled_sources_are_reported_with_reason_and_not_counted_active():
+    result = await source_audit.audit_sources(
+        Path("cities/belgrade/sources"), online=False,
+        source_ids=("city_beograd", "guide_welcome_serbia_residence", "bvk_outage_news"))
+    rows = {row["id"]: row for row in result["sources"]}
+    assert rows["city_beograd"]["status"] == "disabled"
+    assert "city_beograd_news" in rows["city_beograd"]["inactive_reason"]
+    assert "welcome_serbia_temporary_residence" in (
+        rows["guide_welcome_serbia_residence"]["inactive_reason"])
+    assert result["disabled_count"] == 2 and result["active_count"] == 1
+    summary = render_source_health_markdown(result)
+    assert "- disabled `city_beograd` — Перекрыт city_beograd_news" in summary
+    assert "| city_beograd |" not in summary

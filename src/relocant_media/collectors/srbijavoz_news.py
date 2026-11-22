@@ -176,7 +176,7 @@ def _parse_iso_datetime(value: str) -> datetime:
     return parsed.astimezone(BELGRADE_TZ)
 
 
-def _published_at(soup: BeautifulSoup) -> datetime:
+def _publication_time(soup: BeautifulSoup) -> tuple[datetime, str]:
     meta_values: set[str] = set()
     for meta in soup.find_all("meta", attrs={"property": "article:published_time"}):
         if not isinstance(meta, Tag):
@@ -187,7 +187,7 @@ def _published_at(soup: BeautifulSoup) -> datetime:
     if len(meta_values) > 1:
         raise SrbijavozExtractionError("ambiguous article publication timestamp")
     if meta_values:
-        return _parse_iso_datetime(meta_values.pop())
+        return _parse_iso_datetime(meta_values.pop()), "instant"
 
     match = VISIBLE_DATE_RE.search(" ".join(soup.stripped_strings))
     if match is None:
@@ -201,7 +201,7 @@ def _published_at(soup: BeautifulSoup) -> datetime:
             month,
             int(match.group("day")),
             tzinfo=BELGRADE_TZ,
-        )
+        ), "day"
     except ValueError as error:
         raise SrbijavozExtractionError("invalid article publication date") from error
 
@@ -259,13 +259,15 @@ def parse_srbijavoz_article(html: str, source: SourceConfig, response_url: str) 
     if slug != response_slug:
         raise SrbijavozExtractionError("article canonical changed identity")
     title = _title(soup)
+    published_at, precision = _publication_time(soup)
     return RawItem(
         source_id=source.id,
         external_id=slug,
         url=canonical,
         title=title,
         body=_body(soup, title),
-        published_at=_published_at(soup),
+        published_at=published_at,
+        published_at_precision=precision,
         canonical_url=canonical,
         source_html=html,
     )

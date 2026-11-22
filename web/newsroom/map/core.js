@@ -1,7 +1,14 @@
 export const kinds = {
-  water: { label: "Вода", color: "#00669f" },
-  power: { label: "Свет", color: "#6937b2" },
-  road: { label: "Дороги", color: "#8b202e" },
+  water: { label: "Вода", color: "#00669f", night: "#56b5ed", icon: "💧" },
+  power: { label: "Свет", color: "#6937b2", night: "#bf9aff", icon: "⚡" },
+  road: { label: "Дороги", color: "#8b202e", night: "#fb808b", icon: "⛔" },
+};
+
+export const placeKinds = {
+  music: { label: "Музыка", icon: "♫" },
+  exhibition: { label: "Выставки", icon: "▣" },
+  sport: { label: "Спорт", icon: "🏅" },
+  other: { label: "События", icon: "★" },
 };
 
 const eventId = /^event_[a-f0-9]{20}$/;
@@ -13,6 +20,23 @@ const hour = new Intl.DateTimeFormat("ru", {
 const day = new Intl.DateTimeFormat("ru", {
   timeZone: "Europe/Belgrade", day: "numeric", month: "short", year: "numeric",
 });
+const localDate = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Belgrade", year: "numeric", month: "2-digit", day: "2-digit",
+});
+const localHour = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Belgrade", hour: "2-digit", hourCycle: "h23",
+});
+
+export function belgradeDate(instant) {
+  const parts = localDate.formatToParts(instant);
+  return ["year", "month", "day"].map((type) => parts.find((part) => part.type === type).value).join("-");
+}
+
+export function mapTheme(preference, now = Date.now()) {
+  if (preference === "dark" || preference === "light") return preference;
+  const hour = Number(localHour.format(now));
+  return hour >= 7 && hour < 19 ? "light" : "dark";
+}
 
 const cyrillic = {
   а: "a", б: "b", в: "v", г: "g", д: "d", ђ: "đ", е: "e", ё: "e", ж: "ž",
@@ -116,6 +140,25 @@ function dateOnly(value) {
   return result;
 }
 
+export function agendaDays(now, length = 7) {
+  const start = dateOnly(belgradeDate(now));
+  return Array.from({ length }, (_, index) => new Date(start + index * 86_400_000).toISOString().slice(0, 10));
+}
+
+export function placeOnDay(place, key) {
+  return !key || (belgradeDate(place.start) <= key
+    && belgradeDate(Number.isFinite(place.end) ? place.end - 1 : place.start) >= key);
+}
+
+export function placeCategory(place) {
+  const title = String(place.title).normalize("NFC").toLowerCase();
+  if (place.courses?.length) return "sport";
+  if (/выставк|изложб|экспозиц|exhibition|izložb|izlozb/.test(title)) return "exhibition";
+  if (/концерт|музык|джаз|кабаре|koncert|concert|jazz|muzi[čk]|музич/.test(title)) return "music";
+  if (/марафон|спорт|полумара|трка|maraton|\bsport/.test(title)) return "sport";
+  return "other";
+}
+
 function readWindow(window) {
   const start = parseTime(window?.starts_at);
   const end = parseTime(window?.ends_at);
@@ -179,7 +222,7 @@ export function readPlaces(document) {
       scheduleNote: textValue(item.schedule_note), venueNote: textValue(item.venue_note), lat, lon,
       courses: paidPlace ? [] : readPlaceCourses(item.courses),
       paidPlace, sponsored: paidPlace || item.sponsored === true,
-      archived: item.archived === true, start, end, expires }];
+      archived: item.archived === true, published: parseTime(item.published_at), start, end, expires }];
   });
 }
 
@@ -313,27 +356,54 @@ export function unexpired(window, now, archive = false) {
   return archive || !window || now < window.end;
 }
 
+export function incidentInPeriod(incident, now, hours = null) {
+  if (hours === null) return incident;
+  if (incident.archived) return null;
+  const until = now + hours * 3_600_000;
+  const overlaps = ({ start, end }) => Number.isFinite(start) && start <= until
+    && (end === null ? start > now : end > now);
+  const windows = incident.windows.filter(overlaps);
+  if (incident.windows.length ? !windows.length : !overlaps(incident)) return null;
+  const matches = (window) => !window || overlaps(window);
+  const inPeriod = (entries) => entries.filter(({ window }) => matches(window));
+  return {
+    ...incident,
+    windows,
+    points: incident.points.filter(({ address }) => matches(address?.window)),
+    lines: inPeriod(incident.lines),
+    areas: incident.areas.filter(({ window, address }) => matches(window || address?.window)),
+    addresses: inPeriod(incident.addresses),
+    ranges: inPeriod(incident.ranges),
+    waterDistricts: inPeriod(incident.waterDistricts),
+    settlements: inPeriod(incident.settlements),
+  };
+}
+
 export function visibleMapLines(incident, now, archive = false) {
   const fallback = incident.end === null ? null : incident;
   return incident.lines.filter(({ window }) => unexpired(window || fallback, now, archive));
 }
 
-export function nextTransition(incidents, now) {
+export function nextTransition(incidents, now, hours = 0) {
   let closest = Infinity;
   const consider = (value) => {
     if (value !== null && value > now && value < closest) closest = value;
   };
+  const considerStart = (value) => {
+    consider(value);
+    if (hours && value !== null) consider(value - hours * 3_600_000);
+  };
   for (const incident of incidents) {
     if (incident.archived) continue;
-    consider(incident.start);
+    considerStart(incident.start);
     consider(incident.end);
     for (const window of incident.windows) {
-      consider(window.start);
+      considerStart(window.start);
       consider(window.end);
     }
     for (const { window } of incident.lines) {
       if (!window) continue;
-      consider(window.start);
+      considerStart(window.start);
       consider(window.end);
     }
   }

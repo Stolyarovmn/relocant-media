@@ -138,7 +138,10 @@ def _batch_state(
 def validate_batch_handoff(run: SchedulerRun | None, *, now: datetime) -> None:
     """Проверить исходный контракт и неизменяемый срок, включая поздний полный пакет."""
     if _batch_state(run, _utc(now)) is None:
-        raise FallbackValidationError("Исходный сбой пакетного отбора больше не подтверждён")
+        raise FallbackValidationError(
+            "Исходный сбой пакетного отбора больше не подтверждён",
+            code="primary_failure_unconfirmed",
+        )
 
 
 def _brief(
@@ -276,20 +279,29 @@ def validate_batch_rank(
     request = _BatchRequest.model_validate_json(_bounded_json(batch_request))
     rank = _BatchRank.model_validate_json(_bounded_json(batch_result))
     if rank.request_sha256 != _digest(batch_request):
-        raise FallbackValidationError("Выбор GPT не соответствует исходной пачке")
+        raise FallbackValidationError(
+            "Выбор GPT не соответствует исходной пачке", code="batch_request_mismatch",
+        )
     if not timedelta() <= now - request.created_at <= REQUEST_TTL:
-        raise FallbackValidationError("Запрос резервного отбора просрочен или датирован будущим")
+        raise FallbackValidationError(
+            "Запрос резервного отбора просрочен или датирован будущим", code="request_expired",
+        )
     profile = load_city_profile("belgrade")
     if (
         request.profile_sha256 != profile.sha256
         or batch_request["city_profile"] != profile.model_dump(mode="json")
     ):
-        raise FallbackValidationError("Профиль города изменился после запроса")
+        raise FallbackValidationError(
+            "Профиль города изменился после запроса", code="profile_changed",
+        )
     with session.no_autoflush:
         run = session.get(SchedulerRun, request.scheduler_run_id, populate_existing=True)
         state = _batch_state(run, now)
         if run is None or state is None or run.finished_at is None:
-            raise FallbackValidationError("Исходный сбой пакетного отбора больше не подтверждён")
+            raise FallbackValidationError(
+                "Исходный сбой пакетного отбора больше не подтверждён",
+                code="primary_failure_unconfirmed",
+            )
         details, candidates, slots = state
         briefs = {brief.raw_item_id: brief.model_dump(mode="json") for brief in request.candidates}
         selected = rank.selected_ids
@@ -302,7 +314,9 @@ def validate_batch_rank(
             or len(set(selected)) != len(selected)
             or not set(selected).issubset(briefs)
         ):
-            raise FallbackValidationError("Выбор GPT выходит за пределы исходной пачки")
+            raise FallbackValidationError(
+                "Выбор GPT выходит за пределы исходной пачки", code="batch_selection_invalid",
+            )
         if details["status"] == "gpt_ranked":
             evidence = {str(raw_id): briefs[raw_id]["evidence_sha256"] for raw_id in selected}
             if (
@@ -311,7 +325,9 @@ def validate_batch_rank(
                 or details["gpt_request_sha256"] != rank.request_sha256
                 or details["gpt_evidence_sha256"] != evidence
             ):
-                raise FallbackValidationError("Для цикла уже принят другой порядок GPT")
+                raise FallbackValidationError(
+                    "Для цикла уже принят другой порядок GPT", code="batch_order_conflict",
+                )
             for raw_id in selected:
                 if for_export and is_terminal_blocked(session, raw_id, now=now):
                     continue
@@ -320,14 +336,18 @@ def validate_batch_rank(
             # каждый ещё не обработанный материал с его исходным снимком.
             return run, selected
         if any(is_terminal_blocked(session, raw_id, now=now) for raw_id in selected):
-            raise FallbackValidationError("Выбранный материал закрыт или срок обработки истёк")
+            raise FallbackValidationError(
+                "Выбранный материал закрыт или срок обработки истёк", code="material_closed",
+            )
         registry = _registry()
         canonical = _briefs(
             session, candidates, now=request.created_at, profile=profile, registry=registry,
         )
         current = _briefs(session, selected, now=now, profile=profile, registry=registry)
         if briefs != canonical or any(current.get(raw_id) != briefs[raw_id] for raw_id in selected):
-            raise FallbackValidationError("Сведения в резервной пачке изменились после её чтения")
+            raise FallbackValidationError(
+                "Сведения в резервной пачке изменились после её чтения", code="snapshot_changed",
+            )
         return run, selected
 
 
@@ -362,6 +382,11 @@ def build_ranked_request(
             "batch_result_sha256": _digest(batch_result),
             "candidates": candidates,
         }
+        from relocant_media.services.linked_updates import published_post_references
+
+        references = published_post_references(session, city=profile.city_id, now=now)
+        if references:
+            request["published_post_refs"] = references
         # Защищённые темы уже заняли часть исходного лимита. Если полный
         # разбор у Gemini тоже упал, дать их GPT вместе с выбранными темами.
         protected_ids = {

@@ -1,16 +1,44 @@
 import {
-  clusterMapPoints, incidentTimes, launchPlaces, placeCountdown, placeOptionLabel, placeStatus, readPlaces,
-  shareLink, straightLineDistance, updateStamp,
-} from "./core.js?v=14";
-import { calendarLink } from "./calendar.js?v=4";
+  agendaDays, belgradeDate, clusterMapPoints, incidentTimes, launchPlaces, placeCategory, placeCountdown,
+  placeKinds, placeOnDay, placeOptionLabel, placeStatus, readPlaces, shareLink, straightLineDistance, updateStamp,
+} from "./core.js?v=17";
+import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
+import { agendaFavorites } from "./favorites.js?v=1";
+import { snapshotNotice } from "./snapshots.js?v=1";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
+const agendaDate = new Intl.DateTimeFormat("ru", { timeZone: "UTC", day: "numeric", month: "long" });
+const agendaWeekday = new Intl.DateTimeFormat("ru", { timeZone: "UTC", weekday: "short" });
 const courseStyles = [
   { color: "#076342", weight: 7 },
   { color: "#5827a9", weight: 4, dashArray: "9 7" },
   { color: "#155a9a", weight: 4, dashArray: "3 6" },
   { color: "#9c3c02", weight: 4, dashArray: "12 5 3 5" },
 ];
+
+export function agendaVisit(getStorage = () => localStorage) {
+  const key = "relocant-agenda-viewed-at";
+  let previous = NaN;
+  let shownAt = NaN;
+  try {
+    previous = Date.parse(getStorage().getItem(key));
+  } catch { /* The agenda also works without device storage. */ }
+  return {
+    observe(generatedAt) {
+      const stamp = Date.parse(generatedAt);
+      if (!Number.isFinite(stamp) || stamp === shownAt) return;
+      shownAt = stamp;
+      try {
+        const storage = getStorage();
+        const saved = Date.parse(storage.getItem(key));
+        if (!Number.isFinite(saved) || stamp > saved) storage.setItem(key, generatedAt);
+      } catch { /* Keep the current visit in memory. */ }
+    },
+    hasNew(publishedAt) {
+      return Number.isFinite(publishedAt) && publishedAt > previous && publishedAt <= shownAt;
+    },
+  };
+}
 
 function distanceLabel(origin, place) {
   const meters = straightLineDistance(origin, place);
@@ -62,32 +90,89 @@ function requestPosition(telegram) {
   });
 }
 
-export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, readJSON, onSync }) {
+export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, loadSnapshot, onSync }) {
   const list = byId("places-list");
   const detail = byId("place-detail");
   const count = byId("places-count");
   const feedback = byId("places-feedback");
   const toggle = byId("toggle-places");
+  const favoritesToggle = byId("toggle-favorites");
+  const favoritesFeedback = byId("favorites-feedback");
   const body = byId("places-body");
+  const days = byId("places-days");
   const locate = byId("locate-places");
   const clearLocation = byId("clear-location");
   const locationStatus = byId("location-status");
   const leaflet = globalThis.L;
   const layer = map ? leaflet.layerGroup().addTo(map) : null;
   const courseLayer = map ? leaflet.layerGroup().addTo(map) : null;
+  const savedEvents = agendaFavorites(telegram);
   const state = {
     entries: [], selected: "", pending: "", group: "", enabled: false, loading: false,
-    loaded: false, failed: false, stamp: "", origin: null,
+    loaded: false, failed: false, stamp: "", origin: null, day: "",
+    favorites: new Set(), favoritesOnly: false, favoritesLoaded: false, favoritesLoading: false,
+    saving: false, visit: null, snapshotDate: null,
   };
   let clock;
   let retry;
   let attempts = 0;
 
-  function visiblePlaces(now) {
-    return state.entries.filter((place) => !state.group || place.group === state.group)
+  function visiblePlaces(now, day = state.day) {
+    return state.entries.filter((place) => !state.favoritesOnly || state.favorites.has(place.id))
+      .filter((place) => !state.group || place.group === state.group)
       .filter((place) => place.paidPlace
       ? placeStatus(place, now) === "active"
-      : place.id === state.selected || placeStatus(place, now) !== "closed");
+      : (place.id === state.selected || placeStatus(place, now) !== "closed") && placeOnDay(place, day));
+  }
+
+  function updateAgendaCount(now) {
+    byId("agenda-tab-count").textContent = state.loaded
+      ? String(state.entries.filter((place) => !place.paidPlace && placeStatus(place, now) !== "closed").length) : "";
+  }
+
+  function renderDays(now) {
+    const entries = visiblePlaces(now, "").filter((place) => !place.paidPlace && placeStatus(place, now) !== "closed");
+    const keys = agendaDays(now);
+    const later = new Set(entries.map((place) => belgradeDate(place.start)).filter((key) => key > keys.at(-1)));
+    const selected = state.day;
+    const scroll = days.scrollLeft;
+    const buildDay = (key) => {
+      const date = key ? Date.parse(`${key}T12:00:00Z`) : 0;
+      const button = make("button", "agenda-day");
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(key === selected));
+      const label = key ? agendaDate.format(date) : "Все дни";
+      const categories = key ? new Set(entries.filter((place) => placeOnDay(place, key)).map(placeCategory)) : new Set();
+      const tags = [...categories].map((kind) => placeKinds[kind].label.toLowerCase());
+      button.setAttribute("aria-label", tags.length ? `${label}. ${tags.join(", ")}` : label);
+      button.append(make("strong", "", key ? String(new Date(date).getUTCDate()) : "Все"),
+        make("small", "", key === keys[0] ? "сегодня" : key ? agendaWeekday.format(date) : "дни"));
+      const dots = make("span", "agenda-dots");
+      dots.setAttribute("aria-hidden", "true");
+      for (const kind of categories) {
+        const dot = make("i");
+        dot.dataset.category = kind;
+        dots.append(dot);
+      }
+      button.append(dots);
+      button.addEventListener("click", () => {
+        if (state.day === key) return;
+        state.day = key;
+        const open = state.entries.find((place) => place.id === state.selected);
+        if (open && !open.paidPlace && !placeOnDay(open, key)) state.selected = "";
+        map?.closePopup();
+        render();
+        if (document.activeElement === document.body) {
+          days.querySelector('[aria-pressed="true"]')?.focus({ preventScroll: true });
+        }
+      });
+      return button;
+    };
+    days.hidden = !state.loaded;
+    if (state.loaded) {
+      days.replaceChildren(...["", ...keys, ...[...later].sort()].map(buildDay));
+      days.scrollLeft = scroll;
+    }
   }
 
   function showList(open) {
@@ -106,6 +191,9 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     const when = make("span", "place-when", placeTimes(place));
     const venue = make("span", "place-venue", place.venue);
     const parts = place.paidPlace ? [venue] : [countdown, when, venue];
+    if (!place.paidPlace && placeStatus(place, now) !== "closed" && state.visit?.hasNew(place.published)) {
+      parts.unshift(make("span", "place-new", "Новое"));
+    }
     if (place.visitorHours) parts.push(make("span", "place-when", place.visitorHours));
     if (place.scheduleNote) parts.push(make("span", "place-when", place.scheduleNote));
     if (place.sponsored) parts.unshift(make("span", "place-ad", "★ Реклама"));
@@ -118,9 +206,59 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     button.type = "button";
     button.dataset.placeId = place.id;
     button.setAttribute("aria-pressed", String(place.id === state.selected));
-    button.append(make("strong", "", place.title), ...describe(place, now));
+    const kind = placeCategory(place);
+    const badge = make("span", "place-category", `${placeKinds[kind].icon} ${placeKinds[kind].label}`);
+    badge.dataset.category = kind;
+    button.append(...(place.paidPlace ? [] : [badge]), make("strong", "", place.title), ...describe(place, now));
+    if (state.favorites.has(place.id)) button.append(make("span", "place-saved", "★ В избранном"));
     button.addEventListener("click", () => openPlace(place, true));
     return button;
+  }
+
+  function setFavoritesFeedback(message) {
+    favoritesFeedback.textContent = message;
+    favoritesFeedback.hidden = !message;
+  }
+
+  async function loadFavorites() {
+    if (state.favoritesLoading || state.saving) return;
+    state.favoritesLoading = true;
+    try {
+      state.favorites = await savedEvents.read();
+      state.favoritesLoaded = true;
+      setFavoritesFeedback("");
+    } catch {
+      if (state.favoritesOnly) setFavoritesFeedback("Избранное недоступно. Попробуйте обновить карту.");
+    } finally {
+      state.favoritesLoading = false;
+      render();
+    }
+  }
+
+  async function changeFavorite(id, button) {
+    if (state.saving || state.favoritesLoading) return;
+    const saved = !state.favorites.has(id);
+    state.saving = true;
+    button.disabled = true;
+    try {
+      await savedEvents.write(id, saved);
+      if (saved) state.favorites.add(id);
+      else state.favorites.delete(id);
+      if (!saved && state.favoritesOnly && state.selected === id) {
+        state.selected = "";
+        showList(true);
+      }
+      setFavoritesFeedback(saved ? "Событие добавлено в избранное." : "Событие удалено из избранного.");
+    } catch {
+      setFavoritesFeedback("Не удалось изменить избранное. Попробуйте ещё раз.");
+    } finally {
+      state.saving = false;
+      if (state.enabled) {
+        const restoreFocus = document.activeElement === button;
+        render();
+        if (restoreFocus) (detail.querySelector(".place-favorite") || favoritesToggle).focus({ preventScroll: true });
+      }
+    }
   }
 
   function renderDetail(place, now) {
@@ -145,7 +283,11 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     const share = place.sponsored ? "" : shareLink(place.id, place.title, true);
     if (share) links.append(link(share, "Поделиться ↗"));
     const calendar = place.paidPlace || place.scheduleNote ? null : calendarLink(place, now);
-    if (calendar) links.append(calendar);
+    if (calendar) {
+      links.append(calendar);
+      const google = googleCalendarUrl(place, now);
+      if (google) links.append(link(google, "Google Календарь ↗"));
+    }
     detail.replaceChildren(close, make("h3", "", place.title), ...describe(place, now));
     if (place.address && place.address !== place.venue) detail.append(make("p", "place-address", place.address));
     if (place.venueNote) detail.append(make("p", "place-address", place.venueNote));
@@ -164,6 +306,16 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       }
       detail.append(legend);
     }
+    if (!place.paidPlace && state.favoritesLoaded && placeStatus(place, now) !== "closed") {
+      const saved = state.favorites.has(place.id);
+      const favorite = make("button", "place-favorite", saved ? "★ В избранном" : "☆ Сохранить");
+      favorite.type = "button";
+      favorite.disabled = state.saving || state.favoritesLoading;
+      favorite.setAttribute("aria-pressed", String(saved));
+      favorite.setAttribute("aria-label", saved ? "Удалить из избранного" : "Сохранить в избранное");
+      favorite.addEventListener("click", () => void changeFavorite(place.id, favorite));
+      detail.append(favorite);
+    }
     detail.append(links);
   }
 
@@ -180,22 +332,35 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     }
   }
 
-  function mark(places, zoom) {
+  function mark(places, zoom, now) {
     const [first] = places;
     const multiple = places.length > 1;
     const sponsored = !multiple && first.sponsored;
     const title = multiple ? `События рядом · ${places.length}`
       : sponsored ? `Реклама · ${first.title}` : first.title;
-    const badge = make("span", "place-pin-badge", multiple ? String(places.length) : "");
+    const kinds = new Set(places.map(placeCategory));
+    const kind = kinds.size === 1 ? kinds.values().next().value : "other";
+    const badge = make("span", "place-pin-badge");
     badge.setAttribute("aria-hidden", "true");
-    const active = places.some((place) => place.id === state.selected);
+    const symbols = make("span", "cluster-symbols", sponsored ? "★" : [...kinds].map((type) => placeKinds[type].icon).join(" "));
+    badge.append(symbols);
+    if (multiple) badge.append(make("b", "", String(places.length)));
+    const selected = places.some((place) => place.id === state.selected);
+    const planned = places.every((place) => placeStatus(place, now) === "planned");
+    const size = multiple ? 44 : 38;
     const icon = leaflet.divIcon({
-      className: `place-pin${multiple ? " place-pin-group" : ""}${active ? " place-pin-selected" : ""}${sponsored ? " place-pin-ad" : ""}`,
-      html: badge, iconSize: [38, 38], iconAnchor: [19, 19],
+      className: `place-pin${multiple ? " place-pin-group" : ""}${selected ? " place-pin-selected" : ""}${sponsored ? " place-pin-ad" : ""}`,
+      html: badge, iconSize: [size, size], iconAnchor: [size / 2, size / 2],
     });
     const location = [first.lat, first.lon];
     const marker = leaflet.marker(location, { icon, title, alt: title, riseOnHover: true });
-    marker.on("add", () => marker.getElement()?.setAttribute("aria-label", title));
+    marker.on("add", () => {
+      const element = marker.getElement();
+      if (!element) return;
+      element.setAttribute("aria-label", title);
+      element.dataset.category = kind;
+      if (planned) element.dataset.status = "planned";
+    });
     if (!multiple) {
       marker.on("click", () => openPlace(first));
     } else if (zoom < map.getMaxZoom()
@@ -226,13 +391,15 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     layer.clearLayers();
     if (!state.enabled) return;
     const zoom = map.getZoom();
+    const now = Date.now();
     const project = (coordinates) => map.project(coordinates, zoom);
-    for (const group of clusterMapPoints(visiblePlaces(Date.now()), project, 40)) mark(group, zoom);
+    for (const group of clusterMapPoints(visiblePlaces(now), project, 44)) mark(group, zoom, now);
   }
 
   function render() {
     if (!state.enabled) return;
     const now = Date.now();
+    if (state.day && state.day < belgradeDate(now)) state.day = "";
     const entries = visiblePlaces(now);
     entries.sort((a, b) => a.start - b.start);
     if (state.origin) {
@@ -240,15 +407,17 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       entries.sort((a, b) => distances.get(a.id) - distances.get(b.id));
     }
     count.textContent = state.loaded ? String(entries.length) : "";
+    favoritesToggle.setAttribute("aria-pressed", String(state.favoritesOnly));
+    updateAgendaCount(now);
     list.replaceChildren(...entries.map((place) => card(place, now)));
     const selected = entries.find((place) => place.id === state.selected);
     renderDetail(selected, now);
     renderCourses(selected);
     const message = state.failed
-      ? state.loaded ? "Афиша не обновилась. Показана предыдущая версия." : "Афиша не загрузилась. Попробуйте обновить."
+      ? state.loaded ? snapshotNotice(state.stamp) : "Афиша недоступна. Повторите загрузку при подключении."
       : !state.loaded ? "Загружаем события."
         : state.pending ? "Событие из ссылки пока отсутствует в афише."
-          : !entries.length ? "В афише пока нет предстоящих событий."
+          : !entries.length ? emptyAgendaMessage()
             : state.group ? `Площадок: ${new Set(entries.map((place) => `${place.lat},${place.lon}`)).size}. Выберите концерт в списке или на карте.` : "";
     feedback.textContent = message;
     if (state.group && !state.failed && !state.pending) {
@@ -257,12 +426,21 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       reset.addEventListener("click", () => {
         state.group = "";
         state.selected = "";
+        state.day = "";
         render();
       });
       feedback.append(document.createTextNode(" "), reset);
     }
     feedback.hidden = !message;
+    renderDays(now);
     renderMarkers();
+  }
+
+  function emptyAgendaMessage() {
+    if (!state.favoritesOnly) return state.day ? "На этот день событий пока нет." : "В афише пока нет предстоящих событий.";
+    if (state.favoritesLoading) return "Загружаем избранное.";
+    if (!state.favoritesLoaded) return "";
+    return state.day ? "На этот день сохранённых событий нет." : "Откройте событие и нажмите «Сохранить».";
   }
 
   function openPlace(place, fromList = false) {
@@ -295,7 +473,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     }
     clock = setTimeout(() => {
       const current = Date.now();
-      if (current >= next) render();
+      if (current >= next || belgradeDate(current) !== belgradeDate(now)) render();
       else {
         const entries = new Map(state.entries.map((place) => [place.id, place]));
         for (const node of byId("places").querySelectorAll(".place-countdown")) {
@@ -312,11 +490,13 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     state.loading = true;
     if (state.enabled) onSync(state);
     try {
-      const data = await readJSON("./events.json", { cache: "no-cache" });
-      state.entries = readPlaces(data);
-      state.stamp = updateStamp(data.generated_at);
+      const { entries, generatedAt, cached } = await loadSnapshot("./events.json", readPlaces);
+      state.entries = entries;
+      state.snapshotDate = generatedAt;
+      state.stamp = updateStamp(generatedAt);
       state.loaded = true;
-      state.failed = false;
+      state.failed = cached;
+      if (!state.enabled) updateAgendaCount(Date.now());
     } catch {
       state.failed = true;
     } finally {
@@ -330,6 +510,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   }
 
   function show() {
+    state.visit?.observe(state.snapshotDate);
     const selected = state.pending && state.entries.find((place) => place.id === state.pending);
     const group = launchPlaces(state.entries, state.pending);
     if (selected) {
@@ -382,6 +563,17 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     locate.focus({ preventScroll: true });
   });
   toggle.addEventListener("click", () => showList(body.hidden));
+  favoritesToggle.addEventListener("click", () => {
+    state.favoritesOnly = !state.favoritesOnly;
+    state.selected = "";
+    state.group = "";
+    state.day = "";
+    state.pending = "";
+    setFavoritesFeedback("");
+    showList(true);
+    if (state.favoritesOnly) void loadFavorites();
+    render();
+  });
   map?.on("zoomend", renderMarkers);
   mobile.addEventListener("change", () => showList(!mobile.matches));
   document.addEventListener("visibilitychange", () => {
@@ -392,11 +584,17 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   return {
     enter(id = "") {
       state.enabled = true;
+      state.visit ||= agendaVisit();
       state.group = "";
       state.selected = "";
-      if (id) state.pending = id;
+      if (id) {
+        state.pending = id;
+        state.day = "";
+        state.favoritesOnly = false;
+      }
       show();
       if (!state.loaded || state.pending) void load();
+      if (!state.favoritesLoaded) void loadFavorites();
     },
     leave() {
       state.enabled = false;
@@ -408,6 +606,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     refresh() {
       attempts = 0;
       void load();
+      if (state.enabled) void loadFavorites();
     },
   };
 }

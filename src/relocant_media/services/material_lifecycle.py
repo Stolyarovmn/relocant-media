@@ -888,6 +888,25 @@ def delivery_deadline(session: Session, raw_id: int) -> datetime | None:
         return None
 
 
+def hold_until_morning(session: Session, raw_id: int, *, now: datetime,
+                       deadline: datetime) -> bool:
+    """Продлить срок жизни готового несрочного материала до утреннего выпуска (#359).
+
+    Только для проверенного материала в состоянии ready/deliver и только вперёд.
+    Свежесть, источник и ревью перепроверяются в обычной доставке утром.
+    """
+    now = _now(now)
+    record = _refresh(session, raw_id, now)
+    data = record.details
+    if data.get("state") != "ready" or data.get("next_action") != "deliver":
+        return False
+    if _stamp(data["deadline_at"]) < deadline:
+        record.details = {**data, "deadline_at": deadline.isoformat(),
+                          "morning_hold": {"at": now.isoformat(),
+                                           "previous_deadline_at": data["deadline_at"]}}
+    return True
+
+
 def _read_record(session: Session, raw_id: int) -> SchedulerRun | None:
     raw = session.get(RawItem, raw_id)
     source = session.get(Source, raw.source_id) if raw else None

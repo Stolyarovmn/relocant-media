@@ -8,14 +8,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from relocant_media.collectors.telegram_topics import DEFAULT_CHANNELS_BY_CITY
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.ops.newsroom_merge import safe_ai_phase
 from relocant_media.ops.public_observations import public_coverage
 from relocant_media.scheduler.models import SchedulerRun
+from relocant_media.services.editorial_flow import editorial_flow
 from relocant_media.services.kpi import compute_kpi
 from relocant_media.services.newsroom_control import build_newsroom_inbox
 from relocant_media.sources.registry import load_source_registry
@@ -78,7 +81,9 @@ def catalog(root: Path, city: str) -> list[dict[str, Any]]:
     return list(rows.values())
 
 
-def city_snapshot(root: Path, city: str, session: Session | None) -> dict[str, Any]:
+def city_snapshot(
+    root: Path, city: str, session: Session | None, *, observed_at: datetime | None = None,
+) -> dict[str, Any]:
     result: dict[str, Any] = {
         "id": city, "name": CITIES[city], "sources": catalog(root, city),
         "runtime_status": "unavailable", "observed_at": None,
@@ -130,10 +135,18 @@ def city_snapshot(root: Path, city: str, session: Session | None) -> dict[str, A
                         )
                     })
         public_items.append(public)
-    result.update(runtime_status="available", observed_at=datetime.now(UTC).isoformat(),
+    observed = observed_at or datetime.now(UTC)
+    result.update(runtime_status="available", observed_at=observed.isoformat(),
                   counts=inbox["counts"], total_events=inbox["total_events"],
                   returned_events=inbox["returned_events"], items=public_items,
-                  kpi=compute_kpi(session, city, now=datetime.now(UTC)))
+                  kpi=compute_kpi(session, city, now=observed))
+    cities_root = root / "cities"
+    if (cities_root / city / "editorial.yaml").is_file():
+        profile = load_city_profile(city, cities_root=cities_root)
+        result["editorial_flow"] = editorial_flow(
+            session, city, {row["id"] for row in result["sources"]},
+            now=observed, zone=ZoneInfo(profile.timezone),
+        )
     result["runs"] = [
         {"id": run.id, "status": run.status, "started_at": iso(run.started_at),
          "finished_at": iso(run.finished_at), "error_type": run.error_type}
@@ -152,10 +165,14 @@ def city_snapshot(root: Path, city: str, session: Session | None) -> dict[str, A
     return result
 
 
-def snapshot(root: Path, session: Session | None = None) -> dict[str, Any]:
-    return {"schema_version": 1, "generated_at": datetime.now(UTC).isoformat(),
+def snapshot(
+    root: Path, session: Session | None = None, *, observed_at: datetime | None = None,
+) -> dict[str, Any]:
+    generated_at = datetime.now(UTC)
+    return {"schema_version": 1, "generated_at": generated_at.isoformat(),
             "mode": "public_read_only", "cities": [
-                city_snapshot(root, city, session) for city in CITIES],
+                city_snapshot(root, city, session, observed_at=observed_at or generated_at)
+                for city in CITIES],
             "limitations": ["Без текстов черновиков, предложки, контактов и секретов.",
                              "Jev shadow не принимает решения approve/reject.",
                              "Облачные ответы чата не попадают в БД автоматически."]}
@@ -170,6 +187,14 @@ def main() -> None:
     parser.add_argument("--run-directory", type=Path)
     parser.add_argument("--observed-at", help="snapshot observation time; never refresh old data")
     args = parser.parse_args()
+    observed = None
+    if args.observed_at:
+        try:
+            observed = datetime.fromisoformat(args.observed_at)
+        except ValueError:
+            parser.error("valid ISO observation time required")
+        if observed.tzinfo is None or observed > datetime.now(UTC):
+            parser.error("timezone-aware observation time not in the future required")
     if args.database:
         database = args.database.resolve()
         if not database.is_file():
@@ -178,18 +203,11 @@ def main() -> None:
         try:
             with Session(engine) as session:
                 session.execute(text("PRAGMA query_only=ON"))
-                payload = snapshot(args.root, session)
+                payload = snapshot(args.root, session, observed_at=observed)
         finally:
             engine.dispose()
     else:
-        payload = snapshot(args.root)
-    if args.observed_at:
-        observed = datetime.fromisoformat(args.observed_at)
-        if observed.tzinfo is None or observed > datetime.now(UTC):
-            parser.error("timezone-aware observation time not in the future required")
-        for city in payload["cities"]:
-            if city["runtime_status"] == "available":
-                city["observed_at"] = observed.isoformat()
+        payload = snapshot(args.root, observed_at=observed)
     if args.run_directory:
         report_path = args.run_directory / "server-report.json"
         manifest_path = args.run_directory / "manifest.json"

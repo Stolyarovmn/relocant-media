@@ -1,15 +1,164 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
-import { buildCalendar } from "../web/newsroom/map/calendar.js";
+import { buildCalendar, googleCalendarUrl } from "../web/newsroom/map/calendar.js";
 import {
-  addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
-  nextTransition, placeCountdown, placeOptionLabel, placeStatus,
+  addressHits, addressWindowText, agendaDays, belgradeDate, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
+  incidentInPeriod, incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
+  mapTheme, nextTransition, placeCategory, placeCountdown, placeOnDay, placeOptionLabel, placeStatus,
   pointsAtScale, readIncidents, readPlaces, searchAddresses, shareLink, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
-import { setupPlaces } from "../web/newsroom/map/places.js";
+import { agendaVisit, setupPlaces } from "../web/newsroom/map/places.js";
+import { agendaFavorites } from "../web/newsroom/map/favorites.js";
+import { corridorCaps, heatCells, heatOverview, layerView } from "../web/newsroom/map/layer-views.js";
+import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
+
+test("тепловой обзор сохраняет точную геометрию на крупном масштабе и при точном поиске", () => {
+  assert.equal(layerView("unrecognized"), "detail");
+  assert.equal(layerView("corridor"), "corridor");
+  assert.equal(layerView("heat"), "heat");
+  assert.equal(heatOverview("heat", 14, false), true);
+  assert.equal(heatOverview("heat", 15, false), false);
+  assert.equal(heatOverview("heat", 12, true), false);
+  assert.equal(heatOverview("detail", 12, false), false);
+});
+
+test("плотность считает объявления в ячейке и пропускает приблизительные ориентиры", () => {
+  const water = { id: "water", kind: "water" };
+  const power = { id: "power", kind: "power" };
+  const road = { id: "road", kind: "road" };
+  const project = ([lat, lon]) => ({ x: lon, y: lat });
+  const point = (lat, lon, incident, approximate = false) => ({ lat, lon, incident, approximate });
+  const result = heatCells([
+    point(22, 15, water), point(20, 30, water), point(22, 21, power), point(32, 19, road, true),
+    point(20, 80, water),
+  ], project, 64);
+  assert.deepEqual(result, [
+    { x: 32, y: 32, incidents: [water, power] },
+    { x: 96, y: 32, incidents: [water] },
+  ]);
+});
+
+test("концы участков берутся с исходной линии и скрываются, если знаки наложатся", () => {
+  const line = [[1, 1], [8, 20], [2, 24]];
+  const project = ([lat, lon]) => ({ x: lon, y: lat });
+  assert.deepEqual(corridorCaps(line, project), [[1, 1], [2, 24]]);
+  assert.deepEqual(corridorCaps(line, ([lat, lon]) => ({ x: lon / 2, y: lat / 2 })), []);
+});
+
+test("новые события отсчитываются от последней просмотренной версии афиши", () => {
+  const old = "2026-11-22T08:00:00Z";
+  const current = "2026-11-22T09:00:00Z";
+  const post = Date.parse("2026-11-22T08:30:00Z");
+  let saved = null;
+  const storage = () => ({ getItem: () => saved, setItem: (_key, value) => { saved = value; } });
+  const first = agendaVisit(storage);
+  first.observe(old);
+  assert.equal(first.hasNew(post), false);
+
+  const next = agendaVisit(storage);
+  next.observe(current);
+  assert.equal(next.hasNew(post), true);
+  assert.equal(next.hasNew(Date.parse(old)), false);
+  assert.equal(next.hasNew(Date.parse("2026-11-22T10:00:00Z")), false);
+  assert.equal(next.hasNew(null), false);
+  next.observe(old); // При сбое сети старый снимок не меняет отсчёт будущих посещений.
+  assert.equal(next.hasNew(post), false);
+  assert.equal(saved, current);
+
+  const again = agendaVisit(storage);
+  again.observe(current);
+  assert.equal(again.hasNew(post), false);
+});
+
+test("афиша остаётся доступной при запрете локального хранилища", () => {
+  const visit = agendaVisit(() => { throw new Error("Браузерное хранилище выключено"); });
+  visit.observe("2026-11-22T09:00:00Z");
+  assert.equal(visit.hasNew(Date.parse("2026-11-22T08:30:00Z")), false);
+});
+
+function favoritesTelegram(keys) {
+  return {
+    initData: "preview", isVersionAtLeast: () => true,
+    CloudStorage: {
+      getKeys: (done) => done(null, [...keys.keys()]),
+      setItem(key, value, done) { keys.set(key, value); done(null, true); },
+      removeItem: (key, done) => done(null, keys.delete(key)),
+    },
+  };
+}
+
+test("избранное в Telegram хранит отдельные ключи событий и подтверждает запись", async () => {
+  const keys = new Map([["another_preference", "1"]]);
+  const telegram = favoritesTelegram(keys);
+  const blockedLocal = () => { throw new Error("Браузерное хранилище выключено"); };
+  const firstSession = agendaFavorites(telegram, blockedLocal);
+  await firstSession.write("event_11111111111111111111", true);
+  const secondSession = agendaFavorites(telegram, blockedLocal);
+  await secondSession.write("event_22222222222222222222", true);
+  await firstSession.write("event_11111111111111111111", false);
+  assert.deepEqual([...await secondSession.read()], ["event_22222222222222222222"]);
+  assert.equal(keys.get("another_preference"), "1");
+  telegram.CloudStorage.setItem = (_key, _value, done) => done(null, false);
+  await assert.rejects(firstSession.write("event_11111111111111111111", true));
+});
+
+test("сайт вне Telegram сохраняет избранное в этом браузере", async () => {
+  const keys = new Map([["theme", "dark"]]);
+  const storage = {
+    get length() { return keys.size; },
+    key: (index) => [...keys.keys()][index],
+    setItem: (key, value) => keys.set(key, value),
+    removeItem: (key) => keys.delete(key),
+  };
+  const getStorage = () => storage;
+  const id = "event_11111111111111111111";
+  await agendaFavorites(undefined, getStorage).write(id, true);
+  assert.deepEqual([...await agendaFavorites(undefined, getStorage).read()], [id]);
+  await agendaFavorites(undefined, getStorage).write(id, false);
+  assert.deepEqual([...keys.keys()], ["theme"]);
+});
+
+test("the automatic theme changes at seven and nineteen in Belgrade", () => {
+  assert.equal(mapTheme("auto", Date.parse("2026-11-22T05:59:00Z")), "dark");
+  assert.equal(mapTheme("auto", Date.parse("2026-11-22T06:00:00Z")), "light");
+  assert.equal(mapTheme("auto", Date.parse("2026-07-22T17:00:00Z")), "dark");
+  assert.equal(mapTheme("light", Date.parse("2026-11-22T01:00:00Z")), "light");
+  assert.equal(mapTheme("dark", Date.parse("2026-11-22T12:00:00Z")), "dark");
+});
+
+test("agenda dates follow Belgrade midnight and include multiday events", () => {
+  const start = Date.parse("2026-10-24T22:30:00Z");
+  const end = Date.parse("2026-10-27T00:00:00+01:00");
+  assert.equal(belgradeDate(start), "2026-10-25");
+  assert.deepEqual(agendaDays(start, 3), ["2026-10-25", "2026-10-26", "2026-10-27"]);
+  assert.equal(placeOnDay({ start, end }, "2026-10-25"), true);
+  assert.equal(placeOnDay({ start, end }, "2026-10-26"), true);
+  assert.equal(placeOnDay({ start, end }, "2026-10-27"), false);
+  assert.equal(placeOnDay({ start, end: null }, "2026-10-25"), true);
+  assert.equal(placeOnDay({ start, end: null }, "2026-10-26"), false);
+  assert.equal(placeCategory({ title: "Koncert u Beogradu" }), "music");
+  assert.equal(placeCategory({ title: "Muzičko veče u Beogradu" }), "music");
+  assert.equal(placeCategory({ title: "Выставка в спортивном центре" }), "exhibition");
+  assert.equal(placeCategory({ title: "Beogradski polumaraton" }), "sport");
+});
+
+test("Google Calendar uses a verified end time and the Belgrade time zone", () => {
+  const item = { title: "Концерт & джаз", venue: "Дом культуры", address: "Beograd",
+    source: "https://example.rs/event", start: Date.parse("2026-12-01T19:30:00+01:00"),
+    end: Date.parse("2026-12-01T21:00:00+01:00") };
+  const now = Date.parse("2026-11-30T10:00:00Z");
+  const url = new URL(googleCalendarUrl(item, now));
+  assert.equal(url.origin, "https://calendar.google.com");
+  assert.equal(url.searchParams.get("text"), item.title);
+  assert.equal(url.searchParams.get("dates"), "20261201T183000Z/20261201T200000Z");
+  assert.equal(url.searchParams.get("stz"), "Europe/Belgrade");
+  assert.equal(url.searchParams.get("location"), "Дом культуры, Beograd");
+  assert.equal(googleCalendarUrl({ ...item, end: null }, now), "");
+  assert.equal(googleCalendarUrl({ ...item, scheduleNote: "Время уточняется" }, now), "");
+});
 
 const waterId = "event_0123456789abcdef1234";
 const roadId = "event_0123456789abcdef1235";
@@ -32,6 +181,95 @@ function incident(record = {}) {
     source_url: "https://www.beograd.rs/vesti/", ...record,
   }] })[0];
 }
+
+test("карта возвращает проверенный снимок после ошибки сети и повреждённого файла", async () => {
+  const responses = new Map();
+  const cache = {
+    match: async (url) => responses.get(url)?.clone(),
+    put: async (url, response) => responses.set(url, response.clone()),
+  };
+  const storage = { open: async () => cache };
+  const url = "./incidents.json";
+  const generated_at = "2026-11-22T07:00:00Z";
+  const data = { version: 1, generated_at, incidents: [] };
+  const online = await loadSnapshot(url, readIncidents, { storage, fetcher: async () => Response.json(data) });
+  assert.equal(online.cached, false);
+  assert.equal(online.generatedAt, generated_at);
+  for (const fetcher of [
+    async () => { throw new TypeError("network"); },
+    async () => Response.json({ version: 1, events: [] }),
+    async () => Response.json({ ...data, generated_at: "2026-11-21T07:00:00Z" }),
+  ]) {
+    const saved = await loadSnapshot(url, readIncidents, { storage, fetcher });
+    assert.equal(saved.cached, true);
+    assert.equal(saved.generatedAt, generated_at);
+  }
+  const recovered = await loadSnapshot(url, readIncidents, {
+    storage, fetcher: async () => Response.json({ ...data, generated_at: "2026-11-22T08:00:00Z" }),
+  });
+  assert.equal(recovered.cached, false);
+  assert.equal(recovered.generatedAt, "2026-11-22T08:00:00Z");
+  assert.equal(responses.size, 1);
+});
+
+test("кэш выключен в некоторых браузерах, свежие данные всё равно открываются", async () => {
+  const storage = { open: async () => { throw new Error("storage blocked"); } };
+  const readable = await loadSnapshot("./events.json", readPlaces, {
+    storage, fetcher: async () => Response.json({ version: 1, events: [] }),
+  });
+  assert.deepEqual(readable.entries, []);
+  assert.equal(readable.cached, false);
+  await assert.rejects(loadSnapshot("./events.json", readPlaces, {
+    storage, fetcher: async () => new Response(null, { status: 503 }),
+  }));
+});
+
+test("офлайн-оболочка содержит текущие версии модулей и стилей карты", async () => {
+  const fromMap = (file) => readFile(new URL(`../web/newsroom/map/${file}`, import.meta.url), "utf8");
+  const [worker, ...sources] = await Promise.all(
+    ["offline-worker.js", "index.html", "app.js", "places.js"].map(fromMap),
+  );
+  for (const source of sources) {
+    for (const [asset] of source.matchAll(/[\w-]+\.(?:js|css)\?v=\d+/g)) {
+      assert.ok(worker.includes(`"./${asset}"`), asset);
+    }
+  }
+  assert.ok(!worker.includes("tile.openstreetmap.org"));
+  assert.ok(!worker.includes("telegram.org"));
+});
+
+test("фильтр текущих работ оставляет только район со своим активным графиком", () => {
+  const first = { starts_at: "2026-11-24T08:00:00+01:00", ends_at: "2026-11-24T15:00:00+01:00" };
+  const second = { starts_at: first.starts_at, ends_at: "2026-11-24T16:00:00+01:00" };
+  const road = (window, label) => ({ ...window, label, coordinates: [[44.8, 20.4], [44.81, 20.4]] });
+  const item = incident({
+    starts_at: first.starts_at, ends_at: second.ends_at, windows: [first, second],
+    water_districts: [{ ...first, municipality: "Savski venac" }, { ...second, municipality: "Voždovac" }],
+    addresses: [{ ...first, street: "Fabrisova", number: "1" }, { ...second, street: "Brane Ćosića", number: "16" }],
+    lines: [road(first, "Fabrisova"), road(second, "Brane Ćosića")],
+  });
+  const now = Date.parse(first.ends_at);
+  const current = incidentInPeriod(item, now, 0);
+  assert.deepEqual(current.waterDistricts.map((district) => district.municipality), ["Voždovac"]);
+  assert.deepEqual(current.lines.map((line) => line.label), ["Brane Ćosića"]);
+  assert.deepEqual(current.addresses.map((address) => address.number), ["16"]);
+  assert.equal(incidentInPeriod(item, now).lines.length, 2);
+});
+
+test("фильтр периода учитывает будущие окна, точную границу срока и неизвестное время", () => {
+  const planned = incident({ starts_at: "2026-11-24T08:00:00+01:00", ends_at: "2026-11-24T16:00:00+01:00" });
+  const now = Date.parse("2026-11-23T07:00:00+01:00");
+  assert.equal(incidentInPeriod(planned, now, 0), null);
+  assert.equal(incidentInPeriod(planned, now, 24), null);
+  assert.ok(incidentInPeriod(planned, now, 168));
+  const boundary = nextTransition([planned], now, 24);
+  assert.equal(boundary, Date.parse("2026-11-23T08:00:00+01:00"));
+  assert.ok(incidentInPeriod(planned, boundary, 24));
+  assert.equal(incidentInPeriod(planned, Date.parse("2026-11-24T16:00:00+01:00"), 168), null);
+  const unknown = incident();
+  assert.equal(incidentInPeriod(unknown, now, 168), null);
+  assert.equal(incidentInPeriod(unknown, now), unknown);
+});
 
 test("открытие объявления по ссылке браузера и Telegram", () => {
   assert.equal(launchEvent(`?event=${waterId}`, roadId), waterId);
@@ -128,7 +366,7 @@ test("афиша нормализует обе трассы и сохраняе�
   ]) assert.deepEqual(readCourses(invalid), []);
 });
 
-test("ссылка на событие показывает обе трассы и легенду, закрытие убирает линии", async (t) => {
+test("ссылка на событие показывает трассы, а избранное фильтрует карту и список", async (t) => {
   function make(tag, className, textContent) {
     return {
       tag, className, textContent, children: [], style: {}, dataset: {}, events: {}, attributes: {},
@@ -161,7 +399,7 @@ test("ссылка на событие показывает обе трассы 
   const map = {
     on() {}, closePopup() {}, invalidateSize() {},
     getZoom() { return 12; },
-    project([lat, lon]) { return { x: lat, y: lon }; },
+    project([lat, lon]) { return { x: lat * 1200, y: lon * 1200 }; },
     fitBounds(points) { this.bounds = points; },
   };
   const savedLeaflet = globalThis.L;
@@ -180,11 +418,17 @@ test("ссылка на событие показывает обе трассы 
     if (!elements.has(id)) elements.set(id, make("div", id));
     return elements.get(id);
   };
+  const other = { ...race, id: "event_22222222222222222222", courses: [],
+    venue: { ...race.venue, latitude: 44.75 } };
+  const keys = new Map();
   const places = setupPlaces({
     map, mobile: { matches: true, addEventListener() {} }, animate: false, byId, make,
+    telegram: favoritesTelegram(keys),
     link: (_url, title) => make("a", "", title),
-    readJSON: async () => ({ version: 1, events: [race] }), onSync() {},
+    loadSnapshot: async (_path, decode) => ({ entries: decode({ version: 1, events: [race, other] }), cached: false }),
+    onSync() {},
   });
+  t.after(() => places.leave());
   places.enter(roadId);
   await new Promise(setImmediate);
 
@@ -205,6 +449,26 @@ test("ссылка на событие показывает обе трассы 
   assert.deepEqual(courses.layers, []);
   places.enter(roadId);
   assert.equal(courses.layers.length, 4);
+  const favoriteButton = () => detail.children.find((child) => child.className === "place-favorite");
+  assert.equal(favoriteButton().attributes["aria-pressed"], "false");
+  favoriteButton().events.click();
+  await new Promise(setImmediate);
+  assert.equal(favoriteButton().attributes["aria-pressed"], "true");
+  assert.equal(keys.size, 1);
+  byId("toggle-favorites").events.click();
+  await new Promise(setImmediate);
+  assert.deepEqual(byId("places-list").children.map((child) => child.dataset.placeId), [roadId]);
+  assert.equal(groups[0].layers.length, 1);
+
+  byId("places-list").children[0].events.click();
+  favoriteButton().events.click();
+  await new Promise(setImmediate);
+  assert.equal(keys.size, 0);
+  assert.equal(detail.hidden, true);
+  assert.deepEqual(byId("places-list").children, []);
+  assert.deepEqual(groups[0].layers, []);
+  places.enter(roadId);
+  assert.equal(byId("toggle-favorites").attributes["aria-pressed"], "false");
   places.leave();
   assert.deepEqual(courses.layers, []);
 });

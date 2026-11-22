@@ -6,13 +6,14 @@ import hashlib
 import re
 from collections import defaultdict
 from datetime import datetime
+from itertools import chain
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.base import ArticleBatchError, RawItem, article_failure
 from relocant_media.collectors.page_snapshot import normalize_visible_text
 from relocant_media.domain.dedup import normalize_text
 from relocant_media.sources.registry import SourceConfig
@@ -24,6 +25,7 @@ _DATE = re.compile(
 )
 _TIME = re.compile(r"^\d{2}:\d{2}\s*-\s*\d{2}:\d{2}$")
 _HEADER = ("општина", "време", "улице")
+_MAX_FAILURES = 20
 
 
 def _normalize_schedule_date(value: str) -> str:
@@ -61,8 +63,12 @@ def _internal_canonical_url(url: str, external_id: str) -> str:
 def _cells(row: Tag) -> list[str]:
     return [
         " ".join(cell.get_text(" ", strip=True).split())
-        for cell in row.find_all(["th", "td"])
+        for cell in row.find_all(["th", "td"], recursive=False)
     ]
+
+
+def _is_header(cells: list[str]) -> bool:
+    return tuple(value.casefold() for value in cells[:3]) == _HEADER
 
 
 def parse_eds_belgrade_outages(
@@ -70,6 +76,7 @@ def parse_eds_belgrade_outages(
     source: SourceConfig,
     *,
     page_url: str | None = None,
+    item_failures: list[dict[str, str]] | None = None,
 ) -> list[RawItem]:
     """Return one RawItem per official outage row; an empty valid table returns []."""
     if len(html.encode("utf-8")) > MAX_BYTES:
@@ -82,28 +89,40 @@ def parse_eds_belgrade_outages(
     schedule_date = _normalize_schedule_date(date_match.group("date"))
 
     soup = BeautifulSoup(html, "html.parser")
-    rows = [row for row in soup.find_all("tr") if isinstance(row, Tag)]
-    if not rows:
+    tables = [
+        [_cells(row) for row in table.find_all("tr") if row.find_parent("table") is table]
+        for table in soup.find_all("table")
+    ]
+    if not any(tables):
         raise ValueError("EDS outage table not found")
 
-    parsed_rows = [_cells(row) for row in rows]
-    if not any(tuple(value.casefold() for value in cells[:3]) == _HEADER for cells in parsed_rows):
+    schedules = [rows for rows in tables if any(_is_header(cells) for cells in rows)]
+    if not schedules:
         raise ValueError("EDS outage table header not found")
 
     public_url = page_url or str(source.url)
     occurrences: defaultdict[tuple[str, str], int] = defaultdict(int)
     items: list[RawItem] = []
-    for cells in parsed_rows:
-        if len(cells) < 3:
+    failures: list[dict[str, str]] = []
+    for row_number, cells in enumerate(chain.from_iterable(schedules), 1):
+        if _is_header(cells) or not any(cells):
             continue
-        municipality, interval, streets = cells[0], cells[1], " ".join(cells[2:]).strip()
-        if tuple(value.casefold() for value in cells[:3]) == _HEADER:
+        municipality = cells[0]
+        interval = cells[1] if len(cells) > 1 else ""
+        streets = " ".join(cells[2:]).strip()
+        # A broken address cell must not shift the identity of the next row with the same hours.
+        valid_identity = bool(municipality and _TIME.fullmatch(interval))
+        occurrence = 0
+        if valid_identity:
+            key = (normalize_text(municipality), normalize_text(interval))
+            occurrence = occurrences[key]
+            occurrences[key] += 1
+        if not valid_identity or not streets:
+            if len(failures) < _MAX_FAILURES:
+                failures.append(article_failure(
+                    public_url, ValueError(f"invalid EDS schedule row {row_number}"),
+                ))
             continue
-        if not municipality or not _TIME.fullmatch(interval) or not streets:
-            continue
-        key = (normalize_text(municipality), normalize_text(interval))
-        occurrence = occurrences[key]
-        occurrences[key] += 1
         external_id = _notice_id(schedule_date, municipality, interval, occurrence)
         items.append(
             RawItem(
@@ -116,6 +135,10 @@ def parse_eds_belgrade_outages(
                 canonical_url=_internal_canonical_url(public_url, external_id),
             )
         )
+    if failures and not items:
+        raise ArticleBatchError("all EDS schedule rows failed extraction", failures)
+    if item_failures is not None:
+        item_failures.extend(failures)
     return items
 
 
@@ -125,8 +148,12 @@ class EdsBelgradeOutagesCollector:
             raise ValueError(source.extraction.strategy)
         self._source = source
         self._client = client
+        self.item_failures: list[dict[str, str]] = []
+        self.empty_reason: str | None = None
 
     async def collect(self) -> list[RawItem]:
+        self.item_failures.clear()
+        self.empty_reason = None
         response = await self._client.get(
             str(self._source.url),
             follow_redirects=True,
@@ -134,8 +161,12 @@ class EdsBelgradeOutagesCollector:
             headers={"User-Agent": "RelocantMedia source monitoring/1.0"},
         )
         response.raise_for_status()
-        return parse_eds_belgrade_outages(
+        items = parse_eds_belgrade_outages(
             response.text,
             self._source,
             page_url=str(response.url),
+            item_failures=self.item_failures,
         )
+        if not items:
+            self.empty_reason = "empty_index"
+        return items

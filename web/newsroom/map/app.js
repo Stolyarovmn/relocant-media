@@ -1,10 +1,12 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents, shareLink,
+  incidentInPeriod, incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=14";
-import { calendarLink } from "./calendar.js?v=4";
-import { setupPlaces } from "./places.js?v=13";
+} from "./core.js?v=17";
+import { calendarLink } from "./calendar.js?v=5";
+import { corridorCaps, heatCells, heatOverview, layerView } from "./layer-views.js?v=1";
+import { setupPlaces } from "./places.js?v=18";
+import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=1";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -13,6 +15,7 @@ const eventList = byId("event-list");
 const feedback = byId("feedback");
 const mapFrame = byId("map").parentElement;
 const layerButtons = [...byId("layer-filter").querySelectorAll("button")];
+const periodButtons = [...byId("incident-periods").querySelectorAll("button")];
 const announcementBody = byId("announcement-body");
 const announcementToggle = byId("toggle-announcements");
 const selectedPreview = byId("selected-preview");
@@ -26,6 +29,8 @@ const animate = !matchMedia("(prefers-reduced-motion: reduce)").matches;
 const enabled = new Set(Object.keys(kinds));
 const state = {
   incidents: [],
+  period: null,
+  layerView: "detail",
   selected: "",
   previewArchive: "",
   refocusEvent: "",
@@ -43,6 +48,7 @@ const state = {
   eventLayer: null,
   pointLayer: null,
   mapItems: [],
+  vectorKey: "",
   addressLayer: null,
   focusNote: "",
   tileStatus: "loading",
@@ -56,6 +62,73 @@ const statuses = {
   closed: "Завершено",
 };
 const statusOrder = { active: 0, planned: 1, between: 2, unknown: 3, closed: 4 };
+
+function installTheme() {
+  const key = "relocant-map-theme";
+  const button = byId("map-theme");
+  const options = ["auto", "light", "dark"];
+  const labels = { auto: "Авто", light: "День", dark: "Ночь" };
+  let preference = "auto";
+  try {
+    const saved = localStorage.getItem(key);
+    if (options.includes(saved)) preference = saved;
+  } catch { /* The Telegram webview can disable local storage. */ }
+  const apply = () => {
+    const theme = mapTheme(preference);
+    const changed = theme !== document.documentElement.dataset.theme;
+    document.documentElement.dataset.theme = theme;
+    button.firstElementChild.textContent = theme === "dark" ? "☾" : "☀";
+    button.lastElementChild.textContent = labels[preference];
+    button.setAttribute("aria-label", `Тема карты: ${labels[preference]}. Переключить`);
+    if (changed) renderPoints(Date.now());
+  };
+  button.addEventListener("click", () => {
+    preference = options[(options.indexOf(preference) + 1) % options.length];
+    try { localStorage.setItem(key, preference); } catch { /* Keep the session preference. */ }
+    apply();
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) apply(); });
+  setInterval(() => { if (!document.hidden && preference === "auto") apply(); }, 30_000);
+  apply();
+}
+
+const mapColor = (kind) => document.documentElement.dataset.theme === "dark" ? kinds[kind].night : kinds[kind].color;
+
+function installLayerView() {
+  const key = "relocant-city-layer-view";
+  const menu = byId("layer-view");
+  const summary = menu.querySelector("summary");
+  const options = [...menu.querySelectorAll("[data-view]")];
+  const labels = { detail: "Дома и границы", corridor: "Отрезки улиц", heat: "Тепловая карта" };
+  const apply = () => {
+    menu.dataset.view = state.layerView;
+    byId("layer-view-current").textContent = ` · ${labels[state.layerView]}`;
+    for (const option of options) {
+      option.setAttribute("aria-pressed", String(option.dataset.view === state.layerView));
+    }
+    renderPointClusters();
+  };
+  try { state.layerView = layerView(localStorage.getItem(key)); } catch { /* Session only. */ }
+  for (const option of options) {
+    option.addEventListener("click", () => {
+      state.layerView = layerView(option.dataset.view);
+      try { localStorage.setItem(key, state.layerView); } catch { /* Session only. */ }
+      menu.open = false;
+      summary.focus({ preventScroll: true });
+      state.map?.closePopup();
+      apply();
+    });
+  }
+  document.addEventListener("pointerdown", (event) => {
+    if (menu.open && !menu.contains(event.target)) menu.open = false;
+  });
+  menu.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !menu.open) return;
+    menu.open = false;
+    summary.focus({ preventScroll: true });
+  });
+  apply();
+}
 
 function make(tag, className = "", text = "") {
   const node = document.createElement(tag);
@@ -154,7 +227,8 @@ function showMapNote() {
 function visibleIncidents(now) {
   return state.incidents.filter((incident) => enabled.has(incident.kind)
     && (!state.digestIds.length || state.digestIds.includes(incident.id))
-    && (showsArchived(incident) || incidentStatus(incident, now) !== "closed"));
+    && (showsArchived(incident) || incidentStatus(incident, now) !== "closed"))
+    .map((incident) => incidentInPeriod(incident, now, state.period)).filter(Boolean);
 }
 
 function showsArchived(incident) {
@@ -184,7 +258,7 @@ function eventCard(incident, now) {
   const status = incidentStatus(incident, now);
   const meta = make("div", "event-meta");
   const category = make("span", "event-type");
-  const dot = make("i");
+  const dot = make("i", "", kinds[incident.kind].icon);
   dot.setAttribute("aria-hidden", "true");
   category.append(dot, kinds[incident.kind].label);
   const badge = make("span", "event-state", status === "planned" ? "⏰ Запланировано"
@@ -294,21 +368,29 @@ function renderList(now) {
   const items = orderedIncidents(now);
   const count = byId("event-count");
   count.textContent = state.loaded ? String(items.length) : "";
+  updateCityCount(now);
   eventList.replaceChildren(...items.map((item) => eventCard(item, now)));
   const selected = items.find((item) => item.id === state.selected);
   selectedPreview.hidden = !selected;
   if (selected) {
     selectedPreview.dataset.kind = selected.kind;
+    selectedPreview.querySelector("i").textContent = kinds[selected.kind].icon;
     byId("selected-title").textContent = selected.title;
   }
   byId("selected-countdown").textContent = selected ? incidentCountdown(selected, now) : "";
   const message = state.loadFailed
-    ? state.loaded ? "Обновление недоступно. Показана сохранённая версия." : "Список объявлений не загрузился."
+    ? state.loaded ? snapshotNotice(state.stamp) : "Список объявлений недоступен. Повторите загрузку при подключении."
     : state.deepPending && state.loaded ? "Объявление из ссылки пока отсутствует в выгрузке."
       : !state.loaded ? "Загружаем данные."
-        : !items.length ? "В выбранных слоях пока нет объявлений." : "";
+        : !items.length ? state.period === null ? "В выбранных слоях пока нет объявлений."
+          : "На выбранный период объявлений нет." : "";
   feedback.textContent = message;
   feedback.hidden = !message;
+}
+
+function updateCityCount(now) {
+  byId("city-tab-count").textContent = state.loaded
+    ? String(state.incidents.filter((incident) => incidentStatus(incident, now) !== "closed").length) : "";
 }
 
 function roadOrientation(incident) {
@@ -339,16 +421,45 @@ function bindFeature(layer, group, incident, label, window, fromRegister) {
   }).addTo(group);
 }
 
+function pointStatus(point) {
+  const { incident, now, archived } = point;
+  const window = point.window || point.address?.window;
+  if (archived) return "closed";
+  if (window) return now < window.start ? "planned" : now < window.end ? "active" : "closed";
+  return incidentStatus(incident, now);
+}
+
+function incidentChoices(incidents) {
+  const list = make("ul");
+  for (const incident of incidents) {
+    const row = make("li");
+    const button = make("button", "", incident.title);
+    button.type = "button";
+    button.addEventListener("click", () => openEvent(incident));
+    row.append(button);
+    list.append(row);
+  }
+  return list;
+}
+
 function drawCluster(points, zoom) {
   const leaflet = globalThis.L;
   const [first] = points;
   const location = [first.lat, first.lon];
   const kindsInCluster = new Set(points.map(({ incident }) => incident.kind));
-  const badge = make("span", "map-cluster-count", String(points.length));
+  const badge = make("span", "map-cluster-count");
   badge.setAttribute("aria-hidden", "true");
+  const symbols = make("span", "cluster-symbols");
+  for (const kind of kindsInCluster) {
+    const symbol = make("i", "", kinds[kind].icon);
+    symbol.dataset.kind = kind;
+    symbols.append(symbol);
+  }
+  badge.append(symbols, make("b", "", String(points.length)));
   if (kindsInCluster.size === 1) badge.dataset.kind = first.incident.kind;
-  const title = `Метки на карте · ${points.length}`;
-  const size = mobile.matches ? 44 : 38;
+  badge.dataset.status = points.some((point) => pointStatus(point) === "active") ? "active" : "planned";
+  const title = `${[...kindsInCluster].map((kind) => kinds[kind].label).join(", ")} · ${points.length} меток`;
+  const size = mobile.matches ? 46 : 42;
   const icon = leaflet.divIcon({
     className: "map-cluster", html: badge, iconSize: [size, size],
   });
@@ -370,16 +481,7 @@ function drawCluster(points, zoom) {
     const popup = make("div", "map-cluster-popup");
     popup.append(make("strong", "", title));
     const incidents = new Map(points.map(({ incident }) => [incident.id, incident]));
-    const list = make("ul");
-    for (const incident of incidents.values()) {
-      const row = make("li");
-      const button = make("button", "", incident.title);
-      button.type = "button";
-      button.addEventListener("click", () => openEvent(incident));
-      row.append(button);
-      list.append(row);
-    }
-    popup.append(list);
+    popup.append(incidentChoices(incidents.values()));
     marker.bindPopup(popup);
   }
   marker.addTo(state.pointLayer);
@@ -389,70 +491,125 @@ function roadLineWeight(zoom, selected) {
   return Math.max(7, 7 + (zoom - 13) * 2) + (selected ? 3 : 0);
 }
 
+function drawHeatCell(cell, zoom) {
+  const leaflet = globalThis.L;
+  const { incidents } = cell;
+  const types = new Set(incidents.map(({ kind }) => kind));
+  const title = `Объявления · ${incidents.length} · ${[...types].map((kind) => kinds[kind].label).join(", ")}`;
+  const surface = make("span", "heat-cell");
+  surface.setAttribute("aria-hidden", "true");
+  if (types.size === 1) surface.style.setProperty("--heat-color", mapColor(incidents[0].kind));
+  surface.style.setProperty("--heat-opacity", String(Math.min(.78, .30 + incidents.length * .11)));
+  const symbols = make("span", "cluster-symbols");
+  for (const kind of types) {
+    const symbol = make("i", "", kinds[kind].icon);
+    symbol.dataset.kind = kind;
+    symbols.append(symbol);
+  }
+  surface.append(symbols, make("b", "", String(incidents.length)));
+  const size = mobile.matches ? 44 : 38;
+  const icon = leaflet.divIcon({ className: "heat-marker", html: surface, iconSize: [size, size] });
+  const position = state.map.unproject([cell.x, cell.y], zoom);
+  const marker = leaflet.marker(position, { icon, title, alt: title });
+  marker.on("add", () => marker.getElement()?.setAttribute("aria-label", title));
+  if (incidents.length === 1) {
+    marker.on("click", () => openEvent(incidents[0]));
+  } else {
+    const popup = make("div", "map-cluster-popup");
+    popup.append(make("strong", "", title), incidentChoices(incidents));
+    marker.bindPopup(popup);
+  }
+  marker.addTo(state.pointLayer);
+}
+
+function drawCorridorCaps(item, project) {
+  for (const { coordinates, boundary, window } of item.lines) {
+    if (boundary) continue;
+    const faded = item.archived || !unexpired(window, item.now);
+    for (const cap of corridorCaps(coordinates, project)) {
+      globalThis.L.circleMarker(cap, {
+        radius: 4, color: mapColor(item.incident.kind), weight: 2,
+        fillColor: "#fffdf6", fillOpacity: faded ? .58 : .94, opacity: faded ? .54 : .95,
+        interactive: false, className: "outage-line-cap",
+      }).addTo(state.pointLayer);
+    }
+  }
+}
+
 function renderPointClusters() {
   if (!state.map || state.mode !== "incidents") return;
   const leaflet = globalThis.L;
   const zoom = state.map.getZoom();
   const project = (coordinates) => state.map.project(coordinates, zoom);
+  const precise = Boolean(state.address || state.digestIds.length || state.previewArchive);
+  const overview = heatOverview(state.layerView, zoom, precise);
+  renderVectors(overview, zoom);
   state.pointLayer.clearLayers();
-  const markers = state.mapItems.flatMap(({ incident, lines, areas, points, roadPaths, archived, now }) => {
+  const markers = [];
+  const density = [];
+  for (const item of state.mapItems) {
+    const { incident, lines, areas, points, roadPaths, archived, now } = item;
     for (const path of roadPaths) {
       path.setStyle({ weight: roadLineWeight(zoom, incident.id === state.selected) });
     }
-    return pointsAtScale(points, lines, areas, zoom, project)
-      .map((point) => ({ ...point, incident, archived, now }));
-  });
+    if (state.layerView === "corridor" && zoom >= 15) drawCorridorCaps(item, project);
+    for (const point of pointsAtScale(points, lines, areas, zoom, project)) {
+      const target = overview && incident.id !== state.selected && !point.approximate ? density : markers;
+      target.push({ ...point, incident, archived, now });
+    }
+  }
+  const cells = heatCells(density, project, mobile.matches ? 76 : 68);
+  byId("heat-legend").hidden = !cells.length;
+  for (const cell of cells) drawHeatCell(cell, zoom);
   for (const group of clusterMapPoints(markers, project, mobile.matches ? 49 : 43)) {
     if (group.length > 1) {
       drawCluster(group, zoom);
       continue;
     }
     const [point] = group;
-    const { lat, lon, label, address, window, fromRegister, incident, archived, now } = point;
-    if (point.approximate && !archived) {
-      const planned = incidentStatus(incident, now) === "planned";
-      const icon = leaflet.divIcon({ className: "outage-reference",
-        html: planned ? "⏰" : "💧", iconSize: [26, 26], iconAnchor: [13, 13] });
-      bindFeature(leaflet.marker([lat, lon], { icon, title: label }), state.pointLayer,
-        incident, `${label} · ориентир`, window, false);
-      continue;
-    }
+    const { lat, lon, label, address, window, fromRegister, incident } = point;
     const selected = incident.id === state.selected;
-    const expired = !unexpired(window || address?.window, now);
-    bindFeature(leaflet.circleMarker([lat, lon], {
-      radius: selected ? 8 : 6, color: "#fffef9", weight: selected ? 3 : 2,
-      fillColor: kinds[incident.kind].color, fillOpacity: archived || expired ? .58 : .96,
-      className: "outage-point",
-    }), state.pointLayer, incident, label, window || address?.window, fromRegister);
+    const marker = make("span", "incident-pin", kinds[incident.kind].icon);
+    marker.dataset.kind = incident.kind;
+    marker.dataset.status = pointStatus(point);
+    marker.dataset.selected = String(selected);
+    if (point.approximate) marker.classList.add("incident-pin-reference");
+    marker.setAttribute("aria-hidden", "true");
+    const size = selected ? 29 : 24;
+    const icon = leaflet.divIcon({ className: "incident-marker", html: marker,
+      iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+    const displayLabel = point.approximate ? `${label} · ориентир` : label;
+    bindFeature(leaflet.marker([lat, lon], { icon, title: `${kinds[incident.kind].label} · ${displayLabel}` }),
+      state.pointLayer, incident, displayLabel, window || address?.window, fromRegister);
   }
 }
 
-function renderPoints(now) {
-  if (!state.map || state.mode !== "incidents") return;
+function renderVectors(overview, zoom) {
+  const key = `${state.layerView}/${overview}/${state.selected}`;
+  if (key === state.vectorKey) return;
+  state.vectorKey = key;
   const leaflet = globalThis.L;
+  const corridor = state.layerView === "corridor";
   state.eventLayer.clearLayers();
-  state.mapItems = visibleIncidents(now).map((incident) => {
-    const includeExpired = showsArchived(incident);
-    const lines = visibleMapLines(incident, now, includeExpired);
-    const areas = incident.areas.filter((area) => unexpired(area.window, now, includeExpired));
-    const points = exactMapPoints(state.index, incident, now, includeExpired);
-    const color = kinds[incident.kind].color;
+  for (const item of state.mapItems) {
+    const { incident, lines, areas, archived, now } = item;
+    item.roadPaths = [];
     const selected = incident.id === state.selected;
-    const archived = incidentStatus(incident, now) === "closed";
+    if (overview && !selected) continue;
+    const color = mapColor(incident.kind);
     const road = incident.kind === "road";
-    const roadPaths = [];
     for (const { coordinates, label, window, boundary } of lines) {
       const expired = archived || !unexpired(window, now);
       const style = road
-        ? { opacity: expired ? .30 : selected ? .64 : .48, weight: roadLineWeight(state.map.getZoom(), selected) }
-        : { opacity: expired ? .48 : .94, weight: selected ? 8 : 5 };
+        ? { opacity: expired ? .30 : selected || corridor ? .68 : .48, weight: roadLineWeight(zoom, selected) }
+        : { opacity: expired ? .48 : .94, weight: selected || corridor ? 8 : 5 };
       const path = leaflet.polyline(coordinates, {
         color, ...style, lineCap: "round", lineJoin: "round",
         ...(boundary ? { dashArray: "5 7", weight: selected ? 6 : 4 } : {}),
         className: road ? "outage-road" : "outage-line",
       });
       bindFeature(path, state.eventLayer, incident, label, window);
-      if (road) roadPaths.push(path);
+      if (road && !boundary) item.roadPaths.push(path);
     }
     for (const area of areas) {
       const expired = archived || !unexpired(area.window, now);
@@ -460,11 +617,25 @@ function renderPoints(now) {
       bindFeature(leaflet.polygon(area.rings, {
         color, fillColor: color, weight: selected ? 2.8 : 1.8,
         opacity: expired ? .50 : road ? .60 : .92,
-        fillOpacity: expired ? .12 : fill,
+        fillOpacity: expired ? .12 : corridor ? fill * .64 : fill,
         className: road ? "outage-road" : `outage-${area.scope}`,
       }), state.eventLayer, incident, area.label, area.window);
     }
-    return { incident, lines, areas, points, roadPaths, archived, now };
+  }
+}
+
+function renderPoints(now) {
+  if (!state.map || state.mode !== "incidents") return;
+  state.vectorKey = "";
+  state.mapItems = visibleIncidents(now).map((incident) => {
+    const includeExpired = showsArchived(incident);
+    return {
+      incident, now, archived: incidentStatus(incident, now) === "closed",
+      lines: visibleMapLines(incident, now, includeExpired),
+      areas: incident.areas.filter((area) => unexpired(area.window, now, includeExpired)),
+      points: exactMapPoints(state.index, incident, now, includeExpired),
+      roadPaths: [],
+    };
   });
   renderPointClusters();
 }
@@ -477,11 +648,13 @@ function renderAddress() {
   if (!value) return;
   byId("picked-label").textContent = addressLabel(value);
   const now = Date.now();
-  const matches = state.incidents.filter((event) => incidentStatus(event, now) !== "closed"
-    && addressHits(event, value).some((address) => unexpired(address.window, now)));
+  const matches = state.incidents.filter((event) => incidentStatus(event, now) !== "closed")
+    .map((incident) => incidentInPeriod(incident, now, state.period))
+    .filter((event) => event && addressHits(event, value).some((address) => unexpired(address.window, now)));
+  const scope = state.period === null ? "актуальных объявлениях" : "выбранном периоде";
   byId("picked-match").textContent = matches.length
-    ? `Точных совпадений в актуальных объявлениях: ${matches.length}`
-    : "В актуальных объявлениях точного совпадения пока нет.";
+    ? `Точных совпадений в ${scope}: ${matches.length}`
+    : `Точных совпадений в ${scope} пока нет.`;
   if (!state.map) return;
   globalThis.L.circleMarker([value.lat, value.lon], {
     radius: 10, color: "#19362d", weight: 3, fillColor: "#f4eea8", fillOpacity: 1,
@@ -497,11 +670,13 @@ function render() {
   renderPoints(now);
 }
 
-function focusIncident(incident) {
+function focusIncident(item) {
   if (!state.map) return false;
+  const now = Date.now();
+  const incident = incidentInPeriod(item, now, state.period);
+  if (!incident) return false;
   state.map.closePopup();
   state.map.invalidateSize({ pan: false });
-  const now = Date.now();
   const includeExpired = showsArchived(incident);
   const locations = exactMapPoints(state.index, incident, now, includeExpired)
     .map(({ lat, lon }) => [lat, lon]);
@@ -594,13 +769,15 @@ let refreshTimer;
 let clockTimer;
 let deepAttempts = 0;
 function updateCountdowns(now) {
+  const incidents = new Map(visibleIncidents(now).map((incident) => [incident.id, incident]));
   for (const card of eventList.children) {
-    const incident = state.incidents.find((entry) => entry.id === card.dataset.id);
+    const incident = incidents.get(card.dataset.id);
+    if (!incident) continue;
     const countdown = card.querySelector(".event-countdown");
     countdown.textContent = incidentCountdown(incident, now);
     countdown.hidden = !countdown.textContent;
   }
-  const selected = state.incidents.find((entry) => entry.id === state.selected);
+  const selected = incidents.get(state.selected);
   byId("selected-countdown").textContent = selected ? incidentCountdown(selected, now) : "";
 }
 
@@ -608,7 +785,7 @@ function scheduleClock() {
   clearTimeout(clockTimer);
   if (state.mode !== "incidents" || document.hidden) return;
   const now = Date.now();
-  const boundary = nextTransition(state.incidents, now);
+  const boundary = nextTransition(state.incidents, now, state.period ?? 0);
   const nextMinute = 60_000 - now % 60_000;
   clockTimer = setTimeout(() => {
     const current = Date.now();
@@ -624,18 +801,21 @@ async function loadEvents() {
   state.loading = true;
   if (state.mode === "incidents") syncFeed(state);
   try {
-    const data = await readJSON("./incidents.json", { cache: "no-cache" });
-    state.incidents = readIncidents(data);
+    const { entries, generatedAt, cached } = await loadSnapshot("./incidents.json", readIncidents);
+    state.incidents = entries;
     state.loaded = true;
-    state.loadFailed = false;
-    state.stamp = updateStamp(data.generated_at);
-    if (state.mode !== "incidents") return;
+    state.loadFailed = cached;
+    state.stamp = updateStamp(generatedAt);
+    if (state.mode !== "incidents") {
+      updateCityCount(Date.now());
+      return;
+    }
     const pending = state.incidents.find((event) => event.id === state.deepPending);
     if (pending) openEvent(pending);
     else {
       render();
       if (state.digestIds.length) focusDigest();
-      if (state.deepPending && deepAttempts < 2) {
+      if (state.deepPending && !cached && deepAttempts < 2) {
         deepAttempts += 1;
         refreshTimer = setTimeout(loadEvents, deepAttempts === 1 ? 7000 : 18000);
       }
@@ -800,6 +980,29 @@ for (const button of layerButtons) {
     render();
   });
 }
+for (const button of periodButtons) {
+  button.addEventListener("click", () => {
+    const period = button.dataset.hours === "" ? null : Number(button.dataset.hours);
+    if (period === state.period) return;
+    state.period = period;
+    for (const option of periodButtons) {
+      option.setAttribute("aria-pressed", String(option === button));
+    }
+    const selected = visibleIncidents(Date.now()).find((incident) => incident.id === state.selected);
+    if (!selected) {
+      state.selected = "";
+      state.previewArchive = "";
+      state.refocusEvent = "";
+      state.keepSelectedInView = false;
+      state.focusNote = "";
+      showMapNote();
+    }
+    state.map?.closePopup();
+    render();
+    if (selected && !state.address) focusIncident(selected);
+    scheduleClock();
+  });
+}
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) clearTimeout(clockTimer);
   else if (state.mode === "incidents") {
@@ -828,7 +1031,8 @@ byId("refresh").addEventListener("click", () => {
 
 function syncFeed(feed) {
   byId("refresh").disabled = feed.loading;
-  byId("sync-stamp").textContent = feed.failed || feed.loadFailed ? "Повторить загрузку"
+  const failed = feed.failed || feed.loadFailed;
+  byId("sync-stamp").textContent = failed ? feed.loaded ? "Сохранённые данные" : "Повторить загрузку"
     : feed.stamp ? `${feed.stamp} · Белград`
       : feed.loaded ? "Обновлено" : "Загрузка";
 }
@@ -859,6 +1063,8 @@ function showMode(mode, id = "") {
   const view = views.get(mode);
   state.map?.setView(view?.center ?? center, view?.zoom ?? 12, { animate: false });
   if (exploring) {
+    byId("layer-view").open = false;
+    byId("heat-legend").hidden = true;
     clearTimeout(clockTimer);
     clearTimeout(refreshTimer);
     state.eventLayer?.clearLayers();
@@ -877,8 +1083,10 @@ function showMode(mode, id = "") {
   }
 }
 
+installTheme();
+installLayerView();
 setupMap();
-const places = setupPlaces({ map: state.map, mobile, animate, telegram, byId, make, link, readJSON, onSync: syncFeed });
+const places = setupPlaces({ map: state.map, mobile, animate, telegram, byId, make, link, loadSnapshot, onSync: syncFeed });
 byId("show-incidents").addEventListener("click", () => {
   state.digestIds = [];
   if (state.mode === "incidents") render();
@@ -887,3 +1095,12 @@ byId("show-incidents").addEventListener("click", () => {
 byId("show-places").addEventListener("click", () => showMode("places"));
 telegram?.ready?.();
 showMode(initialRoute.mode, initialRoute.id);
+if (initialRoute.mode === "places") void loadEvents();
+else places.refresh();
+window.addEventListener("online", () => {
+  void loadEvents();
+  places.refresh();
+});
+try {
+  navigator.serviceWorker?.register("./offline-worker.js").catch(() => {});
+} catch { /* Some embedded browsers disable service workers. */ }

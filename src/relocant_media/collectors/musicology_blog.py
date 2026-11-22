@@ -259,6 +259,7 @@ def parse_musicology_article(
         title=title,
         body=body,
         published_at=published_at,
+        published_at_precision="instant",
         canonical_url=canonical,
         source_html=html,
     )

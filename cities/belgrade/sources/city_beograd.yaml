@@ -15,7 +15,8 @@ categories:
   - events
 extraction:
   strategy: html_list
-  status: planned
+  status: inactive
+  inactive_reason: 'Перекрыт city_beograd_news: новости портала города собираются из раздела /lat/vesti. Отдельный коллектор главной страницы не нужен (#328).'
 verification:
   checked_at: 2026-10-18
   note: Official city portal publishes current city news and service information.

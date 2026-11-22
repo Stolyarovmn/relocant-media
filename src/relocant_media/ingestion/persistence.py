@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.domain.dedup import canonicalize_url, content_sha256
 from relocant_media.domain.policy import SOURCE_REPLACED_REASON
+from relocant_media.domain.publication_time import same_legacy_publication_time
 from relocant_media.ingestion.media_provenance import build_media_provenance
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.locks import lock_editorial_city
@@ -60,6 +61,17 @@ def sync_source(session: Session, city: str, source: SourceConfig) -> None:
 def _derived_metadata(item: CollectedRawItem) -> tuple[str, str]:
     canonical_url = item.canonical_url or canonicalize_url(item.url)
     return canonical_url, content_sha256(item.title, item.body)
+
+
+def evidence_changed(previous: RawItem, current: CollectedRawItem) -> bool:
+    if any(getattr(previous, key) != getattr(current, key)
+           for key in ("source_id", "url", "title", "body", "published_at")):
+        return True
+    return (previous.published_at_precision != current.published_at_precision
+            and not same_legacy_publication_time(
+                previous.published_at, previous.published_at_precision,
+                current.published_at, current.published_at_precision,
+            ))
 
 
 def _referencing_runs(session: Session, raw_item_id: int) -> list[EditorialRun]:
@@ -141,8 +153,7 @@ def upsert_raw_items(session: Session, items: list[CollectedRawItem]) -> int:
             RawItem.source_id == item.source_id, RawItem.external_id == item.external_id,
         ).with_for_update().execution_options(populate_existing=True))
         if existing is not None and _referencing_runs(session, existing.id):
-            if any(getattr(existing, key) != getattr(item, key)
-                   for key in ("url", "title", "body", "published_at", "published_at_precision")):
+            if evidence_changed(existing, item):
                 raise ReviewedEvidenceChangedError(existing.id)
             # Derived metadata is safe to backfill: it is deterministic from the exact
             # evidence already reviewed and does not change the evidence snapshot itself.

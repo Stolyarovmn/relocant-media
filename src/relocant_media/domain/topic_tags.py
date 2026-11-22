@@ -28,6 +28,7 @@ def _load(name: str) -> _TopicTagRules:
 
 _RULES_V1 = _load("publication_tags_v1.yaml")
 _RULES_V2 = _load("publication_tags_v2.yaml")
+TOPIC_CATEGORIES = frozenset(_RULES_V1.categories)
 # Первая версия с правилами v2; более ранние пакеты проверяются по v1.
 TAGS_V2_PRESENTATION = 6
 _LEGACY_EVENT_TAGS = "#События #Досуг"

@@ -55,6 +55,7 @@ def test_program_keeps_original_publication_date_and_links_exact_race():
     html = _HTML.replace("</head>", metadata + "</head>").replace("<p>", "<h4>Informacije</h4><p>")
     item = parse_marathon_program(html, _KML)
     assert item.published_at == datetime(2026, 9, 15, 19, 6, 54, tzinfo=UTC)
+    assert item.published_at_precision == "instant"
     program = EventCandidate(2, item.source_id, item.url, item.title, item.body, item.published_at)
     report = EventCandidate(
         1, "media_danas", "https://www.danas.rs/sport/beogradski-polumaraton-humanitarna-akcija/",

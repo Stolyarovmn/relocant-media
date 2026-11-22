@@ -17,7 +17,7 @@ categories:
 extraction:
   strategy: venue_feed
   page_text: true
-  excluded_path_prefixes: [/video/]
+  excluded_path_prefixes: [/video/, /najave-emisija/, /svet/, /region/, /english/]
   status: active
   feed_url: https://n1info.rs/feed/
   article_selectors:

@@ -43,6 +43,19 @@ export function buildCalendar(item, now = Date.now()) {
     }), "END:VCALENDAR", ""].map(fold).join("\r\n");
 }
 
+export function googleCalendarUrl(item, now = Date.now()) {
+  const events = calendarEvents(item, now);
+  if (events.length !== 1 || !events[0].end) return "";
+  const [{ start, end }] = events;
+  const params = new URLSearchParams({
+    action: "TEMPLATE", text: item.title, dates: `${start}/${end}`,
+    stz: "Europe/Belgrade", etz: "Europe/Belgrade",
+    details: [item.reportedScope, item.source].filter(Boolean).join("\n"),
+    location: [item.venue, item.address].filter(Boolean).join(", "),
+  });
+  return `https://calendar.google.com/calendar/r/eventedit?${params}`;
+}
+
 export function calendarLink(item, now) {
   const contents = buildCalendar(item, now);
   if (!contents) return null;
