@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from relocant_media.ai.draft_coverage import DraftFactsCheck, draft_coverage_reason
+from relocant_media.ai.linked_update import LinkedUpdate, linked_update_review_reason
 from relocant_media.ai.models import (
     ClaimSet,
     ClaimVerification,
@@ -134,12 +135,15 @@ class EditorialPackage(StrictModel):
     reviews: tuple[ReviewVerdict, ReviewVerdict]
     event: PackageEvent | None = None
     presentation: EditorialPresentation | None = None
+    linked_update: LinkedUpdate | None = None
 
     @model_validator(mode="after")
     def validate_version_contract(self) -> Self:
         if self.policy_version != f"subscription-editorial-v{self.version}":
             raise ValueError("package policy/version mismatch")
         if self.version == 1:
+            if self.linked_update is not None:
+                raise ValueError("linked update requires package v2")
             if self.presentation is not None or self.outcome.ranking.selection is not None:
                 raise ValueError("selection and presentation require package v2")
             if self.event is not None:
@@ -168,6 +172,8 @@ class EditorialPackage(StrictModel):
             payload.pop("event", None)
         if self.presentation is None:
             payload.pop("presentation", None)
+        if self.linked_update is None:
+            payload.pop("linked_update", None)
         return payload
 
     @field_validator("version", mode="before")
@@ -190,9 +196,14 @@ def package_coverage_reason(package: EditorialPackage) -> str | None:
     documents = (tuple(package.event.documents) if package.event is not None
                  else (package.evidence,))
     facts = next((review for review in package.reviews if review.role == "facts"), None)
-    return draft_coverage_reason(
+    reason = draft_coverage_reason(
         facts.facts_check if facts else None, outcome.draft, outcome.claims,
         outcome.verification, documents, outcome.ranking.category,
+    )
+    if reason is not None:
+        return reason
+    return linked_update_review_reason(
+        package, facts.facts_check.linked_update_check if facts and facts.facts_check else None,
     )
 
 

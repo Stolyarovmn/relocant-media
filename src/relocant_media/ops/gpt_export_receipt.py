@@ -68,6 +68,21 @@ def require_public_documents(request: Mapping[str, Any]) -> None:
     candidates = request.get("candidates")
     if not isinstance(candidates, list) or not 1 <= len(candidates) <= 5:
         raise ValueError("Неверный публичный состав резервного запроса")
+    references = request.get("published_post_refs", [])
+    if not isinstance(references, list) or len(references) > 8:
+        raise ValueError("Неверный публичный контекст прежних публикаций")
+    from relocant_media.ai.linked_update import PublishedPostReference
+
+    reference_ids: set[int] = set()
+    message_ids: set[int] = set()
+    for value in references:
+        reference = PublishedPostReference.model_validate_json(json.dumps(value))
+        if reference.raw_item_id in reference_ids or reference.message_id in message_ids:
+            raise ValueError("Повтор ссылки на прежнюю публикацию")
+        reference_ids.add(reference.raw_item_id)
+        message_ids.add(reference.message_id)
+        if reference.source_type not in PUBLIC_SOURCE_TYPES:
+            raise ValueError("Закрытый тип прежней публикации")
     for candidate in candidates:
         documents = candidate.get("documents") if isinstance(candidate, Mapping) else None
         if not isinstance(documents, list) or not 1 <= len(documents) <= 8:

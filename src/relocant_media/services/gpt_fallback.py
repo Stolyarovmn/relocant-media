@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.channel_style import writing_brief
+from relocant_media.ai.linked_update import PublishedPostReference
 from relocant_media.ai.models import PublicationStatus
 from relocant_media.ai.package import (
     EditorialPackage,
@@ -101,6 +102,7 @@ class _FallbackRequest(StrictModel):
     batch_request_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     batch_result_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     candidates: list[_CandidateRequest] = Field(min_length=1, max_length=MAX_CANDIDATES)
+    published_post_refs: list[PublishedPostReference] = Field(default_factory=list, max_length=8)
 
 
 def _utc(now: datetime) -> datetime:
@@ -375,6 +377,9 @@ def build_request(
         windows.sort(key=lambda window: (
             urgent.isdisjoint(window[1]), official.isdisjoint(window[1]), window[0].id,
         ))
+        from relocant_media.services.linked_updates import published_post_references
+
+        references = published_post_references(session, city=profile.city_id, now=now)
         for run, failed in windows:
             candidates: list[dict[str, Any]] = []
             request = {
@@ -386,6 +391,8 @@ def build_request(
                 "writing_brief": writing_brief(profile, now),
                 "candidates": candidates,
             }
+            if references:
+                request["published_post_refs"] = references
             for raw_id in sorted(failed, key=lambda raw_id: (
                 raw_id not in urgent, raw_id not in official,
             )):
@@ -536,6 +543,17 @@ def validate_fallback_package(
             or package.presentation is None
         ):
             raise FallbackValidationError("Пакет не совпадает с точным событием запроса")
+        if package.linked_update is not None:
+            from relocant_media.services.linked_updates import validate_linked_update
+
+            if package.linked_update.parent not in parsed.published_post_refs:
+                raise FallbackValidationError("Связь отсутствует в каноническом запросе")
+            try:
+                validate_linked_update(session, package, now=now)
+            except ValueError as error:
+                raise FallbackValidationError(
+                    "Изменился контекст связанной публикации", code="linked_context_changed",
+                ) from error
         rubric = package.outcome.ranking.selection.rubric_id
         if rubric not in requested.presentation_by_rubric:
             raise FallbackValidationError("Неизвестная рубрика резервного пакета")
