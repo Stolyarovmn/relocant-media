@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { buildCalendar, googleCalendarUrl } from "../web/newsroom/map/calendar.js";
 import {
-  autoTheme, dayStrip, eventCategory, markerSvg, nextThemeSwitch, placeOnDay, resolveTheme,
+  autoTheme, dayStrip, eventCategory, inlineQuery, markerSvg, nextThemeSwitch, placeOnDay, resolveTheme, sendToChat,
 } from "../web/newsroom/map/ui.js";
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
@@ -515,4 +515,32 @@ test("ссылка Google Календаря несёт время, место �
   assert.match(url.searchParams.get("dates"), /^20261121T190000Z\/20261121T210000Z$/);
   assert.equal(url.searchParams.get("location"), "Дом омладине, Македонска 22");
   assert.match(url.searchParams.get("details"), /example\.org/);
+});
+
+test("кнопка «Отправить в чат» только в Telegram и с откатом на обычный «Поделиться»", () => {
+  assert.equal(inlineQuery("places_event_0123456789abcdef1234"), "places_event_0123456789abcdef1234");
+  assert.equal(inlineQuery("event_0123456789abcdef1234 x"), "");
+  assert.equal(sendToChat(undefined, waterId, ""), null);
+  assert.equal(sendToChat({ switchInlineQuery() {}, isVersionAtLeast: () => false }, waterId, ""), null);
+  const saved = globalThis.document;
+  const handlers = {};
+  globalThis.document = { createElement: () => ({ addEventListener: (name, fn) => { handlers[name] = fn; } }) };
+  try {
+    const opened = [];
+    const telegram = {
+      isVersionAtLeast: () => true,
+      switchInlineQuery: () => { throw new Error("WebAppInlineModeDisabled"); },
+      openTelegramLink: (url) => opened.push(url),
+    };
+    const button = sendToChat(telegram, waterId, "https://t.me/share/url?url=x");
+    assert.equal(button.textContent, "Отправить в чат");
+    handlers.click();
+    assert.deepEqual(opened, ["https://t.me/share/url?url=x"]);
+    const queries = [];
+    sendToChat({ switchInlineQuery: (...args) => queries.push(args) }, waterId, "");
+    handlers.click();
+    assert.deepEqual(queries, [[waterId, ["users", "groups", "channels"]]]);
+  } finally {
+    globalThis.document = saved;
+  }
 });

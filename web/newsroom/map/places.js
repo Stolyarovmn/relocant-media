@@ -3,7 +3,7 @@ import {
   shareLink, straightLineDistance, updateStamp,
 } from "./core.js?v=14";
 import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
-import { categories, dayStrip, eventCategory, markerSvg, placeOnDay } from "./ui.js?v=1";
+import { categories, dayStrip, eventCategory, markerSvg, placeOnDay, sendToChat } from "./ui.js?v=2";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 const courseStyles = [
@@ -189,6 +189,8 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     links.append(link(place.source, "Источник ↗"));
     const share = place.sponsored ? "" : shareLink(place.id, place.title, true);
     if (share) links.append(link(share, "Поделиться ↗"));
+    const send = place.sponsored ? null : sendToChat(telegram, `places_${place.id}`, share);
+    if (send) links.append(send);
     const calendar = place.paidPlace || place.scheduleNote ? null : calendarLink(place, now);
     if (calendar) {
       links.append(calendar);

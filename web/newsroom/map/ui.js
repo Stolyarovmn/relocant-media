@@ -114,3 +114,30 @@ export function dayStrip(places, now, count = 14) {
     };
   });
 }
+
+/** Запрос inline-режима бота для карточки: ID объявления или places_ID события. */
+export function inlineQuery(id) {
+  return /^(places_)?event_[a-f0-9]{20}$/.test(String(id)) ? id : "";
+}
+
+/**
+ * Кнопка «Отправить в чат» внутри Telegram: выбор чата и карточка через inline-режим бота.
+ * Если inline-режим ещё не включён, Telegram бросает ошибку — тогда открываем обычный «Поделиться».
+ */
+export function sendToChat(telegram, id, fallback) {
+  const query = inlineQuery(id);
+  if (!query || typeof telegram?.switchInlineQuery !== "function"
+      || telegram.isVersionAtLeast?.("6.7") === false) return null;
+  const button = globalThis.document.createElement("button");
+  button.type = "button";
+  button.className = "link-button";
+  button.textContent = "Отправить в чат";
+  button.addEventListener("click", () => {
+    try {
+      telegram.switchInlineQuery(query, ["users", "groups", "channels"]);
+    } catch {
+      if (fallback) telegram.openTelegramLink?.(fallback);
+    }
+  });
+  return button;
+}

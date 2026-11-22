@@ -4,8 +4,8 @@ import {
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
 } from "./core.js?v=14";
 import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
-import { setupPlaces } from "./places.js?v=14";
-import { markerSvg, nextThemeSwitch, resolveTheme } from "./ui.js?v=1";
+import { setupPlaces } from "./places.js?v=15";
+import { markerSvg, nextThemeSwitch, resolveTheme, sendToChat } from "./ui.js?v=2";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -282,6 +282,8 @@ function eventCard(incident, now) {
   links.append(link(incident.source, "Источник ↗"));
   const share = shareLink(incident.id, incident.title);
   if (share) links.append(link(share, "Поделиться ↗"));
+  const send = sendToChat(telegram, incident.id, share);
+  if (send) links.append(send);
   const calendar = calendarLink(incident, now);
   if (calendar) {
     links.append(calendar);

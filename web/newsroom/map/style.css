@@ -894,3 +894,4 @@ h1 {
 @media (prefers-reduced-motion: no-preference) {
   body, .place-card, .day-chip, .map-modes button { transition: background-color .25s, color .25s, border-color .25s; }
 }
+.link-button { padding: 0; border: 0; background: none; color: var(--link); font: inherit; text-decoration: underline; text-underline-offset: .15em; cursor: pointer; }
