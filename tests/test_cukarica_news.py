@@ -45,6 +45,13 @@ def test_article_keeps_lead_full_body_and_local_publication_time():
     assert "Подели вест" not in item.body
     assert "Сличне вести" not in item.body
     assert item.published_at == datetime(2026, 10, 9, 14, 21, tzinfo=ZoneInfo("Europe/Belgrade"))
+    assert item.published_at_precision == "instant"
+
+
+@pytest.mark.parametrize("local_clock", ["29.03.2026 02:30", "25.10.2026 02:30"])
+def test_clock_change_does_not_supply_an_exact_instant(local_clock):
+    html = article_html().replace("09.10.2026 14:21", local_clock)
+    assert parse_cukarica_article(html, source(), ARTICLE_URL).published_at_precision == "unknown"
 
 
 def test_list_extracts_ids_titles_dates_and_not_truncated_evidence():
@@ -52,6 +59,7 @@ def test_list_extracts_ids_titles_dates_and_not_truncated_evidence():
     assert [item.external_id for item in items] == ["668", "669", "667"]
     assert all(item.body == "" for item in items)
     assert items[0].published_at == datetime(2026, 10, 17, tzinfo=ZoneInfo("Europe/Belgrade"))
+    assert items[0].published_at_precision == "day"
 
 
 @pytest.mark.parametrize("old,new", [

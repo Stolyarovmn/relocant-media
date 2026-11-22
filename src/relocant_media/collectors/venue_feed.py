@@ -6,13 +6,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit
-from zoneinfo import ZoneInfo
 
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
 
 from relocant_media.collectors.base import RawItem
+from relocant_media.domain.publication_time import BELGRADE, local_clock_precision
 from relocant_media.sources.registry import SourceConfig
 
 MAX_BYTES = 2_000_000
@@ -102,7 +102,8 @@ def parse_venue_feed(html_xml: str, source: SourceConfig) -> list[RawItem]:
                 " ", strip=True)
             if len(body) < 120:
                 body = ""
-        result.append(RawItem(source.id, url, url, title, body, published))
+        result.append(RawItem(source.id, url, url, title, body, published,
+                              published_at_precision="instant"))
         seen.add(url)
     return result
 
@@ -121,7 +122,7 @@ def _rts_publication(soup: BeautifulSoup) -> datetime:
         published = datetime.strptime(" ".join(match.groups()), "%d.%m.%Y %H:%M")
     except ValueError as error:
         raise ValueError("RTS article publication date missing or invalid") from error
-    return published.replace(tzinfo=ZoneInfo("Europe/Belgrade")).astimezone(UTC)
+    return published.replace(tzinfo=BELGRADE)
 
 
 def _complete_kolarac_heading(title: str) -> bool:
@@ -221,7 +222,13 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
             body = f"{title}\n\n{body}"
     if lead_text and lead_text not in body:
         body = lead_text + " " + body
-    published = _rts_publication(soup) if source.id == "media_rts" else published or fallback
+    precision = "instant"
+    if source.id == "media_rts":
+        local = _rts_publication(soup)
+        precision = local_clock_precision(local)
+        published = local.astimezone(UTC)
+    else:
+        published = published or fallback
     if not title:
         raise ValueError("venue article title missing")
     if len(body) < 120 and not complete_schedule:
@@ -234,7 +241,7 @@ def _article(html: str, url: str, source: SourceConfig, fallback: datetime | Non
         raise ValueError("venue article publication date missing")
     if published > datetime.now(UTC):
         raise ValueError("venue article publication date is in the future")
-    return RawItem(source.id, url, url, title, body, published)
+    return RawItem(source.id, url, url, title, body, published, published_at_precision=precision)
 
 
 class VenueFeedCollector:
