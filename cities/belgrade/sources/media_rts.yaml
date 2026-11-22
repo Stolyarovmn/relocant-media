@@ -16,6 +16,7 @@ categories:
 - schools
 extraction:
   strategy: venue_feed
+  excluded_path_prefixes: [/vesti/svet/, /vesti/politika/, /lat/vesti/svet/, /lat/vesti/politika/]
   status: active
   feed_url: https://www.rts.rs/lat/vesti/rss.html
   article_selectors:
