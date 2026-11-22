@@ -12,6 +12,7 @@ export const placeKinds = {
 };
 
 const eventId = /^event_[a-f0-9]{20}$/;
+const archiveAge = 14 * 86_400_000;
 const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const calendarDate = /^\d{4}-\d{2}-\d{2}$/;
 const hour = new Intl.DateTimeFormat("ru", {
@@ -190,7 +191,7 @@ function readPlaceCourses(value) {
   return courses;
 }
 
-export function readPlaces(document) {
+export function readPlaces(document, now = null) {
   if (document?.version !== 1 || !Array.isArray(document.events)) {
     throw new Error("Не удалось прочитать афишу");
   }
@@ -213,6 +214,7 @@ export function readPlaces(document) {
     if (!title || !source || !venue || !coords(lat, lon) || start === null
         || expires === null || expires <= start
         || (item.ends_at != null && (end === null || end <= start || end > expires))) return [];
+    if (now !== null && expires < now - archiveAge) return [];
     seen.add(item.id);
     const paidPlace = item.kind === "sponsored_place";
     if (paidPlace && (!post || end !== null)) return [];
@@ -278,7 +280,7 @@ function readArea(item, kind) {
     window: readWindow(item), address: readAddress(item.address) };
 }
 
-export function readIncidents(document) {
+export function readIncidents(document, now = null) {
   if (document?.version !== 1 || !Array.isArray(document.incidents)) {
     throw new Error("Не удалось прочитать список объявлений");
   }
@@ -289,22 +291,29 @@ export function readIncidents(document) {
     const title = textValue(record.title);
     const source = safeLink(record.source_url);
     if (!title || !source) return [];
+    const archived = record.archived === true;
+    const published = parseTime(record.published_at);
+    const end = parseTime(record.ends_at);
+    const windows = array(record.windows).map(readWindow).filter(Boolean)
+      .sort((a, b) => a.start - b.start);
+    const archiveFrom = end ?? (windows.length ? Math.max(...windows.map((window) => window.end))
+      : archived ? published : null);
+    if (now !== null && (archiveFrom === null ? archived : archiveFrom < now - archiveAge)) return [];
     seen.add(record.id);
     return [{
       id: record.id,
       kind: record.kind,
       title,
-      archived: record.archived === true,
+      archived,
       reportedScope: textValue(record.reported_scope),
       source,
       officialMap: safeLink(record.source_map_url),
-      published: parseTime(record.published_at),
+      published,
       start: parseTime(record.starts_at),
-      end: parseTime(record.ends_at),
+      end,
       startDay: dateOnly(record.starts_on),
       endDay: dateOnly(record.ends_on),
-      windows: array(record.windows).map(readWindow).filter(Boolean)
-        .sort((a, b) => a.start - b.start),
+      windows,
       points: array(record.points).flatMap((point) => coords(point?.lat, point?.lon)
         ? [{ lat: point.lat, lon: point.lon, label: textValue(point.label),
           address: readAddress(point.address), fromRegister: point.coordinate_source === "rgz",
