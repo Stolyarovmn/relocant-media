@@ -1,9 +1,11 @@
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 
+from relocant_media.collectors.base import ArticleBatchError
 from relocant_media.collectors.beoelektrane_network_works import (
     BeoelektraneNetworkWorksCollector,
     parse_beoelektrane_network_works,
@@ -160,6 +162,30 @@ def test_parser_rejects_duplicate_district_heading() -> None:
 
     with pytest.raises(ValueError, match="duplicate"):
         parse_beoelektrane_network_works(html, _source())
+
+
+@pytest.mark.asyncio
+async def test_collector_keeps_healthy_districts_and_reports_damaged_district() -> None:
+    html = re.sub(r"<p>[-–].*?</p>", "", _html(), count=2)
+    original = parse_beoelektrane_network_works(_html(), _source())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, text=html),
+    )) as client:
+        collector = BeoelektraneNetworkWorksCollector(_source(), client)
+        assert await collector.collect() == original[1:]
+        assert collector.item_failures == [{
+            "url": PAGE_URL, "error_type": "ValueError",
+            "error_message": "heating district 1 has no usable works details",
+        }]
+
+
+def test_all_damaged_heating_districts_are_an_error_with_coordinates() -> None:
+    html = re.sub(r"<p>[-–].*?</p>", "", _html())
+    with pytest.raises(ArticleBatchError) as caught:
+        parse_beoelektrane_network_works(html, _source())
+    assert len(caught.value.item_failures) == 3
+    assert {failure["url"] for failure in caught.value.item_failures} == {PAGE_URL}
 
 
 @pytest.mark.asyncio

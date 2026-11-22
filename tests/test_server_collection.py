@@ -234,7 +234,11 @@ async def test_news_rss_lead_only_persists_independent_primary_source(
     )
     monkeypatch.setattr(server_cycle, "load_verified_news_feeds", lambda _: (feed,))
 
-    async def news(*args, **kwargs):
+    async def news(*args, observation, **kwargs):
+        observation.update(status="partial", fetched_items=2, fresh_items=1, item_failures=[
+            {"url": feed.feed_url, "error_type": "ValueError",
+             "error_message": "missing publication timestamp"},
+        ])
         return [NewsLead(
             source_id="rts_news",
             url="https://www.rts.rs/vesti/drustvo/6067000/izmena.html",
@@ -260,6 +264,8 @@ async def test_news_rss_lead_only_persists_independent_primary_source(
     assert audit["publication_evidence"] is False
     assert audit["topics"][0]["status"] == "primary_source_resolved"
     assert audit["topics"][0]["source_id"] == "rts_news"
+    assert audit["feeds"][0]["status"] == "partial"
+    assert audit["feeds"][0]["item_failures"][0]["url"] == feed.feed_url
 
 
 @pytest.mark.asyncio

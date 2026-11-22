@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from relocant_media.collectors.base import RawItem
+from relocant_media.collectors.base import ArticleBatchError, RawItem, article_failure
 from relocant_media.collectors.page_snapshot import normalize_visible_text
 from relocant_media.domain.dedup import normalize_text
 from relocant_media.sources.registry import SourceConfig
@@ -17,6 +17,7 @@ _ENTRY = re.compile(r"^(?P<date>\d{2}\.\d{2}\.\d{4}\.)\s+(?P<title>\S.+)$")
 _STOP_LINES = {"Инфо", "Informacije", "Информације"}
 _SKIP_LINES = {"Списак општина и улица", "Погледајте списак цистерни"}
 MAX_BYTES = 2_000_000
+_MAX_FAILURES = 20
 
 
 def _entry_id(date_text: str, title: str) -> str:
@@ -37,6 +38,7 @@ def parse_bvk_planned_works(
     source: SourceConfig,
     *,
     page_url: str | None = None,
+    item_failures: list[dict[str, str]] | None = None,
 ) -> list[RawItem]:
     """Split the live BVK list into independent notices without inventing publication dates."""
     if len(html.encode("utf-8")) > MAX_BYTES:
@@ -69,10 +71,16 @@ def parse_bvk_planned_works(
 
     public_url = page_url or str(source.url)
     items: list[RawItem] = []
+    failures: list[dict[str, str]] = []
     seen: set[str] = set()
-    for date_text, title, body_lines in records:
+    for record_number, (date_text, title, body_lines) in enumerate(records, 1):
         body = "\n".join(line for line in body_lines if line).strip()
         if len(body) < 40:
+            if len(failures) < _MAX_FAILURES:
+                failures.append(article_failure(
+                    public_url,
+                    ValueError(f"BVK planned-works entry {record_number} lacks a usable body"),
+                ))
             continue
         external_id = _entry_id(date_text, title)
         if external_id in seen:
@@ -90,7 +98,9 @@ def parse_bvk_planned_works(
             )
         )
     if not items:
-        raise ValueError("BVK planned-works entries lack usable bodies")
+        raise ArticleBatchError("BVK planned-works entries lack usable bodies", failures)
+    if item_failures is not None:
+        item_failures.extend(failures)
     return items
 
 
@@ -100,8 +110,10 @@ class BvkPlannedWorksCollector:
             raise ValueError(source.extraction.strategy)
         self._source = source
         self._client = client
+        self.item_failures: list[dict[str, str]] = []
 
     async def collect(self) -> list[RawItem]:
+        self.item_failures.clear()
         response = await self._client.get(
             str(self._source.url),
             follow_redirects=True,
@@ -113,4 +125,5 @@ class BvkPlannedWorksCollector:
             response.text,
             self._source,
             page_url=str(response.url),
+            item_failures=self.item_failures,
         )

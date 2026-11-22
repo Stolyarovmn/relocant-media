@@ -13,11 +13,11 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin>
-  <link rel="stylesheet" href="style.css?v=10">
+  <link rel="stylesheet" href="style.css?v=14">
   <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin defer></script>
-  <script type="module" src="app.js?v=16"></script>
+  <script type="module" src="app.js?v=21"></script>
 </head>
 <body>
   <a class="skip-link" href="#announcements">К списку объявлений</a>
@@ -60,10 +60,29 @@
           </div>
           <div id="address-results" class="address-results" hidden></div>
         </form>
-        <div id="layer-filter" class="layers" role="group" aria-label="Слои карты">
-          <button type="button" data-kind="water" aria-pressed="true"><i aria-hidden="true">💧</i>Вода</button>
-          <button type="button" data-kind="power" aria-pressed="true"><i aria-hidden="true">⚡</i>Свет</button>
-          <button type="button" data-kind="road" aria-pressed="true"><i aria-hidden="true">⛔</i>Дороги</button>
+        <div class="layer-toolbar">
+          <div id="layer-filter" class="layers" role="group" aria-label="Слои карты">
+            <button type="button" data-kind="water" aria-pressed="true"><i aria-hidden="true">💧</i>Вода</button>
+            <button type="button" data-kind="power" aria-pressed="true"><i aria-hidden="true">⚡</i>Свет</button>
+            <button type="button" data-kind="road" aria-pressed="true"><i aria-hidden="true">⛔</i>Дороги</button>
+          </div>
+          <details id="layer-view" class="layer-view" data-view="detail">
+            <summary title="Вид карты">Вид<span id="layer-view-current" class="sr-only"> · Дома и границы</span></summary>
+            <div class="layer-view-options" role="group" aria-label="Вид городских работ">
+              <button type="button" data-view="detail" aria-pressed="true">
+                <span class="view-symbol view-symbol-detail" aria-hidden="true"></span>
+                <span>Дома и границы<small>Точные адреса и контуры</small></span>
+              </button>
+              <button type="button" data-view="corridor" aria-pressed="false">
+                <span class="view-symbol view-symbol-corridor" aria-hidden="true"></span>
+                <span>Отрезки улиц<small>Начало, конец и изгибы</small></span>
+              </button>
+              <button type="button" data-view="heat" aria-pressed="false">
+                <span class="view-symbol view-symbol-heat" aria-hidden="true"></span>
+                <span>Тепловая карта<small>Где больше объявлений</small></span>
+              </button>
+            </div>
+          </details>
         </div>
         <div id="picked-address" class="picked-address" hidden>
           <div><strong id="picked-label"></strong><p id="picked-match"></p></div>
@@ -85,6 +104,7 @@
         <i aria-hidden="true"></i><span>Весь Белград</span>
       </button>
       <p id="map-message" class="map-message" role="status" hidden></p>
+      <div id="heat-legend" class="heat-legend" hidden>Ярче — больше объявлений</div>
     </section>
 
     <section id="announcements" class="announcements" aria-labelledby="announcements-title">
@@ -95,6 +115,12 @@
           </button>
         </h2>
       </header>
+      <div id="incident-periods" class="incident-periods" role="group" aria-label="Период городских работ">
+        <button type="button" data-hours="" aria-pressed="true">Все</button>
+        <button type="button" data-hours="0" aria-pressed="false">Сейчас</button>
+        <button type="button" data-hours="24" aria-pressed="false">24 часа</button>
+        <button type="button" data-hours="168" aria-pressed="false">Неделя</button>
+      </div>
       <button id="selected-preview" class="selected-preview" type="button" hidden>
         <i aria-hidden="true"></i>
         <span class="selected-main">
@@ -108,14 +134,16 @@
       </div>
     </section>
     <section id="places" class="announcements places" aria-labelledby="places-title" hidden>
-      <header class="list-header">
+      <header class="list-header places-header">
         <h2 id="places-title">
           <button id="toggle-places" type="button" aria-expanded="true" aria-controls="places-body">
             События <span id="places-count" class="places-count"></span><i aria-hidden="true"></i>
           </button>
         </h2>
+        <button id="toggle-favorites" type="button" aria-controls="places-list" aria-pressed="false">★ Мои</button>
       </header>
       <div id="place-detail" class="place-detail" hidden></div>
+      <p id="favorites-feedback" class="feedback" role="status" hidden></p>
       <p id="places-feedback" class="feedback" role="status" hidden></p>
       <div id="places-body" class="announcement-body">
         <div id="places-list" class="places-list"></div>

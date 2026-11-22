@@ -12,6 +12,7 @@ categories:
 extraction:
   strategy: official_guide
   status: inactive
+  inactive_reason: 'Отключено владельцем 28.10.2026. Изменения этой страницы отслеживает welcome_serbia_temporary_residence (тот же URL).'
   article_selectors:
   - main
   approved_hosts:

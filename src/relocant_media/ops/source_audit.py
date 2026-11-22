@@ -3,20 +3,28 @@
 import argparse
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from relocant_media.collectors.base import ArticleBatchError
+from relocant_media.collectors.base import ArticleBatchError, RawItem
 from relocant_media.collectors.factory import build_collector
+from relocant_media.collectors.news_discovery import (
+    NEWS_DISCOVERY_REGISTRY,
+    collect_news_feed,
+    load_verified_news_feeds,
+)
+from relocant_media.collectors.rhmz_forecast import collect_weather
 from relocant_media.collectors.tls import (
     MISSING_INTERMEDIATE_HINT,
     is_missing_intermediate,
     source_ssl_context,
 )
 from relocant_media.domain.freshness import freshness_decision
+from relocant_media.ops.source_silence import update_source_silence
 from relocant_media.sources.registry import SourceConfig, load_source_registry
 
 _TRANSPORT_ATTEMPTS = 3
@@ -32,14 +40,14 @@ def _error_message(error: BaseException) -> str:
 async def _collect_with_transport_retry(
     source: SourceConfig,
     client: httpx.AsyncClient,
-) -> tuple[list[Any], list[dict[str, str]], int]:
+) -> tuple[list[RawItem], list[dict[str, str]], int, str | None]:
     """Retry bounded transport failures; extraction/data errors remain immediate."""
     for attempt in range(1, _TRANSPORT_ATTEMPTS + 1):
         collector = build_collector(source, client)
         try:
             items = await collector.collect()
             failures = getattr(collector, "item_failures", [])
-            return items, failures, attempt
+            return items, failures, attempt, getattr(collector, "empty_reason", None)
         except httpx.TransportError:
             if attempt >= _TRANSPORT_ATTEMPTS:
                 raise
@@ -52,6 +60,9 @@ async def audit_sources(
     *,
     online: bool = False,
     source_ids: tuple[str, ...] = (),
+    check_belgrade_weather: bool = False,
+    check_news_discovery: bool = False,
+    silence_state: Path | None = None,
 ) -> dict[str, Any]:
     sources = load_source_registry(directory)
     if source_ids:
@@ -71,14 +82,18 @@ async def audit_sources(
                 "type": source.source_type,
                 "strategy": source.extraction.strategy,
                 "auto_publish": source.policy.auto_publish,
-                "status": "configured" if source.extraction.status == "active" else "planned",
+                "status": ("configured" if source.extraction.status == "active"
+                           else "disabled" if source.extraction.status == "inactive"
+                           else "planned"),
             }
+            if source.extraction.status != "active" and source.extraction.inactive_reason:
+                row["inactive_reason"] = source.extraction.inactive_reason
             if row["status"] == "configured" and online:
                 try:
-                    items, item_failures, attempts = await _collect_with_transport_retry(
-                        source,
-                        client,
+                    items, item_failures, attempts, empty_reason = (
+                        await _collect_with_transport_retry(source, client)
                     )
+                    now = datetime.now(UTC)
                     fresh = [
                         item
                         for item in items
@@ -86,7 +101,7 @@ async def audit_sources(
                             item.title,
                             item.body,
                             item.published_at,
-                            datetime.now(UTC),
+                            now,
                             published_at_precision=item.published_at_precision,
                         ).action
                         == "keep"
@@ -110,6 +125,12 @@ async def audit_sources(
                     row["item_failures"] = item_failures
                     if item_failures:
                         row["status"] = "partial"
+                    elif not fresh:
+                        if any(item.published_at is None or item.published_at.tzinfo is None
+                               for item in items):
+                            row["empty_reason"] = "publication_date_unknown"
+                        elif items or empty_reason:
+                            row["empty_reason"] = "empty_fresh" if items else empty_reason
                 except httpx.TransportError as error:
                     row.update(
                         status="transport_error",
@@ -128,17 +149,38 @@ async def audit_sources(
                     if isinstance(error, ArticleBatchError):
                         row["item_failures"] = error.item_failures
             rows.append(row)
+        weather = (await collect_weather(client, datetime.now(UTC))).statuses() if (
+            online and check_belgrade_weather
+        ) else None
+        discovery_rows: list[dict[str, Any]] = []
+        if online and check_news_discovery:
+            for feed in load_verified_news_feeds(NEWS_DISCOVERY_REGISTRY):
+                observation: dict[str, Any] = {}
+                try:
+                    await collect_news_feed(feed, client, observation=observation)
+                except (httpx.HTTPError, ValueError):
+                    pass
+                discovery_rows.append(observation)
 
+    checked_at = datetime.now(UTC)
+    silence_saved = (
+        update_source_silence(rows, silence_state, checked_at)
+        if online and silence_state is not None else None
+    )
     return {
-        "checked_at": datetime.now(UTC).isoformat(),
+        "checked_at": checked_at.isoformat(),
         "online": online,
         "ai_calls": 0,
         "sources": rows,
-        "active_count": sum(row["status"] != "planned" for row in rows),
+        "active_count": sum(row["status"] not in {"planned", "disabled"} for row in rows),
+        "disabled_count": sum(row["status"] == "disabled" for row in rows),
         "working_count": sum(row["status"] in {"ok", "empty", "partial"} for row in rows),
         "partial_count": sum(row["status"] == "partial" for row in rows),
         "transport_error_count": sum(row["status"] == "transport_error" for row in rows),
         "error_count": sum(row["status"] == "error" for row in rows),
+        **({"weather_sources": weather} if weather is not None else {}),
+        **({"news_discovery_feeds": discovery_rows} if online and check_news_discovery else {}),
+        **({"silence_history_saved": silence_saved} if silence_saved is not None else {}),
     }
 
 
@@ -180,12 +222,20 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
         f"- partial: **{result.get('partial_count', 0)}**",
         f"- transport errors: **{result.get('transport_error_count', 0)}**",
         f"- extraction/protocol errors: **{result.get('error_count', 0)}**",
+    ]
+    if result.get("silence_history_saved") is False:
+        lines.append("- Историю проверок источников не удалось сохранить.")
+    lines.extend(
+        f"- {row['status']} `{row.get('id')}` — {row.get('inactive_reason', 'причина не указана')}"
+        for row in result.get("sources", []) if row.get("status") in {"planned", "disabled"}
+    )
+    lines.extend((
         "",
         "| Source | Status | Fresh | Details |",
         "|---|---|---:|---|",
-    ]
+    ))
     for row in result.get("sources", []):
-        if row.get("status") == "planned":
+        if row.get("status") in {"planned", "disabled"}:
             continue
         details = ""
         if row.get("status") in {"error", "transport_error"}:
@@ -198,9 +248,22 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
             if row.get("tls_hint"):
                 details += f" ({row['tls_hint']})"
         elif row.get("status") == "partial":
-            details = f"item_failures={len(row.get('item_failures', []))}"
-        elif row.get("attempts", 1) > 1:
-            details = f"attempts={row['attempts']}"
+            if row.get("health_reason"):
+                details = f"{row['health_reason']}, {row['empty_reason']}"
+            else:
+                details = f"item_failures={len(row.get('item_failures', []))}"
+        else:
+            parts = []
+            if row.get("empty_reason"):
+                parts.append(str(row["empty_reason"]))
+                if row.get("fetched_items"):
+                    parts.append(f"fetched={row['fetched_items']}")
+            if row.get("attempts", 1) > 1:
+                parts.append(f"attempts={row['attempts']}")
+            details = ", ".join(parts)
+        if "silence_hours" in row:
+            details += (f", тишина {row['silence_hours']} ч с `{row['silence_since']}`"
+                        f", порог {row['silence_warning_days']} дн.")
         lines.append(
             "| {id} | {status} | {fresh} | {details} |".format(
                 id=row.get("id", "unknown"),
@@ -209,6 +272,23 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
                 details=details,
             )
         )
+    if weather := result.get("weather_sources"):
+        lines.extend((
+            "", "## Погода в утренней сводке", "",
+            f"- РХМЗ: `{weather['rhmz_forecast']}`",
+            f"- MeteoAlarm: `{weather['meteoalarm']}`",
+        ))
+    if "news_discovery_feeds" in result:
+        lines.extend((
+            "", "## Новостные ленты для поиска поводов", "",
+            "| Источник | Состояние | Свежие | Ошибки записей |",
+            "|---|---|---:|---:|",
+        ))
+        for feed in result["news_discovery_feeds"]:
+            lines.append("| {source_id} | {status} | {fresh} | {errors} |".format(
+                source_id=feed["source_id"], status=feed["status"],
+                fresh=feed.get("fresh_items", "-"), errors=len(feed["item_failures"]),
+            ))
     return "\n".join(lines) + "\n"
 
 
@@ -217,8 +297,11 @@ def main() -> None:
     parser.add_argument("--sources", type=Path, default=Path("cities/belgrade/sources"))
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--source-id", action="append", default=[])
+    parser.add_argument("--check-belgrade-weather", action="store_true")
+    parser.add_argument("--check-news-discovery", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--summary", type=Path)
+    parser.add_argument("--silence-state", type=Path)
     parser.add_argument("--fail-on-error", action="store_true")
     parser.add_argument("--fail-on-partial", action="store_true")
     parser.add_argument("--fail-on-transport", action="store_true")
@@ -230,6 +313,9 @@ def main() -> None:
             args.sources,
             online=args.online,
             source_ids=tuple(args.source_id),
+            check_belgrade_weather=args.check_belgrade_weather,
+            check_news_discovery=args.check_news_discovery,
+            silence_state=args.silence_state,
         )
     )
     if args.output:
@@ -240,6 +326,9 @@ def main() -> None:
     if args.summary:
         args.summary.write_text(render_source_health_markdown(result), encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False))
+    if result.get("silence_history_saved") and (output_path := os.environ.get("GITHUB_OUTPUT")):
+        with Path(output_path).open("a", encoding="utf-8") as output:
+            output.write("silence_history_saved=true\n")
 
     exit_code = source_health_exit_code(
         result,

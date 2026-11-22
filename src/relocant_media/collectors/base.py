@@ -30,7 +30,7 @@ class Collector(Protocol):
 
 
 class ArticleBatchError(ValueError):
-    """No article could be read, with bounded diagnostics for the audit."""
+    """No record could be read, with bounded diagnostics for the audit."""
 
     def __init__(self, message: str, failures: list[dict[str, str]]) -> None:
         super().__init__(message)

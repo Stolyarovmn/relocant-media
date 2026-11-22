@@ -7,6 +7,7 @@ import httpx
 from bs4 import BeautifulSoup, Comment, Tag
 
 from relocant_media.collectors.base import RawItem
+from relocant_media.domain.publication_time import local_clock_precision
 from relocant_media.sources.registry import SourceConfig
 
 ARTICLE_PATH = re.compile(r"/vest/(?P<id>[1-9]\d*)-[a-z0-9-]+/")
@@ -62,7 +63,8 @@ def parse_cukarica_news_list(html: str, source: SourceConfig) -> list[RawItem]:
             published = datetime.strptime(_text(date), "%d.%m.%Y").replace(tzinfo=BELGRADE_TZ)
         except ValueError as exc:
             raise CukaricaExtractionError("invalid news date") from exc
-        item = RawItem(source.id, article_id, url, _text(heading), "", published)
+        item = RawItem(source.id, article_id, url, _text(heading), "", published,
+                       published_at_precision="day")
         if article_id in items and items[article_id] != item:
             raise CukaricaExtractionError("conflicting duplicate news ID")
         items[article_id] = item
@@ -109,7 +111,8 @@ def parse_cukarica_article(html: str, source: SourceConfig, url: str) -> RawItem
     except ValueError as exc:
         raise CukaricaExtractionError("invalid article publication date") from exc
     return RawItem(source.id, article_id, canonical, _text(headings[0]),
-                   "\n\n".join(parts), published, source_html=html)
+                   "\n\n".join(parts), published, source_html=html,
+                   published_at_precision=local_clock_precision(published))
 
 
 class CukaricaNewsCollector:

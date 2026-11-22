@@ -16,6 +16,7 @@ categories:
 - schools
 extraction:
   strategy: venue_feed
+  excluded_path_prefixes: [/vesti/svet/, /vesti/politika/]
   status: active
   feed_url: https://nova.rs/feed/
   page_text: true

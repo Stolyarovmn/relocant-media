@@ -1,12 +1,13 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from relocant_media.ingestion.persistence import sync_source
+from relocant_media.collectors.base import RawItem as CollectedRawItem
+from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops.candidates_cli import select_candidates
 from relocant_media.services.published_watch import (
     evidence_changed,
@@ -14,7 +15,7 @@ from relocant_media.services.published_watch import (
     recent_source_load,
 )
 from relocant_media.sources.registry import load_source_file
-from relocant_media.storage.models import EditorialRun, Post, RawItem
+from relocant_media.storage.models import EditorialRun, Post, RawItem, SourceRevision
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
 
@@ -44,8 +45,17 @@ def test_sent_sources_monitored_without_rewriting_published_text_and_load_breaks
                 published_at=now))
         s.commit()
         assert published_sources(s, now=now) == [first]
-        assert evidence_changed(first, SimpleNamespace(url=first.url,title=first.title,
-            body='Отмена события',published_at=now))
+        current = CollectedRawItem(first.source_id, first.external_id, first.url, first.title,
+                                   first.body, now, published_at_precision="instant")
+        assert not evidence_changed(first, current)
+        assert capture_collected_batch(s, [current]) == (1, 0)
+        s.refresh(first)
+        assert first.published_at_precision == "unknown"
+        changed = replace(current, body="Отмена события")
+        assert evidence_changed(first, changed)
+        assert capture_collected_batch(s, [changed]) == (0, 1)
+        revision = s.scalars(select(SourceRevision)).one()
+        assert revision.evidence["published_at_precision"] == "instant"
         load = recent_source_load(s,now=now)
         assert load == {'city_beograd_news':1}
         manifest = select_candidates(s,city='belgrade',since=now.replace(hour=0),

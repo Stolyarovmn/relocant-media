@@ -58,6 +58,7 @@ def parse_marathon_program(html: str, kml: str) -> RawItem:
         source_id=MARATHON_SOURCE_ID, external_id=MARATHON_PAGE_URL,
         url=MARATHON_PAGE_URL, canonical_url=MARATHON_PAGE_URL,
         title=title, body=body, published_at=_publication_date(soup), source_html=snapshot,
+        published_at_precision="instant",
     )
 
 

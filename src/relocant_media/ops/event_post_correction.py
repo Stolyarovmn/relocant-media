@@ -145,7 +145,8 @@ def execute_event_edit(
     event = reviewed_event(plan)
     expected = event.card(plan.city, "Europe/Belgrade", now)
     feed = read_events_feed(_get_html(client, _FEED).encode())
-    if expected.archived or sum(row == expected for row in feed.events) != 1:
+    matches = sum(row.model_copy(update={"published_at": None}) == expected for row in feed.events)
+    if expected.archived or matches != 1:
         raise ValueError("Проверенная точка ещё не опубликована в Mini App")
     for evidence in plan.evidence:
         soup = BeautifulSoup(_get_html(client, evidence.url), "html.parser")
