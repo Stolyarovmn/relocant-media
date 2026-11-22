@@ -49,7 +49,7 @@ PAGE_TEXT = {"media_nova", "media_danas", "media_n1_srbija"}
 @pytest.mark.parametrize(("source_id", "fixture"), MEDIA.items())
 def test_real_feed_samples_yield_full_text_items(source_id: str, fixture: str) -> None:
     xml = (Path("tests/fixtures") / fixture).read_text(encoding="utf-8")
-    items = parse_venue_feed(xml, _registry()[source_id])
+    items = parse_venue_feed(xml, _registry()[source_id], discover=False)
     assert items and all(item.published_at and item.url for item in items)
     if source_id not in PAGE_TEXT:
         assert all(len(item.body) >= 120 for item in items)
@@ -62,6 +62,32 @@ def test_media_can_only_support_non_high_risk_topics() -> None:
     assert primary_evidence_kind(["media"], "politics") is None
     assert primary_evidence_kind(["media"], "LAW") is None
     assert primary_evidence_kind(["unknown"], "events") is None
+
+
+def test_balkan_insight_preserves_serbia_and_uncertain_geography() -> None:
+    from datetime import UTC, datetime
+
+    date = datetime.now(UTC).isoformat()
+    entries = [
+        ("romanian", "News from Bucharest", ("Romania", "All Countries")),
+        ("moldovan", "Local news from Moldova", ("Moldova – Politics and Society",)),
+        ("serbian", "A new bus network", ("Serbia - Politics and Society",)),
+        ("regional", "Regional rail timetable", ("Serbia", "Croatia", "Bosnia and Herzegovina")),
+        ("border", "New rules for buses from Beograd", ("Croatia",)),
+        ("unknown", "Cross-border travel update", ("Transport and Infrastructure",)),
+        ("untagged", "A local announcement", ()),
+    ]
+    xml = "<rss><channel>" + "".join(
+        f"<item><title>{title}</title><link>https://balkaninsight.com/{slug}/</link>"
+        f"<pubDate>{date}</pubDate>"
+        + "".join(f"<category>{term}</category>" for term in tags) + "</item>"
+        for slug, title, tags in entries
+    ) + "</channel></rss>"
+    source = _registry()["media_balkan_insight"]
+    assert [item.url.rstrip("/").rsplit("/", 1)[-1] for item in parse_venue_feed(xml, source)] == [
+        "serbian", "regional", "border", "unknown", "untagged",
+    ]
+    assert len(parse_venue_feed(xml, source, discover=False)) == len(entries)
 
 
 def test_verbatim_copy_is_detected_but_translation_and_retelling_pass() -> None:
