@@ -15,7 +15,8 @@ POSTS = [
     (154, "Эр Сербия отменила рейс из Белграда в Брюссель из-за забастовки",
      "Если у вас куплен билет на понедельник, обратите внимание: рейс отменён.", 3),
     (155, "Air Serbia отменила рейсы между Белградом и Брюсселем на 23 ноября",
-     "Все рейсы на понедельник, 23 ноября отменены. Пассажирам направят уведомления.", 2),
+     "Все рейсы между Белградом и Брюсселем на понедельник отменены. "
+     "Пассажирам направят уведомления.", 2),
 ]
 
 
@@ -73,6 +74,35 @@ def test_duplicates_do_not_consume_the_four_event_slots(session):
     assert digest is not None
     assert "/155" in digest.html and "/153" not in digest.html and "/154" not in digest.html
     assert {entry.url.rsplit("/", 1)[-1] for entry in entries[1:]} == {"200", "201", "202"}
+
+
+def test_flight_uses_latest_link_even_when_older_post_has_priority(session):
+    add_post(session, *POSTS[0], category="transport")
+    add_post(session, *POSTS[2], category="city")
+    entries = evening_entries(session, NOW)
+    assert [entry.url.rsplit("/", 1)[-1] for entry in entries] == ["155"]
+
+
+def test_same_headline_with_opposite_known_directions_keeps_both_entries(session):
+    title = "Air Serbia отменила рейс на 23 ноября"
+    outbound = "Рейс из Белграда в Брюссель отменён."
+    returning = "Рейс из Брюсселя в Белград отменён."
+    first = flight_cancellation_key(title, outbound, published_at=NOW)
+    second = flight_cancellation_key(title, returning, published_at=NOW)
+    assert first is not None and second is not None
+    assert first[0] == second[0] and first[1].isdisjoint(second[1])
+    add_post(session, 201, title, outbound, 2)
+    add_post(session, 202, title, returning, 1)
+    entries = evening_entries(session, NOW)
+    assert [entry.url.rsplit("/", 1)[-1] for entry in entries] == ["202", "201"]
+
+
+def test_older_notice_with_wider_coverage_keeps_its_link(session):
+    message_id, title, body, _ = POSTS[2]
+    add_post(session, message_id, title, body, 5)
+    add_post(session, *POSTS[1])
+    entries = evening_entries(session, NOW)
+    assert [entry.url.rsplit("/", 1)[-1] for entry in entries] == ["154", "155"]
 
 
 @pytest.mark.parametrize("before,after", [
