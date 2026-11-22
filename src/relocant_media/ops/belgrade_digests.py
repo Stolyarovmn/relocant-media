@@ -32,6 +32,7 @@ from relocant_media.collectors.rhmz_forecast import (
 from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.draft_language import serbian_cyrillic_words
+from relocant_media.domain.flight_notices import flight_cancellation_key
 from relocant_media.domain.map_links import map_digest_url, map_event_url
 from relocant_media.domain.topic_tags import strip_draft_tags
 from relocant_media.ops.events_export import export_events
@@ -493,8 +494,9 @@ def evening_entries(session: Session, now: datetime) -> list[Entry]:
         Post.city == _CITY, Post.telegram_message_id > 0, Post.published_at >= since,
         Post.published_at <= now, EditorialRun.delivery_status == "sent",
         ~Post.title.startswith("[тестовый запуск]"),
-    ).order_by(Post.published_at.desc()).limit(30)).all()
+    ).order_by(Post.published_at.desc(), Post.id.desc()).limit(30)).all()
     seen = set()
+    seen_flights: set[tuple[object, ...]] = set()
     entries = []
     for post, run, source_url in sorted(posts, key=lambda row: _PRIORITY.get(row[0].category, 4)):
         published = effective_published_text(post, run)
@@ -506,7 +508,16 @@ def evening_entries(session: Session, now: datetime) -> list[Entry]:
         key = re.sub(r"[^\w]+", " ", title.casefold()).strip()
         if not key or key in seen:
             continue
+        published_at = post.published_at
+        if published_at is not None and published_at.tzinfo is None:
+            published_at = published_at.replace(tzinfo=UTC)
+        flight = flight_cancellation_key(
+            published.title, published.body, published_at=published_at)
+        if flight is not None and flight in seen_flights:
+            continue
         seen.add(key)
+        if flight is not None:
+            seen_flights.add(flight)
         lead = _recap_text(published.body.partition("\n\n")[0])
         if (len(lead) > 240 or len(lead.split()) > 36 or published.body.lstrip().startswith("#")
                 or "https://" in lead or lead.casefold().rstrip(".") == title.casefold()):
