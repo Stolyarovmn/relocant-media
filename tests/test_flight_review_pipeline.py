@@ -14,13 +14,7 @@ from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.ops import gpt_fallback_worker, server_cycle
 from relocant_media.services import gpt_fallback
 from relocant_media.services.editorial_products import present_draft
-from relocant_media.services.material_lifecycle import (
-    adopt_fallback_request,
-    after_result,
-    before_attempt,
-    lifecycle_state,
-    sweep_materials,
-)
+from relocant_media.services.material_lifecycle import lifecycle_state, sweep_materials
 from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.services.package_import import import_package
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
@@ -73,6 +67,17 @@ def _package(candidate, title, body, now, parent=None):
     return parse(payload)
 
 
+def _answer(request, *, packages=(), rejected=()):
+    return gpt_fallback_worker.FallbackInput.model_validate_json(canonical_json({
+        "request": request, "result": {
+            "version": 1, "request_sha256": hashlib.sha256(
+                canonical_json(request).encode()).hexdigest(),
+            "packages": [package.model_dump(mode="json") for package in packages],
+            "rejected": rejected,
+        },
+    }))
+
+
 @pytest.mark.parametrize("resolution, came_from_fallback", [
     ("duplicate", False), ("update", False), ("update", True),
 ])
@@ -88,6 +93,7 @@ def test_held_flight_goes_from_delivery_to_real_bound_fallback(
     preceding.published_at = preceding.ingested_at = now - timedelta(hours=2)
     cycle.finished_at = now - timedelta(minutes=1)
     cycle.scheduled_for = cycle.started_at = now - timedelta(minutes=3)
+    cycle.status = "success"
     session.commit()
     parent = import_package(session, _package(_candidate(session, preceding.id, now),
         f"Er Srbija отменила рейс из Белграда в Брюссель на {flight_day}",
@@ -111,14 +117,6 @@ def test_held_flight_goes_from_delivery_to_real_bound_fallback(
         f"Air Serbia отменила рейсы между Белградом и Брюсселем на {flight_day}",
         "Подтверждена отмена обратного рейса JU270. Пассажиры получат письмо от перевозчика.",
         now)
-    if came_from_fallback:
-        assert adopt_fallback_request(session, raw_id, now=now)
-        assert before_attempt(session, raw_id, now=now, channel="fallback")
-        session.commit()
-    run = import_package(session, checked, now=now)
-    after_result(session, raw_id, now=now)
-    session.commit()
-
     def fetch(package):
         return tuple(EvidenceDocument.model_validate(doc.model_dump())
                      for doc in package.event.documents)
@@ -141,12 +139,24 @@ def test_held_flight_goes_from_delivery_to_real_bound_fallback(
     monkeypatch.setattr(server_cycle, "fetch_documents", fetch)
     monkeypatch.setattr(gpt_fallback_worker.server_runtime, "fetch_documents", fetch)
     engine = session.get_bind()
-    blocked = []
-    assert asyncio.run(server_cycle.publish_pending(engine, enabled=True, blocked=blocked)) == []
-    assert blocked == [{"raw_item_id": raw_id, "reason": "flight_linked_review",
-                        "parent_message_id": 153}]
+    if came_from_fallback:
+        cycle.status = "partial"
+        cycle.details = {"processing_errors": [{"raw_item_id": raw_id,
+                                                 "error_type": "GeminiWorkerError"}]}
+        session.commit()
+        original_request = gpt_fallback.build_request(session, now=now)
+        exchange = gpt_fallback_worker.run_worker(
+            engine, _answer(original_request, packages=[checked]), send_enabled=True, now=now)
+        assert exchange["flight_review_pending"] == 1 and exchange["sent_count"] == 0, exchange
+    else:
+        import_package(session, checked, now=now)
+        blocked = []
+        assert asyncio.run(server_cycle.publish_pending(
+            engine, enabled=True, blocked=blocked, scheduler_run_id=cycle.id)) == []
+        assert blocked == [{"raw_item_id": raw_id, "reason": "flight_linked_review",
+                            "parent_message_id": 153}]
     assert calls == []
-    session.refresh(run)
+    run = session.get(EditorialRun, raw_id, populate_existing=True)
     review_time = datetime.now(UTC)
     state = lifecycle_state(session, raw_id, now=review_time)
     assert (state["state"], state["delivery_attempts"]) == ("waiting_fallback", 0)
@@ -155,7 +165,9 @@ def test_held_flight_goes_from_delivery_to_real_bound_fallback(
     assert session.get(Post, run.post_id).telegram_message_id is None
     sweep = sweep_materials(session, city="belgrade", now=review_time)
     assert raw_id in sweep.fallback_ids and raw_id in sweep.excluded_ids
-    cycle.details = {"lifecycle_fallback_ids": list(sweep.fallback_ids)}
+    session.refresh(cycle)
+    assert raw_id in cycle.details["flight_review_ids"]
+    assert cycle.details["fallback_required"] and cycle.status == "partial"
     session.commit()
     assert asyncio.run(server_cycle.publish_pending(engine, enabled=True)) == []
     request = gpt_fallback.build_request(session, now=review_time)
@@ -165,14 +177,7 @@ def test_held_flight_goes_from_delivery_to_real_bound_fallback(
     assert ref in request["published_post_refs"]
 
     def run_answer(*, packages=(), rejected=()):
-        payload = gpt_fallback_worker.FallbackInput.model_validate_json(canonical_json({
-            "request": request, "result": {
-                "version": 1, "request_sha256": hashlib.sha256(
-                    canonical_json(request).encode()).hexdigest(),
-                "packages": [package.model_dump(mode="json") for package in packages],
-                "rejected": rejected,
-            },
-        }))
+        payload = _answer(request, packages=packages, rejected=rejected)
         return gpt_fallback_worker.run_worker(engine, payload, now=review_time)
 
     rejection = {"raw_item_id": raw_id, "category": "transport",

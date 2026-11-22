@@ -133,11 +133,12 @@ def _failed_ids(run: SchedulerRun, now: datetime) -> list[int]:
         return []
     errors = run.details.get("processing_errors")
     result: list[int] = []
-    fallback_ids = run.details.get("lifecycle_fallback_ids")
-    if (isinstance(fallback_ids, list) and len(fallback_ids) <= MAX_CANDIDATES
-            and all(type(raw_id) is int and raw_id > 0 for raw_id in fallback_ids)
-            and len(set(fallback_ids)) == len(fallback_ids)):
-        result.extend(fallback_ids)
+    for key in ("flight_review_ids", "lifecycle_fallback_ids"):
+        fallback_ids = run.details.get(key)
+        if (isinstance(fallback_ids, list) and len(fallback_ids) <= MAX_CANDIDATES
+                and all(type(raw_id) is int and raw_id > 0 for raw_id in fallback_ids)
+                and len(set(fallback_ids)) == len(fallback_ids)):
+            result.extend(raw_id for raw_id in fallback_ids if raw_id not in result)
     for error in errors if isinstance(errors, list) else []:
         if not isinstance(error, dict):
             continue
@@ -386,6 +387,8 @@ def build_request(
             select(RawItem, Source).join(Source).where(RawItem.id.in_(pending)),
         ).all()
         official = {item.id for item, source in pending_items if source.ownership == "official"}
+        flights = {item.id for item, _ in pending_items
+                   if flight_review_marker(session.get(EditorialRun, item.id)) is not None}
         urgent = {
             item.id for item, source in pending_items
             if local_utility_notice(item.source_id, item.url, item.title, item.body)
@@ -398,7 +401,8 @@ def build_request(
         # В пределах одного приоритета сначала разбираем более ранний сбой:
         # иначе каждый новый цикл может вытеснять открытые задания до истечения срока.
         windows.sort(key=lambda window: (
-            urgent.isdisjoint(window[1]), official.isdisjoint(window[1]), window[0].id,
+            urgent.isdisjoint(window[1]), flights.isdisjoint(window[1]),
+            official.isdisjoint(window[1]), window[0].id,
         ))
         from relocant_media.services.linked_updates import published_post_references
 
@@ -415,7 +419,7 @@ def build_request(
                 "candidates": candidates,
             }
             for raw_id in sorted(failed, key=lambda raw_id: (
-                raw_id not in urgent, raw_id not in official,
+                raw_id not in urgent, raw_id not in flights, raw_id not in official,
             )):
                 existing = session.get(EditorialRun, raw_id, populate_existing=True)
                 if (existing is not None and flight_review_marker(existing) is None

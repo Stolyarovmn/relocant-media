@@ -24,11 +24,14 @@ from relocant_media.ai.models import (
     RankingResult,
 )
 from relocant_media.ai.package import EditorialPackage, canonical_json
+from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.ops import server_cycle, server_runtime
+from relocant_media.ops.gpt_export_receipt import require_public_documents
 from relocant_media.services.editorial import EditorialService
 from relocant_media.services.flight_review import flight_review_marker
 from relocant_media.services.gpt_batch_fallback import validate_batch_rank
 from relocant_media.services.gpt_fallback import (
+    build_request,
     validate_fallback_candidate,
     validate_fallback_package,
 )
@@ -259,6 +262,7 @@ def _check_live_evidence(package: EditorialPackage) -> None:
 
 async def _publish_imported(
     engine: Engine, raw_ids: set[int], blocked: list[dict[str, Any]],
+    scheduler_run_id: int | None,
 ) -> list[int]:
     # Применяем тот же расширенный live-fetch, что и основной server_runtime;
     # восстанавливаем модульный адаптер даже при неясном результате отправки.
@@ -267,6 +271,7 @@ async def _publish_imported(
     try:
         return await server_cycle.publish_pending(
             engine, enabled=True, only_raw_ids=raw_ids, blocked=blocked,
+            scheduler_run_id=scheduler_run_id,
         )
     finally:
         server_cycle.fetch_documents = previous_fetch
@@ -332,7 +337,10 @@ def run_worker(
     sent_count = 0
     if send_enabled is True and delivery_ids:
         try:
-            sent_count = len(asyncio.run(_publish_imported(engine, delivery_ids, blocked)))
+            cycle_id = payload.request.get("scheduler_run_id")
+            sent_count = len(asyncio.run(_publish_imported(
+                engine, delivery_ids, blocked, cycle_id if type(cycle_id) is int else None,
+            )))
         except Exception as error:
             errors.append({"stage": "publish", "error_type": _error_type(error)})
     candidates = payload.request.get("candidates", [])
@@ -359,6 +367,8 @@ def run_worker(
         "received": len(payload.result.packages), "imported": imported, "ready": ready,
         "rejected": rejected, "declined": declined, "sent_count": sent_count,
         "delivery_blocked": len(blocked),
+        "flight_review_pending": sum(
+            item.get("reason") == FLIGHT_REVIEW_REASON for item in blocked),
         "delivery_enabled": send_enabled is True, "processing_errors": errors,
         "unresolved": unresolved,
         "fallback_required": bool(unresolved or errors or blocked),
@@ -421,6 +431,22 @@ def main() -> None:
             report = run_worker(
                 engine, payload, send_enabled=os.environ.get("EDITORIAL_SEND_ENABLED") == "true",
             )
+            if report["flight_review_pending"]:
+                with Session(engine) as session:
+                    continuation = build_request(
+                        session, now=datetime.now(UTC),
+                        scheduler_run_id=payload.request["scheduler_run_id"],
+                    )
+                if continuation is not None:
+                    continuation["candidates"] = [
+                        candidate for candidate in continuation["candidates"]
+                        if "flight_review_parent" in candidate
+                    ]
+                    if continuation["candidates"]:
+                        require_public_documents(continuation)
+                        (args.output / "gpt-refreshed-request.json").write_text(
+                            canonical_json(continuation), encoding="utf-8",
+                        )
     except Exception as error:
         report = {"status": "PRIMARY_FAILED", "mode": "subscription_gpt_fallback",
                   "error_type": _error_type(error), "model_calls": 0,
