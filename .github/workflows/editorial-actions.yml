@@ -337,13 +337,7 @@ jobs:
               '-f', f'drain_runs_left={left-1}'], check=True, stdout=subprocess.DEVNULL)
           PY
   chain:
-    # One-shot manual operations must release their workflow queue immediately.
-    # Only scheduled runs and the explicit auto loop book another cycle.
-    # Scheduled runs are best effort. A finished cycle books the next one, so the newsroom
-    # keeps running; a failed cycle (for example the exact-main-CI guard right after a merge)
-    # backs off for ten minutes instead of ending the chain. Cron slots remain the restart
-    # path and ACTIONS_CHAIN_ENABLED is the kill switch. The concurrency group still
-    # serializes the single canonical writer.
+    # Book the delay outside the writer workflow so it can release its queue.
     if: >-
       always() && github.ref == 'refs/heads/main' &&
       (github.event_name != 'workflow_dispatch' || inputs.mode == 'auto') &&
@@ -355,19 +349,26 @@ jobs:
       inputs.mode != 'fallback-preview' && inputs.mode != 'fallback' && !startsWith(inputs.mode, 'map-')
     needs: cycle
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     permissions:
       actions: write
     steps:
-      - name: Book the next cycle
+      - name: Запланировать следующий цикл
+        shell: python
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          CHAIN_DELAY_SECONDS: ${{ needs.cycle.result == 'success' && '120' || '600' }}
+          CYCLE_RESULT: ${{ needs.cycle.result }}
+          CYCLE_SHA: ${{ github.sha }}
         run: |
-          set -euo pipefail
-          # The concurrency group keeps at most one pending run, so this cannot pile up.
-          sleep "$CHAIN_DELAY_SECONDS"
-          gh workflow run editorial-actions.yml --ref main -f mode=auto
+          import os
+          import subprocess
+
+          subprocess.run([
+              'gh', 'workflow', 'run', 'editorial-retry.yml', '-R', os.environ['GH_REPO'],
+              '--ref', 'main', '-f', f"result={os.environ['CYCLE_RESULT']}",
+              '-f', f"source_sha={os.environ['CYCLE_SHA']}",
+          ], check=True)
   deploy:
     if: always() && needs.cycle.outputs.projection == 'true'
     needs: cycle

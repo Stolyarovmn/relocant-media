@@ -1,0 +1,62 @@
+name: Пауза перед повторным циклом редакции
+
+on:
+  workflow_dispatch:
+    inputs:
+      result:
+        description: Итог завершившегося рабочего задания
+        required: true
+        type: choice
+        options: [success, failure]
+      source_sha:
+        description: Коммит завершившегося цикла
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  retry:
+    if: >-
+      github.repository == 'Stolyarovmn/relocant-media' &&
+      github.ref == 'refs/heads/main' && inputs.source_sha == github.sha &&
+      (inputs.result == 'success' || inputs.result == 'failure') &&
+      vars.ACTIONS_EDITORIAL_ENABLED == 'true' && vars.ACTIONS_CHAIN_ENABLED == 'true'
+    concurrency:
+      group: editorial-retry-clock
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Дождаться повторного цикла
+        shell: python
+        env:
+          CHAIN_DELAY_SECONDS: ${{ inputs.result == 'success' && '120' || '600' }}
+        run: |
+          import os
+          import time
+
+          time.sleep(int(os.environ['CHAIN_DELAY_SECONDS']))
+      - name: Запустить редакцию на актуальной версии
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          import os
+          import subprocess
+
+          repo = os.environ['GH_REPO']
+          head = subprocess.check_output([
+              'gh', 'api', f'repos/{repo}/git/ref/heads/main', '--jq', '.object.sha',
+          ], text=True).strip()
+          if head == os.environ['GITHUB_SHA']:
+              subprocess.run([
+                  'gh', 'workflow', 'run', 'editorial-actions.yml', '-R', repo,
+                  '--ref', 'main', '-f', 'mode=auto',
+              ], check=True)
+          else:
+              print('main обновилась во время ожидания. Актуальную версию запустит её CI.')
