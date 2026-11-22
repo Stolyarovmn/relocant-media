@@ -3,9 +3,11 @@ import copy
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -13,6 +15,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from relocant_media.ops import actions_runtime as runtime
+from relocant_media.ops.belgrade_digests import MORNING_ATTEMPT, due_slot, morning_delivery
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.storage.models import Submission
 from relocant_media.storage.sqlite_schema import initialize_sqlite
@@ -168,6 +171,47 @@ def test_auto_mode_runs_editorial_when_due_then_intake_until_the_next_hour(
     assert execute(context, tmp_path / 'two', monkeypatch, mode='auto') == 0
     assert commands == ['server_runtime', 'intake_batch']
     assert context[0].state['last_editorial_at'] == recorded
+
+
+def test_morning_reason_is_saved_with_the_normal_cycle(context, tmp_path, monkeypatch):
+    store, memory = context
+    drive = Mock(spec=runtime.SSHStateClient)
+    drive.download.side_effect = memory.download
+    drive.upload.side_effect = memory.upload
+    drive.checkpoint.return_value = "c" * 64
+    slot = due_slot(datetime(2026, 11, 22, 9, tzinfo=UTC))
+    monkeypatch.setattr(runtime, "due_digest_slot", lambda _now: slot)
+    digest = AsyncMock(return_value={"state": "insufficient_items", "items": 0})
+    monkeypatch.setattr(runtime, "run_digest", digest)
+    monkeypatch.setattr(runtime, "run_child", lambda *args: 0)
+    env = {
+        "ACTIONS_CUTOVER_CONFIRMED": "true", "GITHUB_REPOSITORY": runtime.REPO,
+        "GITHUB_REF": "refs/heads/main", "GITHUB_ACTIONS": "true",
+        "EDITORIAL_SEND_ENABLED": "true", "EDITORIAL_CHANNEL_MODE": "public",
+    }
+    assert execute((store, drive), tmp_path, monkeypatch, mode="intake", environment=env) == 0
+    digest.assert_awaited_once()
+    assert store.sha == "initialxx"
+    assert "digest_receipts" not in store.state
+    assert store.state[MORNING_ATTEMPT] == {"slot": slot.key, "reason": "insufficient_items"}
+    assert morning_delivery(store.state, slot.expires).reason == "insufficient_items"
+
+
+def test_morning_watch_output_only_for_an_unconfirmed_public_issue(tmp_path):
+    output = tmp_path / "actions-output"
+    env = {"GITHUB_OUTPUT": str(output), "GITHUB_ACTIONS": "true",
+           "EDITORIAL_SEND_ENABLED": "true", "EDITORIAL_CHANNEL_MODE": "public"}
+    now = datetime(2026, 11, 22, 10, tzinfo=UTC)
+    state = {"status": "ready", "digest_receipts": {
+        "belgrade:2026-11-22:morning": {"state": "sent", "message_id": 152},
+    }}
+    runtime._write_morning_watch(state, env, now=now)
+    state["digest_receipts"].clear()
+    runtime._write_morning_watch(state, env, now=now - timedelta(seconds=1))
+    runtime._write_morning_watch(state, {**env, "EDITORIAL_SEND_ENABLED": "false"}, now=now)
+    assert not output.exists()
+    runtime._write_morning_watch(state, env, now=now)
+    assert output.read_text() == "morning_watch_date=2026-11-22\n"
 
 
 def test_editorial_child_receives_a_new_output_directory(context, tmp_path, monkeypatch):
@@ -769,6 +813,41 @@ def test_workflow_never_uploads_private_database_or_runs_on_pr():
     worker = next(step for step in steps if step.get('id') == 'runtime')
     assert worker['env']['GH_STATE_REPOSITORY'] == '${{ vars.EDITORIAL_STATE_REPOSITORY }}'
     assert worker['env']['GH_STATE_TOKEN'] == '${{ secrets.EDITORIAL_STATE_TOKEN || github.token }}'
+
+
+@pytest.mark.parametrize(("status", "result", "dispatch"), [
+    ("in_progress", None, False),
+    ("completed", "success", False),
+    ("completed", "failure", True),
+])
+def test_chain_can_check_a_missed_issue_without_waiting_for_cron(
+    monkeypatch, status, result, dispatch,
+):
+    import yaml
+
+    workflow = ROOT / ".github/workflows/editorial-actions.yml"
+    jobs = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
+    assert jobs["cycle"]["outputs"]["morning_watch_date"] == (
+        "${{ steps.runtime.outputs.morning_watch_date }}"
+    )
+    step = jobs["chain"]["steps"][1]
+    assert step["continue-on-error"] is True
+    assert "morning_watch_date" in step["if"]
+    monkeypatch.setenv("GH_REPO", runtime.REPO)
+    monkeypatch.setenv("MORNING_DATE", "2026-11-22")
+    monkeypatch.setattr(subprocess, "check_output", lambda *_args, **_options: json.dumps([
+        {"displayTitle": "Утренняя сводка · 2026-11-22", "status": status, "conclusion": result},
+    ]))
+    run = Mock()
+    monkeypatch.setattr(subprocess, "run", run)
+    exec(compile(step["run"], str(workflow), "exec"), {})
+    if dispatch:
+        run.assert_called_once()
+        assert run.call_args.args[0][-4:] == [
+            "-f", "dry_run=false", "-f", "morning_date=2026-11-22",
+        ]
+    else:
+        run.assert_not_called()
 
 
 def test_drive_upload_requires_full_readback_hash(tmp_path, monkeypatch):

@@ -32,6 +32,11 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.package import canonical_json
 from relocant_media.ai.quota_diagnostics import safe_quota
+from relocant_media.ops.belgrade_digests import (
+    MORNING_ATTEMPT,
+    MORNING_SKIP_REASONS,
+    morning_delivery,
+)
 from relocant_media.ops.belgrade_digests import due_slot as due_digest_slot
 from relocant_media.ops.belgrade_digests import run as run_digest
 from relocant_media.ops.digest_preview import preview as preview_digest
@@ -158,6 +163,23 @@ def _write_drain_control(environment: Mapping[str, str], control: tuple[bool, in
         with Path(output).open("a", encoding="utf-8") as stream:
             stream.write(f"drain_continue={str(should_continue).lower()}\n")
             stream.write(f"drain_next_delay_seconds={delay}\n")
+
+
+def _write_morning_watch(
+    state: dict[str, Any], environment: Mapping[str, str], *, now: datetime,
+) -> None:
+    output = environment.get("GITHUB_OUTPUT")
+    if (not output or environment.get("GITHUB_ACTIONS") != "true"
+            or environment.get("EDITORIAL_SEND_ENABLED") != "true"
+            or environment.get("EDITORIAL_CHANNEL_MODE") != "public"):
+        return
+    try:
+        delivery = morning_delivery(state, now)
+        if delivery is not None and delivery.status != "sent":
+            with Path(output).open("a", encoding="utf-8") as stream:
+                stream.write(f"morning_watch_date={delivery.slot.scheduled.date()}\n")
+    except (OSError, ValueError) as error:
+        print(json.dumps({"morning_watch_error": type(error).__name__}), file=sys.stderr)
 
 
 def _sweep_material_lifecycle(database: Path, *, now: datetime | None = None) -> None:
@@ -938,6 +960,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         return 0
     if mode == "fallback-preview":
         return _export_gpt_request(drive, database, work, int(gpt_cycle) if gpt_cycle else None)
+    morning_attempt = None
     if slot is not None:
         def commit_digest(current: dict[str, Any], digest: str,
                           updates: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -949,6 +972,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         if result["state"] in {"sent", "uncertain"}:
             state, sha = store.read()
             validate_ready(state)
+        if slot.kind == "morning" and result["state"] in MORNING_SKIP_REASONS:
+            morning_attempt = {"slot": slot.key, "reason": result["state"]}
     if mode == "digest":
         return 0
     fallback_file = work / "gpt-fallback-input.json"
@@ -1111,6 +1136,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
              "last_editorial_at": (
                  datetime.now(UTC).isoformat() if mode == "editorial" and code == 0
                  else state.get("last_editorial_at"))}
+    if morning_attempt is not None:
+        ready[MORNING_ATTEMPT] = morning_attempt
     if batch is not None:
         engine = create_engine(env["DATABASE_URL"])
         try:
@@ -1164,6 +1191,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     _runtime_phase("state_commit_started")
     store.write(ready, busy_sha)
     _runtime_phase("state_committed")
+    if mode in {"editorial", "intake"} and isinstance(drive, SSHStateClient):
+        _write_morning_watch(ready, environment, now=datetime.now(UTC))
     if (mode in {"editorial", "drain"} and code == 0
             and environment.get("GITHUB_ACTIONS") == "true"
             and environment.get("EDITORIAL_STORAGE_BACKEND") == "ssh"

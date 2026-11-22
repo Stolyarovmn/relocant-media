@@ -5,6 +5,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from test_transport_map import _map_html
@@ -30,6 +31,7 @@ from relocant_media.ops.belgrade_digests import (
     _road_text,
     deliver,
     due_slot,
+    morning_delivery,
     render,
 )
 from relocant_media.ops.map_export import (
@@ -90,8 +92,43 @@ def test_explicit_end_date_still_stops_regular_digests(monkeypatch):
     }))
     assert due_slot(datetime(2026, 11, 27, 6, 30, tzinfo=UTC)).kind == "morning"
     assert due_slot(datetime(2026, 11, 28, 6, 30, tzinfo=UTC)) is None
+    assert morning_delivery({"status": "ready"}, datetime(2026, 11, 28, 12, tzinfo=UTC)) is None
     reminder = due_slot(datetime(2026, 11, 27, 19, 30, tzinfo=UTC))
     assert reminder is not None and reminder.kind == "reminder"
+
+
+@pytest.mark.parametrize("cutoff", [
+    datetime(2026, 11, 22, 10, tzinfo=UTC),
+    datetime(2027, 7, 1, 9, tzinfo=UTC),
+])
+def test_morning_check_uses_the_end_of_the_same_local_slot(cutoff):
+    from datetime import timedelta
+
+    assert morning_delivery({"status": "ready"}, cutoff - timedelta(seconds=1)) is None
+    delivery = morning_delivery({"status": "ready"}, cutoff)
+    assert delivery is not None and delivery.slot.expires.hour == 11
+    assert (delivery.status, delivery.reason) == ("missed", "no_recorded_result")
+
+
+@pytest.mark.parametrize(("receipt", "status", "reason"), [
+    ({"state": "sent", "message_id": 152}, "sent", "confirmed"),
+    ({"state": "sent", "message_id": True}, "unconfirmed", "invalid_receipt"),
+    ({"state": "uncertain"}, "unconfirmed", "telegram_unconfirmed"),
+    ({"state": "sending"}, "unconfirmed", "telegram_unconfirmed"),
+])
+def test_morning_watch_checks_exact_receipt_for_that_day(receipt, status, reason):
+    now = datetime(2026, 11, 22, 10, tzinfo=UTC)
+    state = {"status": "busy", "digest_receipts": {
+        "belgrade:2026-11-22:morning": receipt,
+        "belgrade:2026-11-21:morning": {"state": "sent", "message_id": 151},
+    }, belgrade_digests.MORNING_ATTEMPT: {
+        "slot": "belgrade:2026-11-22:morning", "reason": "insufficient_items",
+    }}
+    delivery = morning_delivery(state, now)
+    assert (delivery.status, delivery.reason) == (status, reason)
+    del state["digest_receipts"]["belgrade:2026-11-22:morning"]
+    assert morning_delivery(state, now).reason == "insufficient_items"
+    assert morning_delivery(state, now.replace(day=23)).reason == "no_recorded_result"
 
 
 def test_forecast_uses_dated_belgrade_column_and_skips_stale_html():

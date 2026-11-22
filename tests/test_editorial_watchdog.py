@@ -1,7 +1,7 @@
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -87,6 +87,89 @@ def test_notification_requires_exact_private_owner(monkeypatch):
         asyncio.run(watchdog.notify_owner(watchdog.Check("busy", "123")))
 
 
+def test_morning_alert_keeps_legacy_queue_state_and_is_deduplicated_by_day(
+    tmp_path, monkeypatch,
+):
+    file = tmp_path / "watchdog"
+    status = watchdog.Check("healthy")
+    file.write_text(status.key, encoding="utf-8")
+    now = datetime(2026, 11, 22, 10, tzinfo=UTC)
+    client = Mock()
+    client.read_status.return_value = ({"status": "ready"}, "sha", None)
+    assert watchdog.inspect(client, now, tmp_path, allow_recovery=False).morning is None
+    client.read_status.reset_mock()
+    check = watchdog.inspect(client, now, tmp_path, allow_recovery=False, check_digests=True)
+    client.read_status.assert_called_once_with()
+    client.write.assert_not_called()
+
+    send = AsyncMock()
+    monkeypatch.setattr(watchdog, "notify_owner", send)
+    assert watchdog.update_alerts(check, file)
+    send.assert_awaited_once_with(None, check.morning)
+    assert not watchdog.update_alerts(check, file)
+    send.assert_awaited_once()
+    assert watchdog.AlertState.read(file).queue == status.key
+    next_day = watchdog.inspect(client, now + timedelta(days=1), tmp_path,
+                                allow_recovery=False, check_digests=True)
+    assert watchdog.update_alerts(next_day, file)
+    assert send.await_count == 2
+
+
+def test_confirmed_morning_does_not_notify_owner(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 22, 10, tzinfo=UTC)
+    client = Mock()
+    client.read_status.return_value = (
+        {"status": "ready", "digest_receipts": {
+            "belgrade:2026-11-22:morning": {"state": "sent", "message_id": 152},
+        }}, "sha", None,
+    )
+    check = watchdog.inspect(client, now, tmp_path, allow_recovery=False, check_digests=True)
+    assert check.morning.status == "sent"
+    send = AsyncMock()
+    monkeypatch.setattr(watchdog, "notify_owner", send)
+    assert watchdog.update_alerts(check, tmp_path / "watchdog")
+    send.assert_not_awaited()
+
+
+def test_redundant_check_targets_the_named_morning_and_does_not_recover_queue(
+    tmp_path, monkeypatch,
+):
+    now = datetime(2026, 11, 22, 10, tzinfo=UTC)
+    client = Mock()
+    client.read_status.return_value = ({"status": "busy"}, "sha", None)
+    queue = Mock(side_effect=AssertionError("morning-only check must not touch writer recovery"))
+    monkeypatch.setattr(watchdog, "_inspect_queue", queue)
+    check = watchdog.inspect(client, now, tmp_path, allow_recovery=False,
+                             check_digests=True, morning_date=now.date())
+    assert check.status == "morning_only" and check.morning.status == "missed"
+    assert not watchdog.should_notify(check, "")
+    yesterday = watchdog.inspect(client, now, tmp_path, allow_recovery=False,
+                                 check_digests=True, morning_date=date(2026, 11, 21))
+    assert yesterday.morning is None
+    client.read_status.side_effect = SSHStorageError("storage_error", "timeout")
+    with pytest.raises(SSHStorageError):
+        watchdog.inspect(client, now, tmp_path, allow_recovery=False,
+                         check_digests=True, morning_date=now.date())
+
+
+def test_owner_notice_reports_a_confirmed_reason_in_one_private_message(monkeypatch):
+    now = datetime(2026, 11, 22, 10, tzinfo=UTC)
+    morning = watchdog.morning_delivery({"status": "ready", "last_morning_digest_attempt": {
+        "slot": "belgrade:2026-11-22:morning", "reason": "insufficient_items",
+    }}, now)
+    monkeypatch.setenv("EDITORIAL_OWNER_CHAT_ID", "42")
+    monkeypatch.setenv("EDITORIAL_OWNER_USER_ID", "42")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    bot = Mock(send_message=AsyncMock())
+    monkeypatch.setattr(watchdog, "TelegramBotAPI", lambda *_args: bot)
+    asyncio.run(watchdog.notify_owner(watchdog.Check("stale"), morning))
+    bot.send_message.assert_awaited_once()
+    chat_id, text = bot.send_message.await_args.args
+    assert chat_id == 42
+    assert "22.11.2026" in text and "11:00 по Белграду" in text
+    assert "не хватило материалов" in text and "больше часа" in text
+
+
 def test_failed_current_main_cycle_can_wake_the_storage_watchdog():
     path = Path(__file__).resolve().parents[1] / ".github/workflows/editorial-watchdog.yml"
     workflow = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
@@ -106,3 +189,6 @@ def test_failed_current_main_cycle_can_wake_the_storage_watchdog():
     ))
     assert workflow["permissions"] == {"actions": "read", "contents": "read"}
     assert all("artifact" not in step.get("uses", "") for step in job["steps"])
+    env = next(step["env"] for step in job["steps"] if step.get("id") == "check")
+    assert env["EDITORIAL_SEND_ENABLED"] == "${{ vars.ACTIONS_SEND_ENABLED }}"
+    assert env["EDITORIAL_CHANNEL_MODE"] == "public"
