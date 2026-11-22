@@ -1,8 +1,7 @@
 """Ровный ритм ленты (#337): не выпускать несрочные посты пачкой.
 
-Пауза между постами только откладывает несрочный материал до следующего цикла и
-никогда не даёт ему сгореть: если до срока жизни материала осталось мало времени,
-он выходит сразу. Срочные поводы (транспорт, отключения, погода) не ждут.
+Пауза между несрочными постами разгружает ленту. Вне утреннего окна она
+снимается при близком истечении материала. Срочные поводы не ждут.
 """
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -49,6 +48,10 @@ def morning_deadline(release: datetime) -> datetime:
     return datetime.combine(release.astimezone(QUIET_ZONE).date(), MORNING_DEADLINE, QUIET_ZONE)
 
 
+def _in_morning_window(local_time: time) -> bool:
+    return QUIET_END <= local_time < MORNING_DEADLINE
+
+
 def _schedule_clock(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -84,7 +87,7 @@ def _event_relevant_today(place: dict[str, Any] | None, now: datetime) -> bool:
 def delivery_order(pending: Iterable[PendingDelivery], *, now: datetime) -> list[int]:
     """Утром сначала срочное и подтверждённые события на сегодня, затем свежие новости."""
     local = now.astimezone(QUIET_ZONE)
-    if not QUIET_END <= local.time() < MORNING_DEADLINE:
+    if not _in_morning_window(local.time()):
         return sorted(row.raw_id for row in pending)
 
     def key(row: PendingDelivery) -> tuple[int, int]:
@@ -112,6 +115,7 @@ def pacing_hold(
         return None
     if now - last_sent_at >= MIN_GAP:
         return None
-    if deadline_at is None or deadline_at - now <= DEADLINE_MARGIN:
+    if (not _in_morning_window(now.astimezone(QUIET_ZONE).time())
+            and (deadline_at is None or deadline_at - now <= DEADLINE_MARGIN)):
         return None
     return PACING_REASON

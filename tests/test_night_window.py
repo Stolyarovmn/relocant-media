@@ -8,10 +8,13 @@ from test_channel_delivery import reviewed as reviewed_fixture
 
 from relocant_media.domain import quiet_hours
 from relocant_media.domain.pacing import (
+    MIN_GAP,
+    PACING_REASON,
     PendingDelivery,
     delivery_order,
     morning_deadline,
     morning_release,
+    pacing_hold,
 )
 from relocant_media.ops import server_cycle
 from relocant_media.services.material_lifecycle import (
@@ -139,6 +142,18 @@ def test_morning_order_respects_urgent_and_verified_event_windows():
         PendingDelivery(6, yesterday, event_place={"starts_at": "2026-11-23T22:30:00"}),
     ]
     assert delivery_order(pending, now=now) == [5, 2, 4, 1, 3, 6]
+
+
+def test_morning_gap_stays_twenty_minutes_near_noon():
+    now = local(2026, 11, 23, 11, 15)
+    pacing = {
+        "urgent": False, "now": now, "deadline_at": now.replace(hour=12, minute=0),
+    }
+    assert pacing_hold(category="culture", last_sent_at=now - timedelta(minutes=5),
+                       **pacing) == PACING_REASON
+    assert pacing_hold(category="culture", last_sent_at=now - MIN_GAP, **pacing) is None
+    assert pacing_hold(category="transport", last_sent_at=now - timedelta(minutes=5),
+                       **pacing) is None
 
 
 @pytest.mark.asyncio

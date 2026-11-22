@@ -1336,17 +1336,20 @@ async def publish_pending(
         query = select(
             EditorialRun.raw_item_id,
             RawItem.published_at,
-            outcome["ranking"]["category"].as_string(),
-            package_fields["urgent"].as_json(),
-            package_fields["presentation"]["event_place"].as_json(),
+            outcome["ranking"]["category"].as_string().label("category"),
+            package_fields["urgent"].as_json().label("urgent"),
+            package_fields["presentation"]["event_place"].as_json().label("event_place"),
         ).join(RawItem, RawItem.id == EditorialRun.raw_item_id).where(
             EditorialRun.delivery_status == "pending",
         )
         if only_raw_ids is not None:
             query = query.where(EditorialRun.raw_item_id.in_(only_raw_ids))
         ids = delivery_order(
-            (PendingDelivery(raw_id, published, str(category or ""), urgent is True, event_place)
-             for raw_id, published, category, urgent, event_place in session.execute(query)),
+            (PendingDelivery(
+                raw_id=row.raw_item_id, published_at=row.published_at,
+                category=str(row.category or ""), urgent=row.urgent is True,
+                event_place=row.event_place,
+            ) for row in session.execute(query)),
             now=quiet_hours.utc_now(),
         )
         last_sent_at = session.scalar(select(func.max(Post.published_at)).join(
