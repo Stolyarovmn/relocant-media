@@ -1,0 +1,109 @@
+name: Model trial
+# #312: read-only comparison of candidate draft/review models on published posts.
+# Restores the verified snapshot into a private copy; never claims or writes state,
+# never calls Telegram and never sends reader submissions to a model.
+on:
+  workflow_dispatch:
+    inputs:
+      draft_model:
+        description: Candidate model for draft, repair and owner revision
+        type: string
+        default: gemini-3.8-flash
+      review_model:
+        description: Candidate model for both independent reviews
+        type: string
+        default: gemini-3.6-flash
+      limit:
+        description: Latest published posts to compare, from 1 to 15
+        type: number
+        default: 15
+permissions:
+  contents: read
+concurrency:
+  group: model-trial
+  cancel-in-progress: false
+jobs:
+  trial:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-python
+      - name: Verify exact main CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo = 'Stolyarovmn/relocant-media'
+          sha = os.environ['EXPECTED_SHA']
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/{path}']))
+          runs = api(f'actions/runs?head_sha={sha}&event=push&per_page=100')['workflow_runs']
+          ci = [r for r in runs if r['path'] == '.github/workflows/ci.yml'
+                and r['head_branch'] == 'main' and r['event'] == 'push']
+          assert ci and ci[0]['status'] == 'completed' and ci[0]['conclusion'] == 'success'
+          PY
+      - name: Prepare storage-only SSH identity
+        id: storage
+        env:
+          STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
+          STORAGE_PRIVATE_KEY: ${{ secrets.EDITORIAL_SSH_PRIVATE_KEY }}
+          STORAGE_KNOWN_HOSTS: ${{ secrets.EDITORIAL_SSH_KNOWN_HOSTS }}
+          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
+          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
+          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          case "$STORAGE_BACKEND" in
+            drive) exit 0 ;;
+            ssh) ;;
+            *) echo 'Unsupported editorial storage backend' >&2; exit 1 ;;
+          esac
+          test -n "$STORAGE_PRIVATE_KEY"
+          test -n "$STORAGE_KNOWN_HOSTS"
+          umask 077
+          identity="$RUNNER_TEMP/editorial-storage-identity"
+          mkdir "$identity"
+          printf '%s\n' "$STORAGE_PRIVATE_KEY" > "$identity/key"
+          printf '%s\n' "$STORAGE_KNOWN_HOSTS" > "$identity/known_hosts"
+          ssh-keygen -y -P '' -f "$identity/key" > /dev/null
+          echo "key_path=$identity/key" >> "$GITHUB_OUTPUT"
+          echo "known_hosts_path=$identity/known_hosts" >> "$GITHUB_OUTPUT"
+      - name: Compare models on a private snapshot copy
+        env:
+          EDITORIAL_STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
+          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
+          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
+          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
+          EDITORIAL_SSH_KEY_PATH: ${{ steps.storage.outputs.key_path }}
+          EDITORIAL_SSH_KNOWN_HOSTS_PATH: ${{ steps.storage.outputs.known_hosts_path }}
+          GH_STATE_REPOSITORY: ${{ vars.EDITORIAL_STATE_REPOSITORY }}
+          GH_STATE_TOKEN: ${{ secrets.EDITORIAL_STATE_TOKEN || github.token }}
+          DRIVE_CREDENTIALS_JSON: ${{ secrets.DRIVE_CREDENTIALS_JSON }}
+          DRIVE_STATE_FOLDER_ID: ${{ vars.DRIVE_STATE_FOLDER_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          TRIAL_MODEL_DRAFT: ${{ inputs.draft_model }}
+          TRIAL_MODEL_REVIEW: ${{ inputs.review_model }}
+          TRIAL_LIMIT: ${{ inputs.limit }}
+        run: |
+          python -m relocant_media.ops.model_trial --work "$RUNNER_TEMP/model-trial-work" \
+            --output "$RUNNER_TEMP/model-trial.json" --limit "$TRIAL_LIMIT"
+      - name: Keep comparison for review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: model-trial-${{ github.run_id }}
+          path: ${{ runner.temp }}/model-trial.json
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Remove private working files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/model-trial-work" "$RUNNER_TEMP/editorial-storage-identity"
