@@ -31,7 +31,9 @@ from relocant_media.services.gpt_fallback import (
     validate_fallback_candidate,
 )
 from relocant_media.services.material_lifecycle import (
+    archive_for_retry,
     authorize_refreshed_evidence,
+    can_retry_snapshot,
     inherit_lifecycle,
 )
 from relocant_media.services.primary_discovery import source_for_url
@@ -187,13 +189,16 @@ def _require_unresolved(session: Session, raw_id: int, *,
         ensure_not_terminal,
     )
 
+    now = now or datetime.now(UTC)
     try:
-        ensure_not_terminal(session, raw_id, now=now or datetime.now(UTC))
+        ensure_not_terminal(session, raw_id, now=now)
     except LifecycleBlockedError as error:
         raise FallbackValidationError(str(error)) from error
     raw = session.get(RawItem, raw_id, populate_existing=True)
     source = session.get(Source, raw.source_id) if raw is not None else None
-    if (raw is None or source is None or session.get(EditorialRun, raw_id) is not None
+    existing = session.get(EditorialRun, raw_id, populate_existing=True)
+    if (raw is None or source is None
+            or existing is not None and not can_retry_snapshot(session, raw_id, now=now)
             or _reviewed_event_item(session, anchor=raw, anchor_source=source) is not None):
         raise FallbackValidationError("Материал уже имеет редакционное решение")
     return raw, source
@@ -246,6 +251,11 @@ def refresh_gpt_evidence(
         now = now or datetime.now(UTC)
         validate_fallback_candidate(session, payload.request, raw_id, now=now)
         raw, _ = _require_unresolved(session, raw_id, now=now)
+        # Сохраняем прежний безопасный отказ только в атомарной фазе записи.
+        # Проверки до сети не меняют историю; rollback не теряет старый снимок.
+        if (session.get(EditorialRun, raw_id) is not None
+                and not archive_for_retry(session, raw_id, now=now)):
+            raise FallbackValidationError("Прежний снимок нельзя безопасно архивировать")
         target_id = raw_id
         if original_unavailable:
             if origin_id != raw_id:
