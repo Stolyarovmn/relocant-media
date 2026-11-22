@@ -73,6 +73,7 @@ from relocant_media.collectors.telegram_topics import (
 )
 from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.collectors.venue_feed import VenueFeedCollector
+from relocant_media.domain import quiet_hours
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
 from relocant_media.domain.dedup import event_key, find_repeated_publication
@@ -81,7 +82,13 @@ from relocant_media.domain.freshness import (
     evidence_freshness,
     freshness_decision,
 )
-from relocant_media.domain.pacing import pacing_hold
+from relocant_media.domain.pacing import (
+    PendingDelivery,
+    delivery_order,
+    morning_deadline,
+    morning_release,
+    pacing_hold,
+)
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
 from relocant_media.domain.presentation import (
     presentation_title,
@@ -1321,14 +1328,30 @@ async def publish_pending(
         before_delivery_attempt,
         delivery_deadline,
         delivery_failure,
+        hold_until_morning,
     )
     with Session(engine) as session:
-        query = select(EditorialRun.raw_item_id).where(
+        outcome = EditorialRun.outcome
+        package_fields = outcome["_package"]
+        query = select(
+            EditorialRun.raw_item_id,
+            RawItem.published_at,
+            outcome["ranking"]["category"].as_string().label("category"),
+            package_fields["urgent"].as_json().label("urgent"),
+            package_fields["presentation"]["event_place"].as_json().label("event_place"),
+        ).join(RawItem, RawItem.id == EditorialRun.raw_item_id).where(
             EditorialRun.delivery_status == "pending",
         )
         if only_raw_ids is not None:
             query = query.where(EditorialRun.raw_item_id.in_(only_raw_ids))
-        ids = list(session.scalars(query.order_by(EditorialRun.raw_item_id)))
+        ids = delivery_order(
+            (PendingDelivery(
+                raw_id=row.raw_item_id, published_at=row.published_at,
+                category=str(row.category or ""), urgent=row.urgent is True,
+                event_place=row.event_place,
+            ) for row in session.execute(query)),
+            now=quiet_hours.utc_now(),
+        )
         last_sent_at = session.scalar(select(func.max(Post.published_at)).join(
             EditorialRun, EditorialRun.post_id == Post.id).where(
                 EditorialRun.delivery_status == "sent",
@@ -1349,10 +1372,19 @@ async def publish_pending(
                     continue
                 ranking = run.outcome.get("ranking")
                 stored = run.outcome["_package"]
+                category = (str(ranking.get("category", "")) if isinstance(ranking, dict)
+                            else "")
+                urgent = isinstance(stored, dict) and stored.get("urgent") is True
+                release = morning_release(category=category, urgent=urgent,
+                                          now=quiet_hours.utc_now())
+                if release is not None:
+                    # Not a failure: the morning cycle re-checks freshness and sends it.
+                    hold_until_morning(session, raw_id, now=quiet_hours.utc_now(),
+                                       deadline=morning_deadline(release))
+                    session.commit()
+                    continue
                 if pacing_hold(
-                    category=str(ranking.get("category", "")) if isinstance(ranking, dict)
-                    else "",
-                    urgent=isinstance(stored, dict) and stored.get("urgent") is True,
+                    category=category, urgent=urgent,
                     now=datetime.now(UTC), last_sent_at=last_sent_at,
                     deadline_at=delivery_deadline(session, raw_id),
                 ):
