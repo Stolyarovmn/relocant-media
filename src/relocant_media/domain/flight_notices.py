@@ -17,6 +17,14 @@ _AIRLINE = re.compile(r"\b(?:air\s+serbia|er\s+srbija|[эе]р\s+серби[яи
 _ROUTE = re.compile(
     r"\b(?:между|из)\s+([А-ЯЁ][а-яё-]{3,})\s+(?:и|в)\s+([А-ЯЁ][а-яё-]{3,})\b")
 _WEEKDAYS = ("понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресень")
+# Отбор сводки строже удержания: разные перевозчики не становятся одной карточкой.
+_DIGEST_CARRIERS = {
+    "air_serbia": ("air serbia", "er srbija", "эр сербия", "ер сербия"),
+    "lufthansa": ("lufthansa", "люфтганза"),
+    "wizz_air": ("wizz air", "визз эйр"),
+    "turkish_airlines": ("turkish airlines", "турецкие авиалинии"),
+}
+
 
 
 def _city(value: str) -> str:
@@ -64,7 +72,15 @@ def flight_cancellation_key(
     Отсутствующие/неоднозначные признаки не объединяются. Это не меняет отдельные
     посты, их исходники, оценки новизны, опубликованные квитанции или правила отправки.
     """
-    return None if published_at is None else _notice(title, body, published_at)
+    if published_at is None:
+        return None
+    plain = " " + " ".join(re.findall(r"\w+", title.casefold())) + " "
+    carriers = {carrier for carrier, aliases in _DIGEST_CARRIERS.items()
+                if any(" " + alias + " " in plain for alias in aliases)}
+    if len(carriers) != 1:
+        return None
+    notice = _notice(title, body, published_at)
+    return (carriers.pop(), notice) if notice is not None else None
 
 def find_related_flight_cancellation(
     title: str, body: str,
