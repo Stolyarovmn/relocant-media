@@ -1,7 +1,9 @@
 name: Model trial
 # #312: read-only comparison of candidate draft/review models on published posts.
 # Restores the verified snapshot into a private copy; never claims or writes state,
-# never calls Telegram and never sends reader submissions to a model.
+# never calls Telegram and never sends reader-linked material to a model. The current
+# and the candidate bundles run on the same posts; the artifact is an anonymized summary
+# (counts, error types, time, sizes, raw_item_id of disagreements) without texts or reasons.
 on:
   workflow_dispatch:
     inputs:
@@ -91,6 +93,8 @@ jobs:
           DRIVE_STATE_FOLDER_ID: ${{ vars.DRIVE_STATE_FOLDER_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GEMINI_MODEL_DRAFT: ${{ vars.GEMINI_MODEL_DRAFT }}
+          GEMINI_MODEL_REVIEW: ${{ vars.GEMINI_MODEL_REVIEW }}
           TRIAL_MODEL_DRAFT: ${{ inputs.draft_model }}
           TRIAL_MODEL_REVIEW: ${{ inputs.review_model }}
           TRIAL_LIMIT: ${{ inputs.limit }}

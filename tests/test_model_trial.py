@@ -1,5 +1,6 @@
 """#312: проба моделей читает снимок и ничего не пишет и не отправляет."""
 import hashlib
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -8,11 +9,14 @@ from test_channel_delivery import reviewed as reviewed_fixture
 
 from relocant_media.ai.models import EditorialOutcome, PublicationStatus, RankingResult
 from relocant_media.ops import model_trial
-from relocant_media.storage.models import EditorialRun, Post
+from relocant_media.storage.models import EditorialRun, Post, Submission
 
 reviewed = reviewed_fixture
+CURRENT = {"default": "gemini-3.5-flash-lite", "draft": "gemini-3.5-flash-lite",
+           "review": "gemini-3.5-flash-lite"}
 MODELS = {"default": "gemini-3.5-flash-lite", "draft": "gemini-3.8-flash",
           "review": "gemini-3.6-flash"}
+BUNDLES = {"current": CURRENT, "candidate": MODELS}
 
 
 def _sent(session, run, **outcome):
@@ -31,7 +35,7 @@ class FakeProvider:
         self.model = model
 
     def generate_json(self, **kwargs):
-        return "{}"
+        return '{"current": true}' if self.model == "gemini-3.5-flash-lite" else "{}"
 
 
 @pytest.fixture
@@ -54,10 +58,11 @@ def fakes(monkeypatch):
         assert all(item.verdict == "hold" for item in package.reviews)
         assert live() == tuple(package.event.documents)
         for role in ("facts", "utility"):
-            provider.generate_json(task=f"independent_{role}", system_instruction="",
-                                   prompt="", response_schema={})
-            audit({"role": role, "verdict": "hold", "computed_score": 40,
-                   "flags": ["Дата не указана"], "reason": "Нет даты"})
+            answer = provider.generate_json(task=f"independent_{role}", system_instruction="",
+                                            prompt="prompt", response_schema={})
+            verdict = "approve" if answer == '{"current": true}' else "hold"
+            audit({"role": role, "verdict": verdict, "computed_score": 40,
+                   "flags": ["Дата не указана"], "reason": "Нет даты в тексте источника"})
         calls.append(("review", now))
 
     monkeypatch.setattr(model_trial, "EditorialPipeline", Pipeline)
@@ -65,33 +70,70 @@ def fakes(monkeypatch):
     return calls
 
 
-def test_trial_compares_published_post_without_writing_state(reviewed, fakes):
+def test_trial_pairs_bundles_on_same_post_without_writing_state(reviewed, fakes):
     session, run = reviewed
     _sent(session, run)
     database = session.get_bind().url.database
     before = hashlib.sha256(open(database, "rb").read()).hexdigest()
-    result = model_trial.run_trial(database, MODELS, FakeProvider, limit=5)
+    result = model_trial.run_trial(database, BUNDLES, FakeProvider, limit=5)
     assert hashlib.sha256(open(database, "rb").read()).hexdigest() == before
     [item] = result["items"]
-    assert item["published"]["title"] and item["candidate_draft"]["status"] == "skipped"
-    assert [r["verdict"] for r in item["candidate_reviews_of_published"]] == ["hold", "hold"]
-    assert [(c["task"], c["model"]) for c in item["calls"]] == [
-        ("draft", "gemini-3.8-flash"), ("independent_facts", "gemini-3.6-flash"),
-        ("independent_utility", "gemini-3.6-flash")]
-    # Модель видит время исходной публикации, а не текущее.
+    assert item["current"]["double_approval"] is True
+    assert item["candidate"]["double_approval"] is False
+    assert item["candidate"]["reviews"] == {"facts": {"verdict": "hold", "flags": 1},
+                                            "utility": {"verdict": "hold", "flags": 1}}
+    assert item["candidate"]["calls"] == 3 and item["candidate"]["input_chars"] == 12
+    assert item["facts_verdicts_differ"] is True
+    # Модель видит время исходной публикации, а не текущее; обе связки — один материал.
     assert {when for _, when in fakes} == {datetime(2026, 11, 21, 10, tzinfo=UTC)}
+    assert len(fakes) == 4
     summary = result["summary"]
-    assert summary["published_posts_not_approved_by_candidate_reviews"] == 1
-    assert summary["by_role_and_model"]["draft:gemini-3.8-flash"]["calls"] == 1
-    assert "| review:gemini-3.6-flash | 2 | 0 |" in model_trial.markdown(result)
+    assert summary["bundles"]["current"]["double_approval"] == 1
+    assert summary["bundles"]["candidate"]["double_approval"] == 0
+    assert summary["bundles"]["candidate"]["facts_flags"] == 1
+    assert summary["facts_verdicts_differ"] == [run.raw_item_id]
+    text = model_trial.markdown(result)
+    assert "| candidate | default=gemini-3.5-flash-lite, draft=gemini-3.8-flash" in text
 
 
-def test_reader_submissions_and_unsent_posts_are_never_sent_to_models(reviewed, fakes):
+def test_output_holds_no_texts_or_reasons(reviewed, fakes):
+    session, run = reviewed
+    _sent(session, run)
+    package = run.outcome["_package"]
+    result = model_trial.run_trial(session.get_bind().url.database, BUNDLES, FakeProvider,
+                                   limit=1)
+    dumped = json.dumps(result, ensure_ascii=False)
+    for text in (package["outcome"]["draft"]["title"], package["outcome"]["draft"]["body"],
+                 package["evidence"]["title"], "Нет даты в тексте источника",
+                 "Дата не указана", "prompt"):
+        assert text not in dumped
+
+
+def test_reader_material_is_excluded_whole(reviewed, fakes):
     session, run = reviewed
     database = session.get_bind().url.database
-    assert model_trial.run_trial(database, MODELS, FakeProvider, limit=5)["items"] == []
+    assert model_trial.run_trial(database, BUNDLES, FakeProvider, limit=5)["items"] == []
     _sent(session, run, _reader_submission_id=5)
-    assert model_trial.run_trial(database, MODELS, FakeProvider, limit=5)["items"] == []
+    assert model_trial.run_trial(database, BUNDLES, FakeProvider, limit=5)["items"] == []
+    # Без пометки в прогоне, но материал связан с заявкой читателя.
+    stored = session.get(EditorialRun, run.raw_item_id)
+    stored.outcome = {k: v for k, v in stored.outcome.items() if k != "_reader_submission_id"}
+    session.add(Submission(kind="reader_tip", payload={"raw_item_ids": [run.raw_item_id]}))
+    session.commit()
+    assert model_trial.run_trial(database, BUNDLES, FakeProvider, limit=5)["items"] == []
+    assert fakes == []
+
+
+def test_reader_linked_event_document_excludes_package(reviewed, fakes, monkeypatch):
+    session, run = reviewed
+    _sent(session, run)
+    package = model_trial.EditorialPackage.model_validate_json(
+        json.dumps(run.outcome["_package"]))
+    [document] = package.event.documents
+    monkeypatch.setattr(model_trial, "reader_linked_raw_ids",
+                        lambda session: {document.raw_item_id})
+    database = session.get_bind().url.database
+    assert model_trial.run_trial(database, BUNDLES, FakeProvider, limit=5)["items"] == []
     assert fakes == []
 
 
@@ -108,8 +150,12 @@ def test_model_failure_is_recorded_per_item(reviewed, fakes, monkeypatch):
 
     monkeypatch.setattr(model_trial, "EditorialPipeline", Broken)
     database = session.get_bind().url.database
-    [item] = model_trial.run_trial(database, MODELS, FakeProvider, limit=1)["items"]
-    assert item["candidate_draft"] == {"error_type": "TimeoutError"}
+    result = model_trial.run_trial(database, BUNDLES, FakeProvider, limit=1)
+    [item] = result["items"]
+    assert item["candidate"]["draft_status"] == "error"
+    assert item["candidate"]["draft_error_type"] == "TimeoutError"
+    assert result["summary"]["bundles"]["candidate"]["error_types"] == {"TimeoutError": 1}
+    assert "secret response body" not in json.dumps(result)
 
 
 @pytest.mark.parametrize("models", [
