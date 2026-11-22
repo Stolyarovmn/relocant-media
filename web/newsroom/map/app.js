@@ -2,9 +2,9 @@ import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=16";
+} from "./core.js?v=17";
 import { calendarLink } from "./calendar.js?v=5";
-import { setupPlaces } from "./places.js?v=17";
+import { setupPlaces } from "./places.js?v=18";
 import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=1";
 
 const byId = (id) => document.getElementById(id);

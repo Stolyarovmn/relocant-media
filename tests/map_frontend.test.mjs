@@ -10,9 +10,40 @@ import {
   pointsAtScale, readIncidents, readPlaces, searchAddresses, shareLink, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
-import { setupPlaces } from "../web/newsroom/map/places.js";
+import { agendaVisit, setupPlaces } from "../web/newsroom/map/places.js";
 import { agendaFavorites } from "../web/newsroom/map/favorites.js";
 import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
+
+test("новые события отсчитываются от последней просмотренной версии афиши", () => {
+  const old = "2026-11-22T08:00:00Z";
+  const current = "2026-11-22T09:00:00Z";
+  const post = Date.parse("2026-11-22T08:30:00Z");
+  let saved = null;
+  const storage = () => ({ getItem: () => saved, setItem: (_key, value) => { saved = value; } });
+  const first = agendaVisit(storage);
+  first.observe(old);
+  assert.equal(first.hasNew(post), false);
+
+  const next = agendaVisit(storage);
+  next.observe(current);
+  assert.equal(next.hasNew(post), true);
+  assert.equal(next.hasNew(Date.parse(old)), false);
+  assert.equal(next.hasNew(Date.parse("2026-11-22T10:00:00Z")), false);
+  assert.equal(next.hasNew(null), false);
+  next.observe(old); // При сбое сети старый снимок не меняет отсчёт будущих посещений.
+  assert.equal(next.hasNew(post), false);
+  assert.equal(saved, current);
+
+  const again = agendaVisit(storage);
+  again.observe(current);
+  assert.equal(again.hasNew(post), false);
+});
+
+test("афиша остаётся доступной при запрете локального хранилища", () => {
+  const visit = agendaVisit(() => { throw new Error("Браузерное хранилище выключено"); });
+  visit.observe("2026-11-22T09:00:00Z");
+  assert.equal(visit.hasNew(Date.parse("2026-11-22T08:30:00Z")), false);
+});
 
 function favoritesTelegram(keys) {
   return {

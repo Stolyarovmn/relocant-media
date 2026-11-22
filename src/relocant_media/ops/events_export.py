@@ -96,6 +96,7 @@ class PublicEvent(PublicModel):
     title: Label
     source_url: str
     post_url: str
+    published_at: AwareDatetime | None = None
     starts_at: AwareDatetime
     ends_at: AwareDatetime | None = None
     expires_at: AwareDatetime
@@ -114,12 +115,14 @@ class PublicEvent(PublicModel):
     courses: Courses = ()
 
     @model_serializer(mode="wrap")
-    def serialize_with_optional_courses(
+    def serialize_optional_fields(
         self, handler: SerializerFunctionWrapHandler,
     ) -> dict[str, Any]:
         result: dict[str, Any] = handler(self)
         if not self.courses:
             result.pop("courses", None)
+        if self.published_at is None:
+            result.pop("published_at", None)
         return result
 
     @field_validator("source_url", "coordinate_source_url", "venue_source_url")
@@ -183,7 +186,7 @@ class ReviewedMapEvent(PublicModel):
     schedule_note: Label | None = None
     evidence_urls: tuple[str, ...] = ()
 
-    def card(self, city: str, timezone: str, now: datetime) -> PublicEvent:
+    def card(self, city: str, timezone: str, now: datetime, published_at: datetime) -> PublicEvent:
         if not 44.2 <= self.venue.latitude <= 45.2 or not 19.8 <= self.venue.longitude <= 21.1:
             raise ValueError("reviewed venue outside the supported Belgrade map")
         expires = self.ends_at or datetime.combine(
@@ -194,6 +197,7 @@ class ReviewedMapEvent(PublicModel):
             **self.model_dump(exclude={"message_id", "post_title", "evidence_urls"}),
             id=map_event_id(self.source_url),
             post_url=f"https://t.me/{PUBLIC_CHANNELS[city]}/{self.message_id}",
+            published_at=published_at,
             expires_at=expires, timezone=timezone, archived=expires <= now,
         )
 
@@ -448,8 +452,8 @@ def _reviewed_events(
     records = TypeAdapter(tuple[ReviewedMapEvent, ...]).validate_json(registry.read_bytes())
     events = {}
     for record in records:
-        matches = session.scalar(
-            select(Post.id)
+        published_at = session.scalar(
+            select(Post.published_at)
             .join(EditorialRun, EditorialRun.post_id == Post.id)
             .join(RawItem, RawItem.id == EditorialRun.raw_item_id)
             .where(
@@ -461,8 +465,8 @@ def _reviewed_events(
             )
             .limit(1)
         )
-        if matches is not None:
-            card = record.card(city, timezone, now)
+        if published_at is not None:
+            card = record.card(city, timezone, now, published_at)
             events[card.id] = card
     return events
 
@@ -534,6 +538,7 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                         title=post.title,
                         source_url=document.url,
                         post_url=post_url,
+                        published_at=post.published_at,
                         starts_at=slot["starts_at"],
                         ends_at=slot["ends_at"],
                         expires_at=slot["expires_at"],
