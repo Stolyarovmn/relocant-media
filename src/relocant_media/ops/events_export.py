@@ -187,6 +187,8 @@ class ReviewedMapEvent(PublicModel):
     evidence_urls: tuple[str, ...] = ()
     # Проверенная трасса или маршрут события (забег, шествие) из первоисточника.
     courses: Courses = ()
+    # Площадка или сеанс одного события из одного поста; см. docs/EVENT_MAP_COMPLETENESS.md.
+    occurrence_key: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,100}$")
 
     def card(
         self, city: str, timezone: str, now: datetime, *, published_at: datetime | None = None,
@@ -199,11 +201,32 @@ class ReviewedMapEvent(PublicModel):
         )
         return PublicEvent(
             **self.model_dump(exclude={"message_id", "post_title", "evidence_urls"}),
-            id=map_event_id(self.source_url),
+            id=(map_occurrence_id(self.source_url, self.occurrence_key)
+                if self.occurrence_key else map_event_id(self.source_url)),
+            group_id=map_event_id(self.source_url) if self.occurrence_key else None,
             post_url=f"https://t.me/{PUBLIC_CHANNELS[city]}/{self.message_id}",
             published_at=published_at,
             expires_at=expires, timezone=timezone, archived=expires <= now,
         )
+
+
+def validate_reviewed_groups(records: tuple[ReviewedMapEvent, ...]) -> None:
+    """Точки одного события связываются только внутри одного поста и одного первоисточника."""
+    by_post: dict[int, list[ReviewedMapEvent]] = {}
+    for record in records:
+        by_post.setdefault(record.message_id, []).append(record)
+    for message_id, group in by_post.items():
+        keys = [record.occurrence_key for record in group]
+        if len(group) == 1:
+            if keys[0] is not None:
+                raise ValueError(f"post {message_id}: occurrence_key needs a second point")
+            continue
+        if (None in keys or len(set(keys)) != len(keys)
+                or len({(r.source_url, r.post_title) for r in group}) != 1):
+            raise ValueError(
+                f"post {message_id}: group needs one source, one post title and unique keys")
+        if len({(r.venue.latitude, r.venue.longitude, r.starts_at) for r in group}) != len(group):
+            raise ValueError(f"post {message_id}: duplicate place and time in one group")
 
 
 class SponsoredPlace(PublicModel):
@@ -454,6 +477,7 @@ def _reviewed_events(
     if not registry.is_file():
         return {}
     records = TypeAdapter(tuple[ReviewedMapEvent, ...]).validate_json(registry.read_bytes())
+    validate_reviewed_groups(records)
     events = {}
     for record in records:
         published_at = session.scalar(

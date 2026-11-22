@@ -476,3 +476,59 @@ def test_cafe_appears_only_inside_approved_paid_map_campaign():
     assert cards[0].post_url == "https://t.me/eduvbelgrad/112"
     end = datetime.fromisoformat(row["ends_at"])
     assert not _sponsored_places({"advertisements": [row]}, "belgrade", zone, end)
+
+
+def _group_record(key: str, latitude: float, start: str) -> dict:
+    return {
+        "message_id": 300, "post_title": "Фестиваль на двух площадках",
+        "title": "Фестиваль", "source_url": "https://example.org/festival",
+        "starts_at": start, "venue": {"name": f"Площадка {key}", "address": "Beograd",
+                                      "latitude": latitude, "longitude": 20.45},
+        "coordinate_source_url": "https://example.org/map",
+        "venue_source_url": "https://example.org/venue",
+        "schedule_source_url": "https://example.org/festival",
+        "occurrence_key": key,
+    }
+
+
+def test_reviewed_points_of_one_post_are_linked_as_one_event():
+    from relocant_media.ops.events_export import ReviewedMapEvent, validate_reviewed_groups
+
+    records = tuple(ReviewedMapEvent.model_validate(_group_record(*row)) for row in (
+        ("a-20261202", 44.80, "2026-12-02T20:00:00+01:00"),
+        ("b-20261203", 44.81, "2026-12-03T20:00:00+01:00"),
+    ))
+    validate_reviewed_groups(records)
+    cards = [record.card("belgrade", "Europe/Belgrade", NOW) for record in records]
+    assert len({card.id for card in cards}) == 2
+    assert {card.group_id for card in cards} == {map_event_id("https://example.org/festival")}
+
+
+@pytest.mark.parametrize("change", ["lone_key", "missing_key", "other_source", "same_place"])
+def test_reviewed_group_rejects_points_that_are_not_one_event(change):
+    from relocant_media.ops.events_export import ReviewedMapEvent, validate_reviewed_groups
+
+    first = _group_record("a", 44.80, "2026-12-02T20:00:00+01:00")
+    second = _group_record("b", 44.81, "2026-12-03T20:00:00+01:00")
+    rows = [first, second]
+    if change == "lone_key":
+        rows = [first]
+    elif change == "missing_key":
+        second.pop("occurrence_key")
+    elif change == "other_source":
+        second["source_url"] = "https://example.org/other"
+    else:
+        second.update(venue=first["venue"], starts_at=first["starts_at"])
+    records = tuple(ReviewedMapEvent.model_validate(row) for row in rows)
+    with pytest.raises(ValueError):
+        validate_reviewed_groups(records)
+
+
+def test_committed_reviewed_registry_has_valid_groups():
+    from pydantic import TypeAdapter
+
+    from relocant_media.ops.events_export import ReviewedMapEvent, validate_reviewed_groups
+
+    registry = Path("cities/belgrade/reviewed-map-events.json")
+    validate_reviewed_groups(
+        TypeAdapter(tuple[ReviewedMapEvent, ...]).validate_json(registry.read_bytes()))
