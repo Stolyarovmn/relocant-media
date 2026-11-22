@@ -2,13 +2,13 @@ import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=17";
+} from "./core.js?v=18";
 import { calendarLink } from "./calendar.js?v=5";
 import {
   corridorCaps, heatCells, heatOverview, layerView, timelineBands, timelineInstant, timelineLabel,
   timelineSteps,
 } from "./layer-views.js?v=2";
-import { setupPlaces } from "./places.js?v=18";
+import { setupPlaces } from "./places.js?v=19";
 import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=1";
 
 const byId = (id) => document.getElementById(id);
@@ -327,7 +327,7 @@ function eventCard(incident, now) {
   category.append(dot, kinds[incident.kind].label);
   const badge = make("span", "event-state", futureFrame() ? "На это время"
     : status === "planned" ? "⏰ Запланировано"
-    : incident.archived ? "Архив" : statuses[status]);
+    : status === "closed" ? "Архив" : statuses[status]);
   badge.dataset.status = status;
   meta.append(category, badge);
   const heading = make("h3");
@@ -445,7 +445,7 @@ function renderList(now) {
   byId("selected-countdown").textContent = selected && !futureFrame() ? incidentCountdown(selected, now) : "";
   const message = state.loadFailed
     ? state.loaded ? snapshotNotice(state.stamp) : "Список объявлений недоступен. Повторите загрузку при подключении."
-    : state.deepPending && state.loaded ? "Объявление из ссылки пока отсутствует в выгрузке."
+    : state.deepPending && state.loaded ? "Карточка недоступна. Архив городских работ — до 14 дней."
       : !state.loaded ? "Загружаем данные."
         : !items.length ? inTimeline() ? "На это время работ в выбранных слоях нет."
           : state.period === null ? "В выбранных слоях пока нет объявлений."
@@ -868,7 +868,9 @@ async function loadEvents() {
   state.loading = true;
   if (state.mode === "incidents") syncFeed(state);
   try {
-    const { entries, generatedAt, cached } = await loadSnapshot("./incidents.json", readIncidents);
+    const { entries, generatedAt, cached } = await loadSnapshot(
+      "./incidents.json", (feed) => readIncidents(feed, Date.now()),
+    );
     state.incidents = entries;
     state.loaded = true;
     state.loadFailed = cached;

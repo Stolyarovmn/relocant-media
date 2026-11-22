@@ -2,8 +2,11 @@
 
 import hashlib
 import re
+from datetime import timedelta
 
 from relocant_media.domain.dedup import canonicalize_url
+
+MAP_ARCHIVE_AGE = timedelta(days=14)
 
 _MAP_PAGE = "https://stolyarovmn.github.io/relocant-media/map/"
 _TELEGRAM_BOT = "https://t.me/relocant_media_belgrade_bot"

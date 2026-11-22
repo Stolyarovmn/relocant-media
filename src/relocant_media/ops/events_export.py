@@ -37,7 +37,7 @@ from relocant_media.ai.package import (
 from relocant_media.ai.pipeline import _citations_are_grounded
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import canonicalize_url
-from relocant_media.domain.map_links import map_event_id, map_occurrence_id
+from relocant_media.domain.map_links import MAP_ARCHIVE_AGE, map_event_id, map_occurrence_id
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.ops.newsroom_export import public_article_url
 from relocant_media.services.event_place import event_occurrences, resolve_saved_event_place
@@ -476,6 +476,7 @@ def _reviewed_events(
 def export_events(session: Session, *, observed_at: datetime, city: str = "belgrade") -> EventsFeed:
     if observed_at.tzinfo is None or city not in PUBLIC_CHANNELS:
         raise ValueError("explicit city channel and aware snapshot time required")
+    archive_cutoff = observed_at.astimezone(UTC) - MAP_ARCHIVE_AGE
     profile = load_city_profile(city)
     policy = json.loads(Path(f"cities/{city}/pin-policy.json").read_text(encoding="utf-8"))
     rows = session.execute(
@@ -501,8 +502,9 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
         .order_by(Post.published_at.desc(), Post.id.desc())
         .limit(MAX_EVENTS * 2)
     )
-    events = _reviewed_events(session, city, profile.timezone, observed_at)
-    reviewed_posts = {event.post_url for event in events.values()}
+    reviewed = _reviewed_events(session, city, profile.timezone, observed_at)
+    reviewed_posts = {event.post_url for event in reviewed.values()}
+    events = {key: event for key, event in reviewed.items() if event.expires_at >= archive_cutoff}
     for item, run, post in rows:
         if len(events) >= MAX_EVENTS:
             break
@@ -532,6 +534,9 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                     continue
                 cards = []
                 for slot in event_occurrences(place):
+                    expires_at = datetime.fromisoformat(slot["expires_at"])
+                    if expires_at < archive_cutoff:
+                        continue
                     courses = _COURSES.validate_python(slot.get("courses", ())) if attested else ()
                     cards.append(PublicEvent(
                         id=slot["id"],
@@ -543,9 +548,9 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                         published_at=post.published_at,
                         starts_at=slot["starts_at"],
                         ends_at=slot["ends_at"],
-                        expires_at=slot["expires_at"],
+                        expires_at=expires_at,
                         timezone=slot["timezone"],
-                        archived=datetime.fromisoformat(slot["expires_at"]) <= observed_at,
+                        archived=expires_at <= observed_at,
                         venue=Venue.model_validate(slot["venue"]),
                         coordinate_source_url=slot["coordinate_source_url"],
                         venue_source_url=slot["venue_source_url"],
