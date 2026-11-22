@@ -50,7 +50,7 @@ def test_gallery_uses_exact_room_and_dated_source_without_inventing_exhibition_e
     GALLERY_BODY.replace("у 19 часова", "увече"),
     GALLERY_BODY + " Изложба је отказана.",
     GALLERY_BODY + " Још једна изложба 19. новембра у 20 часова.",
-    GALLERY_BODY.replace("18. новембра", "18. јануара"),
+    GALLERY_BODY.replace("18. новембра", "18. маја"),
 ])
 def test_gallery_rejects_unknown_room_missing_time_cancellation_and_ambiguous_dates(body):
     article, page = gallery_article(body)
@@ -195,6 +195,20 @@ def test_main_stage_takes_year_from_publication_like_gallery():
 
 
 def test_main_stage_rejects_event_far_from_publication():
-    article, page = gallery_article(STAGE_BODY.replace("новембра", "јануара"),
+    article, page = gallery_article(STAGE_BODY.replace("новембра", "маја"),
                                     published="13.11.2026 14:45")
+    assert _adapt(article, page) is None
+
+
+def test_main_stage_december_announcement_for_january_without_year():
+    article, page = gallery_article(STAGE_BODY.replace("24. новембра", "10. јануара"),
+                                    published="20.12.2026 10:00")
+    facts = _adapt(article, page)
+    assert facts and facts["starts_at"] == "2027-01-10T20:00:00"
+
+
+def test_explicit_past_year_is_not_moved_forward():
+    article, page = gallery_article(
+        STAGE_BODY.replace("24. новембра,", "10. јануара 2026. године,"),
+        published="20.12.2026 10:00")
     assert _adapt(article, page) is None

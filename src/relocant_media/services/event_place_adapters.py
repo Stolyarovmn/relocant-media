@@ -33,7 +33,7 @@ CUKARICA_GALLERY = re.compile(
     r'[„"«]?чукарица[“"»]?', re.IGNORECASE,
 )
 _CUKARICA_DATE = re.compile(
-    r"(?<!\d)(?P<day>\d{1,2})\.\s+(?P<month>[а-я]+)"
+    r"(?<!\d)(?P<day>\d{1,2})\.\s+(?P<month>[а-яјљњћђџ]+)"
     r"(?:\s+(?P<year>20\d{2})\.?(?:\s+године)?)?,?\s+"
     r"(?:са почетком )?у\s+(?P<hour>\d{1,2})(?:[:.](?P<minute>\d{2})|\s+часова)\b",
     re.IGNORECASE,
@@ -232,15 +232,19 @@ def _cukarica_facts(document: EvidenceDocument) -> dict[str, Any] | None:
     gallery = CUKARICA_GALLERY.search(" ".join(document.body.split())) is not None
     published = (document.published_at.astimezone(ZoneInfo("Europe/Belgrade"))
                  if document.published_at else None)
-    # Год без явного указания берём из даты публикации и проверяем окно анонса.
-    start = cukarica_venue_start(
-        document.body, CUKARICA_GALLERY if gallery else CUKARICA_STAGE,
-        corroborated_year=published.year if published else None,
-    )
-    if start is None or published is None or not timedelta(0) <= (
-        start - published.replace(tzinfo=None)
-    ) <= timedelta(days=120):
+    if published is None:
         return None
+    # Год без явного указания: ближайшая дата в окне анонса (декабрь → январь).
+    venue = CUKARICA_GALLERY if gallery else CUKARICA_STAGE
+    candidates = {
+        start for year in (published.year, published.year + 1)
+        if (start := cukarica_venue_start(document.body, venue, corroborated_year=year))
+        is not None
+        and timedelta(0) <= start - published.replace(tzinfo=None) <= timedelta(days=120)
+    }
+    if len(candidates) != 1:
+        return None
+    start = candidates.pop()
     return {
         "event_name": name,
         "venue": {

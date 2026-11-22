@@ -1,16 +1,20 @@
 """Стоп повторной отдельной новости об отмене авиарейса; не решение о новизне.
 
-Совпадение явно названной пары городов и дня требует проверенного связанного
-обновления. Различие формулировок, числа рейсов или написания перевозчика само по
-себе не даёт второй выпуск. Перевозчик не входит в ключ: удержание ведёт только на
-связанную проверку, где редактор видит исходный пост. Нераспознанные маршруты и
-даты этим правилом не классифицируются.
+Совпадение перевозчика, явно названной пары городов и дня требует проверенного
+связанного обновления. Различие формулировок, числа рейсов или написания перевозчика
+само по себе не даёт второй выпуск. Перевозчики и варианты их написания берутся из
+реестра города `cities/<city>/carriers.json`, а не из кода. Разные перевозчики на
+одном направлении в один день — независимые отмены. Нераспознанные перевозчики,
+маршруты и даты этим правилом не классифицируются и идут обычным путём.
 """
+import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
+from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT
 from relocant_media.domain.event_facts import event_dates
 
 FLIGHT_REVIEW_REASON = "flight_linked_review"
@@ -20,13 +24,39 @@ _ROUTE = re.compile(
 _WEEKDAYS = ("понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресень")
 
 
+@lru_cache(maxsize=8)
+def city_carriers(city: str) -> Mapping[str, re.Pattern[str]]:
+    path = DEFAULT_CITIES_ROOT / city / "carriers.json"
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") != 1 or data.get("city_id") != city:
+        raise ValueError(f"invalid carrier registry for {city}")
+    return {
+        carrier: re.compile(
+            r"(?<!\w)(?:" + "|".join(re.escape(a) for a in sorted(aliases, key=len, reverse=True))
+            + r")(?:а|и|ы|у|ой|е)?(?!\w)", re.I)
+        for carrier, aliases in data["carriers"].items()
+    }
+
+
+def _carrier(title: str, carriers: Mapping[str, re.Pattern[str]]) -> str | None:
+    found = {carrier for carrier, pattern in carriers.items() if pattern.search(title)}
+    return found.pop() if len(found) == 1 else None
+
+
 def _city(value: str) -> str:
     # Только падежи односоставных русских названий, без свободной геокодировки.
     return re.sub(r"(?:ом|ем|а|е|у|ь)$", "", value.casefold())
 
 
-def _notice(title: str, body: str, reference: datetime) -> tuple[object, ...] | None:
+def _notice(
+    title: str, body: str, reference: datetime, carriers: Mapping[str, re.Pattern[str]],
+) -> tuple[object, ...] | None:
     if reference.tzinfo is None or max(len(title), len(body)) > 8000:
+        return None
+    carrier = _carrier(title, carriers)
+    if carrier is None:
         return None
     if not (re.search(r"\bотмен\w*", title, re.I)
             and re.search(r"\b(?:авиа)?рейс\w*", title, re.I)):
@@ -54,20 +84,22 @@ def _notice(title: str, body: str, reference: datetime) -> tuple[object, ...] | 
         datetime.fromisoformat(next(iter(dates)))
     except ValueError:
         return None
-    return ("flight_cancellation", next(iter(routes)), dates)
+    return (carrier, next(iter(routes)), dates)
 
 
 def find_related_flight_cancellation(
     title: str, body: str,
     publications: Iterable[tuple[int, str, str, datetime | None]], *, now: datetime,
+    city: str = "belgrade",
 ) -> int | None:
     """Возвращает прежний пост для удержания, не для автоматического отказа."""
-    notice = _notice(title, body, now)
+    carriers = city_carriers(city)
+    notice = _notice(title, body, now, carriers)
     if notice is None:
         return None
     for post_id, old_title, old_body, published in publications:
         if (published is not None and published.tzinfo is not None
                 and timedelta() <= now - published <= _WINDOW
-                and notice == _notice(old_title, old_body, published)):
+                and notice == _notice(old_title, old_body, published, carriers)):
             return post_id
     return None

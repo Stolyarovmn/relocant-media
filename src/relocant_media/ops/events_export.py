@@ -213,8 +213,14 @@ class ReviewedMapEvent(PublicModel):
 def validate_reviewed_groups(records: tuple[ReviewedMapEvent, ...]) -> None:
     """Точки одного события связываются только внутри одного поста и одного первоисточника."""
     by_post: dict[int, list[ReviewedMapEvent]] = {}
+    owner: dict[str, int] = {}
     for record in records:
         by_post.setdefault(record.message_id, []).append(record)
+        # ID карточки и группы строятся из канонического источника: один источник — один пост.
+        source = canonicalize_url(record.source_url)
+        if owner.setdefault(source, record.message_id) != record.message_id:
+            raise ValueError(f"source {source} is bound to posts {owner[source]} "
+                             f"and {record.message_id}")
     for message_id, group in by_post.items():
         keys = [record.occurrence_key for record in group]
         if len(group) == 1:

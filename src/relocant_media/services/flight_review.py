@@ -52,7 +52,8 @@ def guard_flight_delivery(
             yield message_id, effective.title, effective.body, (
                 timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=UTC))
 
-    related = find_related_flight_cancellation(post.title, post.body, history(), now=now)
+    related = find_related_flight_cancellation(
+        post.title, post.body, history(), now=now, city=post.city)
     if related is not None:
         raise FlightReviewRequired(parents[related])
 

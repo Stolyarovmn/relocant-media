@@ -504,7 +504,9 @@ def test_reviewed_points_of_one_post_are_linked_as_one_event():
     assert {card.group_id for card in cards} == {map_event_id("https://example.org/festival")}
 
 
-@pytest.mark.parametrize("change", ["lone_key", "missing_key", "other_source", "same_place"])
+@pytest.mark.parametrize("change", [
+    "lone_key", "missing_key", "other_source", "same_place", "other_post", "other_post_tracked",
+])
 def test_reviewed_group_rejects_points_that_are_not_one_event(change):
     from relocant_media.ops.events_export import ReviewedMapEvent, validate_reviewed_groups
 
@@ -517,8 +519,16 @@ def test_reviewed_group_rejects_points_that_are_not_one_event(change):
         second.pop("occurrence_key")
     elif change == "other_source":
         second["source_url"] = "https://example.org/other"
-    else:
+    elif change == "same_place":
         second.update(venue=first["venue"], starts_at=first["starts_at"])
+    else:
+        # Две публикации одной программы не могут делить ID группы и сеансов.
+        third = {**_group_record("a", 44.82, "2026-12-04T20:00:00+01:00"), "message_id": 301}
+        fourth = {**_group_record("b", 44.83, "2026-12-05T20:00:00+01:00"), "message_id": 301}
+        if change == "other_post_tracked":
+            for row in (third, fourth):
+                row["source_url"] += "?utm_source=telegram"
+        rows = [first, second, third, fourth]
     records = tuple(ReviewedMapEvent.model_validate(row) for row in rows)
     with pytest.raises(ValueError):
         validate_reviewed_groups(records)
@@ -532,3 +542,14 @@ def test_committed_reviewed_registry_has_valid_groups():
     registry = Path("cities/belgrade/reviewed-map-events.json")
     validate_reviewed_groups(
         TypeAdapter(tuple[ReviewedMapEvent, ...]).validate_json(registry.read_bytes()))
+
+
+def test_single_reviewed_cards_keep_their_source_based_id():
+    registry = Path("cities/belgrade/reviewed-map-events.json")
+    from pydantic import TypeAdapter
+
+    from relocant_media.ops.events_export import ReviewedMapEvent
+
+    for record in TypeAdapter(tuple[ReviewedMapEvent, ...]).validate_json(registry.read_bytes()):
+        card = record.card("belgrade", "Europe/Belgrade", NOW)
+        assert card.id == map_event_id(record.source_url) and card.group_id is None

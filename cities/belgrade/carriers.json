@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "city_id": "belgrade",
+  "note": "Перевозчики аэропорта города и варианты написания. Удержание повтора отмены рейса сравнивает перевозчика, маршрут и день; нераспознанный перевозчик идёт обычным путём.",
+  "carriers": {
+    "air_serbia": ["Air Serbia", "Er Srbija", "Ер Србија", "Эр Сербия", "Эйр Сербия", "Эр Сербии", "Эйр Сербии"],
+    "wizz_air": ["Wizz Air", "Wizzair", "Визз Эйр", "Виз Эйр", "Виззэйр"],
+    "lufthansa": ["Lufthansa", "Луфтханза", "Люфтганза"],
+    "turkish_airlines": ["Turkish Airlines", "Туркиш Эйрлайнс", "Турецкие авиалинии", "Турских авиалиний"],
+    "pegasus": ["Pegasus Airlines", "Pegasus", "Пегасус"],
+    "austrian": ["Austrian Airlines", "Austrian", "Австрийские авиалинии"],
+    "swiss": ["SWISS", "Swiss International Air Lines", "Свисс"],
+    "air_france": ["Air France", "Эр Франс", "Эйр Франс"],
+    "klm": ["KLM", "КЛМ"],
+    "ita_airways": ["ITA Airways", "ИТА Эйрвейз"],
+    "lot": ["LOT Polish Airlines", "LOT", "ЛОТ"],
+    "aegean": ["Aegean Airlines", "Aegean", "Эгейские авиалинии"],
+    "qatar_airways": ["Qatar Airways", "Катар Эйрвейз", "Катарские авиалинии"],
+    "emirates": ["Emirates", "Эмирейтс"],
+    "flydubai": ["flydubai", "Флайдубай"],
+    "easyjet": ["easyJet", "Изиджет"],
+    "ryanair": ["Ryanair", "Райанэйр", "Райанэр"],
+    "eurowings": ["Eurowings", "Евровингс"],
+    "transavia": ["Transavia", "Трансавиа"],
+    "air_montenegro": ["Air Montenegro", "Эр Монтенегро"],
+    "croatia_airlines": ["Croatia Airlines", "Кроация Эрлайнс"]
+  }
+}

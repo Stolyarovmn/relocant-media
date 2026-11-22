@@ -32,11 +32,12 @@ def test_real_retellings_need_linked_update_despite_different_wording(index):
     ("23 ноября", "23 ноября 2027"),
     ("Брюсселем", "Парижем"),
     ("Белградом", "Берлином"),
+    ("Air Serbia", "Lufthansa"),
     ("отменила", "возобновила"),
     ("отменила", "задержала"),
     ("отменила", "не отменила"),
 ])
-def test_other_date_route_or_status_is_not_a_match(before, after):
+def test_other_date_route_carrier_or_status_is_not_a_match(before, after):
     _, title, body, _ = POSTS[2]
     title, body = title.replace(before, after), body.replace(before, after)
     assert find_related_flight_cancellation(title, body, [POSTS[0]], now=NOW) is None
@@ -62,17 +63,54 @@ def test_changed_scope_is_held_for_review_instead_of_silently_called_duplicate()
         title, body + " Дополнительные рейсы JU123 также отменены.", [POSTS[0]], now=NOW) == 153
 
 
-@pytest.mark.parametrize("carrier", ["Lufthansa", "Wizz Air", "Turkish Airlines"])
-def test_rule_is_not_tied_to_one_carrier(carrier):
-    # Повтор одной отмены у любого перевозчика удерживается так же, как у первого случая.
-    title = f"{carrier} отменила рейс из Белграда в Брюссель на 23 ноября"
-    retelling = f"{carrier} отменила рейсы между Белградом и Брюсселем на 23 ноября"
+@pytest.mark.parametrize("first,second", [
+    ("Lufthansa", "Люфтганза"),
+    ("Wizz Air", "Визз Эйр"),
+    ("Turkish Airlines", "Турецкие авиалинии"),
+])
+def test_rule_is_not_tied_to_one_carrier_and_accepts_spelling_variants(first, second):
+    # Повтор одной отмены у любого перевозчика из реестра города удерживается (#396).
+    title = f"{first} отменила рейс из Белграда в Брюссель на 23 ноября"
+    retelling = f"{second} отменила рейсы между Белградом и Брюсселем на 23 ноября"
     history = [(201, title, "Пассажиров уведомят.", NOW - timedelta(hours=2))]
     assert find_related_flight_cancellation(
         retelling, "Все рейсы отменены.", history, now=NOW) == 201
 
 
+def test_different_carriers_on_same_route_and_day_are_independent():
+    history = [(201, "Wizz Air отменила рейс из Белграда в Брюссель на 23 ноября",
+                "Пассажиров уведомят.", NOW - timedelta(hours=2))]
+    assert find_related_flight_cancellation(
+        "Lufthansa отменила рейс из Белграда в Брюссель на 23 ноября",
+        "Все рейсы отменены.", history, now=NOW) is None
+
+
+@pytest.mark.parametrize("title", [
+    "Авиакомпания отменила рейс из Белграда в Брюссель на 23 ноября",
+    "Неизвестный Перевозчик отменил рейс из Белграда в Брюссель на 23 ноября",
+    "Air Serbia и Lufthansa отменили рейсы из Белграда в Брюссель на 23 ноября",
+])
+def test_unknown_or_several_carriers_take_the_normal_path(title):
+    history = [(201, title, "Пассажиров уведомят.", NOW - timedelta(hours=2))]
+    assert find_related_flight_cancellation(title, "Рейсы отменены.", history, now=NOW) is None
+
+
+def test_city_without_carrier_registry_does_not_hold():
+    _, title, body, _ = POSTS[2]
+    assert find_related_flight_cancellation(
+        title, body, [POSTS[0]], now=NOW, city="novi_sad") is None
+
+
+def test_committed_carrier_registry_has_unique_aliases():
+    import json
+    from pathlib import Path
+
+    data = json.loads(Path("cities/belgrade/carriers.json").read_text(encoding="utf-8"))
+    aliases = [a.casefold() for names in data["carriers"].values() for a in names]
+    assert len(aliases) == len(set(aliases))
+
+
 def test_title_without_flight_cancellation_is_not_classified():
-    title = "Белград и Брюссель подписали соглашение 23 ноября"
+    title = "Air Serbia и Брюссель подписали соглашение 23 ноября"
     history = [(201, title, "Текст.", NOW - timedelta(hours=2))]
     assert find_related_flight_cancellation(title, "Текст.", history, now=NOW) is None
