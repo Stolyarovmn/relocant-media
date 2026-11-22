@@ -42,6 +42,7 @@ AUDIT_ATTEMPTS = 2
 DELIVERY_ATTEMPTS = 2
 MAX_HISTORY = 20
 TERMINAL_STATES = frozenset({"published", "blocked"})
+PUBLISHED_TRANSPORT_DUPLICATE = "lifecycle_published_transport_duplicate"
 
 
 class LifecycleBlockedError(ValueError):
@@ -772,6 +773,24 @@ def block_unsupported_repair(session: Session, raw_id: int, *, now: datetime) ->
     if record.details.get("state") not in TERMINAL_STATES:
         _block(session, record, run, post, now=now, reason="unsupported_repair")
     return dict(record.details)
+
+
+def confirm_transport_duplicate(
+    session: Session, raw_id: int, previous_post_id: int, *, now: datetime,
+) -> bool:
+    """Зафиксировать повтор под уже удерживаемой блокировкой города."""
+    now = _now(now)
+    raw, source, run, post = _objects(session, raw_id)
+    previous = session.get(Post, previous_post_id)
+    if (run is None or run.delivery_status != "pending" or _unsafe_delivery(run, post)
+            or _owner_approved(session, raw_id, run)
+            or previous is None or previous.city != source.city
+            or not previous.telegram_message_id):
+        return False
+    record = _record(session, raw, source, now)
+    _block(session, record, run, post, now=now, reason="published_transport_duplicate")
+    record.details = {**record.details, "duplicate_of_post_id": previous_post_id}
+    return True
 
 
 def close_by_owner(session: Session, raw_id: int, *, now: datetime) -> dict[str, Any]:

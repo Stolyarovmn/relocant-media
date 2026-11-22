@@ -11,6 +11,7 @@ from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.source_locations import extract_source_maps
+from relocant_media.domain.story_fingerprint import find_same_story
 from relocant_media.domain.topic_tags import (
     is_draft_tag_line,
     is_topic_footer,
@@ -53,8 +54,25 @@ def recent_publications(
         "id": post.id, "title": effective.title, "body": effective.body,
         "status": "published" if run.delivery_status == "sent" else "ready",
         "published_at": (post.published_at or post.created_at).isoformat(),
+        "telegram_message_id": post.telegram_message_id,
         "rubric_id": (run.outcome.get("ranking", {}).get("selection") or {}).get("rubric_id"),
     } for post, run in rows for effective in [effective_published_text(post, run)]]
+
+
+def published_transport_duplicate(
+    history: list[dict[str, Any]], draft: RussianDraft, *, now: datetime,
+) -> int | None:
+    published = [
+        (row["id"], row["title"], row["body"], _publication_time(row["published_at"]))
+        for row in history
+        if row["status"] == "published" and (row.get("telegram_message_id") or 0) > 0
+    ]
+    return find_same_story(draft.title, draft.body, published, now=now, kind="transport")
+
+
+def _publication_time(value: str) -> datetime:
+    observed = datetime.fromisoformat(value)
+    return observed.replace(tzinfo=observed.tzinfo or UTC)
 
 
 def rubric_plan(

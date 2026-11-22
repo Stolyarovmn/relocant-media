@@ -39,6 +39,12 @@ class DeliveryBlockedError(ValueError):
     pass
 
 
+class PublishedTransportDuplicate(DeliveryBlockedError):
+    def __init__(self, post_id: int) -> None:
+        super().__init__(f"transport story repeats published post {post_id}")
+        self.post_id = post_id
+
+
 def _timestamp(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -580,6 +586,7 @@ class EditorialService:
         if "_package" in run.outcome and package.presentation is not None:
             from relocant_media.domain.dedup import find_repeated_publication
             from relocant_media.services.editorial_products import (
+                published_transport_duplicate,
                 recent_publications,
                 verify_stored_presentation,
             )
@@ -592,7 +599,17 @@ class EditorialService:
                     presentation=package.presentation)
             except ValueError as error:
                 raise DeliveryBlockedError(str(error)) from error
-            recent = recent_publications(self.session, package.city, now=datetime.now(UTC))
+            now = datetime.now(UTC)
+            recent = recent_publications(self.session, package.city, now=now)
+            if outcome.ranking.category == "transport" and package.linked_update is None:
+                from relocant_media.services.event_lifecycle import (
+                    source_revision_lifecycle_context,
+                )
+
+                if source_revision_lifecycle_context(self.session, raw_item_id) is None:
+                    duplicate = published_transport_duplicate(recent, outcome.draft, now=now)
+                    if duplicate is not None:
+                        raise PublishedTransportDuplicate(duplicate)
             repeated = find_repeated_publication(
                 outcome.draft.title, outcome.draft.body,
                 [(row["id"], row["title"], row["body"]) for row in recent

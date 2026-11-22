@@ -50,6 +50,20 @@ def test_different_stories_stay_separate(new, old):
     assert same_story(*new, *old) is None
 
 
+@pytest.mark.parametrize("changed", [
+    "С 17 ноября по 12 декабря автобус 82 идёт по улице Гандијева.",
+    "С 17 ноября по 11 декабря автобус 82 идёт по улице Устаничка.",
+    "С 17 ноября по 11 декабря автобус 82 от Дунайской до Гандијева идёт в объезд.",
+    "С 17 ноября по 11 декабря автобус 82 идёт по улице Гандијева с 08:00 до 12:00.",
+    "С 17 ноября по 11 декабря 2027 года автобус 82 идёт по улице Гандијева.",
+    "С 17 ноября по 11 декабря автобус 82 идёт по улице Гандијева в обратном направлении.",
+])
+def test_change_of_scope_or_dates_is_not_a_retelling(changed):
+    title = "Автобус №82 меняет маршрут"
+    original = "С 17 ноября по 11 декабря автобус 82 идёт по улице Гандијева."
+    assert same_story(title, changed, title, original, year=NOW.year) is None
+
+
 def test_window_limits_matches_to_recent_posts():
     first, second, _ = PAIRS[2]
     recent = [(7, *first, NOW - timedelta(hours=4))]

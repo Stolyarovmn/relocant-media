@@ -36,6 +36,7 @@ from relocant_media.services.gpt_fallback import (
     validate_fallback_package,
 )
 from relocant_media.services.gpt_refresh import RefreshInput, refresh_gpt_evidence
+from relocant_media.services.material_lifecycle import PUBLISHED_TRANSPORT_DUPLICATE
 from relocant_media.services.package_import import import_package
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
@@ -323,7 +324,10 @@ def run_worker(
 
                 after_result(session, package.raw_item_id, now=now or datetime.now(UTC))
                 session.commit()
-                imported += 1
+                if run.outcome.get("reason") == PUBLISHED_TRANSPORT_DUPLICATE:
+                    declined += 1
+                else:
+                    imported += 1
                 if run.outcome.get("status") == "ready":
                     ready += 1
                     if run.delivery_status == "pending":

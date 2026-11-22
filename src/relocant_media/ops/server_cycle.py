@@ -115,6 +115,7 @@ from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, delive
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
     EditorialService,
+    PublishedTransportDuplicate,
     _candidate,
     _document,
     _event_items,
@@ -1469,6 +1470,8 @@ async def publish_pending(
                     if blocked is not None:
                         blocked.append({"raw_item_id": raw_id, "reason": reason,
                                         "parent_message_id": error.parent.message_id})
+                    continue
+                except PublishedTransportDuplicate:
                     continue
                 except DeliveryBlockedError as error:
                     failed(type(error).__name__)

@@ -19,7 +19,12 @@ from relocant_media.domain.channel_targets import (
 )
 from relocant_media.domain.event_map_policy import event_map_review_reason
 from relocant_media.domain.presentation import valid_title_presentation
-from relocant_media.services.editorial import DeliveryBlockedError, DeliveryResult, EditorialService
+from relocant_media.services.editorial import (
+    DeliveryBlockedError,
+    DeliveryResult,
+    EditorialService,
+    PublishedTransportDuplicate,
+)
 from relocant_media.services.flight_review import guard_flight_delivery
 from relocant_media.services.followup import revision_reply_target
 from relocant_media.services.production_media import (
@@ -90,6 +95,7 @@ async def deliver_reviewed(
             return result
         from relocant_media.services.material_lifecycle import (
             LifecycleBlockedError,
+            confirm_transport_duplicate,
             ensure_not_terminal,
         )
 
@@ -141,7 +147,15 @@ async def deliver_reviewed(
         if run.outcome.get("_package_sha256") != package_sha256:
             raise DeliveryBlockedError("reviewed package fingerprint does not match")
         service = EditorialService(session, cast(EditorialPipeline, None))
-        preview = await service.deliver(raw_item_id, dry_run=True)
+        try:
+            preview = await service.deliver(raw_item_id, dry_run=True)
+        except PublishedTransportDuplicate as error:
+            if not confirm_transport_duplicate(
+                session, raw_item_id, error.post_id, now=datetime.now(UTC),
+            ):
+                raise DeliveryBlockedError(str(error)) from error
+            session.commit()
+            raise
         try:
             prepared_media = prepare_production_media(
                 raw_item_id=raw_item_id,

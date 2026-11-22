@@ -21,7 +21,12 @@ from relocant_media.services.editorial import (
     _timestamp,
 )
 from relocant_media.services.flight_review import flight_review_reference
-from relocant_media.services.material_lifecycle import LifecycleBlockedError, ensure_not_terminal
+from relocant_media.services.material_lifecycle import (
+    PUBLISHED_TRANSPORT_DUPLICATE,
+    LifecycleBlockedError,
+    confirm_transport_duplicate,
+    ensure_not_terminal,
+)
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
     eligible_map_hold,
@@ -65,7 +70,10 @@ def import_package(
         ):
             raise PackageConflictError("raw evidence changed")
         existing = session.get(EditorialRun, item.id)
-        if existing is None or existing.delivery_status != "sent":
+        if existing is None or (
+            existing.delivery_status != "sent"
+            and existing.outcome.get("reason") != PUBLISHED_TRANSPORT_DUPLICATE
+        ):
             try:
                 ensure_not_terminal(session, item.id, now=now or datetime.now(UTC))
             except LifecycleBlockedError as error:
@@ -140,6 +148,27 @@ def import_package(
                 outcome = outcome.model_copy(update={
                     "status": PublicationStatus.HUMAN_REVIEW, "reason": reason,
                 })
+        duplicate = None
+        if (outcome.status == PublicationStatus.READY and outcome.ranking.category == "transport"
+                and package.linked_update is None):
+            from relocant_media.services.editorial_products import (
+                published_transport_duplicate,
+                recent_publications,
+            )
+            from relocant_media.services.event_lifecycle import source_revision_lifecycle_context
+
+            if source_revision_lifecycle_context(session, item.id) is None:
+                checked_at = now or datetime.now(UTC)
+                duplicate = published_transport_duplicate(
+                    recent_publications(session, package.city, now=checked_at),
+                    package.outcome.draft, now=checked_at,
+                )
+                if duplicate is not None:
+                    outcome = outcome.model_copy(update={
+                        "status": PublicationStatus.SKIPPED,
+                        "reason": PUBLISHED_TRANSPORT_DUPLICATE,
+                        "draft": None,
+                    })
         post = None
         if outcome.status in {PublicationStatus.READY, PublicationStatus.HUMAN_REVIEW}:
             post = Post(
@@ -169,6 +198,12 @@ def import_package(
                 editorial_rule_version=CURRENT_EDITORIAL_RULE_VERSION,
             )
             session.add(run)
+        if duplicate is not None:
+            session.flush()
+            if not confirm_transport_duplicate(
+                session, item.id, duplicate, now=now or datetime.now(UTC),
+            ):
+                raise PackageConflictError("transport duplicate cannot be recorded safely")
         session.commit()
         return run
     except BaseException:
