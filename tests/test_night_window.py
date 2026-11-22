@@ -7,14 +7,14 @@ from sqlalchemy.orm import Session
 from test_channel_delivery import reviewed as reviewed_fixture
 
 from relocant_media.domain import quiet_hours
-from relocant_media.domain.pacing import morning_deadline, morning_release
+from relocant_media.domain.pacing import delivery_order, morning_deadline, morning_release
 from relocant_media.ops import server_cycle
 from relocant_media.services.material_lifecycle import (
     delivery_deadline,
     hold_until_morning,
     lifecycle_state,
 )
-from relocant_media.storage.models import EditorialRun
+from relocant_media.storage.models import EditorialRun, RawItem
 
 reviewed = reviewed_fixture
 BELGRADE = ZoneInfo("Europe/Belgrade")
@@ -97,3 +97,41 @@ async def test_night_story_is_held_without_delivery_attempt(reviewed, monkeypatc
     assert asked == [{"category": "transport", "urgent": False, "now": night}]
     with Session(session.get_bind()) as check:
         assert check.get(EditorialRun, run.raw_item_id).delivery_status == "pending"
+
+
+def test_today_news_goes_before_yesterday_backlog():
+    now = local(2026, 11, 23, 8, 5).astimezone(UTC)
+    yesterday = local(2026, 11, 22, 21, 0).astimezone(UTC)
+    today = local(2026, 11, 23, 7, 30).astimezone(UTC)
+    naive_today = today.replace(tzinfo=None)  # SQLite отдаёт UTC без зоны
+    assert delivery_order([(1, yesterday), (2, today), (3, None), (4, naive_today)],
+                          now=now) == [2, 4, 1, 3]
+    # Днём всё «сегодня», порядок остаётся по поступлению.
+    assert delivery_order([(5, today), (6, today)], now=now) == [5, 6]
+
+
+@pytest.mark.asyncio
+async def test_morning_cycle_tries_today_story_first(reviewed, monkeypatch):
+    session, run = reviewed
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    morning = local(2026, 11, 23, 8, 5).astimezone(UTC)
+    monkeypatch.setattr(quiet_hours, "utc_now", lambda: morning)
+    old = session.get(RawItem, run.raw_item_id)
+    old.published_at = local(2026, 11, 22, 21, 0).astimezone(UTC)
+    fresh = RawItem(source_id=old.source_id, external_id=old.external_id + "-today",
+                    url=old.url + "?today", title=old.title, body=old.body,
+                    published_at=local(2026, 11, 23, 7, 30).astimezone(UTC),
+                    published_at_precision=old.published_at_precision)
+    session.add(fresh)
+    session.flush()
+    session.add(EditorialRun(raw_item_id=fresh.id, outcome=dict(run.outcome),
+                             evidence=dict(run.evidence),
+                             editorial_rule_version=run.editorial_rule_version,
+                             delivery_status="pending"))
+    session.commit()
+    tried: list[int] = []
+    monkeypatch.setattr(
+        "relocant_media.services.material_lifecycle.before_delivery_attempt",
+        lambda session, raw_id, **kwargs: tried.append(raw_id) and False)
+    assert await server_cycle.publish_pending(session.get_bind(), enabled=True) == []
+    assert tried == [fresh.id, run.raw_item_id]

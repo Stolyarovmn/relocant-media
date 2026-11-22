@@ -4,7 +4,8 @@
 никогда не даёт ему сгореть: если до срока жизни материала осталось мало времени,
 он выходит сразу. Срочные поводы (транспорт, отключения, погода) не ждут.
 """
-from datetime import datetime, time, timedelta
+from collections.abc import Iterable
+from datetime import UTC, datetime, time, timedelta
 
 from relocant_media.domain.quiet_hours import QUIET_END, QUIET_START, QUIET_ZONE, is_quiet_time
 
@@ -35,6 +36,28 @@ def morning_release(*, category: str, urgent: bool, now: datetime) -> datetime |
 
 def morning_deadline(release: datetime) -> datetime:
     return datetime.combine(release.astimezone(QUIET_ZONE).date(), MORNING_DEADLINE, QUIET_ZONE)
+
+
+def delivery_order(
+    pending: Iterable[tuple[int, datetime | None]], *, now: datetime,
+) -> list[int]:
+    """Order pending posts: today's Belgrade news first, then by arrival (#359).
+
+    With a 20-minute gap the morning backlog goes out one by one, so yesterday's
+    non-urgent note must not take the first morning slot before today's news.
+    During the day everything is "today" and the order stays by arrival.
+    """
+    today = now.astimezone(QUIET_ZONE).date()
+
+    def key(row: tuple[int, datetime | None]) -> tuple[bool, int]:
+        raw_id, published_at = row
+        if published_at is not None and published_at.tzinfo is None:
+            published_at = published_at.replace(tzinfo=UTC)
+        is_today = (published_at is not None
+                    and published_at.astimezone(QUIET_ZONE).date() == today)
+        return (not is_today, raw_id)
+
+    return [raw_id for raw_id, _ in sorted(pending, key=key)]
 
 
 def pacing_hold(

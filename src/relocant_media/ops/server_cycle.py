@@ -82,7 +82,12 @@ from relocant_media.domain.freshness import (
     evidence_freshness,
     freshness_decision,
 )
-from relocant_media.domain.pacing import morning_deadline, morning_release, pacing_hold
+from relocant_media.domain.pacing import (
+    delivery_order,
+    morning_deadline,
+    morning_release,
+    pacing_hold,
+)
 from relocant_media.domain.policy import CURRENT_EDITORIAL_RULE_VERSION
 from relocant_media.domain.presentation import (
     presentation_title,
@@ -1316,12 +1321,16 @@ async def publish_pending(
         hold_until_morning,
     )
     with Session(engine) as session:
-        query = select(EditorialRun.raw_item_id).where(
+        query = select(EditorialRun.raw_item_id, RawItem.published_at).join(
+            RawItem, RawItem.id == EditorialRun.raw_item_id).where(
             EditorialRun.delivery_status == "pending",
         )
         if only_raw_ids is not None:
             query = query.where(EditorialRun.raw_item_id.in_(only_raw_ids))
-        ids = list(session.scalars(query.order_by(EditorialRun.raw_item_id)))
+        ids = delivery_order(
+            [(row[0], row[1]) for row in session.execute(
+                query.order_by(EditorialRun.raw_item_id))],
+            now=quiet_hours.utc_now())
         last_sent_at = session.scalar(select(func.max(Post.published_at)).join(
             EditorialRun, EditorialRun.post_id == Post.id).where(
                 EditorialRun.delivery_status == "sent",
