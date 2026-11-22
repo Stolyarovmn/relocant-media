@@ -114,6 +114,7 @@ jobs:
       worker_mode: ${{ steps.mode.outputs.value }}
       drain_continue: ${{ steps.runtime.outputs.drain_continue }}
       drain_next_delay_seconds: ${{ steps.runtime.outputs.drain_next_delay_seconds }}
+      morning_watch_date: ${{ steps.runtime.outputs.morning_watch_date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -376,6 +377,40 @@ jobs:
               '-f', f"source_sha={os.environ['CYCLE_SHA']}",
               '-f', f"source_run_id={os.environ['CYCLE_RUN_ID']}",
           ], check=True)
+      - name: Проверить пропущенную утреннюю сводку
+        if: always() && needs.cycle.outputs.morning_watch_date != ''
+        continue-on-error: true
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MORNING_DATE: ${{ needs.cycle.outputs.morning_watch_date }}
+        run: |
+          import json
+          import os
+          import subprocess
+          from datetime import date
+
+          issue_date = os.environ['MORNING_DATE']
+          if date.fromisoformat(issue_date).isoformat() != issue_date:
+              raise SystemExit('Неверная дата утренней сводки')
+          repo = os.environ['GH_REPO']
+          workflow = 'editorial-watchdog.yml'
+          title = f'Утренняя сводка · {issue_date}'
+          recent = json.loads(subprocess.check_output([
+              'gh', 'run', 'list', '-R', repo, '--workflow', workflow, '--branch', 'main',
+              '--event', 'workflow_dispatch', '--limit', '20',
+              '--json', 'displayTitle,status,conclusion',
+          ], text=True, encoding='utf-8', timeout=40))
+          if any(run['displayTitle'] == title and (
+              run['status'] != 'completed' or run['conclusion'] == 'success'
+          ) for run in recent):
+              print('Проверка этой сводки уже запущена или завершена.')
+          else:
+              subprocess.run([
+                  'gh', 'workflow', 'run', workflow, '-R', repo, '--ref', 'main',
+                  '-f', 'dry_run=false', '-f', f'morning_date={issue_date}',
+              ], check=True, timeout=40)
   deploy:
     if: always() && needs.cycle.outputs.projection == 'true'
     needs: cycle

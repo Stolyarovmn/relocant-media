@@ -9,8 +9,8 @@ import json
 import os
 import re
 import subprocess
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,6 +19,7 @@ import httpx
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.ops.actions_recovery import recover
 from relocant_media.ops.actions_runtime import EDITORIAL_INTERVAL, REPO
+from relocant_media.ops.belgrade_digests import MorningDelivery, morning_delivery
 from relocant_media.ops.editorial_failure_streak import (
     ALERT_THRESHOLD,
     CAUSES,
@@ -48,6 +49,14 @@ MESSAGES = {
     "restored": "Очередь редакции Белграда восстановлена из проверенного снимка.",
     "healthy": "Редакция Белграда снова работает. Очередь доступна, свежий цикл сохранён.",
 }
+MORNING_REASONS = {
+    "insufficient_items": "Редакционный цикл зафиксировал, что для выпуска не хватило материалов.",
+    "window_closed": "Окно догоняющего выпуска закрылось до отправки.",
+    "telegram_unconfirmed": "Telegram не подтвердил результат отправки. Сверьте выпуск в канале.",
+    "invalid_receipt": "Запись об отправке неполная. Сверьте выпуск в канале.",
+    "no_recorded_result": "В журнале редакции нет записи о результате попытки. "
+                          "Проверьте последние запуски.",
+}
 
 
 @dataclass(frozen=True)
@@ -55,12 +64,36 @@ class Check:
     status: str
     run_id: str | None = None
     streak: FailureStreak | None = None
+    morning: MorningDelivery | None = None
 
     @property
     def key(self) -> str:
-        # Cache contains only this digest; no Telegram IDs, state, or snapshot metadata.
+        # Alert cache keys carry no Telegram IDs or snapshot metadata.
         identity = self.streak.cause if self.streak else self.run_id
         return hashlib.sha256(f"{self.status}:{identity}".encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class AlertState:
+    queue: str = ""
+    morning: str = ""
+
+    @classmethod
+    def read(cls, path: Path) -> AlertState:
+        if not path.is_file():
+            return cls()
+        text = path.read_text(encoding="utf-8").strip()
+        if re.fullmatch(r"[a-f0-9]{64}", text):
+            return cls(queue=text)
+        try:
+            value = json.loads(text)
+        except ValueError:
+            return cls()
+        if not isinstance(value, dict):
+            return cls()
+        return cls(**{key: stamp for key in ("queue", "morning")
+                      if isinstance(stamp := value.get(key), str)
+                      and re.fullmatch(r"[a-f0-9]{64}", stamp)})
 
 
 def gh(*args: str) -> str:
@@ -83,12 +116,30 @@ def checkpoint_from_run(run_id: str, attempt: str) -> str | None:
 
 
 def inspect(
-    client: SSHStateClient, now: datetime, work: Path, *, allow_recovery: bool,
+    client: SSHStateClient, now: datetime, work: Path, *,
+    allow_recovery: bool, check_digests: bool = False, morning_date: date | None = None,
 ) -> Check:
     try:
         state, _, capacity_low = client.read_status()
     except SSHStorageError:
+        if morning_date is not None:
+            raise
         return Check("storage")
+    if morning_date is not None:
+        morning = morning_delivery(state, now) if check_digests else None
+        if morning is None or morning.slot.scheduled.date() != morning_date:
+            return Check("morning_only")
+        return Check("morning_only", morning=morning)
+    result = _inspect_queue(client, state, capacity_low, now, work, allow_recovery=allow_recovery)
+    if check_digests and result.status != "restored":
+        return replace(result, morning=morning_delivery(state, now))
+    return result
+
+
+def _inspect_queue(
+    client: SSHStateClient, state: dict[str, Any], capacity_low: bool | None,
+    now: datetime, work: Path, *, allow_recovery: bool,
+) -> Check:
     if state.get("status") == "ready":
         if capacity_low:
             return Check("storage_capacity")
@@ -129,7 +180,7 @@ def inspect(
 
 
 def should_notify(check: Check, previous: str) -> bool:
-    if check.status == "running" or check.key == previous:
+    if check.status in {"running", "morning_only"} or check.key == previous:
         return False
     if check.status == "healthy":
         return bool(previous and previous != Check("healthy").key)
@@ -140,28 +191,59 @@ def check_failure_streak(check: Check) -> Check:
     if check.status in {"healthy", "stale", "storage", "storage_capacity", "busy"}:
         streak = recent_failure_streak(REPO)
         if streak and streak.count >= ALERT_THRESHOLD:
-            return Check("repeated_failure", streak.run_id, streak)
+            return replace(check, status="repeated_failure", run_id=streak.run_id, streak=streak)
     return check
 
 
-async def notify_owner(check: Check) -> None:
-    chat_id = int(os.environ["EDITORIAL_OWNER_CHAT_ID"])
-    if chat_id <= 0 or chat_id != int(os.environ["EDITORIAL_OWNER_USER_ID"]):
-        raise ValueError("positive private owner chat required")
-    link = RUN_URL + check.run_id if check.run_id else (
-        f"https://github.com/{REPO}/actions/workflows/editorial-actions.yml"
-    )
+def notification(check: Check) -> str:
     if check.streak:
         amount = str(check.streak.count)
         if check.streak.count >= STREAK_LIMIT:
             amount = f"не менее {STREAK_LIMIT}"
-        message = (f"Серия сбоев редакции Белграда. Число сбоев подряд — {amount}. "
-                   f"Причина — {CAUSES[check.streak.cause]}.")
-    else:
-        message = MESSAGES[check.status]
+        return (f"Серия сбоев редакции Белграда. Число сбоев подряд — {amount}. "
+                f"Причина — {CAUSES[check.streak.cause]}.")
+    return MESSAGES[check.status]
+
+
+async def notify_owner(check: Check | None, morning: MorningDelivery | None = None) -> None:
+    chat_id = int(os.environ["EDITORIAL_OWNER_CHAT_ID"])
+    if chat_id <= 0 or chat_id != int(os.environ["EDITORIAL_OWNER_USER_ID"]):
+        raise ValueError("positive private owner chat required")
+    link = RUN_URL + check.run_id if check and check.run_id else (
+        f"https://github.com/{REPO}/actions/workflows/editorial-actions.yml"
+    )
+    messages = [notification(check)] if check else []
+    if morning is not None:
+        status = ("отправка не подтверждена" if morning.status == "unconfirmed"
+                  else f"пропущена к {morning.slot.expires:%H:%M} по Белграду")
+        messages.append(f"Утренняя сводка за {morning.slot.scheduled:%d.%m.%Y} — {status}. "
+                        + MORNING_REASONS[morning.reason])
+    messages.append(link)
     async with httpx.AsyncClient(timeout=18, trust_env=False) as http:
         bot = TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], http)
-        await bot.send_message(chat_id, f"{message}\n{link}")
+        await bot.send_message(chat_id, "\n\n".join(messages))
+
+
+def update_alerts(check: Check, path: Path) -> bool:
+    previous = AlertState.read(path)
+    queue = check if should_notify(check, previous.queue) else None
+    morning = check.morning
+    morning_key = previous.morning
+    if morning is not None and morning.status != "sent":
+        morning_key = hashlib.sha256(morning.slot.key.encode()).hexdigest()
+        if morning_key == previous.morning:
+            morning = None
+    else:
+        morning = None
+    if queue is not None or morning is not None:
+        asyncio.run(notify_owner(queue, morning))
+    queue_key = (previous.queue if check.status in {"running", "morning_only"}
+                 else Check("healthy").key if check.status == "restored" else check.key)
+    saved = AlertState(queue=queue_key, morning=morning_key)
+    if saved == previous:
+        return False
+    path.write_text(json.dumps(asdict(saved)), encoding="utf-8")
+    return True
 
 
 def current_main_passed_ci() -> bool:
@@ -180,22 +262,25 @@ def main() -> None:
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--morning-date", type=date.fromisoformat)
     args = parser.parse_args()
     try:
         client = SSHStateClient(SSHConfig.from_environment(os.environ))
         check = inspect(client, datetime.now(UTC), args.work,
-                        allow_recovery=not args.dry_run and current_main_passed_ci())
+                        allow_recovery=(args.morning_date is None and not args.dry_run
+                                        and current_main_passed_ci()),
+                        check_digests=(os.getenv("EDITORIAL_SEND_ENABLED") == "true"
+                                       and os.getenv("EDITORIAL_CHANNEL_MODE") == "public"),
+                        morning_date=args.morning_date)
         check = check_failure_streak(check)
+        morning = check.morning
         print(json.dumps({"watchdog": check.status, "run_id": check.run_id,
+                          "morning": {"slot": morning.slot.key, "status": morning.status,
+                                      "reason": morning.reason} if morning else None,
                           "dry_run": args.dry_run}))
-        if args.dry_run or check.status == "running":
+        if args.dry_run:
             return
-        previous = args.state.read_text(encoding="utf-8") if args.state.exists() else ""
-        if should_notify(check, previous):
-            asyncio.run(notify_owner(check))
-        saved = Check("healthy").key if check.status == "restored" else check.key
-        if saved != previous:
-            args.state.write_text(saved, encoding="utf-8")
+        if update_alerts(check, args.state):
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
                 output.write("changed=true\n")
     except Exception as error:
