@@ -34,6 +34,7 @@ jobs:
         run: |
           python -m relocant_media.ops.source_audit \
             --online \
+            --check-belgrade-weather \
             --fail-on-error \
             --require-active \
             --summary "$GITHUB_STEP_SUMMARY"

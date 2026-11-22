@@ -27,8 +27,7 @@ from relocant_media.collectors.rhmz_forecast import (
     FORECAST_URL,
     WARNING_URL,
     Forecast,
-    parse_forecast,
-    parse_warning,
+    collect_weather,
 )
 from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.domain.city_profile import load_city_profile
@@ -823,17 +822,11 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
         now = datetime.now(UTC).astimezone(slot.scheduled.tzinfo)
         forecast = None
         warning = None
+        weather_details: dict[str, Any] = {}
         if slot.kind == "morning":
-            try:
-                response = await client.get(FORECAST_URL)
-                forecast = parse_forecast(response.raise_for_status().text, now)
-            except httpx.HTTPError:
-                pass
-            try:
-                response = await client.get(WARNING_URL)
-                warning = parse_warning(response.raise_for_status().content, now)
-            except httpx.HTTPError:
-                pass
+            weather = await collect_weather(client, now)
+            forecast, warning = weather.forecast, weather.warning
+            weather_details["weather_sources"] = weather.statuses()
         engine = create_engine(f"sqlite:///{database.resolve().as_uri()}?mode=ro&uri=true")
         try:
             with Session(engine) as session:
@@ -868,7 +861,8 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
         if (priority_missing or candidates and not confirmed) and (
             len(entries) < 2 or now < slot.expires - timedelta(minutes=15)
         ):
-            return {"state": "reminder_source_unconfirmed", "items": len(candidates)}
+            return {"state": "reminder_source_unconfirmed", "items": len(candidates),
+                    **weather_details}
         if confirmed:
             reply_to = reply_target(slot, confirmed, originals)
             for index, item in enumerate(confirmed):
@@ -881,12 +875,13 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
         telegram_app = environment.get("RELOCANT_MAP_TELEGRAM_APP")
         digest = render(slot, entries, telegram_app)
         if digest is None:
-            return {"state": "insufficient_items", "items": len(entries)}
+            return {"state": "insufficient_items", "items": len(entries), **weather_details}
         digest, photo = _with_cover(slot, entries, digest, telegram_app)
         if datetime.now(UTC) >= slot.expires:
-            return {"state": "window_closed"}
+            return {"state": "window_closed", **weather_details}
         bot = TelegramBotAPI(environment["TELEGRAM_BOT_TOKEN"], client)
-        return await deliver(slot, digest, state, sha, commit, lambda: bot.send_digest_message(
+        receipt = await deliver(slot, digest, state, sha, commit, lambda: bot.send_digest_message(
             APPROVED_CHANNEL_ID, digest.html, map_url=digest.map_url,
             reply_to=reply_to, photo=photo,
         ))
+        return {**receipt, **weather_details}

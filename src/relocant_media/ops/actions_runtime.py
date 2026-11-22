@@ -967,8 +967,11 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             return _commit_republication(store, drive, current, digest, updates, environment, work)
 
         result = asyncio.run(run_digest(database, slot, state, sha, commit_digest, environment))
-        print(json.dumps({"digest": slot.key, "status": result["state"],
-                          "message_id": result.get("message_id")}), flush=True)
+        digest_log = {"digest": slot.key, "status": result["state"],
+                      "message_id": result.get("message_id")}
+        if weather_sources := result.get("weather_sources"):
+            digest_log["weather_sources"] = weather_sources
+        print(json.dumps(digest_log), flush=True)
         if result["state"] in {"sent", "uncertain"}:
             state, sha = store.read()
             validate_ready(state)

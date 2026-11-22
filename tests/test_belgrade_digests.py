@@ -17,6 +17,8 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.collectors.rhmz_forecast import (
     FORECAST_URL,
     WARNING_URL,
+    _forecast_reading,
+    collect_weather,
     parse_forecast,
     parse_warning,
 )
@@ -143,6 +145,13 @@ def test_forecast_uses_dated_belgrade_column_and_skips_stale_html():
     assert forecast is not None and not forecast.hazardous
     assert forecast.text == "Днём до +9 °C, небольшая облачность."
     assert parse_forecast(html.replace("13.11. 12:18", "12.11. 12:18"), now) is None
+    assert _forecast_reading(html.replace("13.11. 12:18", "12.11. 12:18"), now) == (None, "stale")
+    assert _forecast_reading(html.replace("14.11. СУБОТА", "15.11. НЕДЕЉА"), now) == (
+        None, "today_missing",
+    )
+    assert _forecast_reading(html.replace("/prognoza/4.gif", "missing"), now) == (
+        None, "invalid_payload",
+    )
 
 
 def test_weather_warning_has_to_overlap_the_belgrade_day():
@@ -157,6 +166,35 @@ def test_weather_warning_has_to_overlap_the_belgrade_day():
     )
     assert parse_warning(alert.replace("Belgrade", "Novi Sad").encode(), now) is None
     assert parse_warning(alert.encode(), now.replace(hour=18)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("feed", "status", "has_warning"), [
+    ("", "none_active", False),
+    ("<entry/>", "invalid_payload", False),
+    ("<entry><cap:areaDesc>Belgrade</cap:areaDesc></entry>", "invalid_payload", False),
+    ("<entry><cap:areaDesc>Belgrade</cap:areaDesc><cap:event>Wind orange</cap:event>"
+     "<cap:effective>2026-11-14T07:00:00+00:00</cap:effective>"
+     "<cap:expires>2026-11-14T16:00:00+00:00</cap:expires></entry><entry/>",
+     "partial", True),
+])
+async def test_weather_accounts_for_missing_and_malformed_alerts(feed, status, has_warning):
+    now = datetime(2026, 11, 14, 6, 30, tzinfo=UTC)
+
+    def respond(request):
+        if str(request.url) == FORECAST_URL:
+            raise httpx.ReadTimeout("unavailable", request=request)
+        return httpx.Response(200, text=(
+            '<feed xmlns="http://www.w3.org/2005/Atom" '
+            'xmlns:cap="urn:oasis:names:tc:emergency:cap:1.2">'
+            f'{feed}</feed>'
+        ))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        weather = await collect_weather(client, now)
+    assert weather.forecast is None
+    assert bool(weather.warning) is has_warning
+    assert weather.statuses() == {"rhmz_forecast": "transport_error", "meteoalarm": status}
 
 
 def test_render_uses_compact_html_one_hashtag_and_grouped_map():
@@ -436,6 +474,7 @@ def test_next_morning_delivers_addresses_and_all_map_items_before_evening_remind
         "TELEGRAM_BOT_TOKEN": "test-token", "RELOCANT_MAP_TELEGRAM_APP": app,
     }))
     assert receipt["state"] == "sent" and len(sent) == 1
+    assert receipt["weather_sources"] == {"rhmz_forecast": "http_error", "meteoalarm": "http_error"}
     message = sent[0]
     html = message["text"]
     assert "<b>⚡ Отключения света</b>" in html
