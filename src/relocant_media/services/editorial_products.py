@@ -110,7 +110,7 @@ def build_presentation(
     source_map = (select_source_map(enrichment, source_url=source_url)
                   if native_map is None and event_place is None else None)
     return EditorialPresentation(
-        version=5,
+        version=6,
         profile_sha256=profile.sha256, rubric_id=rubric.id, rubric_name=rubric.name,
         source_map=source_map,
         illustration=plan_illustration(
@@ -125,7 +125,8 @@ def present_draft(
     draft: RussianDraft, presentation: EditorialPresentation, *, category: str = "",
 ) -> RussianDraft:
     """Идемпотентное оформление до двух ревью; после них текст не дополняется."""
-    label = (topic_tags(category, presentation_version=presentation.version)
+    label = (topic_tags(category, presentation_version=presentation.version,
+                        rubric_id=presentation.rubric_id)
              if presentation.version >= 2 else
              f"Рубрика: {presentation.rubric_name}")
     lines = [line for line in draft.body.splitlines()

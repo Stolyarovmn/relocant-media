@@ -51,6 +51,47 @@ def test_belgrade_categories_have_one_public_hashtag():
         assert topic_tag_spans(tag) == ((0, len(tag)),)
 
 
+def test_tags_v2_split_city_stories_and_keep_one_public_hashtag():
+    profile = load_city_profile("belgrade")
+    categories = {category for rubric in profile.rubrics for category in rubric.categories}
+    for rubric in profile.rubrics:
+        for category in rubric.categories:
+            tag = topic_tags(category, presentation_version=6, rubric_id=rubric.id)
+            assert is_topic_footer(tag)
+            assert topic_tag_spans(tag) == ((0, len(tag)),)
+    # Городские истории больше не смешиваются с изменениями в городе.
+    assert topic_tags("city", presentation_version=6, rubric_id="city_life") == "#Истории"
+    assert topic_tags("city", presentation_version=6, rubric_id="city_changes") == "#Город"
+    assert topic_tags("unknown", presentation_version=6, rubric_id="city_life") == "#Истории"
+    assert topic_tags("unknown", presentation_version=6, rubric_id="city_changes") == "#Город"
+    # Рубрика не перекрашивает определённую категорию, в том числе чувствительную.
+    assert topic_tags("events", presentation_version=6, rubric_id="city_life") == "#События"
+    assert topic_tags("crime", presentation_version=6, rubric_id="city_life") == "#Безопасность"
+    assert topic_tags(
+        "accusations", presentation_version=6, rubric_id="city_changes") == "#Общество"
+    v2 = {topic_tags(category, presentation_version=6, rubric_id="city_changes")
+          for category in categories}
+    assert "#Досуг" not in " ".join(v2)
+    # Сохранённые пакеты прежних версий проверяются по прежним правилам.
+    assert topic_tags("accusations", presentation_version=5, rubric_id="city_life") == "#Город"
+    assert topic_tags("city", presentation_version=5, rubric_id="city_life") == "#Город"
+    assert topic_tags("events", presentation_version=2) == "#События #Досуг"
+    assert is_topic_footer("#События #Досуг")
+
+
+def test_city_story_rendered_with_v2_tag_is_idempotent(session):
+    raw_id, doc = _record(session, "belgrade", "Knez Mihailova 6", "Serbia")
+    profile = load_city_profile("belgrade")
+    presentation = build_presentation(session, raw_id, (doc,), document_ids=[raw_id],
+                                      profile=profile, rubric_id="city_life")
+    draft = RussianDraft(title="Земун глазами гостя", body="Текст.\n\n#Город",
+                         claim_ids=("c1",))
+    rendered = present_draft(draft, presentation, category="city")
+    assert rendered.body.endswith("\n\n#Истории")
+    assert "#Город" not in rendered.body
+    assert present_draft(rendered, presentation, category="city") == rendered
+
+
 def test_maps_and_rubrics_are_bound_before_review_and_rechecked_from_snapshot(session):
     raw_id, doc = _record(session, "belgrade", "Knez Mihailova 6", "Serbia")
     profile = load_city_profile("belgrade")
@@ -65,7 +106,7 @@ def test_maps_and_rubrics_are_bound_before_review_and_rechecked_from_snapshot(se
         claim_ids=("c1",),
     )
     rendered = present_draft(draft, presentation, category="events")
-    assert presentation.version == 5
+    assert presentation.version == 6
     assert present_draft(rendered, presentation, category="events") == rendered
     assert rendered.title == "Городское событие Белград"
     assert rendered.body == (
