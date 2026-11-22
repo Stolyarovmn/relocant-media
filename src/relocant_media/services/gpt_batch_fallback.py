@@ -382,6 +382,11 @@ def build_ranked_request(
             "batch_result_sha256": _digest(batch_result),
             "candidates": candidates,
         }
+        from relocant_media.services.linked_updates import published_post_references
+
+        references = published_post_references(session, city=profile.city_id, now=now)
+        if references:
+            request["published_post_refs"] = references
         # Защищённые темы уже заняли часть исходного лимита. Если полный
         # разбор у Gemini тоже упал, дать их GPT вместе с выбранными темами.
         protected_ids = {

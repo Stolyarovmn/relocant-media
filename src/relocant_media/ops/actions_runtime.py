@@ -379,6 +379,16 @@ def _require_public_fallback_documents(session: Session, request: dict[str, Any]
 
     require_public_documents(request)
     registry = _registry()
+    from relocant_media.ai.linked_update import PublishedPostReference
+    from relocant_media.services.linked_updates import published_post_reference
+
+    for value in request.get("published_post_refs", []):
+        reference = PublishedPostReference.model_validate_json(canonical_json(value))
+        current = published_post_reference(
+            session, reference.raw_item_id, city="belgrade", now=datetime.now(UTC),
+        )
+        if current != reference:
+            raise ValueError("Прежняя публикация не соответствует канонической квитанции")
     for candidate in request["candidates"]:
         for snapshot in candidate["documents"]:
             document = PackageEventDocument.model_validate_json(canonical_json(snapshot))

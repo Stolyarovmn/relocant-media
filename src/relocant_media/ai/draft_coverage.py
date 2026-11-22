@@ -1,9 +1,10 @@
 """Проверяемый контракт покрытия точного текста независимым фактическим ревью."""
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
+from relocant_media.ai.linked_update import LinkedUpdateFactsCheck
 from relocant_media.ai.models import (
     ClaimSet,
     EvidenceCitation,
@@ -35,6 +36,14 @@ class DraftFactsCheck(BaseModel):
     ]
     scope_claim_ids: tuple[str, ...]
     reason: str = Field(min_length=1)
+    linked_update_check: LinkedUpdateFactsCheck | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_compatible(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if self.linked_update_check is None:
+            payload.pop("linked_update_check", None)
+        return payload
 
 
 def _citation_key(citation: EvidenceCitation) -> tuple[str, str, str]:
@@ -124,4 +133,18 @@ FACTS_COVERAGE_INSTRUCTION = (
     "Если факты полностью подтверждены, но тема чувствительная, возможен approve "
     "по фактам с sensitive_substance: автоматическая публикация всё равно запрещена, "
     "решение о риске принимает владелец отдельно."
+)
+
+
+FACTS_COVERAGE_INSTRUCTION += (
+    " Если пакет содержит linked_update, независимо открой прежнюю публичную новость "
+    "с указанным message_id в собственном канале и сопоставь событие и новые факты. "
+    "Верни linked_update_check: parent_message_id, parent_publication_checked, same_event, "
+    "substantive_new_facts, точный change_claim_ids и reason. Только новые подтверждённые "
+    "draft claims могут доказывать существенное дополнение. Совпадение темы или города "
+    "не доказывает то же событие. При недоступности прежней публикации, иной теме или "
+    "повторе без нового факта — hold, положительную связь не имитировать. "
+    "Каноническая ссылка доказывает квитанцию, но не семантическую связь: её проверяет reviewer. "
+    "Если linked_update отсутствует или равен null, linked_update_check не передавай "
+    "или оставь null; не создавай формальный объект с false для обычной новости."
 )
