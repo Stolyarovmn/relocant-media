@@ -51,6 +51,7 @@ from relocant_media.services.editorial import (
     _event_items,
     _snapshot_member,
 )
+from relocant_media.services.flight_review import FlightReviewRequired, guard_flight_delivery
 from relocant_media.services.followup import revision_reply_target
 from relocant_media.services.material_lifecycle import (
     LifecycleBlockedError,
@@ -904,6 +905,7 @@ async def deliver_owner_approved(
         except ValueError as error:
             raise DeliveryBlockedError(str(error)) from error
         reply_to = revision_reply_target(session, raw_item_id, post.city)
+        guard_flight_delivery(session, post, reply_to=reply_to, now=datetime.now(UTC))
         reply_publisher = getattr(publisher, "publish_followup", None)
         if reply_to is not None and native is None and (
             prepared_media is not None or not callable(reply_publisher)
@@ -1236,22 +1238,33 @@ async def process_owner_actions(
             except DeliveryBlockedError as error:
                 session.rollback()
                 current = session.get(Submission, review_id)
-                changed = isinstance(error, OwnerSourceChangedError)
+                reason = "delivery_guard"
+                message = "Публикация остановлена на проверке согласованной версии."
+                parent_context: dict[str, int] = {}
+                if isinstance(error, OwnerSourceChangedError):
+                    reason = "source_changed"
+                    message = "Публикация остановлена: первоисточник изменился после согласования."
+                elif isinstance(error, FlightReviewRequired):
+                    reason = "flight_linked_review"
+                    parent_context = {"parent_message_id": error.parent.message_id}
+                    message = ("Материал относится к уже опубликованной авиановости "
+                               f"https://t.me/eduvbelgrad/{error.parent.message_id}. "
+                               "Для дополнения требуется проверка новых фактов.")
                 if current is not None:
                     current.status = "publish_blocked"
                     current.payload = {
                         **current.payload,
                         "publish_error_type": type(error).__name__,
-                        "publish_block_reason": "source_changed" if changed else "delivery_guard",
+                        "publish_block_reason": reason,
                         "blocked_at": _now_iso(),
+                        **parent_context,
                     }
                 delivery_failure(session, raw_item_id, type(error).__name__, now=datetime.now(UTC))
                 session.commit()
                 await _send_notice(
                     bot,
                     owner_chat_id,
-                    "Публикация остановлена: первоисточник изменился после согласования."
-                    if changed else "Публикация остановлена на проверке согласованной версии.",
+                    message,
                     reply_to=review.telegram_message_id,
                 )
                 stats["blocked"] += 1

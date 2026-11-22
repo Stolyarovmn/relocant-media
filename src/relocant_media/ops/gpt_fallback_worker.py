@@ -26,6 +26,7 @@ from relocant_media.ai.models import (
 from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.ops import server_cycle, server_runtime
 from relocant_media.services.editorial import EditorialService
+from relocant_media.services.flight_review import flight_review_marker
 from relocant_media.services.gpt_batch_fallback import validate_batch_rank
 from relocant_media.services.gpt_fallback import (
     validate_fallback_candidate,
@@ -49,6 +50,7 @@ class FallbackRejection(BaseModel):
     raw_item_id: int = Field(gt=0, lt=2**63)
     category: str = Field(min_length=1, max_length=40)
     rationale: str = Field(min_length=1, max_length=800)
+    duplicate_of_message_id: int | None = Field(default=None, gt=0, lt=2**63)
 
 
 class FallbackResult(BaseModel):
@@ -140,6 +142,22 @@ def _save_rejection(
     with Session(engine) as session:
         raw_id = rejection.raw_item_id
         _, profile, candidate, _ = validate_fallback_candidate(session, request, raw_id, now=now)
+        parent = candidate.flight_review_parent
+        if rejection.duplicate_of_message_id != (parent.message_id if parent else None):
+            raise ValueError("Решение о повторе должно ссылаться на исходную авиановость")
+        if parent is not None:
+            from relocant_media.services.material_lifecycle import confirm_flight_duplicate
+
+            run = session.get(EditorialRun, raw_id)
+            if run is None or "_package" not in run.outcome:
+                raise ValueError("Отсутствует пакет удержанной авиановости")
+            _check_live_evidence(EditorialPackage.model_validate_json(
+                canonical_json(run.outcome["_package"])))
+            validate_fallback_candidate(session, request, raw_id, now=now)
+            _claim_fallback(session, raw_id, now=now)
+            confirm_flight_duplicate(session, raw_id, now=now)
+            session.commit()
+            return
         if rejection.category not in {category for rubric in profile.rubrics
                                       for category in rubric.categories}:
             raise ValueError("Неизвестная категория отказа GPT")
@@ -295,7 +313,7 @@ def run_worker(
                 )
                 phase = "import"
                 run = import_package(session, package, now=now, replace_empty_hold=True,
-                                     replace_map_hold=True)
+                                     replace_map_hold=True, replace_flight_hold=True)
                 from relocant_media.services.material_lifecycle import after_result
 
                 after_result(session, package.raw_item_id, now=now or datetime.now(UTC))
@@ -330,9 +348,9 @@ def run_worker(
                 "ready", "human_review", "skipped", "blocked",
             }),
         )).all()
-        resolved = {raw_id for raw_id in saved_ids if not eligible_policy_reassessment(
-            session, raw_id, now=now,
-        )}
+        resolved = {raw_id for raw_id in saved_ids
+                    if flight_review_marker(session.get(EditorialRun, raw_id)) is None
+                    and not eligible_policy_reassessment(session, raw_id, now=now)}
     unresolved = len(requested_ids - resolved)
     status = ("PRIMARY_FAILED" if not (imported or declined) else
               "PRIMARY_PARTIAL" if rejected or errors or blocked or unresolved else "PRIMARY_OK")

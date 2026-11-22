@@ -1329,12 +1329,14 @@ async def publish_pending(
 ) -> list[int]:
     if not enabled or only_raw_ids == set():
         return []
+    from relocant_media.services.flight_review import FlightReviewRequired
     from relocant_media.services.material_lifecycle import (
         after_result,
         before_delivery_attempt,
         delivery_deadline,
         delivery_failure,
         hold_until_morning,
+        request_flight_review,
     )
     with Session(engine) as session:
         outcome = EditorialRun.outcome
@@ -1446,6 +1448,15 @@ async def publish_pending(
                 try:
                     result = await deliver_reviewed(session, raw_id, publisher,
                         target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
+                except FlightReviewRequired as error:
+                    reason = request_flight_review(
+                        session, raw_id, parent_raw_id=error.parent.raw_item_id,
+                        parent_message_id=error.parent.message_id, now=datetime.now(UTC))
+                    session.commit()
+                    if blocked is not None:
+                        blocked.append({"raw_item_id": raw_id, "reason": reason,
+                                        "parent_message_id": error.parent.message_id})
+                    continue
                 except DeliveryBlockedError as error:
                     failed(type(error).__name__)
                     if blocked is not None:

@@ -298,7 +298,8 @@ def test_fallback_package_cannot_choose_a_parent_outside_its_request(published, 
                 "event_key": candidate.event.event_key,
                 "documents": [doc.model_dump(mode="json") for doc in candidate.event.documents]}
     monkeypatch.setattr(gpt_fallback, "validate_fallback_candidate", lambda *args, **kwargs: (
-        SimpleNamespace(published_post_refs=[]), load_city_profile("belgrade"), None, expected,
+        SimpleNamespace(published_post_refs=[]), load_city_profile("belgrade"),
+        SimpleNamespace(flight_review_parent=None), expected,
     ))
     with pytest.raises(gpt_fallback.FallbackValidationError, match="каноническом запросе"):
         gpt_fallback.validate_fallback_package(session, {}, candidate, now=NOW)

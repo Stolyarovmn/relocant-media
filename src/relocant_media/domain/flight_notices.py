@@ -5,12 +5,13 @@
 Другие перевозчики и нераспознанные маршруты этим правилом не классифицируются.
 """
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from relocant_media.domain.event_facts import event_dates
 
+FLIGHT_REVIEW_REASON = "flight_linked_review"
 _WINDOW = timedelta(hours=72)
 _AIRLINE = re.compile(r"\b(?:air\s+serbia|er\s+srbija|[эе]р\s+серби[яи])\b", re.I)
 _ROUTE = re.compile(
@@ -57,7 +58,7 @@ def _notice(title: str, body: str, reference: datetime) -> tuple[object, ...] | 
 
 def find_related_flight_cancellation(
     title: str, body: str,
-    publications: Sequence[tuple[int, str, str, datetime | None]], *, now: datetime,
+    publications: Iterable[tuple[int, str, str, datetime | None]], *, now: datetime,
 ) -> int | None:
     """Возвращает прежний пост для удержания, не для автоматического отказа."""
     notice = _notice(title, body, now)
