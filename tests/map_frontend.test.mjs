@@ -1,15 +1,54 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildCalendar } from "../web/newsroom/map/calendar.js";
+import { buildCalendar, googleCalendarUrl } from "../web/newsroom/map/calendar.js";
 import {
-  addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
+  addressHits, addressWindowText, agendaDays, belgradeDate, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
-  nextTransition, placeCountdown, placeOptionLabel, placeStatus,
+  mapTheme, nextTransition, placeCategory, placeCountdown, placeOnDay, placeOptionLabel, placeStatus,
   pointsAtScale, readIncidents, readPlaces, searchAddresses, shareLink, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
 import { setupPlaces } from "../web/newsroom/map/places.js";
+
+test("the automatic theme changes at seven and nineteen in Belgrade", () => {
+  assert.equal(mapTheme("auto", Date.parse("2026-11-22T05:59:00Z")), "dark");
+  assert.equal(mapTheme("auto", Date.parse("2026-11-22T06:00:00Z")), "light");
+  assert.equal(mapTheme("auto", Date.parse("2026-07-22T17:00:00Z")), "dark");
+  assert.equal(mapTheme("light", Date.parse("2026-11-22T01:00:00Z")), "light");
+  assert.equal(mapTheme("dark", Date.parse("2026-11-22T12:00:00Z")), "dark");
+});
+
+test("agenda dates follow Belgrade midnight and include multiday events", () => {
+  const start = Date.parse("2026-10-24T22:30:00Z");
+  const end = Date.parse("2026-10-27T00:00:00+01:00");
+  assert.equal(belgradeDate(start), "2026-10-25");
+  assert.deepEqual(agendaDays(start, 3), ["2026-10-25", "2026-10-26", "2026-10-27"]);
+  assert.equal(placeOnDay({ start, end }, "2026-10-25"), true);
+  assert.equal(placeOnDay({ start, end }, "2026-10-26"), true);
+  assert.equal(placeOnDay({ start, end }, "2026-10-27"), false);
+  assert.equal(placeOnDay({ start, end: null }, "2026-10-25"), true);
+  assert.equal(placeOnDay({ start, end: null }, "2026-10-26"), false);
+  assert.equal(placeCategory({ title: "Koncert u Beogradu" }), "music");
+  assert.equal(placeCategory({ title: "Muzičko veče u Beogradu" }), "music");
+  assert.equal(placeCategory({ title: "Выставка в спортивном центре" }), "exhibition");
+  assert.equal(placeCategory({ title: "Beogradski polumaraton" }), "sport");
+});
+
+test("Google Calendar uses a verified end time and the Belgrade time zone", () => {
+  const item = { title: "Концерт & джаз", venue: "Дом культуры", address: "Beograd",
+    source: "https://example.rs/event", start: Date.parse("2026-12-01T19:30:00+01:00"),
+    end: Date.parse("2026-12-01T21:00:00+01:00") };
+  const now = Date.parse("2026-11-30T10:00:00Z");
+  const url = new URL(googleCalendarUrl(item, now));
+  assert.equal(url.origin, "https://calendar.google.com");
+  assert.equal(url.searchParams.get("text"), item.title);
+  assert.equal(url.searchParams.get("dates"), "20261201T183000Z/20261201T200000Z");
+  assert.equal(url.searchParams.get("stz"), "Europe/Belgrade");
+  assert.equal(url.searchParams.get("location"), "Дом культуры, Beograd");
+  assert.equal(googleCalendarUrl({ ...item, end: null }, now), "");
+  assert.equal(googleCalendarUrl({ ...item, scheduleNote: "Время уточняется" }, now), "");
+});
 
 const waterId = "event_0123456789abcdef1234";
 const roadId = "event_0123456789abcdef1235";

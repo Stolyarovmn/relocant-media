@@ -1,7 +1,14 @@
 export const kinds = {
-  water: { label: "Вода", color: "#00669f" },
-  power: { label: "Свет", color: "#6937b2" },
-  road: { label: "Дороги", color: "#8b202e" },
+  water: { label: "Вода", color: "#00669f", night: "#56b5ed", icon: "💧" },
+  power: { label: "Свет", color: "#6937b2", night: "#bf9aff", icon: "⚡" },
+  road: { label: "Дороги", color: "#8b202e", night: "#fb808b", icon: "⛔" },
+};
+
+export const placeKinds = {
+  music: { label: "Музыка", icon: "♫" },
+  exhibition: { label: "Выставки", icon: "▣" },
+  sport: { label: "Спорт", icon: "🏅" },
+  other: { label: "События", icon: "★" },
 };
 
 const eventId = /^event_[a-f0-9]{20}$/;
@@ -13,6 +20,23 @@ const hour = new Intl.DateTimeFormat("ru", {
 const day = new Intl.DateTimeFormat("ru", {
   timeZone: "Europe/Belgrade", day: "numeric", month: "short", year: "numeric",
 });
+const localDate = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Belgrade", year: "numeric", month: "2-digit", day: "2-digit",
+});
+const localHour = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Belgrade", hour: "2-digit", hourCycle: "h23",
+});
+
+export function belgradeDate(instant) {
+  const parts = localDate.formatToParts(instant);
+  return ["year", "month", "day"].map((type) => parts.find((part) => part.type === type).value).join("-");
+}
+
+export function mapTheme(preference, now = Date.now()) {
+  if (preference === "dark" || preference === "light") return preference;
+  const hour = Number(localHour.format(now));
+  return hour >= 7 && hour < 19 ? "light" : "dark";
+}
 
 const cyrillic = {
   а: "a", б: "b", в: "v", г: "g", д: "d", ђ: "đ", е: "e", ё: "e", ж: "ž",
@@ -114,6 +138,25 @@ function dateOnly(value) {
     return null;
   }
   return result;
+}
+
+export function agendaDays(now, length = 7) {
+  const start = dateOnly(belgradeDate(now));
+  return Array.from({ length }, (_, index) => new Date(start + index * 86_400_000).toISOString().slice(0, 10));
+}
+
+export function placeOnDay(place, key) {
+  return !key || (belgradeDate(place.start) <= key
+    && belgradeDate(Number.isFinite(place.end) ? place.end - 1 : place.start) >= key);
+}
+
+export function placeCategory(place) {
+  const title = String(place.title).normalize("NFC").toLowerCase();
+  if (place.courses?.length) return "sport";
+  if (/выставк|изложб|экспозиц|exhibition|izložb|izlozb/.test(title)) return "exhibition";
+  if (/концерт|музык|джаз|кабаре|koncert|concert|jazz|muzi[čk]|музич/.test(title)) return "music";
+  if (/марафон|спорт|полумара|трка|maraton|\bsport/.test(title)) return "sport";
+  return "other";
 }
 
 function readWindow(window) {

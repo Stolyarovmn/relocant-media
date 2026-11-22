@@ -1,10 +1,10 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, nextTransition, readIncidents, shareLink,
+  incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=14";
-import { calendarLink } from "./calendar.js?v=4";
-import { setupPlaces } from "./places.js?v=13";
+} from "./core.js?v=15";
+import { calendarLink } from "./calendar.js?v=5";
+import { setupPlaces } from "./places.js?v=14";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -56,6 +56,37 @@ const statuses = {
   closed: "Завершено",
 };
 const statusOrder = { active: 0, planned: 1, between: 2, unknown: 3, closed: 4 };
+
+function installTheme() {
+  const key = "relocant-map-theme";
+  const button = byId("map-theme");
+  const options = ["auto", "light", "dark"];
+  const labels = { auto: "Авто", light: "День", dark: "Ночь" };
+  let preference = "auto";
+  try {
+    const saved = localStorage.getItem(key);
+    if (options.includes(saved)) preference = saved;
+  } catch { /* The Telegram webview can disable local storage. */ }
+  const apply = () => {
+    const theme = mapTheme(preference);
+    const changed = theme !== document.documentElement.dataset.theme;
+    document.documentElement.dataset.theme = theme;
+    button.firstElementChild.textContent = theme === "dark" ? "☾" : "☀";
+    button.lastElementChild.textContent = labels[preference];
+    button.setAttribute("aria-label", `Тема карты: ${labels[preference]}. Переключить`);
+    if (changed) renderPoints(Date.now());
+  };
+  button.addEventListener("click", () => {
+    preference = options[(options.indexOf(preference) + 1) % options.length];
+    try { localStorage.setItem(key, preference); } catch { /* Keep the session preference. */ }
+    apply();
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) apply(); });
+  setInterval(() => { if (!document.hidden && preference === "auto") apply(); }, 30_000);
+  apply();
+}
+
+const mapColor = (kind) => document.documentElement.dataset.theme === "dark" ? kinds[kind].night : kinds[kind].color;
 
 function make(tag, className = "", text = "") {
   const node = document.createElement(tag);
@@ -184,7 +215,7 @@ function eventCard(incident, now) {
   const status = incidentStatus(incident, now);
   const meta = make("div", "event-meta");
   const category = make("span", "event-type");
-  const dot = make("i");
+  const dot = make("i", "", kinds[incident.kind].icon);
   dot.setAttribute("aria-hidden", "true");
   category.append(dot, kinds[incident.kind].label);
   const badge = make("span", "event-state", status === "planned" ? "⏰ Запланировано"
@@ -294,11 +325,13 @@ function renderList(now) {
   const items = orderedIncidents(now);
   const count = byId("event-count");
   count.textContent = state.loaded ? String(items.length) : "";
+  updateCityCount(now);
   eventList.replaceChildren(...items.map((item) => eventCard(item, now)));
   const selected = items.find((item) => item.id === state.selected);
   selectedPreview.hidden = !selected;
   if (selected) {
     selectedPreview.dataset.kind = selected.kind;
+    selectedPreview.querySelector("i").textContent = kinds[selected.kind].icon;
     byId("selected-title").textContent = selected.title;
   }
   byId("selected-countdown").textContent = selected ? incidentCountdown(selected, now) : "";
@@ -309,6 +342,11 @@ function renderList(now) {
         : !items.length ? "В выбранных слоях пока нет объявлений." : "";
   feedback.textContent = message;
   feedback.hidden = !message;
+}
+
+function updateCityCount(now) {
+  byId("city-tab-count").textContent = state.loaded
+    ? String(state.incidents.filter((incident) => incidentStatus(incident, now) !== "closed").length) : "";
 }
 
 function roadOrientation(incident) {
@@ -339,16 +377,32 @@ function bindFeature(layer, group, incident, label, window, fromRegister) {
   }).addTo(group);
 }
 
+function pointStatus(point) {
+  const { incident, now, archived } = point;
+  const window = point.window || point.address?.window;
+  if (archived) return "closed";
+  if (window) return now < window.start ? "planned" : now < window.end ? "active" : "closed";
+  return incidentStatus(incident, now);
+}
+
 function drawCluster(points, zoom) {
   const leaflet = globalThis.L;
   const [first] = points;
   const location = [first.lat, first.lon];
   const kindsInCluster = new Set(points.map(({ incident }) => incident.kind));
-  const badge = make("span", "map-cluster-count", String(points.length));
+  const badge = make("span", "map-cluster-count");
   badge.setAttribute("aria-hidden", "true");
+  const symbols = make("span", "cluster-symbols");
+  for (const kind of kindsInCluster) {
+    const symbol = make("i", "", kinds[kind].icon);
+    symbol.dataset.kind = kind;
+    symbols.append(symbol);
+  }
+  badge.append(symbols, make("b", "", String(points.length)));
   if (kindsInCluster.size === 1) badge.dataset.kind = first.incident.kind;
-  const title = `Метки на карте · ${points.length}`;
-  const size = mobile.matches ? 44 : 38;
+  badge.dataset.status = points.some((point) => pointStatus(point) === "active") ? "active" : "planned";
+  const title = `${[...kindsInCluster].map((kind) => kinds[kind].label).join(", ")} · ${points.length} меток`;
+  const size = mobile.matches ? 46 : 42;
   const icon = leaflet.divIcon({
     className: "map-cluster", html: badge, iconSize: [size, size],
   });
@@ -408,22 +462,20 @@ function renderPointClusters() {
       continue;
     }
     const [point] = group;
-    const { lat, lon, label, address, window, fromRegister, incident, archived, now } = point;
-    if (point.approximate && !archived) {
-      const planned = incidentStatus(incident, now) === "planned";
-      const icon = leaflet.divIcon({ className: "outage-reference",
-        html: planned ? "⏰" : "💧", iconSize: [26, 26], iconAnchor: [13, 13] });
-      bindFeature(leaflet.marker([lat, lon], { icon, title: label }), state.pointLayer,
-        incident, `${label} · ориентир`, window, false);
-      continue;
-    }
+    const { lat, lon, label, address, window, fromRegister, incident } = point;
     const selected = incident.id === state.selected;
-    const expired = !unexpired(window || address?.window, now);
-    bindFeature(leaflet.circleMarker([lat, lon], {
-      radius: selected ? 8 : 6, color: "#fffef9", weight: selected ? 3 : 2,
-      fillColor: kinds[incident.kind].color, fillOpacity: archived || expired ? .58 : .96,
-      className: "outage-point",
-    }), state.pointLayer, incident, label, window || address?.window, fromRegister);
+    const marker = make("span", "incident-pin", kinds[incident.kind].icon);
+    marker.dataset.kind = incident.kind;
+    marker.dataset.status = pointStatus(point);
+    marker.dataset.selected = String(selected);
+    if (point.approximate) marker.classList.add("incident-pin-reference");
+    marker.setAttribute("aria-hidden", "true");
+    const size = selected ? 29 : 24;
+    const icon = leaflet.divIcon({ className: "incident-marker", html: marker,
+      iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+    const displayLabel = point.approximate ? `${label} · ориентир` : label;
+    bindFeature(leaflet.marker([lat, lon], { icon, title: `${kinds[incident.kind].label} · ${displayLabel}` }),
+      state.pointLayer, incident, displayLabel, window || address?.window, fromRegister);
   }
 }
 
@@ -436,7 +488,7 @@ function renderPoints(now) {
     const lines = visibleMapLines(incident, now, includeExpired);
     const areas = incident.areas.filter((area) => unexpired(area.window, now, includeExpired));
     const points = exactMapPoints(state.index, incident, now, includeExpired);
-    const color = kinds[incident.kind].color;
+    const color = mapColor(incident.kind);
     const selected = incident.id === state.selected;
     const archived = incidentStatus(incident, now) === "closed";
     const road = incident.kind === "road";
@@ -629,7 +681,10 @@ async function loadEvents() {
     state.loaded = true;
     state.loadFailed = false;
     state.stamp = updateStamp(data.generated_at);
-    if (state.mode !== "incidents") return;
+    if (state.mode !== "incidents") {
+      updateCityCount(Date.now());
+      return;
+    }
     const pending = state.incidents.find((event) => event.id === state.deepPending);
     if (pending) openEvent(pending);
     else {
@@ -877,6 +932,7 @@ function showMode(mode, id = "") {
   }
 }
 
+installTheme();
 setupMap();
 const places = setupPlaces({ map: state.map, mobile, animate, telegram, byId, make, link, readJSON, onSync: syncFeed });
 byId("show-incidents").addEventListener("click", () => {
@@ -887,3 +943,5 @@ byId("show-incidents").addEventListener("click", () => {
 byId("show-places").addEventListener("click", () => showMode("places"));
 telegram?.ready?.();
 showMode(initialRoute.mode, initialRoute.id);
+if (initialRoute.mode === "places") void loadEvents();
+else places.refresh();

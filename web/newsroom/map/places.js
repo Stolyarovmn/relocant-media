@@ -1,10 +1,12 @@
 import {
-  clusterMapPoints, incidentTimes, launchPlaces, placeCountdown, placeOptionLabel, placeStatus, readPlaces,
-  shareLink, straightLineDistance, updateStamp,
-} from "./core.js?v=14";
-import { calendarLink } from "./calendar.js?v=4";
+  agendaDays, belgradeDate, clusterMapPoints, incidentTimes, launchPlaces, placeCategory, placeCountdown,
+  placeKinds, placeOnDay, placeOptionLabel, placeStatus, readPlaces, shareLink, straightLineDistance, updateStamp,
+} from "./core.js?v=15";
+import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
+const agendaDate = new Intl.DateTimeFormat("ru", { timeZone: "UTC", day: "numeric", month: "long" });
+const agendaWeekday = new Intl.DateTimeFormat("ru", { timeZone: "UTC", weekday: "short" });
 const courseStyles = [
   { color: "#076342", weight: 7 },
   { color: "#5827a9", weight: 4, dashArray: "9 7" },
@@ -69,6 +71,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   const feedback = byId("places-feedback");
   const toggle = byId("toggle-places");
   const body = byId("places-body");
+  const days = byId("places-days");
   const locate = byId("locate-places");
   const clearLocation = byId("clear-location");
   const locationStatus = byId("location-status");
@@ -77,17 +80,67 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   const courseLayer = map ? leaflet.layerGroup().addTo(map) : null;
   const state = {
     entries: [], selected: "", pending: "", group: "", enabled: false, loading: false,
-    loaded: false, failed: false, stamp: "", origin: null,
+    loaded: false, failed: false, stamp: "", origin: null, day: "",
   };
   let clock;
   let retry;
   let attempts = 0;
 
-  function visiblePlaces(now) {
+  function visiblePlaces(now, day = state.day) {
     return state.entries.filter((place) => !state.group || place.group === state.group)
       .filter((place) => place.paidPlace
       ? placeStatus(place, now) === "active"
-      : place.id === state.selected || placeStatus(place, now) !== "closed");
+      : (place.id === state.selected || placeStatus(place, now) !== "closed") && placeOnDay(place, day));
+  }
+
+  function updateAgendaCount(now) {
+    byId("agenda-tab-count").textContent = state.loaded
+      ? String(state.entries.filter((place) => !place.paidPlace && placeStatus(place, now) !== "closed").length) : "";
+  }
+
+  function renderDays(now) {
+    const entries = visiblePlaces(now, "").filter((place) => !place.paidPlace && placeStatus(place, now) !== "closed");
+    const keys = agendaDays(now);
+    const later = new Set(entries.map((place) => belgradeDate(place.start)).filter((key) => key > keys.at(-1)));
+    const selected = state.day;
+    const scroll = days.scrollLeft;
+    const buildDay = (key) => {
+      const date = key ? Date.parse(`${key}T12:00:00Z`) : 0;
+      const button = make("button", "agenda-day");
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(key === selected));
+      const label = key ? agendaDate.format(date) : "Все дни";
+      const categories = key ? new Set(entries.filter((place) => placeOnDay(place, key)).map(placeCategory)) : new Set();
+      const tags = [...categories].map((kind) => placeKinds[kind].label.toLowerCase());
+      button.setAttribute("aria-label", tags.length ? `${label}. ${tags.join(", ")}` : label);
+      button.append(make("strong", "", key ? String(new Date(date).getUTCDate()) : "Все"),
+        make("small", "", key === keys[0] ? "сегодня" : key ? agendaWeekday.format(date) : "дни"));
+      const dots = make("span", "agenda-dots");
+      dots.setAttribute("aria-hidden", "true");
+      for (const kind of categories) {
+        const dot = make("i");
+        dot.dataset.category = kind;
+        dots.append(dot);
+      }
+      button.append(dots);
+      button.addEventListener("click", () => {
+        if (state.day === key) return;
+        state.day = key;
+        const open = state.entries.find((place) => place.id === state.selected);
+        if (open && !open.paidPlace && !placeOnDay(open, key)) state.selected = "";
+        map?.closePopup();
+        render();
+        if (document.activeElement === document.body) {
+          days.querySelector('[aria-pressed="true"]')?.focus({ preventScroll: true });
+        }
+      });
+      return button;
+    };
+    days.hidden = !state.loaded;
+    if (state.loaded) {
+      days.replaceChildren(...["", ...keys, ...[...later].sort()].map(buildDay));
+      days.scrollLeft = scroll;
+    }
   }
 
   function showList(open) {
@@ -118,7 +171,10 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     button.type = "button";
     button.dataset.placeId = place.id;
     button.setAttribute("aria-pressed", String(place.id === state.selected));
-    button.append(make("strong", "", place.title), ...describe(place, now));
+    const kind = placeCategory(place);
+    const badge = make("span", "place-category", `${placeKinds[kind].icon} ${placeKinds[kind].label}`);
+    badge.dataset.category = kind;
+    button.append(...(place.paidPlace ? [] : [badge]), make("strong", "", place.title), ...describe(place, now));
     button.addEventListener("click", () => openPlace(place, true));
     return button;
   }
@@ -145,7 +201,11 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     const share = place.sponsored ? "" : shareLink(place.id, place.title, true);
     if (share) links.append(link(share, "Поделиться ↗"));
     const calendar = place.paidPlace || place.scheduleNote ? null : calendarLink(place, now);
-    if (calendar) links.append(calendar);
+    if (calendar) {
+      links.append(calendar);
+      const google = googleCalendarUrl(place, now);
+      if (google) links.append(link(google, "Google Календарь ↗"));
+    }
     detail.replaceChildren(close, make("h3", "", place.title), ...describe(place, now));
     if (place.address && place.address !== place.venue) detail.append(make("p", "place-address", place.address));
     if (place.venueNote) detail.append(make("p", "place-address", place.venueNote));
@@ -180,22 +240,35 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     }
   }
 
-  function mark(places, zoom) {
+  function mark(places, zoom, now) {
     const [first] = places;
     const multiple = places.length > 1;
     const sponsored = !multiple && first.sponsored;
     const title = multiple ? `События рядом · ${places.length}`
       : sponsored ? `Реклама · ${first.title}` : first.title;
-    const badge = make("span", "place-pin-badge", multiple ? String(places.length) : "");
+    const kinds = new Set(places.map(placeCategory));
+    const kind = kinds.size === 1 ? kinds.values().next().value : "other";
+    const badge = make("span", "place-pin-badge");
     badge.setAttribute("aria-hidden", "true");
-    const active = places.some((place) => place.id === state.selected);
+    const symbols = make("span", "cluster-symbols", sponsored ? "★" : [...kinds].map((type) => placeKinds[type].icon).join(" "));
+    badge.append(symbols);
+    if (multiple) badge.append(make("b", "", String(places.length)));
+    const selected = places.some((place) => place.id === state.selected);
+    const planned = places.every((place) => placeStatus(place, now) === "planned");
+    const size = multiple ? 44 : 38;
     const icon = leaflet.divIcon({
-      className: `place-pin${multiple ? " place-pin-group" : ""}${active ? " place-pin-selected" : ""}${sponsored ? " place-pin-ad" : ""}`,
-      html: badge, iconSize: [38, 38], iconAnchor: [19, 19],
+      className: `place-pin${multiple ? " place-pin-group" : ""}${selected ? " place-pin-selected" : ""}${sponsored ? " place-pin-ad" : ""}`,
+      html: badge, iconSize: [size, size], iconAnchor: [size / 2, size / 2],
     });
     const location = [first.lat, first.lon];
     const marker = leaflet.marker(location, { icon, title, alt: title, riseOnHover: true });
-    marker.on("add", () => marker.getElement()?.setAttribute("aria-label", title));
+    marker.on("add", () => {
+      const element = marker.getElement();
+      if (!element) return;
+      element.setAttribute("aria-label", title);
+      element.dataset.category = kind;
+      if (planned) element.dataset.status = "planned";
+    });
     if (!multiple) {
       marker.on("click", () => openPlace(first));
     } else if (zoom < map.getMaxZoom()
@@ -226,13 +299,15 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     layer.clearLayers();
     if (!state.enabled) return;
     const zoom = map.getZoom();
+    const now = Date.now();
     const project = (coordinates) => map.project(coordinates, zoom);
-    for (const group of clusterMapPoints(visiblePlaces(Date.now()), project, 40)) mark(group, zoom);
+    for (const group of clusterMapPoints(visiblePlaces(now), project, 44)) mark(group, zoom, now);
   }
 
   function render() {
     if (!state.enabled) return;
     const now = Date.now();
+    if (state.day && state.day < belgradeDate(now)) state.day = "";
     const entries = visiblePlaces(now);
     entries.sort((a, b) => a.start - b.start);
     if (state.origin) {
@@ -240,6 +315,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       entries.sort((a, b) => distances.get(a.id) - distances.get(b.id));
     }
     count.textContent = state.loaded ? String(entries.length) : "";
+    updateAgendaCount(now);
     list.replaceChildren(...entries.map((place) => card(place, now)));
     const selected = entries.find((place) => place.id === state.selected);
     renderDetail(selected, now);
@@ -248,7 +324,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       ? state.loaded ? "Афиша не обновилась. Показана предыдущая версия." : "Афиша не загрузилась. Попробуйте обновить."
       : !state.loaded ? "Загружаем события."
         : state.pending ? "Событие из ссылки пока отсутствует в афише."
-          : !entries.length ? "В афише пока нет предстоящих событий."
+          : !entries.length ? state.day ? "На этот день событий пока нет." : "В афише пока нет предстоящих событий."
             : state.group ? `Площадок: ${new Set(entries.map((place) => `${place.lat},${place.lon}`)).size}. Выберите концерт в списке или на карте.` : "";
     feedback.textContent = message;
     if (state.group && !state.failed && !state.pending) {
@@ -257,11 +333,13 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       reset.addEventListener("click", () => {
         state.group = "";
         state.selected = "";
+        state.day = "";
         render();
       });
       feedback.append(document.createTextNode(" "), reset);
     }
     feedback.hidden = !message;
+    renderDays(now);
     renderMarkers();
   }
 
@@ -295,7 +373,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     }
     clock = setTimeout(() => {
       const current = Date.now();
-      if (current >= next) render();
+      if (current >= next || belgradeDate(current) !== belgradeDate(now)) render();
       else {
         const entries = new Map(state.entries.map((place) => [place.id, place]));
         for (const node of byId("places").querySelectorAll(".place-countdown")) {
@@ -317,6 +395,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       state.stamp = updateStamp(data.generated_at);
       state.loaded = true;
       state.failed = false;
+      if (!state.enabled) updateAgendaCount(Date.now());
     } catch {
       state.failed = true;
     } finally {
@@ -394,7 +473,10 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       state.enabled = true;
       state.group = "";
       state.selected = "";
-      if (id) state.pending = id;
+      if (id) {
+        state.pending = id;
+        state.day = "";
+      }
       show();
       if (!state.loaded || state.pending) void load();
     },
