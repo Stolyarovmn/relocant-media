@@ -136,13 +136,45 @@ def _notice_layout(
             "cover_sha256": hashlib.sha256(render_notice_banner(kind)).hexdigest()}
            if legacy else {}),
         "schedule": [
-            {"when": f"{start:%d.%m.%Y} · {start:%H:%M}–{end:%H:%M}",
+            {"when": _window(start, end),
              "items": list(dict.fromkeys(windows.get((start, end), ()))),
              **({} if legacy else
                 {"areas": list(dict.fromkeys(areas.get((start, end), ())))})}
             for start, end in sorted(windows.keys() | areas.keys())
         ],
     }
+
+
+def notice_scope_places(
+    document: EvidenceDocument, point: dict[str, Any],
+) -> tuple[str, list[tuple[str, str]]] | None:
+    """Вид работ и пары «окно, муниципалитет» из того же разбора, что и `map_notice_v2`.
+
+    Используется собственной карточкой отключения: вид работ и районы берутся
+    не из URL, а из проверенного разбора объявления. Перекрытия дорог и
+    объявления без районов в разборе дают None.
+    """
+    if point["mode"] != UTILITY_MAP_MODE:
+        return None
+    pairs: list[tuple[str, str]] = []
+    kind = "power"
+    if power := extract_power_scopes(document, include_whole_areas=True):
+        for scope in power:
+            places = [item["municipality"].split(",", 1)[0] for item in scope.addresses]
+            if scope.settlement is not None:
+                places.append(scope.settlement.municipality)
+            pairs.extend((_window(scope.starts_at, scope.ends_at), place) for place in places)
+    else:
+        kind = "water"
+        for water_scope in extract_water_outage_scopes(document):
+            pairs.append((_window(water_scope.starts_at, water_scope.ends_at),
+                          water_scope.municipality))
+    pairs = list(dict.fromkeys((when, place.strip()) for when, place in pairs if place.strip()))
+    return (kind, pairs) if pairs else None
+
+
+def _window(start: datetime, end: datetime) -> str:
+    return f"{start:%d.%m.%Y} · {start:%H:%M}–{end:%H:%M}"
 
 
 def build_native_map(

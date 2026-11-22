@@ -106,76 +106,126 @@ def test_self_authored_card_refuses_after_delivery_claim(
         create_self_authored_card_bundle(session, run.raw_item_id, tmp_path / "generated")
 
 
-def _notice_map(source_id: str = "bvk_planned_works", **extra) -> dict:
-    return {
-        "layout": "map_notice_v2",
-        "point": {"mode": "utility_map_review", "source_id": source_id,
-                  "source_url": "https://www.bvk.rs/planirani-radovi/1"},
-        "schedule": [
-            {"when": "24.11.2026 · 08:00–15:00",
-             "items": ["Fabrisova, 1 · Савски-Венац", "Zvečanska, 2 · Савски-Венац"],
-             "areas": []},
-            {"when": "24.11.2026 · 08:00–16:00",
-             "items": ["Brane Ćosića, 16 · Вождовац"], "areas": ["Медаковић · Вождовац"]},
-        ],
-        **extra,
-    }
+POST_149_URL = ("https://www.beograd.rs/lat/beoinfo-vesti/a116747/"
+                "Radovi-na-vodovodnoj-mrezi-u-utorak.html")
 
 
-def test_notice_card_text_comes_only_from_reviewed_schedule() -> None:
+def _post_149(second_day: str = "utorak, 24.", **changes):
+    """Объявление из поста №149 в том виде, в каком его хранит сборщик городского сайта."""
+    from datetime import UTC, datetime
+
+    from relocant_media.ai.models import EvidenceDocument
+
+    return EvidenceDocument.model_validate({
+        "source_id": "city_beograd_news", "url": POST_149_URL,
+        "title": "Radovi na vodovodnoj mreži",
+        "published_at": datetime(2026, 11, 20, 23, tzinfo=UTC),
+        "published_at_precision": "day",
+        "body": (
+            "Zbog planiranih radova na vodovodnoj mreži u opštini Savski venac, "
+            "u utorak, 24. novembra, u periodu od 8 do 15 sati, "
+            "bez vode će ostati potrošači u bloku oivičenom Fabrisovom, Zvečanskom, "
+            "Dr Milutina Ivkovića i Oblakovskom ulicom.\n"
+            f"U opštini Voždovac, u {second_day} novembra, u periodu od 8 do 16 sati, "
+            "bez vode će ostati potrošači u ulicama Brane Ćosića (od broja 16 do broja 42), "
+            "Katarine Ivanović i Rastka Petrovića."
+        ),
+        **changes,
+    })
+
+
+def _reviewed_map(document) -> dict:
+    """Полный путь: точка карты и расписание map_notice_v2 из того же документа."""
+    from relocant_media.services.native_map import _notice_layout
+    from relocant_media.services.utility_map import build_utility_point
+
+    point = build_utility_point(document, "")
+    assert point is not None
+    return {"point": point, **_notice_layout(document, point)}
+
+
+def _power_notice():
+    from datetime import UTC, datetime
+
+    from relocant_media.ai.models import EvidenceDocument
+
+    return EvidenceDocument.model_validate({
+        "source_id": "city_beograd_news",
+        "url": ("https://www.beograd.rs/lat/servisne-informacije/elektricna-energija/"
+                "a116619/Planirana-iskljucenja-na-elektro-mrezi.html"),
+        "title": "ELEKTRIČNA ENERGIJA: Planirana isključenja za 13. novembar 2026. godine",
+        "published_at": datetime(2026, 11, 12, tzinfo=UTC), "published_at_precision": "day",
+        "body": "\n\n".join([
+            "Zbog izvođenja planiranih radova bez električne energije:",
+            "Vračar 9.00 - 11.00 PRVA ULICA: 42,",
+            "Zvezdara 9.00 - 11.00 DRUGA ULICA: 2,",
+            "Palilula 9.00 - 11.00 ČETVRTA: 119,",
+        ]),
+    })
+
+
+def test_notice_card_for_post_149_takes_kind_and_districts_from_reviewed_parse() -> None:
     from relocant_media.services.native_map import NOTICE_LAYOUT
     from relocant_media.services.notice_card import notice_card_text
 
-    assert NOTICE_LAYOUT == "map_notice_v2"
-    # Пост №149: у каждого района своё окно — время привязано к району.
-    text = notice_card_text(_notice_map())
+    document = _post_149()
+    native = _reviewed_map(document)
+    assert native["layout"] == NOTICE_LAYOUT
+    assert native["point"]["source_id"] == "city_beograd_news"
+    assert native["point"]["source_url"] == POST_149_URL
+    text = notice_card_text(native, (document,))
     assert text is not None and text.layout == "per_district"
     assert text.lines() == ("Отключение воды", "24.11.2026",
                             "Савски-Венац · 08:00–15:00", "Вождовац · 08:00–16:00")
-    power = notice_card_text(_notice_map("eds_belgrade_outages_tomorrow"))
-    assert power is not None and power.headline == "Отключение света"
-    # Неизвестный вид работ, другой макет или пустое расписание — без карточки.
-    city = _notice_map("city_beograd_news")
-    assert notice_card_text(city) is None
-    city["point"]["source_url"] = ("https://www.beograd.rs/lat/servisne-informacije/"
-                                   "vodovod-i-kanalizacija/a1/x.html")
-    city_text = notice_card_text(city)
-    assert city_text is not None and city_text.kind == "water"
-    assert notice_card_text(_notice_map(layout="map_notice_v1")) is None
-    assert notice_card_text(_notice_map(schedule=[])) is None
-    assert notice_card_text({**_notice_map(), "point": {"mode": "transport_map_review"}}) is None
-    assert notice_card_text(None) is None
 
 
 def test_notice_card_shared_interval_only_when_all_districts_match() -> None:
     from relocant_media.services.notice_card import notice_card_text
 
-    shared = _notice_map(schedule=[{
-        "when": "24.11.2026 · 08:00–15:00",
-        "items": ["A, 1 · Савски-Венац", "B, 2 · Вождовац", "C, 3 · Земун", "D, 4 · Врачар"],
-        "areas": [],
-    }])
-    text = notice_card_text(shared)
+    document = _power_notice()
+    text = notice_card_text(_reviewed_map(document), (document,))
     assert text is not None and text.layout == "shared_window"
-    assert text.body == ("Савски-Венац, Вождовац и ещё 2 района", "24.11.2026 · 08:00–15:00")
+    assert text.lines() == ("Отключение света", "Врачар, Звездара и ещё 1 район",
+                            "13.11.2026 · 09:00–11:00")
 
 
-def test_notice_card_falls_back_to_map_note_when_rows_do_not_fit() -> None:
+def test_notice_card_falls_back_to_map_note_across_dates() -> None:
     from relocant_media.services.notice_card import MAP_NOTE, notice_card_text
 
-    many = _notice_map()
-    many["schedule"][1]["items"] += ["X, 1 · Земун", "Y, 2 · Врачар"]
-    text = notice_card_text(many)
+    document = _post_149("sredu, 25.")
+    text = notice_card_text(_reviewed_map(document), (document,))
     assert text is not None and text.layout == "see_map"
-    assert text.body == ("24.11.2026", MAP_NOTE)
-    # Один район в двух окнах — тоже без общего времени.
-    repeated = _notice_map()
-    repeated["schedule"][1]["items"].append("Z, 3 · Савски-Венац")
-    assert notice_card_text(repeated).layout == "see_map"  # type: ignore[union-attr]
-    two_days = _notice_map()
-    two_days["schedule"][1]["when"] = "25.11.2026 · 08:00–16:00"
-    days = notice_card_text(two_days)
-    assert days is not None and days.body == ("24.11.2026 – 25.11.2026", MAP_NOTE)
+    assert text.body == ("24.11.2026 – 25.11.2026", MAP_NOTE)
+
+
+def test_notice_card_requires_the_reviewed_document_and_matching_source(monkeypatch) -> None:
+    from relocant_media.services import notice_card
+    from relocant_media.services.notice_card import notice_card_text
+    from relocant_media.services.utility_map import utility_document_sha256
+
+    document = _post_149()
+    native = _reviewed_map(document)
+    assert notice_card_text(native) is None
+    assert notice_card_text(native, (_post_149(title="Изменённый текст"),)) is None
+    assert notice_card_text({**native, "schedule": native["schedule"][:1]}, (document,)) is None
+    assert notice_card_text({**native, "layout": "map_notice_v1"}, (document,)) is None
+    assert notice_card_text({**native, "schedule": []}, (document,)) is None
+    assert notice_card_text(None, (document,)) is None
+    # Профильный источник электросетей не может получить карточку «вода»,
+    # даже если разбор по ошибке распознал бы водопровод.
+    eds = _post_149(source_id="eds_belgrade_outages_tomorrow")
+    point = {**native["point"], "source_id": eds.source_id,
+             "document_sha256": utility_document_sha256(eds)}
+    monkeypatch.setattr(notice_card, "notice_scope_places",
+                        lambda document, point: ("water", [("24.11.2026 · 08:00–15:00",
+                                                            "Savski venac")]))
+    assert notice_card_text({**native, "point": point}, (document,)) is None
+    assert notice_card_text({**native, "point": point}, (eds,)) is None
+    monkeypatch.setattr(notice_card, "notice_scope_places",
+                        lambda document, point: ("water", [("24.11.2026 · 08:00–15:00",
+                                                            "Beograd")]))
+    # Неизвестный муниципалитет не выводится на карточку.
+    assert notice_card_text(native, (document,)) is None
 
 
 def test_notice_card_renders_deterministic_png() -> None:
@@ -187,7 +237,8 @@ def test_notice_card_renders_deterministic_png() -> None:
     )
     from relocant_media.services.notice_card import notice_card_text, render_notice_card
 
-    text = notice_card_text(_notice_map())
+    document = _post_149()
+    text = notice_card_text(_reviewed_map(document), (document,))
     assert text is not None
     first = render_notice_card(text)
     assert first == render_notice_card(text)
@@ -206,13 +257,13 @@ def test_notice_card_backgrounds_exist_and_long_text_wraps() -> None:
         render_notice_card,
     )
 
-    for kind in ("water", "power", "heating"):
+    for kind in ("water", "power"):
         assert _background(kind).size == (1280, 720)
     cards = (
         NoticeCardText(kind="power", layout="shared_window", headline="Отключение света",
                        body=("Палилула, Нови-Београд и ещё 12 районов",
                              "24.11.2026 · 08:00–15:00")),
-        NoticeCardText(kind="heating", layout="per_district", headline="Отключение отопления",
+        NoticeCardText(kind="power", layout="per_district", headline="Отключение света",
                        body=("24.11.2026", "Нови-Београд · 08:00–15:00",
                              "Савски-Венац · 09:00–16:00", "Звездара · 10:00–17:00")),
         NoticeCardText(kind="water", layout="see_map", headline="Отключение воды",

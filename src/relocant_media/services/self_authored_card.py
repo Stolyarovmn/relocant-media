@@ -209,7 +209,9 @@ def create_self_authored_card_bundle(
     from relocant_media.services.notice_card import notice_card_text, render_notice_card
 
     native_map = package.presentation.native_map if package.presentation is not None else None
-    card_text = notice_card_text(native_map)
+    documents = (package.event.documents if package.event is not None
+                 else (package.evidence,))
+    card_text = notice_card_text(native_map, documents)
     png = (render_notice_card(card_text) if card_text is not None else render_card_png(
         category=package.outcome.ranking.category,
         package_sha256=package_sha256,

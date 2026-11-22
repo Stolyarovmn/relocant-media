@@ -1,15 +1,15 @@
 """Собственная карточка отключения: вид работ, район и время крупно.
 
 Запасной вариант для постов без подходящего превью (#336). Текст карточки берётся
-только из уже проверенного расписания native_map и проходит те же два независимых
-media-review, что и остальные вложения. Сторонние изображения и фрагмент карты
-в карточку не попадают.
+только из проверенного разбора объявления, по которому построено расписание
+native_map, и проходит те же два независимых media-review, что и остальные вложения.
+Сторонние изображения и фрагмент карты в карточку не попадают.
 """
 
 from __future__ import annotations
 
 import io
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from functools import cache
 from importlib.resources import files
 from typing import Any, Literal
@@ -17,28 +17,27 @@ from typing import Any, Literal
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ConfigDict, Field
 
-from relocant_media.services.native_map import NOTICE_LAYOUT
-from relocant_media.services.utility_map import UTILITY_MAP_MODE
+from relocant_media.ai.models import EvidenceDocument
+from relocant_media.services.native_map import NOTICE_LAYOUT, notice_scope_places
+from relocant_media.services.utility_map import UTILITY_MAP_MODE, utility_document_sha256
 
 CARD_WIDTH = 1280
 CARD_HEIGHT = 720
 MAX_PLACES = 2
 
-NoticeKind = Literal["water", "power", "heating"]
+NoticeKind = Literal["water", "power"]
 
 _HEADLINES: dict[str, str] = {
     "water": "Отключение воды",
     "power": "Отключение света",
-    "heating": "Отключение отопления",
 }
 # Акцент вида работ совпадает с иконкой собственного фона (assets/notice-cards).
 _ACCENTS: dict[str, tuple[int, int, int]] = {
     "water": (137, 215, 243),
     "power": (255, 214, 102),
-    "heating": (255, 160, 122),
 }
 _WHITE = (255, 255, 255)
-# Источник однозначно задаёт вид работ; общий городской сайт — только по разделу URL.
+# Профильный источник не может противоречить разбору: иначе карточки нет.
 _SOURCE_KINDS: dict[str, NoticeKind] = {
     "bvk_outage_news": "water",
     "bvk_planned_works": "water",
@@ -46,13 +45,31 @@ _SOURCE_KINDS: dict[str, NoticeKind] = {
     "eds_belgrade_outages_tomorrow": "power",
     "eds_belgrade_outages_day2": "power",
     "eds_belgrade_outages_day3": "power",
-    "beoelektrane_network_works": "heating",
 }
-_CITY_URL_KINDS: tuple[tuple[str, NoticeKind], ...] = (
-    ("/vodovod-i-kanalizacija/", "water"),
-    ("/elektricna-energija/", "power"),
-    ("/grejanje/", "heating"),
-)
+# Все 17 городских муниципалитетов Белграда в латинице и сербской кириллице.
+_MUNICIPALITIES_RU: dict[str, str] = {
+    name.casefold(): russian
+    for russian, names in {
+        "Бараево": ("Barajevo", "Барајево"),
+        "Чукарица": ("Čukarica", "Чукарица"),
+        "Гроцка": ("Grocka", "Гроцка"),
+        "Лазаревац": ("Lazarevac", "Лазаревац"),
+        "Младеновац": ("Mladenovac", "Младеновац"),
+        "Нови-Београд": ("Novi Beograd", "Нови Београд"),
+        "Обреновац": ("Obrenovac", "Обреновац"),
+        "Палилула": ("Palilula", "Палилула"),
+        "Раковица": ("Rakovica", "Раковица"),
+        "Савски-Венац": ("Savski venac", "Савски венац"),
+        "Сопот": ("Sopot", "Сопот"),
+        "Стари-Град": ("Stari grad", "Стари град"),
+        "Сурчин": ("Surčin", "Сурчин"),
+        "Вождовац": ("Voždovac", "Вождовац"),
+        "Врачар": ("Vračar", "Врачар"),
+        "Земун": ("Zemun", "Земун"),
+        "Звездара": ("Zvezdara", "Звездара"),
+    }.items()
+    for name in names
+}
 
 
 CardLayout = Literal["shared_window", "per_district", "see_map"]
@@ -79,18 +96,6 @@ class NoticeCardText(BaseModel):
         return (self.headline, *self.body)
 
 
-def _kind(point: Mapping[str, Any]) -> NoticeKind | None:
-    source_id = point.get("source_id")
-    if isinstance(source_id, str) and source_id in _SOURCE_KINDS:
-        return _SOURCE_KINDS[source_id]
-    url = point.get("source_url")
-    if isinstance(url, str):
-        for fragment, kind in _CITY_URL_KINDS:
-            if fragment in url:
-                return kind
-    return None
-
-
 def _more(count: int, one: str, few: str, many: str) -> str:
     tail = count % 100
     word = (many if 11 <= tail <= 14 else one if count % 10 == 1
@@ -98,55 +103,76 @@ def _more(count: int, one: str, few: str, many: str) -> str:
     return f" и ещё {count} {word}"
 
 
-def _municipality(entry: str) -> str | None:
-    head, separator, tail = entry.rpartition(" · ")
-    return tail.strip() or None if separator and head else None
+def _reviewed_document(
+    point: Mapping[str, Any], documents: Iterable[EvidenceDocument],
+) -> EvidenceDocument | None:
+    for candidate in documents:
+        if (candidate.url, candidate.source_id) != (point.get("source_url"),
+                                                    point.get("source_id")):
+            continue
+        document = EvidenceDocument.model_validate(
+            candidate.model_dump(include=set(EvidenceDocument.model_fields)))
+        if utility_document_sha256(document) == point.get("document_sha256"):
+            return document
+    return None
 
 
-def notice_card_text(native_map: Mapping[str, Any] | None) -> NoticeCardText | None:
-    """Карточка только для объявления об отключении с проверенным расписанием."""
+def notice_card_text(
+    native_map: Mapping[str, Any] | None, documents: Iterable[EvidenceDocument] = (),
+) -> NoticeCardText | None:
+    """Карточка только из проверенного разбора объявления об отключении.
+
+    Вид работ и районы берутся из того же разбора документа, по которому построено
+    расписание `map_notice_v2`; документ сверяется с отпечатком точки карты,
+    а окна — с расписанием пакета.
+    """
     if not native_map or native_map.get("layout") != NOTICE_LAYOUT:
         return None
     point = native_map.get("point")
-    if not isinstance(point, Mapping) or point.get("mode") != UTILITY_MAP_MODE:
-        return None
-    kind = _kind(point)
     schedule = native_map.get("schedule")
-    if kind is None or not isinstance(schedule, list) or not schedule:
+    if (not isinstance(point, Mapping) or point.get("mode") != UTILITY_MAP_MODE
+            or not isinstance(schedule, list) or not schedule):
         return None
-    # Район -> окна, в которых он упомянут, в порядке расписания.
+    document = _reviewed_document(point, documents)
+    if document is None:
+        return None
+    facts = notice_scope_places(document, dict(point))
+    if facts is None:
+        return None
+    kind, pairs = facts
+    if kind not in _HEADLINES or _SOURCE_KINDS.get(document.source_id, kind) != kind:
+        return None
+    reviewed_windows = {section.get("when") for section in schedule
+                        if isinstance(section, Mapping)}
+    # Район -> окна, в которых он упомянут, в порядке разбора.
     windows_by_place: dict[str, list[str]] = {}
-    for section in schedule:
-        when = section.get("when") if isinstance(section, Mapping) else None
-        if not isinstance(when, str) or " · " not in when:
+    for when, municipality in pairs:
+        place = _MUNICIPALITIES_RU.get(municipality.casefold())
+        if place is None or when not in reviewed_windows:
             return None
-        for entry in (*section.get("items", ()), *section.get("areas", ())):
-            name = _municipality(entry) if isinstance(entry, str) else None
-            if name:
-                windows = windows_by_place.setdefault(name, [])
-                if when not in windows:
-                    windows.append(when)
-    if not windows_by_place:
-        return None
+        windows = windows_by_place.setdefault(place, [])
+        if when not in windows:
+            windows.append(when)
     places = list(windows_by_place)
     all_windows = {when for windows in windows_by_place.values() for when in windows}
     dates = sorted({when.split(" · ", 1)[0] for when in all_windows},
                    key=lambda value: value.split(".")[::-1])
     headline = _HEADLINES[kind]
+    notice_kind: NoticeKind = "power" if kind == "power" else "water"
     if len(all_windows) == 1:
         shown = ", ".join(places[:MAX_PLACES])
         if len(places) > MAX_PLACES:
             shown += _more(len(places) - MAX_PLACES, "район", "района", "районов")
-        return NoticeCardText(kind=kind, layout="shared_window", headline=headline,
+        return NoticeCardText(kind=notice_kind, layout="shared_window", headline=headline,
                               body=(shown, next(iter(all_windows))))
     one_window_each = all(len(windows) == 1 for windows in windows_by_place.values())
     if one_window_each and len(places) <= MAX_DISTRICT_ROWS and len(dates) == 1:
         rows = tuple(f"{place} · {windows_by_place[place][0].split(' · ', 1)[1]}"
                      for place in places)
-        return NoticeCardText(kind=kind, layout="per_district", headline=headline,
+        return NoticeCardText(kind=notice_kind, layout="per_district", headline=headline,
                               body=(dates[0], *rows))
     date = dates[0] if len(dates) == 1 else f"{dates[0]} – {dates[-1]}"
-    return NoticeCardText(kind=kind, layout="see_map", headline=headline,
+    return NoticeCardText(kind=notice_kind, layout="see_map", headline=headline,
                           body=(date, MAP_NOTE))
 
 
