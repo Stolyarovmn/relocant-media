@@ -11,6 +11,7 @@ import httpx
 
 from relocant_media.collectors.base import ArticleBatchError, RawItem
 from relocant_media.collectors.factory import build_collector
+from relocant_media.collectors.rhmz_forecast import collect_weather
 from relocant_media.collectors.tls import (
     MISSING_INTERMEDIATE_HINT,
     is_missing_intermediate,
@@ -52,6 +53,7 @@ async def audit_sources(
     *,
     online: bool = False,
     source_ids: tuple[str, ...] = (),
+    check_belgrade_weather: bool = False,
 ) -> dict[str, Any]:
     sources = load_source_registry(directory)
     if source_ids:
@@ -134,6 +136,9 @@ async def audit_sources(
                     if isinstance(error, ArticleBatchError):
                         row["item_failures"] = error.item_failures
             rows.append(row)
+        weather = (await collect_weather(client, datetime.now(UTC))).statuses() if (
+            online and check_belgrade_weather
+        ) else None
 
     return {
         "checked_at": datetime.now(UTC).isoformat(),
@@ -145,6 +150,7 @@ async def audit_sources(
         "partial_count": sum(row["status"] == "partial" for row in rows),
         "transport_error_count": sum(row["status"] == "transport_error" for row in rows),
         "error_count": sum(row["status"] == "error" for row in rows),
+        **({"weather_sources": weather} if weather is not None else {}),
     }
 
 
@@ -222,6 +228,12 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
                 details=details,
             )
         )
+    if weather := result.get("weather_sources"):
+        lines.extend((
+            "", "## Погода в утренней сводке", "",
+            f"- РХМЗ: `{weather['rhmz_forecast']}`",
+            f"- MeteoAlarm: `{weather['meteoalarm']}`",
+        ))
     return "\n".join(lines) + "\n"
 
 
@@ -230,6 +242,7 @@ def main() -> None:
     parser.add_argument("--sources", type=Path, default=Path("cities/belgrade/sources"))
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--source-id", action="append", default=[])
+    parser.add_argument("--check-belgrade-weather", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--summary", type=Path)
     parser.add_argument("--fail-on-error", action="store_true")
@@ -243,6 +256,7 @@ def main() -> None:
             args.sources,
             online=args.online,
             source_ids=tuple(args.source_id),
+            check_belgrade_weather=args.check_belgrade_weather,
         )
     )
     if args.output:

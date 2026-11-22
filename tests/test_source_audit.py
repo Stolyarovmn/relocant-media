@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
+from relocant_media.collectors.rhmz_forecast import FORECAST_URL, WARNING_URL
 from relocant_media.ops import source_audit
 from relocant_media.ops.source_audit import (
     render_source_health_markdown,
@@ -112,6 +113,33 @@ def _audit_with_response(monkeypatch, source_id, handler):
         Path("cities/belgrade/sources"), online=True, source_ids=(source_id,),
     ))
     return report["sources"][0]
+
+
+def test_weather_sources_are_visible_in_audit_without_changing_news_counts(monkeypatch):
+    client = httpx.AsyncClient
+
+    def respond(request):
+        if str(request.url) == FORECAST_URL:
+            return httpx.Response(503)
+        if str(request.url) == WARNING_URL:
+            return httpx.Response(200, text="<html>Changed response</html>")
+        assert "wp-json/wp/v2/posts" in request.url.path
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(source_audit.httpx, "AsyncClient", lambda **kwargs: client(
+        transport=httpx.MockTransport(respond), **kwargs,
+    ))
+    report = asyncio.run(source_audit.audit_sources(
+        Path("cities/belgrade/sources"), online=True, source_ids=("bvk_outage_news",),
+        check_belgrade_weather=True,
+    ))
+    assert report["active_count"] == 1 and report["error_count"] == 0
+    assert report["weather_sources"] == {
+        "rhmz_forecast": "http_error", "meteoalarm": "invalid_payload",
+    }
+    summary = render_source_health_markdown(report)
+    assert "РХМЗ: `http_error`" in summary
+    assert "MeteoAlarm: `invalid_payload`" in summary
 
 
 @pytest.mark.parametrize(("scenario", "status"), [

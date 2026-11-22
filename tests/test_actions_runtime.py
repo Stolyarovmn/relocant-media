@@ -173,7 +173,7 @@ def test_auto_mode_runs_editorial_when_due_then_intake_until_the_next_hour(
     assert context[0].state['last_editorial_at'] == recorded
 
 
-def test_morning_reason_is_saved_with_the_normal_cycle(context, tmp_path, monkeypatch):
+def test_morning_reason_is_saved_with_the_normal_cycle(context, tmp_path, monkeypatch, capsys):
     store, memory = context
     drive = Mock(spec=runtime.SSHStateClient)
     drive.download.side_effect = memory.download
@@ -181,7 +181,10 @@ def test_morning_reason_is_saved_with_the_normal_cycle(context, tmp_path, monkey
     drive.checkpoint.return_value = "c" * 64
     slot = due_slot(datetime(2026, 11, 22, 9, tzinfo=UTC))
     monkeypatch.setattr(runtime, "due_digest_slot", lambda _now: slot)
-    digest = AsyncMock(return_value={"state": "insufficient_items", "items": 0})
+    weather = {"rhmz_forecast": "stale", "meteoalarm": "none_active"}
+    digest = AsyncMock(return_value={
+        "state": "insufficient_items", "items": 0, "weather_sources": weather,
+    })
     monkeypatch.setattr(runtime, "run_digest", digest)
     monkeypatch.setattr(runtime, "run_child", lambda *args: 0)
     env = {
@@ -195,6 +198,8 @@ def test_morning_reason_is_saved_with_the_normal_cycle(context, tmp_path, monkey
     assert "digest_receipts" not in store.state
     assert store.state[MORNING_ATTEMPT] == {"slot": slot.key, "reason": "insufficient_items"}
     assert morning_delivery(store.state, slot.expires).reason == "insufficient_items"
+    entries = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [row["weather_sources"] for row in entries if row.get("digest") == slot.key] == [weather]
 
 
 def test_morning_watch_output_only_for_an_unconfirmed_public_issue(tmp_path):
