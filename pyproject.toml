@@ -15,6 +15,7 @@ dependencies = [
   "certifi>=2024.2.2",
   "beautifulsoup4>=4.13,<5",
   "feedparser>=6.0.11,<7",
+  "pypdf>=7.1.1,<8",
   "PyYAML>=6.0,<7",
   "google-genai>=2.31,<3",
   "google-auth[requests]>=2.38,<3",
