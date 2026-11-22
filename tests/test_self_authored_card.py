@@ -167,3 +167,16 @@ def test_notice_card_renders_deterministic_png() -> None:
     assert first.startswith(b"\x89PNG\r\n\x1a\n")
     assert struct.unpack(">II", first[16:24]) == (NOTICE_WIDTH, NOTICE_HEIGHT)
     validate_telegram_photo(Path("notice-card.png"), first)
+
+
+def test_notice_card_backgrounds_exist_and_long_text_wraps() -> None:
+    from relocant_media.services.notice_card import NoticeCardText, _background, render_notice_card
+
+    for kind in ("water", "power", "heating", "road"):
+        assert _background(kind).size == (1280, 720)
+    long_text = NoticeCardText(
+        kind="power", headline="Отключение света",
+        places="Палилула, Нови-Београд и ещё 12 районов",
+        when="24.11.2026 · 08:00–15:00 и ещё 14 интервалов",
+    )
+    assert render_notice_card(long_text).startswith(b"\x89PNG\r\n\x1a\n")

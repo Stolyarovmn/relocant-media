@@ -31,8 +31,7 @@ _HEADLINES: dict[str, str] = {
     "power": "Отключение света",
     "heating": "Отключение отопления",
 }
-# Фирменный синий аватара канала и акцент вида работ.
-_BACKGROUND = (22, 74, 160)
+# Акцент вида работ совпадает с иконкой собственного фона (assets/notice-cards).
 _ACCENTS: dict[str, tuple[int, int, int]] = {
     "water": (137, 215, 243),
     "power": (255, 214, 102),
@@ -133,32 +132,63 @@ def _font(weight: str, size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(io.BytesIO(path.read_bytes()), size)
 
 
-def _fit(draw: ImageDraw.ImageDraw, text: str, weight: str, size: int, width: int,
-         ) -> ImageFont.FreeTypeFont:
-    while size > 28:
+def _wrap(draw: ImageDraw.ImageDraw, text: str, weight: str, size: int, width: int,
+          max_lines: int) -> tuple[ImageFont.FreeTypeFont, list[str]]:
+    """Самый крупный кегль, при котором текст по словам укладывается в max_lines строк."""
+    while size >= 28:
         font = _font(weight, size)
-        if draw.textlength(text, font=font) <= width:
-            return font
+        head, separator, tail = text.partition(" и ещё ")
+        if separator and draw.textlength(text, font=font) > width:
+            # «и ещё N …» переносится целиком, а не по случайному слову.
+            lines = [head, f"и ещё {tail}"]
+            if all(draw.textlength(line, font=font) <= width for line in lines):
+                return font, lines
+            size -= 4
+            continue
+        lines = []
+        for word in text.split():
+            candidate = f"{lines[-1]} {word}" if lines else word
+            if lines and draw.textlength(candidate, font=font) <= width:
+                lines[-1] = candidate
+            else:
+                lines.append(word)
+        if len(lines) <= max_lines and all(draw.textlength(line, font=font) <= width
+                                           for line in lines):
+            return font, lines
         size -= 4
     raise ValueError("notice card text does not fit")
 
 
+@cache
+def _background(kind: str) -> Image.Image:
+    path = files("relocant_media.assets").joinpath(f"notice-cards/{kind}.jpg")
+    image = Image.open(io.BytesIO(path.read_bytes())).convert("RGB")
+    if image.size != (CARD_WIDTH, CARD_HEIGHT):
+        raise ValueError("notice card background has an unexpected size")
+    return image
+
+
 def render_notice_card(text: NoticeCardText) -> bytes:
-    """Детерминированный PNG: одинаковый текст и версии шрифта/Pillow дают те же байты."""
+    """Детерминированный PNG поверх собственного фона вида работ.
+
+    Иконка фона занимает правую треть, текст — левые ~55 % ширины.
+    """
     accent = _ACCENTS[text.kind]
-    image = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT), _BACKGROUND)
+    image = _background(text.kind).copy()
     draw = ImageDraw.Draw(image)
-    margin = 88
-    width = CARD_WIDTH - 2 * margin
-    draw.rectangle((0, 0, 24, CARD_HEIGHT), fill=accent)
-    draw.text((margin, 96), text.headline, fill=accent,
-              font=_fit(draw, text.headline, "Bold", 96, width))
-    draw.text((margin, 300), text.places, fill=_WHITE,
-              font=_fit(draw, text.places, "Bold", 72, width))
-    draw.text((margin, 440), text.when, fill=_WHITE,
-              font=_fit(draw, text.when, "Medium", 60, width))
-    draw.text((margin, CARD_HEIGHT - 110), "Еду в Белград · время Белграда", fill=accent,
-              font=_font("Medium", 34))
+    left, width, y = 88, 640, 96
+    blocks = ((text.headline, "Bold", 88, accent, 2, 28),
+              (text.places, "Bold", 60, _WHITE, 2, 22),
+              (text.when, "Medium", 48, _WHITE, 2, 0))
+    for value, weight, size, colour, max_lines, gap in blocks:
+        font, lines = _wrap(draw, value, weight, size, width, max_lines)
+        line_height = round(font.size * 1.18)
+        for line in lines:
+            draw.text((left, y), line, fill=colour, font=font)
+            y += line_height
+        y += gap
+    draw.text((left, CARD_HEIGHT - 96), "Еду в Белград · время Белграда", fill=accent,
+              font=_font("Medium", 30))
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=False, compress_level=9)
     return output.getvalue()
