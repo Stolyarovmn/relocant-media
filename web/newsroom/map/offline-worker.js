@@ -2,11 +2,12 @@ const scope = new URL(self.registration.scope);
 // CI checks the versions against the HTML entry and its module imports.
 const paths = [
   "./",
-  "./style.css?v=11",
-  "./app.js?v=18",
+  "./style.css?v=12",
+  "./app.js?v=19",
   "./core.js?v=16",
   "./calendar.js?v=5",
-  "./places.js?v=16",
+  "./places.js?v=17",
+  "./favorites.js?v=1",
   "./snapshots.js?v=1",
 ];
 const shell = paths.map((path) => new URL(path, scope).href);

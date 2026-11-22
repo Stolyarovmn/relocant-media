@@ -11,7 +11,50 @@ import {
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
 import { setupPlaces } from "../web/newsroom/map/places.js";
+import { agendaFavorites } from "../web/newsroom/map/favorites.js";
 import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
+
+function favoritesTelegram(keys) {
+  return {
+    initData: "preview", isVersionAtLeast: () => true,
+    CloudStorage: {
+      getKeys: (done) => done(null, [...keys.keys()]),
+      setItem(key, value, done) { keys.set(key, value); done(null, true); },
+      removeItem: (key, done) => done(null, keys.delete(key)),
+    },
+  };
+}
+
+test("избранное в Telegram хранит отдельные ключи событий и подтверждает запись", async () => {
+  const keys = new Map([["another_preference", "1"]]);
+  const telegram = favoritesTelegram(keys);
+  const blockedLocal = () => { throw new Error("Браузерное хранилище выключено"); };
+  const firstSession = agendaFavorites(telegram, blockedLocal);
+  await firstSession.write("event_11111111111111111111", true);
+  const secondSession = agendaFavorites(telegram, blockedLocal);
+  await secondSession.write("event_22222222222222222222", true);
+  await firstSession.write("event_11111111111111111111", false);
+  assert.deepEqual([...await secondSession.read()], ["event_22222222222222222222"]);
+  assert.equal(keys.get("another_preference"), "1");
+  telegram.CloudStorage.setItem = (_key, _value, done) => done(null, false);
+  await assert.rejects(firstSession.write("event_11111111111111111111", true));
+});
+
+test("сайт вне Telegram сохраняет избранное в этом браузере", async () => {
+  const keys = new Map([["theme", "dark"]]);
+  const storage = {
+    get length() { return keys.size; },
+    key: (index) => [...keys.keys()][index],
+    setItem: (key, value) => keys.set(key, value),
+    removeItem: (key) => keys.delete(key),
+  };
+  const getStorage = () => storage;
+  const id = "event_11111111111111111111";
+  await agendaFavorites(undefined, getStorage).write(id, true);
+  assert.deepEqual([...await agendaFavorites(undefined, getStorage).read()], [id]);
+  await agendaFavorites(undefined, getStorage).write(id, false);
+  assert.deepEqual([...keys.keys()], ["theme"]);
+});
 
 test("the automatic theme changes at seven and nineteen in Belgrade", () => {
   assert.equal(mapTheme("auto", Date.parse("2026-11-22T05:59:00Z")), "dark");
@@ -258,7 +301,7 @@ test("афиша нормализует обе трассы и сохраняе�
   ]) assert.deepEqual(readCourses(invalid), []);
 });
 
-test("ссылка на событие показывает обе трассы и легенду, закрытие убирает линии", async (t) => {
+test("ссылка на событие показывает трассы, а избранное фильтрует карту и список", async (t) => {
   function make(tag, className, textContent) {
     return {
       tag, className, textContent, children: [], style: {}, dataset: {}, events: {}, attributes: {},
@@ -291,7 +334,7 @@ test("ссылка на событие показывает обе трассы 
   const map = {
     on() {}, closePopup() {}, invalidateSize() {},
     getZoom() { return 12; },
-    project([lat, lon]) { return { x: lat, y: lon }; },
+    project([lat, lon]) { return { x: lat * 1200, y: lon * 1200 }; },
     fitBounds(points) { this.bounds = points; },
   };
   const savedLeaflet = globalThis.L;
@@ -310,12 +353,17 @@ test("ссылка на событие показывает обе трассы 
     if (!elements.has(id)) elements.set(id, make("div", id));
     return elements.get(id);
   };
+  const other = { ...race, id: "event_22222222222222222222", courses: [],
+    venue: { ...race.venue, latitude: 44.75 } };
+  const keys = new Map();
   const places = setupPlaces({
     map, mobile: { matches: true, addEventListener() {} }, animate: false, byId, make,
+    telegram: favoritesTelegram(keys),
     link: (_url, title) => make("a", "", title),
-    loadSnapshot: async (_path, decode) => ({ entries: decode({ version: 1, events: [race] }), cached: false }),
+    loadSnapshot: async (_path, decode) => ({ entries: decode({ version: 1, events: [race, other] }), cached: false }),
     onSync() {},
   });
+  t.after(() => places.leave());
   places.enter(roadId);
   await new Promise(setImmediate);
 
@@ -336,6 +384,26 @@ test("ссылка на событие показывает обе трассы 
   assert.deepEqual(courses.layers, []);
   places.enter(roadId);
   assert.equal(courses.layers.length, 4);
+  const favoriteButton = () => detail.children.find((child) => child.className === "place-favorite");
+  assert.equal(favoriteButton().attributes["aria-pressed"], "false");
+  favoriteButton().events.click();
+  await new Promise(setImmediate);
+  assert.equal(favoriteButton().attributes["aria-pressed"], "true");
+  assert.equal(keys.size, 1);
+  byId("toggle-favorites").events.click();
+  await new Promise(setImmediate);
+  assert.deepEqual(byId("places-list").children.map((child) => child.dataset.placeId), [roadId]);
+  assert.equal(groups[0].layers.length, 1);
+
+  byId("places-list").children[0].events.click();
+  favoriteButton().events.click();
+  await new Promise(setImmediate);
+  assert.equal(keys.size, 0);
+  assert.equal(detail.hidden, true);
+  assert.deepEqual(byId("places-list").children, []);
+  assert.deepEqual(groups[0].layers, []);
+  places.enter(roadId);
+  assert.equal(byId("toggle-favorites").attributes["aria-pressed"], "false");
   places.leave();
   assert.deepEqual(courses.layers, []);
 });

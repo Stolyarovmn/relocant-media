@@ -476,6 +476,24 @@ h1 {
 }
 #event-count { color: var(--muted); font-size: .84rem; font-weight: 600; }
 .places-count { color: var(--muted); font-size: .84rem; font-weight: 600; }
+.places-header { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
+.places-header #toggle-favorites, .place-favorite {
+  min-height: 40px;
+  padding: 4px 11px;
+  border: 1px solid var(--stroke);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--places);
+  font-size: .86rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+.places-header #toggle-favorites[aria-pressed="true"], .place-favorite[aria-pressed="true"] {
+  border-color: var(--places);
+  background: var(--places-tint);
+}
+.place-favorite { grid-column: 1 / -1; justify-self: start; }
+.place-saved { grid-column: 1 / -1; color: var(--places); font-size: .8rem; font-weight: 750; }
 .places-list { display: grid; gap: 5px; padding: 3px; }
 .place-card, .place-detail {
   display: grid;
