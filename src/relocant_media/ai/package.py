@@ -32,7 +32,7 @@ from relocant_media.ai.models import (
 from relocant_media.ai.pipeline import _citations_are_grounded, _verification_map
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.policy import AUTO_PUBLISH_CATEGORIES, requires_human_review
-from relocant_media.domain.sensitivity import sensitive_topic_reason
+from relocant_media.domain.sensitivity import personal_detail_reason, sensitive_topic_reason
 
 
 class StrictModel(BaseModel):
@@ -315,6 +315,10 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     sensitive_reason = sensitive_topic_reason(_package_texts(package))
     if sensitive_reason is not None and status == PublicationStatus.READY:
         status, reason = PublicationStatus.HUMAN_REVIEW, sensitive_reason
+    detail_reason = personal_detail_reason(_package_texts(package), draft.title, draft.body)
+    if detail_reason is not None and status in {
+            PublicationStatus.READY, PublicationStatus.HUMAN_REVIEW}:
+        status, reason = PublicationStatus.HUMAN_REVIEW, detail_reason
     date_reason=draft_date_reason(draft.title,draft.body)
     if date_reason is not None:
         status,reason=PublicationStatus.HUMAN_REVIEW,date_reason

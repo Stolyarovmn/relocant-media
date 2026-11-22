@@ -11,8 +11,10 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup, Tag
 
 from relocant_media.ai.models import EvidenceDocument
+from relocant_media.collectors.kolarac_program import saved_linked_program
 from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, CityEditorialProfile
 from relocant_media.domain.source_locations import is_public_https_url
+from relocant_media.services.event_program import festival_program, registered_event_venues
 from relocant_media.services.exhibition_map_point import MAX_HTML_BYTES
 
 _DOB_HOSTS = {"domomladine.org", "www.domomladine.org"}
@@ -262,6 +264,36 @@ def _cukarica_facts(document: EvidenceDocument) -> dict[str, Any] | None:
     }
 
 
+def _kolarac_facts(
+    document: EvidenceDocument, source_html: str, profile: CityEditorialProfile,
+) -> dict[str, Any] | None:
+    program = saved_linked_program(source_html, document.url, document.title, document.body)
+    if program is None:
+        return None
+    program_url, starts_at, hall = program
+    try:
+        hall_key = " ".join(hall.casefold().split())
+        venues = [entry for entry in registered_event_venues(profile)
+                  if hall_key in {alias.casefold() for alias in entry["aliases"]}]
+        if len(venues) != 1:
+            return None
+        venue = venues[0]
+        location = venue["venue"]
+        if not all(is_public_https_url(venue[field]) for field in (
+            "coordinate_source_url", "venue_source_url",
+        )) or not (44.2 <= location["latitude"] <= 45.2 and 19.8 <= location["longitude"] <= 21.1):
+            return None
+        return {
+            "event_name": document.title, "venue": location,
+            "starts_at": starts_at.isoformat(), "ends_at": None,
+            "time_basis": "source_kolarac_linked_program", "schedule_source_url": program_url,
+            "coordinate_source_url": venue["coordinate_source_url"],
+            "venue_source_url": venue["venue_source_url"],
+        }
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def extract_event_adapter(
     document: EvidenceDocument, source_html: str, *, profile: CityEditorialProfile,
 ) -> dict[str, Any] | None:
@@ -269,6 +301,8 @@ def extract_event_adapter(
     if (profile.city_id != "belgrade" or not isinstance(source_html, str)
             or len(source_html.encode()) > MAX_HTML_BYTES):
         return None
+    if document.source_id == "venue_kolarac":
+        return _kolarac_facts(document, source_html, profile)
     if document.source_id == "cukarica_news":
         from relocant_media.collectors.cukarica_news import (
             CukaricaExtractionError,
@@ -282,8 +316,6 @@ def extract_event_adapter(
         except CukaricaExtractionError:
             return None
         if (item.url, item.title, item.body) == (document.url, document.title, document.body):
-            from relocant_media.services.event_program import festival_program
-
             return _cukarica_facts(document) or festival_program(document, profile=profile)
         return None
     if document.source_id != "venue_youth_centre" or not _dob_url(document.url):

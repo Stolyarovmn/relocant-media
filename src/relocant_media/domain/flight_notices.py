@@ -21,9 +21,9 @@ FLIGHT_REVIEW_REASON = "flight_linked_review"
 _WINDOW = timedelta(hours=72)
 _ROUTE = re.compile(
     r"\b(?:между|из)\s+([А-ЯЁ][а-яё-]{3,})\s+(?:и|в)\s+([А-ЯЁ][а-яё-]{3,})\b")
+_DIRECTION = re.compile(r"\bиз\s+([А-ЯЁ][а-яё-]{3,})\s+в\s+([А-ЯЁ][а-яё-]{3,})\b")
+_BOTH_DIRECTIONS = re.compile(r"\b(?:в обоих направлениях|вс[её] (?:авиа)?рейсы между)\b", re.I)
 _WEEKDAYS = ("понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресень")
-
-
 @lru_cache(maxsize=8)
 def city_carriers(city: str) -> Mapping[str, re.Pattern[str]]:
     path = DEFAULT_CITIES_ROOT / city / "carriers.json"
@@ -47,7 +47,7 @@ def _carrier(title: str, carriers: Mapping[str, re.Pattern[str]]) -> str | None:
 
 def _city(value: str) -> str:
     # Только падежи односоставных русских названий, без свободной геокодировки.
-    return re.sub(r"(?:ом|ем|а|е|у|ь)$", "", value.casefold())
+    return re.sub(r"(?:ом|ем|а|я|е|у|ю|ь)$", "", value.casefold())
 
 
 def _notice(
@@ -86,6 +86,26 @@ def _notice(
         return None
     return (carrier, next(iter(routes)), dates)
 
+
+def flight_cancellation_key(
+    title: str, body: str, *, published_at: datetime | None, city: str = "belgrade",
+) -> tuple[tuple[object, ...], frozenset[tuple[str, str]]] | None:
+    """Авиасюжет и направления, которые прямо охватывает опубликованный текст.
+
+    День недели относится ко времени поста. Одно упоминание пары городов
+    без явно указанного охвата оставляет множество направлений пустым.
+    """
+    if published_at is None:
+        return None
+    notice = _notice(title, body, published_at, city_carriers(city))
+    if notice is None:
+        return None
+    text = title + "\n" + body
+    directions = {(_city(a), _city(b)) for a, b in _DIRECTION.findall(text)}
+    if _BOTH_DIRECTIONS.search(text):
+        for a, b in _ROUTE.findall(text):
+            directions.update(((_city(a), _city(b)), (_city(b), _city(a))))
+    return notice, frozenset(directions)
 
 def find_related_flight_cancellation(
     title: str, body: str,

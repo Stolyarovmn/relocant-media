@@ -4,7 +4,10 @@ import {
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
 } from "./core.js?v=17";
 import { calendarLink } from "./calendar.js?v=5";
-import { corridorCaps, heatCells, heatOverview, layerView } from "./layer-views.js?v=1";
+import {
+  corridorCaps, heatCells, heatOverview, layerView, timelineBands, timelineInstant, timelineLabel,
+  timelineSteps,
+} from "./layer-views.js?v=2";
 import { setupPlaces } from "./places.js?v=18";
 import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=1";
 
@@ -16,6 +19,7 @@ const feedback = byId("feedback");
 const mapFrame = byId("map").parentElement;
 const layerButtons = [...byId("layer-filter").querySelectorAll("button")];
 const periodButtons = [...byId("incident-periods").querySelectorAll("button")];
+const timelineInput = byId("timeline-time");
 const announcementBody = byId("announcement-body");
 const announcementToggle = byId("toggle-announcements");
 const selectedPreview = byId("selected-preview");
@@ -31,6 +35,8 @@ const state = {
   incidents: [],
   period: null,
   layerView: "detail",
+  timelineOrigin: 0,
+  timelineStep: 0,
   selected: "",
   previewArchive: "",
   refocusEvent: "",
@@ -80,7 +86,7 @@ function installTheme() {
     button.firstElementChild.textContent = theme === "dark" ? "☾" : "☀";
     button.lastElementChild.textContent = labels[preference];
     button.setAttribute("aria-label", `Тема карты: ${labels[preference]}. Переключить`);
-    if (changed) renderPoints(Date.now());
+    if (changed) renderPoints(viewClock());
   };
   button.addEventListener("click", () => {
     preference = options[(options.indexOf(preference) + 1) % options.length];
@@ -99,18 +105,28 @@ function installLayerView() {
   const menu = byId("layer-view");
   const summary = menu.querySelector("summary");
   const options = [...menu.querySelectorAll("[data-view]")];
-  const labels = { detail: "Дома и границы", corridor: "Отрезки улиц", heat: "Тепловая карта" };
+  const labels = {
+    detail: "Дома и границы", corridor: "Отрезки улиц", heat: "Тепловая карта", timeline: "По времени",
+  };
   const apply = () => {
     menu.dataset.view = state.layerView;
     byId("layer-view-current").textContent = ` · ${labels[state.layerView]}`;
     for (const option of options) {
       option.setAttribute("aria-pressed", String(option.dataset.view === state.layerView));
     }
-    renderPointClusters();
+    byId("incident-periods").hidden = inTimeline();
+    byId("incident-timeline").hidden = !inTimeline();
+    clearInvisibleSelection();
+    render();
+    scheduleClock();
   };
   try { state.layerView = layerView(localStorage.getItem(key)); } catch { /* Session only. */ }
+  const requested = new URLSearchParams(location.search).get("view");
+  if (requested !== null) state.layerView = layerView(requested);
+  if (inTimeline() && (initialRoute.id || digestIds.length)) state.layerView = "detail";
   for (const option of options) {
     option.addEventListener("click", () => {
+      if (state.layerView !== option.dataset.view) state.timelineStep = 0;
       state.layerView = layerView(option.dataset.view);
       try { localStorage.setItem(key, state.layerView); } catch { /* Session only. */ }
       menu.open = false;
@@ -128,6 +144,54 @@ function installLayerView() {
     summary.focus({ preventScroll: true });
   });
   apply();
+}
+
+const inTimeline = () => state.layerView === "timeline";
+const viewPeriod = () => inTimeline() ? 0 : state.period;
+const viewClock = (now = Date.now()) => inTimeline() && state.timelineStep
+  ? timelineInstant(state.timelineOrigin, state.timelineStep) : now;
+const futureFrame = () => inTimeline() && state.timelineStep > 0;
+
+function renderTimeline(realNow) {
+  if (!inTimeline()) return;
+  if (viewClock(realNow) <= realNow) {
+    state.timelineStep = 0;
+    state.timelineOrigin = realNow;
+  }
+  const origin = state.timelineOrigin;
+  const end = timelineInstant(origin, timelineSteps);
+  const selected = viewClock(realNow);
+  const label = timelineLabel(selected, !state.timelineStep);
+  timelineInput.value = String(state.timelineStep);
+  timelineInput.setAttribute("aria-valuetext", label);
+  byId("timeline-label").textContent = label;
+  byId("timeline-reset").hidden = !state.timelineStep;
+  const bands = timelineBands(state.incidents.filter((incident) =>
+    !state.digestIds.length || state.digestIds.includes(incident.id)), origin, end);
+  const percent = (time) => `${(time - origin) / (end - origin) * 100}%`;
+  const icons = [];
+  const tracks = [];
+  for (const [kind, details] of Object.entries(kinds)) {
+    if (!enabled.has(kind)) continue;
+    const icon = make("span", "", details.icon);
+    const track = make("div", "timeline-track");
+    track.dataset.kind = kind;
+    for (const [start, finish] of bands.get(kind) ?? []) {
+      const segment = make("span", "timeline-segment");
+      segment.style.left = percent(start);
+      segment.style.right = `${(end - finish) / (end - origin) * 100}%`;
+      track.append(segment);
+    }
+    icons.push(icon);
+    tracks.push(track);
+  }
+  if (tracks.length) {
+    const cursor = make("i", "timeline-cursor");
+    cursor.style.left = percent(selected);
+    tracks.push(cursor);
+  }
+  byId("timeline-icons").replaceChildren(...icons);
+  byId("timeline-bands").replaceChildren(...tracks);
 }
 
 function make(tag, className = "", text = "") {
@@ -228,7 +292,7 @@ function visibleIncidents(now) {
   return state.incidents.filter((incident) => enabled.has(incident.kind)
     && (!state.digestIds.length || state.digestIds.includes(incident.id))
     && (showsArchived(incident) || incidentStatus(incident, now) !== "closed"))
-    .map((incident) => incidentInPeriod(incident, now, state.period)).filter(Boolean);
+    .map((incident) => incidentInPeriod(incident, now, viewPeriod())).filter(Boolean);
 }
 
 function showsArchived(incident) {
@@ -261,7 +325,8 @@ function eventCard(incident, now) {
   const dot = make("i", "", kinds[incident.kind].icon);
   dot.setAttribute("aria-hidden", "true");
   category.append(dot, kinds[incident.kind].label);
-  const badge = make("span", "event-state", status === "planned" ? "⏰ Запланировано"
+  const badge = make("span", "event-state", futureFrame() ? "На это время"
+    : status === "planned" ? "⏰ Запланировано"
     : incident.archived ? "Архив" : statuses[status]);
   badge.dataset.status = status;
   meta.append(category, badge);
@@ -274,7 +339,7 @@ function eventCard(incident, now) {
   });
   heading.append(title);
   card.append(meta, heading);
-  const countdown = make("p", "event-countdown", incidentCountdown(incident, now));
+  const countdown = make("p", "event-countdown", futureFrame() ? "" : incidentCountdown(incident, now));
   countdown.hidden = !countdown.textContent;
   card.append(countdown);
 
@@ -354,7 +419,7 @@ function eventCard(incident, now) {
   links.append(link(incident.source, "Источник ↗"));
   const share = shareLink(incident.id, incident.title);
   if (share) links.append(link(share, "Поделиться ↗"));
-  const calendar = calendarLink(incident, now);
+  const calendar = calendarLink(incident, Date.now());
   if (calendar) links.append(calendar);
   if (incident.officialMap && incident.officialMap !== incident.source) {
     links.append(link(incident.officialMap,
@@ -368,7 +433,7 @@ function renderList(now) {
   const items = orderedIncidents(now);
   const count = byId("event-count");
   count.textContent = state.loaded ? String(items.length) : "";
-  updateCityCount(now);
+  updateCityCount(Date.now());
   eventList.replaceChildren(...items.map((item) => eventCard(item, now)));
   const selected = items.find((item) => item.id === state.selected);
   selectedPreview.hidden = !selected;
@@ -377,12 +442,13 @@ function renderList(now) {
     selectedPreview.querySelector("i").textContent = kinds[selected.kind].icon;
     byId("selected-title").textContent = selected.title;
   }
-  byId("selected-countdown").textContent = selected ? incidentCountdown(selected, now) : "";
+  byId("selected-countdown").textContent = selected && !futureFrame() ? incidentCountdown(selected, now) : "";
   const message = state.loadFailed
     ? state.loaded ? snapshotNotice(state.stamp) : "Список объявлений недоступен. Повторите загрузку при подключении."
     : state.deepPending && state.loaded ? "Объявление из ссылки пока отсутствует в выгрузке."
       : !state.loaded ? "Загружаем данные."
-        : !items.length ? state.period === null ? "В выбранных слоях пока нет объявлений."
+        : !items.length ? inTimeline() ? "На это время работ в выбранных слоях нет."
+          : state.period === null ? "В выбранных слоях пока нет объявлений."
           : "На выбранный период объявлений нет." : "";
   feedback.textContent = message;
   feedback.hidden = !message;
@@ -417,7 +483,7 @@ function bindFeature(layer, group, incident, label, window, fromRegister) {
     state.refocusEvent = "";
     state.focusNote = "";
     showMapNote();
-    renderList(Date.now());
+    renderList(viewClock());
   }).addTo(group);
 }
 
@@ -640,18 +706,17 @@ function renderPoints(now) {
   renderPointClusters();
 }
 
-function renderAddress() {
+function renderAddress(now) {
   const picked = byId("picked-address");
   const value = state.address;
   picked.hidden = !value;
   state.addressLayer?.clearLayers();
   if (!value) return;
   byId("picked-label").textContent = addressLabel(value);
-  const now = Date.now();
   const matches = state.incidents.filter((event) => incidentStatus(event, now) !== "closed")
-    .map((incident) => incidentInPeriod(incident, now, state.period))
+    .map((incident) => incidentInPeriod(incident, now, viewPeriod()))
     .filter((event) => event && addressHits(event, value).some((address) => unexpired(address.window, now)));
-  const scope = state.period === null ? "актуальных объявлениях" : "выбранном периоде";
+  const scope = viewPeriod() === null ? "актуальных объявлениях" : "выбранном периоде";
   byId("picked-match").textContent = matches.length
     ? `Точных совпадений в ${scope}: ${matches.length}`
     : `Точных совпадений в ${scope} пока нет.`;
@@ -664,16 +729,18 @@ function renderAddress() {
 
 function render() {
   if (state.mode !== "incidents") return;
-  const now = Date.now();
-  renderAddress();
+  const realNow = Date.now();
+  renderTimeline(realNow);
+  const now = viewClock(realNow);
+  renderAddress(now);
   renderList(now);
   renderPoints(now);
 }
 
 function focusIncident(item) {
   if (!state.map) return false;
-  const now = Date.now();
-  const incident = incidentInPeriod(item, now, state.period);
+  const now = viewClock();
+  const incident = incidentInPeriod(item, now, viewPeriod());
   if (!incident) return false;
   state.map.closePopup();
   state.map.invalidateSize({ pan: false });
@@ -719,7 +786,7 @@ function focusIncident(item) {
 }
 
 function focusDigest() {
-  const now = Date.now();
+  const now = viewClock();
   const locations = visibleIncidents(now).flatMap((incident) => [
     ...exactMapPoints(state.index, incident, now, false).map(({ lat, lon }) => [lat, lon]),
     ...visibleMapLines(incident, now, false).flatMap((line) => line.coordinates),
@@ -729,7 +796,7 @@ function focusDigest() {
 }
 
 function openEvent(incident, { fromCard = false } = {}) {
-  const now = Date.now();
+  const now = viewClock();
   state.deepPending = "";
   state.selected = incident.id;
   state.keepSelectedInView = true;
@@ -785,11 +852,11 @@ function scheduleClock() {
   clearTimeout(clockTimer);
   if (state.mode !== "incidents" || document.hidden) return;
   const now = Date.now();
-  const boundary = nextTransition(state.incidents, now, state.period ?? 0);
+  const boundary = nextTransition(state.incidents, now, viewPeriod() ?? 0);
   const nextMinute = 60_000 - now % 60_000;
   clockTimer = setTimeout(() => {
     const current = Date.now();
-    if (current >= boundary) render();
+    if (current >= boundary || inTimeline()) render();
     else updateCountdowns(current);
     scheduleClock();
   }, Math.min(nextMinute, boundary - now + 10));
@@ -823,7 +890,7 @@ async function loadEvents() {
     scheduleClock();
   } catch {
     state.loadFailed = true;
-    if (state.mode === "incidents") renderList(Date.now());
+    if (state.mode === "incidents") renderList(viewClock());
   } finally {
     state.loading = false;
     if (state.mode === "incidents") syncFeed(state);
@@ -849,7 +916,7 @@ async function readAddresses() {
 function loadAddressIndex() {
   addressRequest ??= readAddresses().then((data) => {
     state.index = buildAddressIndex(data);
-    renderPoints(Date.now());
+    renderPoints(viewClock());
     const event = state.incidents.find((incident) => incident.id === state.refocusEvent);
     state.refocusEvent = "";
     if (state.mode === "incidents" && event && !state.address) focusIncident(event);
@@ -988,21 +1055,37 @@ for (const button of periodButtons) {
     for (const option of periodButtons) {
       option.setAttribute("aria-pressed", String(option === button));
     }
-    const selected = visibleIncidents(Date.now()).find((incident) => incident.id === state.selected);
-    if (!selected) {
-      state.selected = "";
-      state.previewArchive = "";
-      state.refocusEvent = "";
-      state.keepSelectedInView = false;
-      state.focusNote = "";
-      showMapNote();
-    }
+    const selected = clearInvisibleSelection();
     state.map?.closePopup();
     render();
     if (selected && !state.address) focusIncident(selected);
     scheduleClock();
   });
 }
+function clearInvisibleSelection() {
+  const selected = visibleIncidents(viewClock()).find((incident) => incident.id === state.selected);
+  if (!selected && state.selected) {
+    state.selected = "";
+    state.previewArchive = "";
+    state.refocusEvent = "";
+    state.keepSelectedInView = false;
+    state.focusNote = "";
+    showMapNote();
+  }
+  return selected;
+}
+function selectTimelineStep(step) {
+  state.timelineStep = step;
+  clearInvisibleSelection();
+  state.map?.closePopup();
+  render();
+  scheduleClock();
+}
+timelineInput.addEventListener("input", () => selectTimelineStep(timelineInput.valueAsNumber));
+byId("timeline-reset").addEventListener("click", () => {
+  selectTimelineStep(0);
+  timelineInput.focus({ preventScroll: true });
+});
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) clearTimeout(clockTimer);
   else if (state.mode === "incidents") {

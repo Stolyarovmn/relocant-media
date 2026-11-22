@@ -1,4 +1,4 @@
-const allowed = new Set(["getChat", "sendMessage", "answerCallbackQuery"]);
+const allowed = new Set(["getChat", "sendMessage", "answerCallbackQuery", "answerInlineQuery"]);
 
 // No arbitrary URL, API method or token may be supplied by a Telegram update.
 export class ReplyBot {

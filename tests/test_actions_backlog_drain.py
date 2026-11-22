@@ -277,7 +277,12 @@ def test_drain_workflow_has_separate_chain_and_same_canonical_lock():
     assert cycle["concurrency"]["group"] == "canonical-editorial-state"
     steps = cycle["steps"]
     guard = next(step for step in steps if "exact main CI" in step.get("name", ""))
-    assert "git/ref/heads/main" in guard["run"] and "conclusion" in guard["run"]
+    assert guard["id"] == "start" and guard["run"].endswith("editorial_start.py gate")
+    for guarded in ("storage", "runtime", "projection"):
+        step = next(step for step in steps if step.get("id") == guarded)
+        assert "steps.start.outputs.status == 'ready'" in step["if"]
+    recovery = next(step for step in steps if "interrupted writer" in step.get("name", ""))
+    assert "steps.start.outputs.status == 'ready'" in recovery["if"]
     chain = workflow["jobs"]["drain_chain"]
     assert chain["needs"] == "cycle" and "concurrency" not in chain
     assert "needs.cycle.result == 'success'" in chain["if"]
@@ -290,7 +295,7 @@ def test_drain_workflow_has_separate_chain_and_same_canonical_lock():
     assert "'--ref', 'main'" in body
     assert "secrets." not in json.dumps(chain)
     assert set(cycle["outputs"]) == {
-        "projection", "worker_mode", "drain_continue", "drain_next_delay_seconds",
+        "projection", "worker_mode", "start_status", "drain_continue", "drain_next_delay_seconds",
         "morning_watch_date",
     }
     worker_env = next(step['env'] for step in steps if step.get('id') == 'runtime')

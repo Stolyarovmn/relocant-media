@@ -12,7 +12,10 @@ import {
 } from "../web/newsroom/map/core.js";
 import { agendaVisit, setupPlaces } from "../web/newsroom/map/places.js";
 import { agendaFavorites } from "../web/newsroom/map/favorites.js";
-import { corridorCaps, heatCells, heatOverview, layerView } from "../web/newsroom/map/layer-views.js";
+import {
+  corridorCaps, heatCells, heatOverview, layerView, timelineBands, timelineInstant,
+  timelineLabel, timelineSteps,
+} from "../web/newsroom/map/layer-views.js";
 import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
 
 test("тепловой обзор сохраняет точную геометрию на крупном масштабе и при точном поиске", () => {
@@ -46,6 +49,46 @@ test("концы участков берутся с исходной линии 
   const project = ([lat, lon]) => ({ x: lon, y: lat });
   assert.deepEqual(corridorCaps(line, project), [[1, 1], [2, 24]]);
   assert.deepEqual(corridorCaps(line, ([lat, lon]) => ({ x: lon / 2, y: lat / 2 })), []);
+});
+
+test("временной вид фиксирует ближайшие полчаса и подписывает время Белграда", () => {
+  const origin = Date.parse("2026-11-23T22:48:00Z");
+  assert.equal(layerView("timeline"), "timeline");
+  assert.equal(timelineInstant(origin, 0), origin);
+  assert.equal(timelineInstant(origin, 1), Date.parse("2026-11-23T23:00:00Z"));
+  assert.equal(timelineInstant(origin, 2), Date.parse("2026-11-23T23:30:00Z"));
+  assert.ok(timelineInstant(origin, timelineSteps) - origin <= 24 * 3_600_000);
+  assert.equal(timelineLabel(origin, true), "Сейчас");
+  assert.match(timelineLabel(timelineInstant(origin, 2), false), /24.*00:30/u);
+});
+
+test("полосы работ сохраняют паузы и объединяют пересекающиеся интервалы одного слоя", () => {
+  const incident = (kind, spans, archived = false) => ({
+    kind, archived, windows: spans.map(([start, end]) => ({ start, end })),
+  });
+  const bands = timelineBands([
+    incident("water", [[1, 4], [3, 6], [8, 12]]),
+    incident("power", [[5, 10]]),
+    incident("road", [[1, 9]], true),
+    incident("water", [[0, 1], [10, 14], [5, null]]),
+  ], 2, 10);
+  assert.deepEqual([...bands], [["water", [[2, 6], [8, 10]]], ["power", [[5, 10]]]]);
+});
+
+test("выбранное время оставляет на карте только действующую зону одного объявления", () => {
+  const origin = Date.parse("2026-11-24T14:08:00Z");
+  const first = { start: Date.parse("2026-11-24T07:00:00Z"),
+    end: Date.parse("2026-11-24T14:00:00Z") };
+  const second = { start: first.start, end: Date.parse("2026-11-24T15:00:00Z") };
+  const notice = { start: first.start, end: second.end, windows: [first, second],
+    archived: false, points: [], lines: [], areas: [], addresses: [], ranges: [], segments: [],
+    settlements: [], waterDistricts: [
+      { municipality: "Савски-Венац", window: first },
+      { municipality: "Вождовац", window: second },
+    ] };
+  const picked = incidentInPeriod(notice, timelineInstant(origin, 1), 0);
+  assert.deepEqual(picked.waterDistricts.map(({ municipality }) => municipality), ["Вождовац"]);
+  assert.equal(incidentInPeriod(notice, timelineInstant(origin, 2), 0), null);
 });
 
 test("новые события отсчитываются от последней просмотренной версии афиши", () => {

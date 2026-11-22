@@ -1578,7 +1578,8 @@ def main() -> None:
         lifecycle = MaterialLifecycleRuntime(engine, "belgrade", provider)
 
         def lifecycle_due() -> tuple[list[int], set[int]]:
-            sweep = lifecycle.reconcile()
+            # Резерв открывает цикл, который формирует запрос после сохранения состояния.
+            sweep = lifecycle.reconcile(reissue_event_fallback=gpt_fallback_enabled)
             scope["lifecycle_fallback_ids"] = set(sweep.fallback_ids)
             return lifecycle_due_order(sweep.rejection_audit_ids, sweep.due_ids), set(
                 sweep.excluded_ids)

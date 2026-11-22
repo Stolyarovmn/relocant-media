@@ -37,6 +37,27 @@
       "venue": {"name": "Galerija '73", "address": "Požeška 83a, Beograd", "latitude": 44.7739888, "longitude": 20.4144289},
       "coordinate_source_url": "https://www.galerija73.com/js/galerija73.js",
       "venue_source_url": "https://www.galerija73.com/kontakt"
+    },
+    {
+      "id": "kolarac-amphitheatre",
+      "aliases": ["предавачки амфитеатар коларчеве задужбине", "предавачком амфитеатру коларчеве задужбине", "predavački amfiteatar kolarčeve zadužbine", "predavačkom amfiteatru kolarčeve zadužbine"],
+      "venue": {"name": "Kolarac · Predavački amfiteatar", "address": "Studentski trg 5, Beograd", "latitude": 44.8193013, "longitude": 20.4566811},
+      "coordinate_source_url": "https://www.openstreetmap.org/node/12467583159",
+      "venue_source_url": "https://www.kolarac.rs/kontakt/"
+    },
+    {
+      "id": "kolarac-great-hall",
+      "aliases": ["велика дворана коларчеве задужбине", "великој дворани коларчеве задужбине", "velika dvorana kolarčeve zadužbine", "velikoj dvorani kolarčeve zadužbine"],
+      "venue": {"name": "Kolarac · Velika dvorana", "address": "Studentski trg 5, Beograd", "latitude": 44.8193013, "longitude": 20.4566811},
+      "coordinate_source_url": "https://www.openstreetmap.org/node/12467583159",
+      "venue_source_url": "https://www.kolarac.rs/kontakt/"
+    },
+    {
+      "id": "kolarac-small-hall",
+      "aliases": ["мала сала коларчеве задужбине", "малој сали коларчеве задужбине", "mala sala kolarčeve zadužbine", "maloj sali kolarčeve zadužbine"],
+      "venue": {"name": "Kolarac · Mala sala", "address": "Studentski trg 5, Beograd", "latitude": 44.8193013, "longitude": 20.4566811},
+      "coordinate_source_url": "https://www.openstreetmap.org/node/12467583159",
+      "venue_source_url": "https://www.kolarac.rs/kontakt/"
     }
   ]
 }

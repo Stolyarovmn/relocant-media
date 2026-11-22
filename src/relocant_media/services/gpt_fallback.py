@@ -51,6 +51,7 @@ from relocant_media.services.material_lifecycle import (
     LifecycleBlockedError,
     can_retry_snapshot,
     ensure_not_terminal,
+    fallback_reissued_at,
     is_terminal_blocked,
 )
 from relocant_media.services.native_map import bind_native_map_draft
@@ -449,6 +450,11 @@ def validate_fallback_candidate(
     if not timedelta(0) <= now - parsed.created_at <= REQUEST_TTL:
         raise FallbackValidationError(
             "Резервный запрос просрочен или датирован будущим", code="request_expired",
+        )
+    reissued = fallback_reissued_at(session, raw_id)
+    if reissued is not None and parsed.created_at < reissued:
+        raise FallbackValidationError(
+            "Резервный запрос выпущен раньше нового окна", code="request_expired",
         )
     with session.no_autoflush:
         run = session.get(SchedulerRun, parsed.scheduler_run_id, populate_existing=True)

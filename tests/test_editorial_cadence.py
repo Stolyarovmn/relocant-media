@@ -86,7 +86,8 @@ def retry_workflow():
     return yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
-def chain_enabled(*, event, mode="", result="success", enabled=True, branch="main"):
+def chain_enabled(*, event, mode="", result="success", enabled=True, branch="main",
+                  start_status="ready"):
     """Evaluate the actual job gate with bounded literal contexts, without a runner."""
     gate = _chain()["if"]
     replacements = {
@@ -95,6 +96,7 @@ def chain_enabled(*, event, mode="", result="success", enabled=True, branch="mai
         "github.ref": repr(f"refs/heads/{branch}"),
         "github.event_name": repr(event),
         "needs.cycle.result": repr(result),
+        "needs.cycle.outputs.start_status": repr(start_status),
         "needs.cycle.outputs.worker_mode": repr(mode),
         "vars.ACTIONS_EDITORIAL_ENABLED": repr("true" if enabled else "false"),
         "vars.ACTIONS_CHAIN_ENABLED": repr("true" if enabled else "false"),
@@ -121,14 +123,14 @@ def test_automatic_runs_keep_success_and_failure_continuation(event, mode, resul
 
 @pytest.mark.parametrize("context", [
     {"result": "cancelled"}, {"result": "skipped"}, {"enabled": False}, {"branch": "feature"},
+    {"start_status": "superseded"}, {"start_status": "ci_pending"}, {"start_status": "ci_failed"},
 ])
 def test_automatic_chain_still_respects_stop_conditions(context):
     assert chain_enabled(event="workflow_dispatch", mode="auto", **context) is False
 
 
 def test_chain_survives_a_failed_cycle_but_backs_off():
-    """The exact-main-CI guard fails right after every merge; that must pause the chain
-    for ten minutes, not end it. Cancelled or skipped cycles still do not chain."""
+    """Operational failures after start still use the established backoff."""
     chain = _chain()
     # Without a status function GitHub adds an implicit success(), which silently skips this
     # job after a failed cycle (this ended the chain at 04:20 on 28.10.2026).
@@ -162,6 +164,24 @@ def test_manual_operations_have_separate_workflow_queues_and_shared_state_lock()
     assert "inputs.mode != 'digest-preview'" in _chain()["if"]
     assert "inputs.mode != 'digest'" in _chain()["if"]
     assert "needs.cycle.outputs.worker_mode != 'digest'" in _chain()["if"]
+
+
+def test_preflight_retry_requires_an_unstarted_cycle_and_releases_the_writer():
+    data = workflow()
+    retry = data["jobs"]["start_retry"]
+    assert retry["needs"] == "cycle"
+    assert retry["concurrency"]["group"] != data["jobs"]["cycle"]["concurrency"]["group"]
+    assert retry["concurrency"]["cancel-in-progress"] == "false"
+    assert retry["permissions"] == {"actions": "write", "contents": "read"}
+    assert "github.run_attempt == '1' && !inputs.preflight_retry" in retry["if"]
+    assert "needs.cycle.result == 'success'" in retry["if"]
+    assert "needs.cycle.outputs.start_status == 'superseded'" in retry["if"]
+    assert "needs.cycle.outputs.start_status == 'ci_pending'" in retry["if"]
+    assert "vars.ACTIONS_EDITORIAL_ENABLED == 'true'" in retry["if"]
+    assert "vars.ACTIONS_CUTOVER_CONFIRMED == 'true'" in retry["if"]
+    assert data["on"]["workflow_dispatch"]["inputs"]["preflight_retry"]["default"] == "false"
+    assert retry["steps"][0]["with"]["persist-credentials"] == "false"
+    assert "secrets." not in str(retry)
 
 
 @pytest.mark.parametrize(('mode', 'schedule', 'expected'), [
