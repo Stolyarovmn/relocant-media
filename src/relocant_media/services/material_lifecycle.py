@@ -17,6 +17,8 @@ from typing import Any, Literal, cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.models import EvidenceDocument
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.domain.freshness import FreshnessDecision, evidence_freshness
 from relocant_media.domain.policy import (
@@ -343,6 +345,53 @@ def _restore_unqueued_utility(
                    "_recovered_owner_hold": old}
     post.status = "human_review"
     _wait_for_owner(record, now=now)
+    record.finished_at = None
+
+
+def _reissue_unattempted_event_fallback(
+    session: Session, record: SchedulerRun, *, now: datetime,
+) -> None:
+    """Одна новая выдача резерва для будущего события без черновика или попытки GPT."""
+    from relocant_media.services.event_place import event_occurrences, resolve_saved_event_place
+
+    data = record.details
+    raw_id = data.get("raw_item_id")
+    if (type(raw_id) is not int or data.get("lifecycle_root_raw_id")
+            or data.get("replacement_raw_item_id") or "fallback_reissued_at" in data
+            or data.get("fallback_attempts") != 0 or data.get("attempts") != PRIMARY_ATTEMPTS
+            or not _validate({**data, "state": "waiting_fallback", "next_action": "fallback",
+                              "next_attempt_at": now.isoformat()})):
+        return
+    previous_deadline = _stamp(data["fallback_deadline_at"])
+    material_deadline = _stamp(data["deadline_at"])
+    if not previous_deadline <= now < material_deadline:
+        return
+    try:
+        raw, source, run, post = _objects(session, raw_id)
+        if (run is not None or post is not None or not source.enabled or not source.auto_publish
+                or source.ownership != "official" or source.high_risk
+                or data.get("fingerprints", {}).get(str(raw_id)) != _fingerprint(raw)
+                or _fresh(raw, source, now).action != "keep"):
+            return
+        place = resolve_saved_event_place(
+            session, EvidenceDocument.model_validate(raw, from_attributes=True), [raw_id],
+            profile=load_city_profile(source.city),
+        )
+        if place is None:
+            return
+        start = min(_stamp(slot["starts_at"]) for slot in event_occurrences(place))
+    except (ValueError, KeyError, TypeError):
+        return
+    deadline = min(material_deadline, start, now + FALLBACK_WAIT)
+    if deadline <= now or session.scalar(select(Submission.id).where(
+        Submission.kind == "owner_editorial_review",
+        Submission.payload["raw_item_id"].as_integer() == raw_id,
+    ).limit(1)) is not None:
+        return
+    _set(record, now=now, state="waiting_fallback", action="fallback", next_at=now,
+         reason="verified_event_fallback_reissued", fallback_deadline_at=deadline.isoformat(),
+         fallback_reissued_at=now.isoformat(),
+         previous_fallback_deadline_at=previous_deadline.isoformat())
     record.finished_at = None
 
 
@@ -1006,6 +1055,12 @@ def response_deadline(session: Session, raw_id: int) -> datetime | None:
     return deadline
 
 
+def fallback_reissued_at(session: Session, raw_id: int) -> datetime | None:
+    record = _read_record(session, raw_id)
+    marker = record.details.get("fallback_reissued_at") if record is not None else None
+    return _stamp(marker) if marker is not None else None
+
+
 def ensure_not_terminal(session: Session, raw_id: int, *, now: datetime | None = None) -> None:
     if is_terminal_blocked(session, raw_id, now=now):
         raise LifecycleBlockedError("Материал окончательно заблокирован жизненным циклом")
@@ -1052,10 +1107,13 @@ def sweep_materials(session: Session, *, city: str, now: datetime,
         SchedulerRun.city == city, SchedulerRun.task_type == TASK_TYPE,
     ).order_by(SchedulerRun.id))}
     for record in records.values():
-        if (record.status == "blocked"
-                and record.details.get("reason") == "separate_publication_approval_required"
-                and (raw_ids is None or record.details.get("raw_item_id") in raw_ids)):
+        if (record.status != "blocked"
+                or raw_ids is not None and record.details.get("raw_item_id") not in raw_ids):
+            continue
+        if record.details.get("reason") == "separate_publication_approval_required":
             _restore_unqueued_utility(session, record, now=now)
+        elif record.details.get("reason") == "fallback_deadline_exceeded":
+            _reissue_unattempted_event_fallback(session, record, now=now)
     session.flush()
     closed_ids = {row.details["raw_item_id"] for row in records.values()
                   if row.details.get("state") in TERMINAL_STATES

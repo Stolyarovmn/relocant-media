@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -22,10 +23,17 @@ from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.policy import SOURCE_REPLACED_REASON
+from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops import server_cycle
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import gpt_fallback, gpt_refresh
 from relocant_media.services.editorial_products import present_draft
+from relocant_media.services.material_lifecycle import (
+    after_error,
+    before_attempt,
+    lifecycle_state,
+    sweep_materials,
+)
 from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.services.package_import import import_package
 from relocant_media.sources.registry import load_source_registry
@@ -156,6 +164,69 @@ def fallback_session():
         raw, run = seed_fallback(session)
         yield session, raw, run
     engine.dispose()
+
+
+def test_unattempted_expired_event_fallback_reissues_only_a_fresh_request(fallback_session):
+    from pathlib import Path
+
+    from test_kolarac_program import ARTICLE, HALL, PAGE, PROGRAM, START, TITLE, _pdf
+
+    from relocant_media.collectors.kolarac_program import parse_linked_program
+
+    session, _, _ = fallback_session
+    config = next(c for c in load_source_registry(Path("cities/belgrade/sources"))
+                  if c.id == "venue_kolarac")
+    sync_source(session, "belgrade", config)
+    now = datetime(2026, 11, 22, 20, tzinfo=UTC)
+    retry = now + timedelta(minutes=5)
+    later = now + timedelta(minutes=45)
+    title, body = parse_linked_program(_pdf(TITLE, f"23. novembra u 18, u {HALL}."), PROGRAM, START)
+    item = CollectedRawItem(
+        config.id, ARTICLE, ARTICLE, title, body, now - timedelta(minutes=30),
+        published_at_precision="instant",
+    )
+    capture_collected_batch(session, [item])
+    raw_id = session.scalar(select(RawItem.id).where(RawItem.source_id == config.id))
+    assert raw_id is not None
+    assert before_attempt(session, raw_id, now=now)
+    after_error(session, raw_id, "GeminiWorkerError", now=now)
+    assert before_attempt(session, raw_id, now=retry)
+    after_error(session, raw_id, "GeminiWorkerError", now=retry)
+    cycle = SchedulerRun(
+        task_key="editorial-primary:belgrade", task_type="editorial_primary", city="belgrade",
+        status="partial", scheduled_for=retry, started_at=retry, finished_at=retry,
+        details={"processing_errors": [{"raw_item_id": raw_id, "error_type": "GeminiWorkerError"}]},
+    )
+    session.add(cycle)
+    session.flush()
+    early_request = gpt_fallback.build_request(session, now=retry, scheduler_run_id=cycle.id)
+    assert early_request is not None
+    early_presentation = early_request["candidates"][0]["presentation_by_rubric"]["weekend"]
+    assert early_presentation.get("event_place") is None
+    blocked = lifecycle_state(session, raw_id, now=later)
+    assert blocked["reason"] == "fallback_deadline_exceeded" and blocked["fallback_attempts"] == 0
+    assert sweep_materials(session, city="belgrade", now=later, raw_ids={raw_id}).fallback_ids == ()
+
+    capture_collected_batch(session, [replace(item, source_html=PAGE)])
+    assert gpt_fallback.build_request(session, now=later, scheduler_run_id=cycle.id) is None
+    assert sweep_materials(session, city="belgrade", now=later, raw_ids={raw_id}).fallback_ids == (
+        raw_id,
+    )
+    reissued = lifecycle_state(session, raw_id, now=later)
+    assert reissued["deadline_at"] == blocked["deadline_at"]
+    assert reissued["previous_fallback_deadline_at"] == blocked["fallback_deadline_at"]
+    assert reissued["attempts"] == 2 and reissued["fallback_attempts"] == 0
+    fresh_request = gpt_fallback.build_request(session, now=later, scheduler_run_id=cycle.id)
+    assert fresh_request is not None
+    place = fresh_request["candidates"][0]["presentation_by_rubric"]["weekend"]["event_place"]
+    assert place["starts_at"] == "2026-11-23T18:00:00+01:00"
+    with pytest.raises(gpt_fallback.FallbackValidationError, match="раньше нового окна"):
+        gpt_fallback.validate_fallback_candidate(session, early_request, raw_id, now=later)
+    gpt_fallback.validate_fallback_candidate(session, fresh_request, raw_id, now=later)
+
+    again = later + timedelta(minutes=31)
+    assert lifecycle_state(session, raw_id, now=again)["reason"] == "fallback_deadline_exceeded"
+    assert sweep_materials(session, city="belgrade", now=again, raw_ids={raw_id}).fallback_ids == ()
 
 
 def _refresh_exchange(request: dict, raw_id: int, urls: list[str]):
