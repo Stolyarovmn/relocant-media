@@ -3,10 +3,10 @@ const scope = new URL(self.registration.scope);
 const paths = [
   "./",
   "./style.css?v=15",
-  "./app.js?v=22",
-  "./core.js?v=17",
+  "./app.js?v=23",
+  "./core.js?v=18",
   "./calendar.js?v=5",
-  "./places.js?v=18",
+  "./places.js?v=19",
   "./favorites.js?v=1",
   "./layer-views.js?v=2",
   "./snapshots.js?v=1",

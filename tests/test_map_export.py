@@ -1,6 +1,6 @@
 import gzip
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -212,8 +212,16 @@ def test_map_exports_three_layers_and_archived_button_target(tmp_path):
     actual = next(e for e in read_map_feed(path.read_bytes()).incidents if e.kind == "water")
     assert actual.lines[0].coordinates == ((44.77, 20.49), (44.78, 20.49), (44.79, 20.49))
 
-    export_map_snapshot(database, path, "2027-01-12T07:00:00+00:00")
-    assert [e.id for e in read_map_feed(path.read_bytes()).incidents] == [road.id]
+    old_active = datetime(2026, 12, 1, 7, tzinfo=UTC)
+    export_map_snapshot(database, path, old_active.isoformat())
+    ongoing, = read_map_feed(path.read_bytes()).incidents
+    assert ongoing.id == road.id and ongoing.ends_at > old_active
+    for completed in by_kind.values():
+        limit = completed.ends_at + timedelta(days=14)
+        export_map_snapshot(database, path, limit.isoformat())
+        assert completed.id in {item.id for item in read_map_feed(path.read_bytes()).incidents}
+        export_map_snapshot(database, path, (limit + timedelta(seconds=1)).isoformat())
+        assert completed.id not in {item.id for item in read_map_feed(path.read_bytes()).incidents}
 
     engine = create_engine(f"sqlite:///{database}")
     with Session(engine) as session:
@@ -221,10 +229,14 @@ def test_map_exports_three_layers_and_archived_button_target(tmp_path):
         changed.body = changed.body.replace("05.12.2026", "07.12.2026")
         session.commit()
     engine.dispose()
-    export_map_snapshot(database, path, "2027-01-12T07:00:00+00:00")
-    archived, = read_map_feed(path.read_bytes()).incidents
+    export_map_snapshot(database, path, (NOW + timedelta(days=14)).isoformat())
+    archived = next(item for item in read_map_feed(path.read_bytes()).incidents
+                    if item.id == road.id)
     assert archived.id == road.id and archived.archived
     assert archived.lines == road.lines
+    assert archived.ends_at is None and archived.published_at == NOW
+    export_map_snapshot(database, path, (NOW + timedelta(days=14, seconds=1)).isoformat())
+    assert road.id not in {item.id for item in read_map_feed(path.read_bytes()).incidents}
 
 
 def test_public_map_schema_rejects_unexpected_private_fields():

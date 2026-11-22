@@ -1,7 +1,7 @@
 import {
   agendaDays, belgradeDate, clusterMapPoints, incidentTimes, launchPlaces, placeCategory, placeCountdown,
   placeKinds, placeOnDay, placeOptionLabel, placeStatus, readPlaces, shareLink, straightLineDistance, updateStamp,
-} from "./core.js?v=17";
+} from "./core.js?v=18";
 import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
 import { agendaFavorites } from "./favorites.js?v=1";
 import { snapshotNotice } from "./snapshots.js?v=1";
@@ -416,7 +416,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     const message = state.failed
       ? state.loaded ? snapshotNotice(state.stamp) : "Афиша недоступна. Повторите загрузку при подключении."
       : !state.loaded ? "Загружаем события."
-        : state.pending ? "Событие из ссылки пока отсутствует в афише."
+        : state.pending ? "Карточка недоступна. Архив афиши — до 14 дней."
           : !entries.length ? emptyAgendaMessage()
             : state.group ? `Площадок: ${new Set(entries.map((place) => `${place.lat},${place.lon}`)).size}. Выберите концерт в списке или на карте.` : "";
     feedback.textContent = message;
@@ -490,7 +490,9 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     state.loading = true;
     if (state.enabled) onSync(state);
     try {
-      const { entries, generatedAt, cached } = await loadSnapshot("./events.json", readPlaces);
+      const { entries, generatedAt, cached } = await loadSnapshot(
+        "./events.json", (feed) => readPlaces(feed, Date.now()),
+      );
       state.entries = entries;
       state.snapshotDate = generatedAt;
       state.stamp = updateStamp(generatedAt);

@@ -162,8 +162,10 @@ def test_feed_only_exposes_allowlisted_published_fields_and_keeps_archive_id(ses
     assert event.published_at == post.published_at
     assert event.published_at != event.starts_at
     assert event.ends_at is None and not event.archived
-    later = export_events(session, observed_at=NOW + timedelta(days=20))
+    limit = event.expires_at + timedelta(days=14)
+    later = export_events(session, observed_at=limit)
     assert later.events[0].archived and later.events[0].id == event.id
+    assert export_events(session, observed_at=limit + timedelta(seconds=1)).events == ()
     assert "PRIVATE_INTAKE" not in first.model_dump_json()
     assert "reviews" not in first.model_dump_json() and "raw_item_id" not in first.model_dump_json()
     assert "courses" not in event.model_dump()
@@ -240,9 +242,9 @@ def test_reviewed_event_matches_a_sent_post_even_when_the_article_is_media(sessi
     assert event.post_url == "https://t.me/eduvbelgrad/121"
     assert event.published_at == post.published_at
     assert event.visitor_hours == "Ежедневно 12:00–20:00"
-    assert not event.archived and export_events(session, observed_at=checked + timedelta(
-        days=20,
-    )).events[0].archived
+    limit = event.expires_at + timedelta(days=14)
+    assert not event.archived and export_events(session, observed_at=limit).events[0].archived
+    assert export_events(session, observed_at=limit + timedelta(seconds=1)).events == ()
 
 
 @pytest.mark.parametrize("message_id", [100, 104, 141])

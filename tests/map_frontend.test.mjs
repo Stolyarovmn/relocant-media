@@ -18,6 +18,30 @@ import {
 } from "../web/newsroom/map/layer-views.js";
 import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
 
+test("старый снимок не открывает архив старше 14 дней", () => {
+  const start = "2026-11-01T08:00:00+01:00";
+  const end = "2026-11-02T10:00:00+01:00";
+  const boundary = Date.parse("2026-11-16T10:00:00+01:00");
+  const id = (char) => "event_" + char.repeat(20);
+  const base = { title: "Объявление", source_url: "https://www.beograd.rs/", kind: "water" };
+  const incidents = { version: 1, incidents: [
+    { ...base, id: id("a"), starts_at: start, ends_at: end },
+    { ...base, id: id("b"), kind: "road", archived: true, published_at: end },
+    { ...base, id: id("c"), kind: "road", archived: true },
+    { ...base, id: id("d"), kind: "road", starts_at: start, ends_at: "2027-01-01T00:00:00+01:00" },
+    { ...base, id: id("e"), windows: [{ starts_at: start, ends_at: end }] },
+  ] };
+  const event = { ...base, kind: "event", timezone: "Europe/Belgrade",
+    venue: { name: "Коларац", latitude: 44.819, longitude: 20.457 },
+    id: id("1"), starts_at: start, expires_at: end };
+  const events = { version: 1, events: [event] };
+  assert.deepEqual(readIncidents(incidents, boundary).map(({ id }) => id),
+    [id("a"), id("b"), id("d"), id("e")]);
+  assert.deepEqual(readIncidents(incidents, boundary + 1).map(({ id }) => id), [id("d")]);
+  assert.equal(readPlaces(events, boundary).length, 1);
+  assert.equal(readPlaces(events, boundary + 1).length, 0);
+});
+
 test("тепловой обзор сохраняет точную геометрию на крупном масштабе и при точном поиске", () => {
   assert.equal(layerView("unrecognized"), "detail");
   assert.equal(layerView("corridor"), "corridor");

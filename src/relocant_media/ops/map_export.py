@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.collectors.bgprevoz_changes import transport_notice_suspended
-from relocant_media.domain.map_links import map_event_id
+from relocant_media.domain.map_links import MAP_ARCHIVE_AGE, map_event_id
 from relocant_media.services.local_outage_geometry import (
     AreaIndex,
     AreaPolygon,
@@ -598,10 +598,11 @@ def _published_road(
             incident = _road(document, notice, geometry, post.title, streets)
             if incident is not None:
                 return incident
-    # Старый deep link открывает геометрию уже опубликованной версии как архивную.
+    # Дата публикации ограничивает жизнь сохранённой геометрии без проверенного окна.
     lines = _road_lines(reviewed)
-    return _incident(document, "road", post.title, (), archived=True, lines=tuple(lines),
-                     source_map_url=point["notice_url"])
+    archived = _incident(document, "road", post.title, (), archived=True, lines=tuple(lines),
+                         source_map_url=point["notice_url"])
+    return archived.model_copy(update={"published_at": post.published_at or document.published_at})
 
 
 def export_map(
@@ -612,6 +613,7 @@ def export_map(
         raise ValueError("snapshot timestamp requires a timezone")
     published = (EditorialRun.delivery_status == "sent") & (Post.telegram_message_id.is_not(None))
     cutoff = observed_at - timedelta(days=21)
+    archive_cutoff = observed_at.astimezone(UTC) - MAP_ARCHIVE_AGE
     recent = Source.enabled.is_(True) & or_(
         RawItem.ingested_at >= cutoff, RawItem.source_id == SOURCE_ID,
     )
@@ -644,8 +646,6 @@ def export_map(
                 continue
             geometry = extract_transport_map(document, _source_html(session, item)[0])
             incident = _road(document, document, geometry, None, streets or {})
-            if incident is not None and incident.ends_at is not None and incident.ends_at < cutoff:
-                continue
         else:
             html, geography = _source_html(session, item)
             point = build_utility_point(document, html, geography)
@@ -661,6 +661,13 @@ def export_map(
             else:
                 incident = None
         if incident is None:
+            continue
+        end = incident.ends_at
+        if incident.archived and end is None:
+            end = incident.published_at
+            if end is None:
+                continue
+        if end is not None and end < archive_cutoff:
             continue
         if (incident.kind == "road" and not incident.archived
                 and incident.source_map_url != incident.source_url):
