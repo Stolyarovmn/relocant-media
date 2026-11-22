@@ -83,6 +83,7 @@ from relocant_media.domain.freshness import (
     freshness_decision,
 )
 from relocant_media.domain.pacing import (
+    PendingDelivery,
     delivery_order,
     morning_deadline,
     morning_release,
@@ -1321,16 +1322,24 @@ async def publish_pending(
         hold_until_morning,
     )
     with Session(engine) as session:
-        query = select(EditorialRun.raw_item_id, RawItem.published_at).join(
-            RawItem, RawItem.id == EditorialRun.raw_item_id).where(
+        outcome = EditorialRun.outcome
+        package_fields = outcome["_package"]
+        query = select(
+            EditorialRun.raw_item_id,
+            RawItem.published_at,
+            outcome["ranking"]["category"].as_string(),
+            package_fields["urgent"].as_json(),
+            package_fields["presentation"]["event_place"].as_json(),
+        ).join(RawItem, RawItem.id == EditorialRun.raw_item_id).where(
             EditorialRun.delivery_status == "pending",
         )
         if only_raw_ids is not None:
             query = query.where(EditorialRun.raw_item_id.in_(only_raw_ids))
         ids = delivery_order(
-            [(row[0], row[1]) for row in session.execute(
-                query.order_by(EditorialRun.raw_item_id))],
-            now=quiet_hours.utc_now())
+            (PendingDelivery(raw_id, published, str(category or ""), urgent is True, event_place)
+             for raw_id, published, category, urgent, event_place in session.execute(query)),
+            now=quiet_hours.utc_now(),
+        )
         last_sent_at = session.scalar(select(func.max(Post.published_at)).join(
             EditorialRun, EditorialRun.post_id == Post.id).where(
                 EditorialRun.delivery_status == "sent",

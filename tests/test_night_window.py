@@ -7,7 +7,12 @@ from sqlalchemy.orm import Session
 from test_channel_delivery import reviewed as reviewed_fixture
 
 from relocant_media.domain import quiet_hours
-from relocant_media.domain.pacing import delivery_order, morning_deadline, morning_release
+from relocant_media.domain.pacing import (
+    PendingDelivery,
+    delivery_order,
+    morning_deadline,
+    morning_release,
+)
 from relocant_media.ops import server_cycle
 from relocant_media.services.material_lifecycle import (
     delivery_deadline,
@@ -104,27 +109,62 @@ def test_today_news_goes_before_yesterday_backlog():
     yesterday = local(2026, 11, 22, 21, 0).astimezone(UTC)
     today = local(2026, 11, 23, 7, 30).astimezone(UTC)
     naive_today = today.replace(tzinfo=None)  # SQLite отдаёт UTC без зоны
-    assert delivery_order([(1, yesterday), (2, today), (3, None), (4, naive_today)],
-                          now=now) == [2, 4, 1, 3]
-    # Днём всё «сегодня», порядок остаётся по поступлению.
-    assert delivery_order([(5, today), (6, today)], now=now) == [5, 6]
+    pending = [
+        PendingDelivery(1, yesterday), PendingDelivery(2, today),
+        PendingDelivery(3, None), PendingDelivery(4, naive_today),
+    ]
+    assert delivery_order(pending, now=now) == [2, 4, 1, 3]
+    assert delivery_order(pending, now=local(2026, 11, 23, 12)) == [1, 2, 3, 4]
+
+
+def test_morning_order_respects_urgent_and_verified_event_windows():
+    now = local(2026, 11, 23, 8, 5)
+    yesterday = local(2026, 11, 22, 21)
+    today = local(2026, 11, 23, 7, 30)
+    pending = [
+        PendingDelivery(1, today),
+        PendingDelivery(2, yesterday, event_place={"version": 2, "occurrences": [
+            {"starts_at": "2026-11-24T19:00:00+01:00"},
+            {"starts_at": "2026-11-23T20:00:00+01:00"},
+        ]}),
+        PendingDelivery(3, yesterday, event_place={
+            "starts_at": "2026-11-23T06:00:00+01:00",
+            "ends_at": "2026-11-23T07:00:00+01:00",
+        }),
+        PendingDelivery(4, yesterday, event_place={
+            "starts_at": "2026-11-22T18:00:00+01:00",
+            "ends_at": "2026-11-23T10:00:00+01:00",
+        }),
+        PendingDelivery(5, yesterday, category="utilities"),
+        PendingDelivery(6, yesterday, event_place={"starts_at": "2026-11-23T22:30:00"}),
+    ]
+    assert delivery_order(pending, now=now) == [5, 2, 4, 1, 3, 6]
 
 
 @pytest.mark.asyncio
-async def test_morning_cycle_tries_today_story_first(reviewed, monkeypatch):
+@pytest.mark.parametrize("scheduled_today", [False, True])
+async def test_morning_cycle_prioritizes_today_stories(reviewed, monkeypatch, scheduled_today):
     session, run = reviewed
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
     morning = local(2026, 11, 23, 8, 5).astimezone(UTC)
     monkeypatch.setattr(quiet_hours, "utc_now", lambda: morning)
     old = session.get(RawItem, run.raw_item_id)
     old.published_at = local(2026, 11, 22, 21, 0).astimezone(UTC)
+    base = {**run.outcome, "ranking": {**run.outcome["ranking"], "category": "culture"}}
+    run.outcome = base if not scheduled_today else {
+        **base, "_package": {
+            **base["_package"], "presentation": {"event_place": {
+                "version": 1, "starts_at": "2026-11-23T20:00:00+01:00",
+            }},
+        },
+    }
     fresh = RawItem(source_id=old.source_id, external_id=old.external_id + "-today",
                     url=old.url + "?today", title=old.title, body=old.body,
                     published_at=local(2026, 11, 23, 7, 30).astimezone(UTC),
                     published_at_precision=old.published_at_precision)
     session.add(fresh)
     session.flush()
-    session.add(EditorialRun(raw_item_id=fresh.id, outcome=dict(run.outcome),
+    session.add(EditorialRun(raw_item_id=fresh.id, outcome=base,
                              evidence=dict(run.evidence),
                              editorial_rule_version=run.editorial_rule_version,
                              delivery_status="pending"))
@@ -134,4 +174,5 @@ async def test_morning_cycle_tries_today_story_first(reviewed, monkeypatch):
         "relocant_media.services.material_lifecycle.before_delivery_attempt",
         lambda session, raw_id, **kwargs: tried.append(raw_id) and False)
     assert await server_cycle.publish_pending(session.get_bind(), enabled=True) == []
-    assert tried == [fresh.id, run.raw_item_id]
+    expected = [run.raw_item_id, fresh.id] if scheduled_today else [fresh.id, run.raw_item_id]
+    assert tried == expected
