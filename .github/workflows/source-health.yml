@@ -15,11 +15,16 @@ on:
       - "docs/serbian-news-discovery.json"
       - "src/relocant_media/collectors/**"
       - "src/relocant_media/ops/source_audit.py"
+      - "src/relocant_media/ops/source_silence.py"
       - "src/relocant_media/ops/changed_source_ids.py"
       - "src/relocant_media/sources/**"
 
 permissions:
   contents: read
+
+concurrency:
+  group: source-health-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -31,15 +36,39 @@ jobs:
           # PR strict probes compare the real base/head source YAML files.
           fetch-depth: 0
       - uses: ./.github/actions/install-python
+      - name: Restore source check history
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/source-health-silence.json
+          key: source-health-silence-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: source-health-silence-v1-
       - name: Audit registered sources
+        id: audit
+        shell: bash
         run: |
+          set -euo pipefail
+          state=()
+          if [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_EVENT_NAME" != pull_request ]]; then
+            state+=(--silence-state "$RUNNER_TEMP/source-health-silence.json")
+          fi
           python -m relocant_media.ops.source_audit \
             --online \
             --check-belgrade-weather \
             --check-news-discovery \
             --fail-on-error \
             --require-active \
-            --summary "$GITHUB_STEP_SUMMARY"
+            --summary "$GITHUB_STEP_SUMMARY" "${state[@]}"
+      - name: Save source check history
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/main'
+          && github.event_name != 'pull_request' && steps.audit.outputs.silence_history_saved == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/source-health-silence.json
+          key: source-health-silence-v1-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Strict audit changed source configs
         if: github.event_name == 'pull_request'
         shell: bash

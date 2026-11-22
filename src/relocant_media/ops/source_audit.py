@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from relocant_media.collectors.tls import (
     source_ssl_context,
 )
 from relocant_media.domain.freshness import freshness_decision
+from relocant_media.ops.source_silence import update_source_silence
 from relocant_media.sources.registry import SourceConfig, load_source_registry
 
 _TRANSPORT_ATTEMPTS = 3
@@ -60,6 +62,7 @@ async def audit_sources(
     source_ids: tuple[str, ...] = (),
     check_belgrade_weather: bool = False,
     check_news_discovery: bool = False,
+    silence_state: Path | None = None,
 ) -> dict[str, Any]:
     sources = load_source_registry(directory)
     if source_ids:
@@ -155,8 +158,13 @@ async def audit_sources(
                     pass
                 discovery_rows.append(observation)
 
+    checked_at = datetime.now(UTC)
+    silence_saved = (
+        update_source_silence(rows, silence_state, checked_at)
+        if online and silence_state is not None else None
+    )
     return {
-        "checked_at": datetime.now(UTC).isoformat(),
+        "checked_at": checked_at.isoformat(),
         "online": online,
         "ai_calls": 0,
         "sources": rows,
@@ -167,6 +175,7 @@ async def audit_sources(
         "error_count": sum(row["status"] == "error" for row in rows),
         **({"weather_sources": weather} if weather is not None else {}),
         **({"news_discovery_feeds": discovery_rows} if online and check_news_discovery else {}),
+        **({"silence_history_saved": silence_saved} if silence_saved is not None else {}),
     }
 
 
@@ -208,10 +217,14 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
         f"- partial: **{result.get('partial_count', 0)}**",
         f"- transport errors: **{result.get('transport_error_count', 0)}**",
         f"- extraction/protocol errors: **{result.get('error_count', 0)}**",
+    ]
+    if result.get("silence_history_saved") is False:
+        lines.append("- Историю проверок источников не удалось сохранить.")
+    lines.extend((
         "",
         "| Source | Status | Fresh | Details |",
         "|---|---|---:|---|",
-    ]
+    ))
     for row in result.get("sources", []):
         if row.get("status") == "planned":
             continue
@@ -226,7 +239,10 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
             if row.get("tls_hint"):
                 details += f" ({row['tls_hint']})"
         elif row.get("status") == "partial":
-            details = f"item_failures={len(row.get('item_failures', []))}"
+            if row.get("health_reason"):
+                details = f"{row['health_reason']}, {row['empty_reason']}"
+            else:
+                details = f"item_failures={len(row.get('item_failures', []))}"
         else:
             parts = []
             if row.get("empty_reason"):
@@ -236,6 +252,9 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
             if row.get("attempts", 1) > 1:
                 parts.append(f"attempts={row['attempts']}")
             details = ", ".join(parts)
+        if "silence_hours" in row:
+            details += (f", тишина {row['silence_hours']} ч с `{row['silence_since']}`"
+                        f", порог {row['silence_warning_days']} дн.")
         lines.append(
             "| {id} | {status} | {fresh} | {details} |".format(
                 id=row.get("id", "unknown"),
@@ -273,6 +292,7 @@ def main() -> None:
     parser.add_argument("--check-news-discovery", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--summary", type=Path)
+    parser.add_argument("--silence-state", type=Path)
     parser.add_argument("--fail-on-error", action="store_true")
     parser.add_argument("--fail-on-partial", action="store_true")
     parser.add_argument("--fail-on-transport", action="store_true")
@@ -286,6 +306,7 @@ def main() -> None:
             source_ids=tuple(args.source_id),
             check_belgrade_weather=args.check_belgrade_weather,
             check_news_discovery=args.check_news_discovery,
+            silence_state=args.silence_state,
         )
     )
     if args.output:
@@ -296,6 +317,9 @@ def main() -> None:
     if args.summary:
         args.summary.write_text(render_source_health_markdown(result), encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False))
+    if result.get("silence_history_saved") and (output_path := os.environ.get("GITHUB_OUTPUT")):
+        with Path(output_path).open("a", encoding="utf-8") as output:
+            output.write("silence_history_saved=true\n")
 
     exit_code = source_health_exit_code(
         result,

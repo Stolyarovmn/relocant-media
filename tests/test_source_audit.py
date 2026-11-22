@@ -166,6 +166,35 @@ def test_discovery_audit_marks_unreadable_feed_without_counting_it_as_news(monke
     assert "| rts_news | error | - | 0 |" in render_source_health_markdown(report)
 
 
+def test_renderer_keeps_prolonged_silence_separate_from_failures(monkeypatch, tmp_path):
+    client = httpx.AsyncClient
+    monkeypatch.setattr(source_audit.httpx, "AsyncClient", lambda **kwargs: client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=[])),
+        **kwargs,
+    ))
+    now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(source_audit, "datetime", Clock)
+    for _ in range(15):
+        report = asyncio.run(source_audit.audit_sources(
+            Path("cities/belgrade/sources"), online=True,
+            source_ids=("bvk_outage_news",), silence_state=tmp_path / "state.json",
+        ))
+        now += timedelta(days=1)
+
+    assert report["silence_history_saved"] is True
+    assert report["partial_count"] == 1
+    assert report["error_count"] == 0
+    assert report["sources"][0]["empty_reason"] == "empty_index"
+    assert "prolonged_silence, empty_index, тишина 336 ч" in render_source_health_markdown(report)
+    assert source_health_exit_code(report, fail_on_error=True) == 0
+
+
 @pytest.mark.parametrize(("scenario", "status"), [
     ("index_changed", "error"), ("article_changed", "error"), ("old_article", "empty"),
 ])
