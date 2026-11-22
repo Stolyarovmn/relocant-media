@@ -7,6 +7,25 @@ delivery_window_minutes: 45
 # #321: a morning digest missed during an outage still goes out until 11:00.
 morning_catch_up_until: '11:00'
 reminders_from: '2026-11-16'
+# Ключи — нормализованные сербские названия 17 общин Белграда.
+municipality_labels:
+  барајево: Бараево
+  вождовац: Вождовац
+  врачар: Врачар
+  гроцка: Гроцка
+  земун: Земун
+  звездара: Звездара
+  лазаревац: Лазаревац
+  младеновац: Младеновац
+  нови београд: Новый Белград
+  обреновац: Обреновац
+  палилула: Палилула
+  раковица: Раковица
+  савски венац: Савски-Венац
+  сопот: Сопот
+  стари град: Стари-Град
+  сурчин: Сурчин
+  чукарица: Чукарица
 official_reminder_sources:
   '2026-11-17':
     - https://www.beograd.rs/lat/beoinfo-vesti/a116643/Delovi-Barajeva-u-utorak-bez-vode.html
