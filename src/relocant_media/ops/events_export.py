@@ -185,6 +185,8 @@ class ReviewedMapEvent(PublicModel):
     visitor_hours: Label | None = None
     schedule_note: Label | None = None
     evidence_urls: tuple[str, ...] = ()
+    # Проверенная трасса или маршрут события (забег, шествие) из первоисточника.
+    courses: Courses = ()
 
     def card(
         self, city: str, timezone: str, now: datetime, *, published_at: datetime | None = None,
@@ -521,7 +523,7 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
                 if source is None or public_article_url(document.url, source.url) is None:
                     continue
                 place = resolve_saved_event_place(
-                    session, document, ids, profile=profile, legacy_published=attested is None,
+                    session, document, ids, profile=profile,
                 )
                 if place is None:
                     continue

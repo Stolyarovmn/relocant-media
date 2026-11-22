@@ -12,10 +12,8 @@ from bs4 import BeautifulSoup, Tag
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, CityEditorialProfile
-from relocant_media.domain.event_programs import MARATHON_PAGE_URL, MARATHON_SOURCE_ID
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.exhibition_map_point import MAX_HTML_BYTES
-from relocant_media.services.marathon_event_map import marathon_event_facts
 
 _DOB_HOSTS = {"domomladine.org", "www.domomladine.org"}
 _DOB_CONTACT = "https://domomladine.org/kontakt/"
@@ -27,25 +25,6 @@ _DOB_ROOMS = {
     "dob//velika sala": "Dom omladine Beograda · Velika sala",
     "dob//klub": "Dom omladine Beograda · Klub DOB",
 }
-_DOB_INTERVIEW_2026 = (
-    "https://domomladine.org/karlos-sances-flamenko-gitarista-u-susret-koncertu-u-"
-    "domu-omladine-flamenko-svoju-snagu-crpi-iz-iskrenosti-i-emocija/"
-)
-_DOB_PROGRAM_2026 = (
-    "https://domomladine.org/koncerti/svetski-dan-flamenka-u-domu-omladine-beograda-"
-    "el-sonido-de-la-vida-zvuk-zivota/"
-)
-_CUKARICA_POST_2026 = (
-    "https://www.cukarica.rs/vest/707-muzicko-poetski-kabare-da-to-su-bili-dani-"
-    "na-sceni-kulturnog-centra-cukarica/"
-)
-_CUKARICA_PROGRAM = "https://www.kccukarica.rs/srl/program/dramski-program/vecernja-scena/"
-_SANU_ARTICLE = (
-    "https://www.beograd.rs/lat/zivot-u-beogradu/umetnicki-program/a116694/"
-    "pocinje-sa-radom-novi-galerijski-prostor-u-sanu.html"
-)
-_SANU_PROGRAM = "https://www.sanu.ac.rs/otvaranje-novog-galerijskog-prostora-sanu-u-kneza-mihaila-36/"
-_SANU_PLACE = "https://www.openstreetmap.org/node/4014618797"
 CUKARICA_STAGE = re.compile(
     r'на великој сцени културног центра\s*[„"«]?чукарица[“"»]?', re.IGNORECASE,
 )
@@ -250,21 +229,17 @@ def _cukarica_facts(document: EvidenceDocument) -> dict[str, Any] | None:
     if not name_match or len(name_match[1]) > 260:
         return None
     name = name_match[1]
-    confirmed = document.url == _CUKARICA_POST_2026 and name.casefold() == "да, то су били дани"
     gallery = CUKARICA_GALLERY.search(" ".join(document.body.split())) is not None
     published = (document.published_at.astimezone(ZoneInfo("Europe/Belgrade"))
                  if document.published_at else None)
-    year = (published.year if gallery and published else
-            2026 if confirmed else None)
+    # Год без явного указания берём из даты публикации и проверяем окно анонса.
     start = cukarica_venue_start(
         document.body, CUKARICA_GALLERY if gallery else CUKARICA_STAGE,
-        corroborated_year=year,
+        corroborated_year=published.year if published else None,
     )
-    if start is None or (confirmed and start != datetime(2026, 11, 24, 20)):
-        return None
-    if gallery and (published is None or not timedelta(0) <= (
+    if start is None or published is None or not timedelta(0) <= (
         start - published.replace(tzinfo=None)
-    ) <= timedelta(days=120)):
+    ) <= timedelta(days=120):
         return None
     return {
         "event_name": name,
@@ -277,24 +252,10 @@ def _cukarica_facts(document: EvidenceDocument) -> dict[str, Any] | None:
         "starts_at": start.isoformat(),
         "ends_at": None,
         "time_basis": "source_cukarica_gallery" if gallery else "source_cukarica_main_stage",
-        "schedule_source_url": _CUKARICA_PROGRAM if confirmed else document.url,
+        "schedule_source_url": document.url,
         "coordinate_source_url": "https://www.openstreetmap.org/node/2567920976",
         "venue_source_url": "https://www.kccukarica.rs/srl/kontakt/",
     }
-
-
-def verified_legacy_event_schedule(document: EvidenceDocument) -> dict[str, Any] | None:
-    """Сверенные карточки программы для публикаций до сохранения HTML."""
-    if document.source_id == "cukarica_news" and document.url == _CUKARICA_POST_2026:
-        return _cukarica_facts(document)
-    name = "El Sonido de la Vida"
-    if (document.source_id != "venue_youth_centre" or document.url != _DOB_INTERVIEW_2026
-            or name.casefold() not in document.body.casefold()):
-        return None
-    return _dob_schedule_facts(
-        name, _DOB_ROOMS["dob//amerikana"], datetime(2026, 11, 16, 20),
-        "source_dob_linked_concert", _DOB_PROGRAM_2026,
-    )
 
 
 def extract_event_adapter(
@@ -304,42 +265,6 @@ def extract_event_adapter(
     if (profile.city_id != "belgrade" or not isinstance(source_html, str)
             or len(source_html.encode()) > MAX_HTML_BYTES):
         return None
-    if document.source_id == MARATHON_SOURCE_ID:
-        return (
-            marathon_event_facts(document.body, source_html)
-            if document.url == MARATHON_PAGE_URL else None
-        )
-    if document.source_id == "city_beograd_news" and document.url == _SANU_ARTICLE:
-        from relocant_media.collectors.beograd_article import (
-            ArticleExtractionError,
-            parse_beograd_article,
-        )
-        from relocant_media.sources.registry import load_source_file
-
-        source = load_source_file(DEFAULT_CITIES_ROOT / "belgrade/sources/city_beograd_news.yaml")
-        try:
-            item = parse_beograd_article(source_html, source, document.url)
-        except ArticleExtractionError:
-            return None
-        if (item.title, item.body) != (document.title, document.body):
-            return None
-        lead = " ".join(item.body.split("\n\n", 1)[0].casefold().split())
-        if not (
-            "topografija pogleda" in lead and "novi galerijski prostor sanu" in lead
-            and "20. novembra, u 19 sati" in lead and "kneza mihaila 36" in lead
-            and item.published_at is not None and item.published_at.year == 2026
-            and not _CHANGE.search(item.body)
-        ):
-            return None
-        return {
-            "event_name": "Topografija pogleda",
-            "venue": {"name": "Новая галерея САНУ", "address": "Kneza Mihaila 36, Beograd",
-                      "latitude": 44.8180268, "longitude": 20.4568544},
-            "starts_at": datetime(2026, 11, 20, 19).isoformat(),
-            "ends_at": None, "time_basis": "source_sanu_opening",
-            "schedule_source_url": _SANU_PROGRAM, "venue_source_url": _SANU_PROGRAM,
-            "coordinate_source_url": _SANU_PLACE,
-        }
     if document.source_id == "cukarica_news":
         from relocant_media.collectors.cukarica_news import (
             CukaricaExtractionError,

@@ -20,7 +20,6 @@ from relocant_media.domain.map_links import map_event_id, map_occurrence_id
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.event_place_adapters import (
     extract_event_adapter,
-    verified_legacy_event_schedule,
 )
 from relocant_media.services.exhibition_map_point import (
     MAX_HTML_BYTES,
@@ -297,7 +296,6 @@ def resolve_saved_event_place(
     document_ids: list[int],
     *,
     profile: CityEditorialProfile,
-    legacy_published: bool = False,
 ) -> dict[str, Any] | None:
     """Только точный официальный источник и валидный сохранённый HTML того же документа."""
     for raw_id in document_ids:
@@ -318,12 +316,6 @@ def resolve_saved_event_place(
         ):
             continue
         if snapshot is None:
-            if legacy_published and profile.city_id == "belgrade":
-                facts = verified_legacy_event_schedule(document)
-                if facts is not None:
-                    return _verified_place(
-                        _base_document(document), facts, profile, html_sha256=None,
-                    )
             continue
         if (snapshot.source_page != document.url or snapshot.source_html is None
                 or not _valid_snapshot(snapshot)):

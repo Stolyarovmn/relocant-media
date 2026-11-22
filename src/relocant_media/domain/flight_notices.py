@@ -1,8 +1,10 @@
-"""Узкий стоп повторной отдельной отмены рейса; не решение о новизне.
+"""Стоп повторной отдельной новости об отмене авиарейса; не решение о новизне.
 
-Совпадение перевозчика, пары городов и дня требует проверенного связанного
-обновления. Различие формулировок/числа рейсов само по себе не даёт второй выпуск.
-Другие перевозчики и нераспознанные маршруты этим правилом не классифицируются.
+Совпадение явно названной пары городов и дня требует проверенного связанного
+обновления. Различие формулировок, числа рейсов или написания перевозчика само по
+себе не даёт второй выпуск. Перевозчик не входит в ключ: удержание ведёт только на
+связанную проверку, где редактор видит исходный пост. Нераспознанные маршруты и
+даты этим правилом не классифицируются.
 """
 import re
 from collections.abc import Iterable
@@ -13,7 +15,6 @@ from relocant_media.domain.event_facts import event_dates
 
 FLIGHT_REVIEW_REASON = "flight_linked_review"
 _WINDOW = timedelta(hours=72)
-_AIRLINE = re.compile(r"\b(?:air\s+serbia|er\s+srbija|[эе]р\s+серби[яи])\b", re.I)
 _ROUTE = re.compile(
     r"\b(?:между|из)\s+([А-ЯЁ][а-яё-]{3,})\s+(?:и|в)\s+([А-ЯЁ][а-яё-]{3,})\b")
 _WEEKDAYS = ("понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресень")
@@ -27,8 +28,8 @@ def _city(value: str) -> str:
 def _notice(title: str, body: str, reference: datetime) -> tuple[object, ...] | None:
     if reference.tzinfo is None or max(len(title), len(body)) > 8000:
         return None
-    if not (_AIRLINE.search(title) and re.search(r"\bотмен\w*", title, re.I)
-            and re.search(r"\bрейс\w*", title, re.I)):
+    if not (re.search(r"\bотмен\w*", title, re.I)
+            and re.search(r"\b(?:авиа)?рейс\w*", title, re.I)):
         return None
     if re.search(r"\bне\s+(?:будет\s+)?отмен\w*", title, re.I):
         return None
@@ -53,7 +54,7 @@ def _notice(title: str, body: str, reference: datetime) -> tuple[object, ...] | 
         datetime.fromisoformat(next(iter(dates)))
     except ValueError:
         return None
-    return ("air_serbia", next(iter(routes)), dates)
+    return ("flight_cancellation", next(iter(routes)), dates)
 
 
 def find_related_flight_cancellation(

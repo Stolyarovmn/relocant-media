@@ -30,7 +30,6 @@ from relocant_media.domain.event_facts import (
     terminal_anchor,
     transport_routes,
 )
-from relocant_media.domain.event_programs import confirms_event_program, linked_event_program
 from relocant_media.domain.topic_tags import is_topic_footer
 
 _TRACKING_KEYS = {
@@ -431,16 +430,9 @@ def same_event(
     if left.resolved_content_sha256 == right.resolved_content_sha256:
         return True
 
-    outside_window = (left.published_at is None or right.published_at is None
-                      or abs(left.published_at - right.published_at) > event_window)
-    if outside_window:
-        for report, program in ((left, right), (right, left)):
-            if (linked_event_program(report.source_id, report.url, report.body, report.published_at)
-                    == (program.source_id, program.url)
-                    and confirms_event_program(program.source_id, program.url, program.body)):
-                break
-        else:
-            return False
+    if (left.published_at is None or right.published_at is None
+            or abs(left.published_at - right.published_at) > event_window):
+        return False
 
     # Материализованная правка первоисточника уже назначена на новое ревью.
     # Не превращаем её обратно в прочитанный исходный материал через fuzzy.
@@ -449,9 +441,6 @@ def same_event(
         for item in (left, right)
     ):
         return False
-
-    if outside_window:
-        return True
 
     if left.source_id == right.source_id:
         return _same_source_transport_reprint(left, right, event_window=event_window)

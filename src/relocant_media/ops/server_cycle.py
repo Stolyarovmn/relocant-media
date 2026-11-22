@@ -460,10 +460,6 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     # Each source is re-read through the same parser used at intake.
     venues = {**venue_sources(), **media_sources(), **guide_sources(),
               BVK_NEWS_SOURCE: load_source_file(SOURCES / f"{BVK_NEWS_SOURCE}.yaml")}
-    for source in load_source_registry(SOURCES):
-        if (source.extraction.strategy == "belgrade_marathon"
-                and source.extraction.status == "active"):
-            venues[source.id] = source
     async def fetch_venue(source: SourceConfig, url: str) -> Any:
         async with httpx.AsyncClient(
             timeout=25, trust_env=False, verify=source_ssl_context(),

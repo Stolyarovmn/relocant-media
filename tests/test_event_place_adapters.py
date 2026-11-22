@@ -177,3 +177,24 @@ def test_mismatched_source_or_lead_cannot_borrow_event_coordinates():
     assert _adapt(doc, html.replace(_INTERVIEW, _INTERVIEW + "other")) is None
     other_venue = html.replace("u Domu omladine Beograda imati", "u drugoj hali imati")
     assert _adapt(doc, other_venue) is None
+
+
+STAGE_BODY = (
+    "Кабаре ће бити изведено на великој сцени Културног центра „Чукарица“ "
+    "24. новембра, са почетком у 20 часова."
+)
+
+
+def test_main_stage_takes_year_from_publication_like_gallery():
+    # Общее правило площадки вместо отдельной ветки под один анонс (#396).
+    article, page = gallery_article(STAGE_BODY, published="13.11.2026 14:45")
+    facts = _adapt(article, page)
+    assert facts and facts["starts_at"] == "2026-11-24T20:00:00"
+    assert facts["venue"]["name"] == "Kulturni centar Čukarica · Velika scena"
+    assert facts["schedule_source_url"] == article.url
+
+
+def test_main_stage_rejects_event_far_from_publication():
+    article, page = gallery_article(STAGE_BODY.replace("новембра", "јануара"),
+                                    published="13.11.2026 14:45")
+    assert _adapt(article, page) is None

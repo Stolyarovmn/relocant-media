@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
-from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, Field
 from sqlalchemy import select
@@ -32,7 +31,6 @@ from relocant_media.domain.audience import local_utility_notice
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.dedup import event_key, find_repeated_publication
 from relocant_media.domain.editorial_products import EditorialPresentation
-from relocant_media.domain.event_programs import MARATHON_PAGE_URL, MARATHON_SOURCE_ID
 from relocant_media.domain.freshness import evidence_freshness
 from relocant_media.domain.policy import SOURCE_REPLACED_REASON
 from relocant_media.domain.source_locations import is_public_https_url
@@ -49,7 +47,6 @@ from relocant_media.services.editorial_products import (
     verify_stored_presentation,
 )
 from relocant_media.services.flight_review import flight_review_marker, flight_review_reference
-from relocant_media.services.marathon_event_map import marathon_event_facts
 from relocant_media.services.material_lifecycle import (
     LifecycleBlockedError,
     can_retry_snapshot,
@@ -59,7 +56,6 @@ from relocant_media.services.material_lifecycle import (
 from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.services.policy_reassessment import eligible_policy_reassessment
 from relocant_media.sources.registry import SourceConfig, load_source_registry
-from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 REQUEST_TTL = timedelta(hours=4)
@@ -310,10 +306,7 @@ def _candidate_request(
                 source_type=policy.source_type,
                 verified_at=member.ingested_at,
                 timezone_name=profile.timezone,
-            ).action != "keep" and not (
-                member.id != raw_id
-                and _active_marathon_program(session, member, now=now, profile=profile)
-            ))
+            ).action != "keep")
         ):
             raise FallbackValidationError("Источник закрыт, устарел или превышает лимит")
     snapshots = [_snapshot_member(member, policy) for member, policy in members]
@@ -355,20 +348,6 @@ def _apply_request_references(request: dict[str, Any], references: list[dict[str
         request["published_post_refs"] = list(unique.values())[:8]
     else:
         request.pop("published_post_refs", None)
-
-
-def _active_marathon_program(
-    session: Session, document: RawItem, *, now: datetime, profile: CityEditorialProfile,
-) -> bool:
-    if document.source_id != MARATHON_SOURCE_ID or document.url != MARATHON_PAGE_URL:
-        return False
-    snapshot = session.get(RawItemMediaSnapshot, document.id, populate_existing=True)
-    if snapshot is None or not snapshot.source_html:
-        return False
-    facts = marathon_event_facts(document.body, snapshot.source_html)
-    return facts is not None and datetime.fromisoformat(facts["starts_at"]).replace(
-        tzinfo=ZoneInfo(profile.timezone),
-    ) > now
 
 
 def build_request(

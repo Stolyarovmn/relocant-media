@@ -23,7 +23,6 @@ from relocant_media.ops.map_backfill import plan_event_buttons
 from relocant_media.ops.newsroom_publish import EVENTS_PATH, _publish_events
 from relocant_media.ops.pages_assets import copy_assets
 from relocant_media.services.event_place import resolve_saved_event_place
-from relocant_media.services.event_place_adapters import _CUKARICA_POST_2026, _DOB_INTERVIEW_2026
 from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source, Submission
 
@@ -246,37 +245,36 @@ def test_reviewed_event_matches_a_sent_post_even_when_the_article_is_media(sessi
     )).events[0].archived
 
 
-def test_published_cukarica_event_without_html_uses_corroborated_program(session, monkeypatch):
-    article = document().model_copy(update={
-        "source_id": "cukarica_news",
-        "url": _CUKARICA_POST_2026,
-        "title": "Кабаре „Да, то су били дани“",
-        "body": (
-            "Кабаре ће бити изведено на великој сцени Културног центра „Чукарица“ "
-            "24. новембра, са почетком у 20 часова."
-        ),
-    })
-    item, _, post, _ = seed(session, doc=article, attested=False)
+@pytest.mark.parametrize("message_id", [100, 104, 141])
+def test_former_one_off_adapters_are_served_from_reviewed_registry(
+    session, monkeypatch, message_id,
+):
+    # Карточки, раньше зашитые в код под одну новость, живут в общем реестре (#396).
+    registry = Path("cities/belgrade/reviewed-map-events.json")
+    record = next(row for row in json.loads(registry.read_text(encoding="utf-8"))
+                  if row["message_id"] == message_id)
+    item, _, post, _ = seed(session)
     session.delete(session.get(RawItemMediaSnapshot, item.id))
-    post.telegram_message_id = 104
+    item.url = record["source_url"]
+    post.title = record["post_title"]
+    post.telegram_message_id = message_id
     session.commit()
-
-    feed = export_events(session, observed_at=NOW)
-    assert len(feed.events) == 1
-    event = feed.events[0]
-    assert event.post_url == "https://t.me/eduvbelgrad/104"
-    assert event.starts_at.isoformat() == "2026-11-24T20:00:00+01:00"
-    assert event.venue.address == "Turgenjevljeva 5, Beograd"
-    monkeypatch.setattr(
-        "relocant_media.ops.map_backfill.export_events",
-        lambda session, observed_at: export_events(session, observed_at=NOW),
-    )
-    app = "https://t.me/relocant_media_belgrade_bot"
-    assert plan_event_buttons(session, {104: event.id}, feed, app) == {
-        104: f"{app}?startapp=places_{event.id}",
-    }
-    with pytest.raises(ValueError, match="confirmed afisha card"):
-        plan_event_buttons(session, {103: event.id}, feed, app)
+    observed = datetime(2026, 11, 13, 12, tzinfo=UTC) + timedelta(days=10)
+    feed = export_events(session, observed_at=observed)
+    event, = feed.events
+    assert event.post_url == f"https://t.me/eduvbelgrad/{message_id}"
+    assert event.starts_at.isoformat() == record["starts_at"]
+    assert event.schedule_source_url == record["schedule_source_url"]
+    assert len(event.courses) == len(record.get("courses", ()))
+    if message_id == 104:
+        monkeypatch.setattr(
+            "relocant_media.ops.map_backfill.export_events",
+            lambda session, observed_at: export_events(session, observed_at=observed),
+        )
+        app = "https://t.me/relocant_media_belgrade_bot"
+        assert plan_event_buttons(session, {104: event.id}, feed, app) == {
+            104: f"{app}?startapp=places_{event.id}",
+        }
 
 
 def test_published_gallery_backfill_requires_reviewed_time_and_saved_exact_article(session):
@@ -295,27 +293,16 @@ def test_published_gallery_backfill_requires_reviewed_time_and_saved_exact_artic
     assert export_events(session, observed_at=NOW).events == ()
 
 
-@pytest.mark.parametrize("verified_time", [True, False])
-def test_legacy_concert_requires_grounded_published_time_without_saved_html(session, verified_time):
-    article = _source(_DOB_INTERVIEW_2026)
-    body = (
+def test_published_item_without_saved_html_is_not_mapped_by_story_specific_code(session):
+    article = _source().model_copy(update={"body": (
         "Publika će 16. novembra od 20 časova u Domu omladine Beograda "
         "imati priliku da doživi El Sonido de la Vida."
-    )
-    if not verified_time:
-        body = body.replace("20 časova", "18 časova")
-    article = article.model_copy(update={"body": body})
+    )})
     item, _, _, _ = seed(session, doc=article, attested=False)
     session.delete(session.get(RawItemMediaSnapshot, item.id))
     session.commit()
-
     assert resolve_saved_event_place(session, article, [item.id], profile=PROFILE) is None
-    feed = export_events(session, observed_at=NOW)
-    if verified_time:
-        assert len(feed.events) == 1 and feed.events[0].starts_at.hour == 20
-        assert feed.events[0].schedule_source_url
-    else:
-        assert feed.events == ()
+    assert export_events(session, observed_at=NOW).events == ()
 
 
 @pytest.mark.parametrize(
