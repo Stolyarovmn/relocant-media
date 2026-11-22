@@ -71,8 +71,12 @@ async def audit_sources(
                 "type": source.source_type,
                 "strategy": source.extraction.strategy,
                 "auto_publish": source.policy.auto_publish,
-                "status": "configured" if source.extraction.status == "active" else "planned",
+                "status": ("configured" if source.extraction.status == "active"
+                           else "disabled" if source.extraction.status == "inactive"
+                           else "planned"),
             }
+            if source.extraction.status != "active" and source.extraction.inactive_reason:
+                row["inactive_reason"] = source.extraction.inactive_reason
             if row["status"] == "configured" and online:
                 try:
                     items, item_failures, attempts = await _collect_with_transport_retry(
@@ -134,7 +138,8 @@ async def audit_sources(
         "online": online,
         "ai_calls": 0,
         "sources": rows,
-        "active_count": sum(row["status"] != "planned" for row in rows),
+        "active_count": sum(row["status"] not in {"planned", "disabled"} for row in rows),
+        "disabled_count": sum(row["status"] == "disabled" for row in rows),
         "working_count": sum(row["status"] in {"ok", "empty", "partial"} for row in rows),
         "partial_count": sum(row["status"] == "partial" for row in rows),
         "transport_error_count": sum(row["status"] == "transport_error" for row in rows),
@@ -180,12 +185,14 @@ def render_source_health_markdown(result: dict[str, Any]) -> str:
         f"- partial: **{result.get('partial_count', 0)}**",
         f"- transport errors: **{result.get('transport_error_count', 0)}**",
         f"- extraction/protocol errors: **{result.get('error_count', 0)}**",
+        *(f"- disabled `{row.get('id')}`: {row.get('inactive_reason', 'reason not recorded')}"
+          for row in result.get("sources", []) if row.get("status") in {"planned", "disabled"}),
         "",
         "| Source | Status | Fresh | Details |",
         "|---|---|---:|---|",
     ]
     for row in result.get("sources", []):
-        if row.get("status") == "planned":
+        if row.get("status") in {"planned", "disabled"}:
             continue
         details = ""
         if row.get("status") in {"error", "transport_error"}:

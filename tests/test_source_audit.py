@@ -100,7 +100,9 @@ def test_render_source_health_markdown_exposes_degraded_sources() -> None:
     assert "| partial | partial | 1 | item_failures=1 |" in rendered
     assert "| network | transport_error | - | ConnectError after 3 attempts |" in rendered
     assert "| broken | error | - | ValueError |" in rendered
-    assert "future" not in rendered
+    # #328: a non-collected source stays out of the table but its reason is visible.
+    assert "| future |" not in rendered
+    assert "- disabled `future`: reason not recorded" in rendered
 
 
 def _audit_with_response(monkeypatch, source_id, handler):
@@ -178,3 +180,31 @@ def test_water_source_keeps_valid_notices_and_reports_errors(monkeypatch, scenar
         assert [(failure["url"], failure["error_type"]) for failure in row["item_failures"]] == [
             (broken["link"], "ValueError"),
         ]
+
+
+def test_every_non_active_source_explains_why_it_is_not_collected():
+    # #328: source-health must not show unexplained «planned» sources.
+    from relocant_media.sources.registry import load_source_registry
+
+    for source in load_source_registry(Path("cities/belgrade/sources")):
+        if source.extraction.status != "active":
+            assert source.extraction.status == "inactive", source.id
+            assert source.extraction.inactive_reason, source.id
+
+
+@pytest.mark.asyncio
+async def test_disabled_sources_are_reported_with_reason_and_not_counted_active():
+    from relocant_media.ops.source_audit import audit_sources, render_source_health_markdown
+
+    result = await audit_sources(
+        Path("cities/belgrade/sources"), online=False,
+        source_ids=("city_beograd", "guide_welcome_serbia_residence", "bvk_outage_news"))
+    rows = {row["id"]: row for row in result["sources"]}
+    assert rows["city_beograd"]["status"] == "disabled"
+    assert "city_beograd_news" in rows["city_beograd"]["inactive_reason"]
+    assert "welcome_serbia_temporary_residence" in (
+        rows["guide_welcome_serbia_residence"]["inactive_reason"])
+    assert result["disabled_count"] == 2 and result["active_count"] == 1
+    summary = render_source_health_markdown(result)
+    assert "- disabled `city_beograd`: Перекрыт city_beograd_news" in summary
+    assert "| city_beograd |" not in summary
