@@ -290,7 +290,7 @@ def test_power_summary_groups_suburbs_under_unique_municipalities():
     incident = Incident(id=map_event_id(source), kind="power", title="Плановое отключение",
                         source_url=source, windows=(first, second), addresses=addresses)
     text, rows = _incident_content(incident, now, tomorrow, belgrade_digests._policy())
-    assert text == "Земун, Звездара, Чукарица и другие районы."
+    assert text == "Земун, Звездара, Чукарица и ещё 2 района."
     assert len(rows) == len(addresses)
     assert "Земун, ALTINA, UGRINOVAČKI PUT, 12 — 09:00–14:00" in rows
     assert "Новый Белград, NEHRUOVA, 2 — 09:00–14:00" in rows

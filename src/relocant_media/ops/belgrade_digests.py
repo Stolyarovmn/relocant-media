@@ -410,7 +410,11 @@ def _incident_content(
     names = list(districts)
     if not names:
         return "", ()
-    lead = ", ".join(names[:3]) + " и другие районы" if len(names) > 4 else ", ".join(names)
+    lead = ", ".join(names[:3])
+    other = len(names) - 3
+    if other > 0:
+        word = "район" if other == 1 else "района" if 2 <= other <= 4 else "районов"
+        lead += f" и ещё {other} {word}"
     return lead + ".", tuple(details)
 
 
