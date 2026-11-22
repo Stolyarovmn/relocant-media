@@ -48,6 +48,7 @@ from relocant_media.services.editorial_products import (
     recent_publications,
     verify_stored_presentation,
 )
+from relocant_media.services.flight_review import flight_review_marker, flight_review_reference
 from relocant_media.services.marathon_event_map import marathon_event_facts
 from relocant_media.services.material_lifecycle import (
     LifecycleBlockedError,
@@ -90,6 +91,7 @@ class _CandidateRequest(StrictModel):
     event_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     documents: list[PackageEventDocument] = Field(min_length=1, max_length=MAX_DOCUMENTS)
     presentation_by_rubric: dict[str, EditorialPresentation]
+    flight_review_parent: PublishedPostReference | None = None
 
 
 class _FallbackRequest(StrictModel):
@@ -131,11 +133,12 @@ def _failed_ids(run: SchedulerRun, now: datetime) -> list[int]:
         return []
     errors = run.details.get("processing_errors")
     result: list[int] = []
-    fallback_ids = run.details.get("lifecycle_fallback_ids")
-    if (isinstance(fallback_ids, list) and len(fallback_ids) <= MAX_CANDIDATES
-            and all(type(raw_id) is int and raw_id > 0 for raw_id in fallback_ids)
-            and len(set(fallback_ids)) == len(fallback_ids)):
-        result.extend(fallback_ids)
+    for key in ("flight_review_ids", "lifecycle_fallback_ids"):
+        fallback_ids = run.details.get(key)
+        if (isinstance(fallback_ids, list) and len(fallback_ids) <= MAX_CANDIDATES
+                and all(type(raw_id) is int and raw_id > 0 for raw_id in fallback_ids)
+                and len(set(fallback_ids)) == len(fallback_ids)):
+            result.extend(raw_id for raw_id in fallback_ids if raw_id not in result)
     for error in errors if isinstance(errors, list) else []:
         if not isinstance(error, dict):
             continue
@@ -254,6 +257,7 @@ def pending_gpt_ids(session: Session, *, now: datetime) -> set[int]:
                 if _registered_public(item, source, registry.get(source.id))
                 and not is_terminal_blocked(session, item.id, now=now)
                 and (session.get(EditorialRun, item.id, populate_existing=True) is None
+                     or flight_review_marker(session.get(EditorialRun, item.id)) is not None
                      or eligible_policy_reassessment(session, item.id, now=now)
                      or can_retry_snapshot(session, item.id, now=now))}
 
@@ -316,7 +320,7 @@ def _candidate_request(
     documents = tuple(
         PackageEventDocument.model_validate_json(canonical_json(snapshot)) for snapshot in snapshots
     )
-    return {
+    request = {
         "raw_item_id": item.id,
         "source_id": source.id,
         "article_id": item.external_id,
@@ -331,6 +335,26 @@ def _candidate_request(
             for rubric in profile.rubrics
         },
     }
+    parent = flight_review_reference(
+        session, session.get(EditorialRun, raw_id), city=profile.city_id, now=now,
+    )
+    if parent is not None:
+        if any(doc.ownership not in {"official", "media"} or doc.high_risk for doc in documents):
+            raise FallbackValidationError("Связанная проверка допускает публичные документы")
+        request["flight_review_parent"] = parent.model_dump(mode="json")
+    return request
+
+
+def _apply_request_references(request: dict[str, Any], references: list[dict[str, Any]]) -> None:
+    parents = [candidate["flight_review_parent"] for candidate in request["candidates"]
+               if "flight_review_parent" in candidate]
+    unique: dict[int, dict[str, Any]] = {}
+    for reference in parents + references:
+        unique.setdefault(reference["message_id"], reference)
+    if unique:
+        request["published_post_refs"] = list(unique.values())[:8]
+    else:
+        request.pop("published_post_refs", None)
 
 
 def _active_marathon_program(
@@ -363,6 +387,8 @@ def build_request(
             select(RawItem, Source).join(Source).where(RawItem.id.in_(pending)),
         ).all()
         official = {item.id for item, source in pending_items if source.ownership == "official"}
+        flights = {item.id for item, _ in pending_items
+                   if flight_review_marker(session.get(EditorialRun, item.id)) is not None}
         urgent = {
             item.id for item, source in pending_items
             if local_utility_notice(item.source_id, item.url, item.title, item.body)
@@ -375,7 +401,8 @@ def build_request(
         # В пределах одного приоритета сначала разбираем более ранний сбой:
         # иначе каждый новый цикл может вытеснять открытые задания до истечения срока.
         windows.sort(key=lambda window: (
-            urgent.isdisjoint(window[1]), official.isdisjoint(window[1]), window[0].id,
+            urgent.isdisjoint(window[1]), flights.isdisjoint(window[1]),
+            official.isdisjoint(window[1]), window[0].id,
         ))
         from relocant_media.services.linked_updates import published_post_references
 
@@ -391,12 +418,11 @@ def build_request(
                 "writing_brief": writing_brief(profile, now),
                 "candidates": candidates,
             }
-            if references:
-                request["published_post_refs"] = references
             for raw_id in sorted(failed, key=lambda raw_id: (
-                raw_id not in urgent, raw_id not in official,
+                raw_id not in urgent, raw_id not in flights, raw_id not in official,
             )):
-                if (session.get(EditorialRun, raw_id, populate_existing=True) is not None
+                existing = session.get(EditorialRun, raw_id, populate_existing=True)
+                if (existing is not None and flight_review_marker(existing) is None
                         and not eligible_policy_reassessment(session, raw_id, now=now)
                         and not can_retry_snapshot(session, raw_id, now=now)):
                     continue
@@ -412,10 +438,12 @@ def build_request(
                 except ValueError:
                     continue
                 candidates.append(candidate)
+                _apply_request_references(request, references)
                 try:
                     _FallbackRequest.model_validate_json(_bounded_json(request))
                 except ValueError:
                     candidates.pop()
+                    _apply_request_references(request, references)
                 if len(candidates) == MAX_CANDIDATES:
                     break
             if candidates:
@@ -510,10 +538,23 @@ def validate_fallback_candidate(
             for candidate in parsed.candidates
             if candidate.raw_item_id == raw_id
         )
-        if requested.model_dump(mode="json") != expected:
+        if requested.flight_review_parent is not None and "flight_review_parent" not in expected:
+            existing = session.get(EditorialRun, raw_id, populate_existing=True)
+            if existing is not None:
+                archived = existing.outcome.get("_previous_policy_hold", {}).get("outcome", {})
+                link = existing.outcome.get("_package", {}).get("linked_update", {})
+                marker = archived.get("_flight_review")
+                if marker == {"raw_item_id": requested.flight_review_parent.raw_item_id,
+                              "message_id": requested.flight_review_parent.message_id}:
+                    expected["flight_review_parent"] = link.get("parent")
+        if requested.model_dump(mode="json", exclude={"flight_review_parent"}
+                                if requested.flight_review_parent is None else None) != expected:
             raise FallbackValidationError(
                 "Снимок события или оформления изменился после запроса", code="snapshot_changed",
             )
+        if (requested.flight_review_parent is not None
+                and requested.flight_review_parent not in parsed.published_post_refs):
+            raise FallbackValidationError("Исходная авиановость отсутствует в запросе")
         return parsed, profile, requested, expected
 
 
@@ -543,6 +584,13 @@ def validate_fallback_package(
             or package.presentation is None
         ):
             raise FallbackValidationError("Пакет не совпадает с точным событием запроса")
+        if requested.flight_review_parent is not None and (
+            package.linked_update is None
+            or package.linked_update.parent != requested.flight_review_parent
+        ):
+            raise FallbackValidationError(
+                "Нужна проверенная связь с исходной авиановостью", code="flight_parent_mismatch",
+            )
         if package.linked_update is not None:
             from relocant_media.services.linked_updates import validate_linked_update
 
@@ -590,9 +638,9 @@ def validate_fallback_package(
         }:
             raise FallbackValidationError("Пакет не прошёл действующие редакционные проверки")
         existing = session.get(EditorialRun, package.raw_item_id, populate_existing=True)
-        if existing is not None and not eligible_policy_reassessment(
-            session, package.raw_item_id, now=now,
-        ) and not can_retry_snapshot(session, package.raw_item_id, now=now):
+        if (existing is not None and flight_review_marker(existing) is None
+                and not eligible_policy_reassessment(session, package.raw_item_id, now=now)
+                and not can_retry_snapshot(session, package.raw_item_id, now=now)):
             fingerprint = hashlib.sha256(
                 canonical_json(package.model_dump(mode="json")).encode()
             ).hexdigest()

@@ -20,6 +20,7 @@ from relocant_media.domain.channel_targets import (
 from relocant_media.domain.event_map_policy import event_map_review_reason
 from relocant_media.domain.presentation import valid_title_presentation
 from relocant_media.services.editorial import DeliveryBlockedError, DeliveryResult, EditorialService
+from relocant_media.services.flight_review import guard_flight_delivery
 from relocant_media.services.followup import revision_reply_target
 from relocant_media.services.production_media import (
     PreparedProductionMedia,
@@ -161,21 +162,7 @@ async def deliver_reviewed(
             reply_to = revision_reply_target(session, raw_item_id, city)
         except ValueError as error:
             raise DeliveryBlockedError("linked publication requires reconciliation") from error
-        if reply_to is None:
-            from relocant_media.domain.flight_notices import find_related_flight_cancellation
-            from relocant_media.services.editorial_products import recent_publications
-
-            now = datetime.now(UTC)
-            recent = recent_publications(session, city, now=now)
-            related = find_related_flight_cancellation(
-                post.title, post.body,
-                [(row["id"], row["title"], row["body"],
-                  parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)) for row in recent
-                 if row["id"] != post.id and row["status"] == "published"
-                 for parsed in [datetime.fromisoformat(row["published_at"])]], now=now)
-            if related is not None:
-                raise DeliveryBlockedError(
-                    f"flight cancellation requires verified linked update to post {related}")
+        guard_flight_delivery(session, post, reply_to=reply_to, now=datetime.now(UTC))
         reply_publisher = getattr(publisher, "publish_followup", None)
         if reply_to is not None and native is None and (
             prepared_media is not None or not callable(reply_publisher)

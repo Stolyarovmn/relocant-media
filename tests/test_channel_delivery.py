@@ -254,10 +254,12 @@ async def test_explicit_enable_and_numeric_target_required(reviewed, target, ena
 
 @pytest.mark.asyncio
 async def test_related_flight_stops_before_bot_and_preserves_pending_receipt(reviewed, monkeypatch):
-    from relocant_media.domain import flight_notices
+    from relocant_media.services.flight_review import FlightParent, FlightReviewRequired
 
     session, run = reviewed
-    monkeypatch.setattr(flight_notices, "find_related_flight_cancellation", lambda *a, **kw: 153)
+    def guard(*a, **kw):
+        raise FlightReviewRequired(FlightParent(12, 153))
+    monkeypatch.setattr(channel_delivery, "guard_flight_delivery", guard)
     publisher = FakePublisher()
     with pytest.raises(DeliveryBlockedError, match="requires verified linked update"):
         await send(session, run, publisher)
@@ -269,14 +271,14 @@ async def test_related_flight_stops_before_bot_and_preserves_pending_receipt(rev
 
 @pytest.mark.asyncio
 async def test_verified_followup_keeps_reply_path(reviewed, monkeypatch):
-    from relocant_media.domain import flight_notices
+    from relocant_media.services import flight_review
 
     session, run = reviewed
     # Проверка реальной валидации linked/source-revision отдельно покрыта test_linked_updates.
     monkeypatch.setattr(channel_delivery, "revision_reply_target", lambda *a, **kw: 153)
     def forbidden(*a, **kw):
         raise AssertionError("Подтверждённое обновление уже прошло каноническую связь")
-    monkeypatch.setattr(flight_notices, "find_related_flight_cancellation", forbidden)
+    monkeypatch.setattr(flight_review, "find_related_flight_cancellation", forbidden)
     class ReplyPublisher(FakePublisher):
         async def publish_followup(self, text, reply_to):
             self.calls.append((text, reply_to))

@@ -508,7 +508,7 @@ def test_only_successfully_imported_packages_enter_normal_delivery(
             raise ValueError("PRIVATE-UNREQUESTED-CANDIDATE")
         return value
 
-    async def publish(engine, *, enabled, only_raw_ids, blocked):
+    async def publish(engine, *, enabled, only_raw_ids, blocked, scheduler_run_id=None):
         assert enabled is True
         assert worker.server_cycle.fetch_documents is worker.server_runtime.fetch_documents
         sent.append(only_raw_ids)

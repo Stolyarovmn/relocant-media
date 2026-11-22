@@ -78,6 +78,7 @@ from relocant_media.domain import quiet_hours
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
 from relocant_media.domain.dedup import event_key, find_repeated_publication
+from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.domain.freshness import (
     GUIDE_SOURCE_TYPE,
     evidence_freshness,
@@ -108,6 +109,7 @@ from relocant_media.ops.newsroom_status import summarize
 from relocant_media.ops.newsroom_triage import triage_queue
 from relocant_media.ops.primary_cycle import run_cycle
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
+from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.audience_observation import observe_audience
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
 from relocant_media.services.editorial import (
@@ -1322,19 +1324,34 @@ async def audience_observation() -> dict[str, Any]:
         return await observe_audience(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client))
 
 
+def _attach_flight_review(session: Session, cycle_id: int, raw_id: int) -> None:
+    cycle = session.get(SchedulerRun, cycle_id)
+    if (cycle is None or cycle.task_key != "editorial-primary:belgrade"
+            or cycle.task_type != "editorial_primary" or cycle.finished_at is None
+            or cycle.status not in {"success", "partial"}):
+        raise ValueError("Отсутствует завершённый цикл удержанной авиановости")
+    ids = dict.fromkeys([raw_id, *cycle.details.get("flight_review_ids", [])])
+    cycle.status = "partial"
+    cycle.details = {**cycle.details, "status": "PRIMARY_PARTIAL", "window_complete": False,
+                     "fallback_required": True, "flight_review_ids": list(ids)[:5]}
+
+
 async def publish_pending(
     engine: Engine, *, enabled: bool, limit: int = 2,
     blocked: list[dict[str, Any]] | None = None,
     only_raw_ids: set[int] | None = None,
+    scheduler_run_id: int | None = None,
 ) -> list[int]:
     if not enabled or only_raw_ids == set():
         return []
+    from relocant_media.services.flight_review import FlightReviewRequired
     from relocant_media.services.material_lifecycle import (
         after_result,
         before_delivery_attempt,
         delivery_deadline,
         delivery_failure,
         hold_until_morning,
+        request_flight_review,
     )
     with Session(engine) as session:
         outcome = EditorialRun.outcome
@@ -1446,6 +1463,17 @@ async def publish_pending(
                 try:
                     result = await deliver_reviewed(session, raw_id, publisher,
                         target_channel_id=APPROVED_CHANNEL_ID, enabled=True)
+                except FlightReviewRequired as error:
+                    reason = request_flight_review(
+                        session, raw_id, parent_raw_id=error.parent.raw_item_id,
+                        parent_message_id=error.parent.message_id, now=datetime.now(UTC))
+                    if reason == FLIGHT_REVIEW_REASON and scheduler_run_id is not None:
+                        _attach_flight_review(session, scheduler_run_id, raw_id)
+                    session.commit()
+                    if blocked is not None:
+                        blocked.append({"raw_item_id": raw_id, "reason": reason,
+                                        "parent_message_id": error.parent.message_id})
+                    continue
                 except DeliveryBlockedError as error:
                     failed(type(error).__name__)
                     if blocked is not None:
@@ -1602,8 +1630,11 @@ def main() -> None:
             blocked: list[dict[str, Any]] = []
             result["sent_message_ids"] = asyncio.run(
                 publish_pending(engine, enabled=enabled, blocked=blocked,
-                    only_raw_ids=allowed_items() if args.submissions_only else None))
+                    only_raw_ids=allowed_items() if args.submissions_only else None,
+                    scheduler_run_id=None if args.submissions_only else result["run_id"]))
             result["channel_blocked"] = blocked
+            if any(item["reason"] == FLIGHT_REVIEW_REASON for item in blocked):
+                result.update(status="PRIMARY_PARTIAL", window_complete=False)
             result["fallback_required"] = result["fallback_required"] or bool(blocked)
             if enabled:
                 result["pin_maintenance"] = asyncio.run(cleanup_news_pins(engine))
