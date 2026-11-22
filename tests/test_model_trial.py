@@ -219,3 +219,28 @@ def test_limit_is_bounded(reviewed):
     with pytest.raises(ValueError, match="limit"):
         model_trial.published_packages(Session(session.get_bind()), 16)
 
+
+
+def test_trial_waits_for_running_cycle_without_touching_state():
+    states = iter([{"status": "busy"}, {"status": "busy"}, {"status": "ready", "snapshot": {}}])
+    pauses, validated = [], []
+    state = model_trial.wait_ready(lambda: next(states), validated.append, attempts=5,
+                                   pause=7, sleep=pauses.append)
+    assert state["status"] == "ready" and validated == [state] and pauses == [7, 7]
+
+
+def test_trial_gives_up_when_state_stays_busy():
+    pauses = []
+    with pytest.raises(TimeoutError):
+        model_trial.wait_ready(lambda: {"status": "busy"}, lambda state: None, attempts=3,
+                               pause=1, sleep=pauses.append)
+    assert pauses == [1, 1]
+
+
+def test_trial_rejects_state_that_is_not_ready():
+    def validate(state):
+        raise ValueError("canonical state not ready")
+
+    with pytest.raises(ValueError):
+        model_trial.wait_ready(lambda: {"status": "failed"}, validate, attempts=3,
+                               sleep=lambda pause: None)

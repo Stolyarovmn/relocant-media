@@ -335,6 +335,27 @@ def write_outputs(result: dict[str, Any], output: Path, step_summary: str | None
             handle.write(markdown(result))
 
 
+READY_ATTEMPTS = 20
+READY_PAUSE_SECONDS = 30.0
+
+
+def wait_ready(read: Callable[[], dict[str, Any]], validate: Callable[[dict[str, Any]], None],
+               *, attempts: int = READY_ATTEMPTS, pause: float = READY_PAUSE_SECONDS,
+               sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    """Read canonical state until it is ready; a running cycle holds it busy for minutes.
+
+    The trial never claims or resets the marker: it only waits and reads again.
+    """
+    for attempt in range(attempts):
+        state = read()
+        if state.get("status") != "busy":
+            validate(state)
+            return state
+        if attempt + 1 < attempts:
+            sleep(pause)
+    raise TimeoutError("canonical state stayed busy")
+
+
 def main() -> None:
     from relocant_media.ai.gemini_process import IsolatedGeminiProvider
     from relocant_media.ops.actions_runtime import build_storage, restored, validate_ready
@@ -344,6 +365,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=MAX_ITEMS)
     args = parser.parse_args()
+    stage = "configuration"
     try:
         current = role_models(os.environ)
         bundles = {"current": current,
@@ -354,11 +376,14 @@ def main() -> None:
                                  or current["review"]}}
         api_key = os.environ["GEMINI_API_KEY"]
         with httpx.Client(timeout=60, follow_redirects=False) as client:
+            stage = "storage"
             store, blobs, _ = build_storage(client, os.environ)
-            state, _ = store.read()
-            validate_ready(state)
+            stage = "state"
+            state = wait_ready(lambda: store.read()[0], validate_ready)
+            stage = "snapshot"
             args.work.mkdir(parents=True, exist_ok=False, mode=0o700)
             database = restored(blobs, state["snapshot"], args.work)
+        stage = "trial"
         result = run_trial(database, bundles,
                            lambda model: IsolatedGeminiProvider(api_key, model=model),
                            limit=args.limit)
@@ -366,7 +391,8 @@ def main() -> None:
         print(json.dumps({"model_trial": result["summary"]}, ensure_ascii=False))
     except Exception as error:
         # Exception text can contain URLs, credentials or response bodies.
-        print(json.dumps({"model_trial_error": type(error).__name__}), file=sys.stderr)
+        print(json.dumps({"model_trial_error": type(error).__name__, "stage": stage}),
+              file=sys.stderr)
         raise SystemExit(1) from None
 
 
