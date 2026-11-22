@@ -12,6 +12,10 @@ on:
         description: Коммит завершившегося цикла
         required: true
         type: string
+      source_run_id:
+        description: Номер запуска, завершившего рабочий цикл
+        required: false
+        type: string
 
 permissions: {}
 
@@ -26,15 +30,30 @@ jobs:
       group: editorial-retry-clock
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 36
     permissions:
       actions: write
       contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.result == 'failure' && inputs.source_run_id != ''
+        continue-on-error: true
+        with:
+          persist-credentials: false
+      - name: Определить паузу после однотипных сбоев
+        id: failure-delay
+        if: inputs.result == 'failure' && inputs.source_run_id != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          delay=$(python src/relocant_media/ops/editorial_failure_streak.py "$SOURCE_RUN_ID")
+          echo "seconds=$delay" >> "$GITHUB_OUTPUT"
       - name: Дождаться повторного цикла
         shell: python
         env:
-          CHAIN_DELAY_SECONDS: ${{ inputs.result == 'success' && '120' || '600' }}
+          CHAIN_DELAY_SECONDS: ${{ inputs.result == 'success' && '120' || steps.failure-delay.outputs.seconds || '600' }}
         run: |
           import os
           import time
