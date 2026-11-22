@@ -4,7 +4,8 @@ import {
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
 } from "./core.js?v=16";
 import { calendarLink } from "./calendar.js?v=5";
-import { setupPlaces } from "./places.js?v=15";
+import { setupPlaces } from "./places.js?v=16";
+import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=1";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -339,7 +340,7 @@ function renderList(now) {
   }
   byId("selected-countdown").textContent = selected ? incidentCountdown(selected, now) : "";
   const message = state.loadFailed
-    ? state.loaded ? "Обновление недоступно. Показана сохранённая версия." : "Список объявлений не загрузился."
+    ? state.loaded ? snapshotNotice(state.stamp) : "Список объявлений недоступен. Повторите загрузку при подключении."
     : state.deepPending && state.loaded ? "Объявление из ссылки пока отсутствует в выгрузке."
       : !state.loaded ? "Загружаем данные."
         : !items.length ? state.period === null ? "В выбранных слоях пока нет объявлений."
@@ -686,11 +687,11 @@ async function loadEvents() {
   state.loading = true;
   if (state.mode === "incidents") syncFeed(state);
   try {
-    const data = await readJSON("./incidents.json", { cache: "no-cache" });
-    state.incidents = readIncidents(data);
+    const { entries, generatedAt, cached } = await loadSnapshot("./incidents.json", readIncidents);
+    state.incidents = entries;
     state.loaded = true;
-    state.loadFailed = false;
-    state.stamp = updateStamp(data.generated_at);
+    state.loadFailed = cached;
+    state.stamp = updateStamp(generatedAt);
     if (state.mode !== "incidents") {
       updateCityCount(Date.now());
       return;
@@ -700,7 +701,7 @@ async function loadEvents() {
     else {
       render();
       if (state.digestIds.length) focusDigest();
-      if (state.deepPending && deepAttempts < 2) {
+      if (state.deepPending && !cached && deepAttempts < 2) {
         deepAttempts += 1;
         refreshTimer = setTimeout(loadEvents, deepAttempts === 1 ? 7000 : 18000);
       }
@@ -916,7 +917,8 @@ byId("refresh").addEventListener("click", () => {
 
 function syncFeed(feed) {
   byId("refresh").disabled = feed.loading;
-  byId("sync-stamp").textContent = feed.failed || feed.loadFailed ? "Повторить загрузку"
+  const failed = feed.failed || feed.loadFailed;
+  byId("sync-stamp").textContent = failed ? feed.loaded ? "Сохранённые данные" : "Повторить загрузку"
     : feed.stamp ? `${feed.stamp} · Белград`
       : feed.loaded ? "Обновлено" : "Загрузка";
 }
@@ -967,7 +969,7 @@ function showMode(mode, id = "") {
 
 installTheme();
 setupMap();
-const places = setupPlaces({ map: state.map, mobile, animate, telegram, byId, make, link, readJSON, onSync: syncFeed });
+const places = setupPlaces({ map: state.map, mobile, animate, telegram, byId, make, link, loadSnapshot, onSync: syncFeed });
 byId("show-incidents").addEventListener("click", () => {
   state.digestIds = [];
   if (state.mode === "incidents") render();
@@ -978,3 +980,10 @@ telegram?.ready?.();
 showMode(initialRoute.mode, initialRoute.id);
 if (initialRoute.mode === "places") void loadEvents();
 else places.refresh();
+window.addEventListener("online", () => {
+  void loadEvents();
+  places.refresh();
+});
+try {
+  navigator.serviceWorker?.register("./offline-worker.js").catch(() => {});
+} catch { /* Some embedded browsers disable service workers. */ }
