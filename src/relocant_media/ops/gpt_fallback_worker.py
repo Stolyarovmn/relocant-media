@@ -355,6 +355,7 @@ def main() -> None:
     args = parser.parse_args()
     engine = None
     output_created = False
+    stage = "input"
     try:
         args.output.mkdir(parents=True, exist_ok=False)
         output_created = True
@@ -369,6 +370,7 @@ def main() -> None:
         payload = None if rank_only or refresh is not None else FallbackInput.model_validate_json(
             exchange,
         )
+        stage = "database"
         url = make_url(os.environ["DATABASE_URL"])
         if (url.get_backend_name() != "sqlite" or not url.database or url.query
                 or not Path(url.database).is_file()):
@@ -376,6 +378,7 @@ def main() -> None:
         engine = create_engine(url)
         verify_sqlite_schema(engine)
         if refresh is not None:
+            stage = "refresh"
             request = refresh_gpt_evidence(engine, refresh)
             (args.output / "gpt-refreshed-request.json").write_text(
                 canonical_json(request), encoding="utf-8",
@@ -389,18 +392,21 @@ def main() -> None:
                 ),
             }
         elif payload is None:
+            stage = "batch_preselection"
             if set(value) != {"request", "result"} or not isinstance(value["request"], dict):
                 raise ValueError("Ожидался приватный запрос и результат отбора")
             report = save_batch_rank(
                 engine, value["request"], value["result"], now=datetime.now(UTC),
             )
         else:
+            stage = "import"
             report = run_worker(
                 engine, payload, send_enabled=os.environ.get("EDITORIAL_SEND_ENABLED") == "true",
             )
     except Exception as error:
         report = {"status": "PRIMARY_FAILED", "mode": "subscription_gpt_fallback",
                   "error_type": _error_type(error), "model_calls": 0,
+                  "processing_errors": [_error_entry(stage, error)],
                   "fallback_required": True}
     finally:
         if engine is not None:

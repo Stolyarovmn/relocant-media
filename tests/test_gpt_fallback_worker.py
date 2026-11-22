@@ -18,6 +18,7 @@ from relocant_media.ai.package import EditorialPackage, canonical_json, context_
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.presentation import presentation_title
+from relocant_media.ops import actions_runtime
 from relocant_media.ops import gpt_fallback_worker as worker
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import gpt_fallback
@@ -593,6 +594,38 @@ def test_cli_uses_existing_database_and_writes_only_structural_report(
     with pytest.raises(SystemExit):
         worker.main()
     assert (output / "server-report.json").read_bytes() == before
+
+
+def test_cli_reports_batch_failure_reason_without_request_text(
+    ready_package, tmp_path, monkeypatch, capsys,
+):
+    engine, _ = ready_package
+    private = tmp_path / "private.json"
+    private.write_text(json.dumps({
+        "request": {"text": "PRIVATE_REQUEST"},
+        "result": {"kind": "batch_preselection"},
+    }), encoding="utf-8")
+    output = tmp_path / "failed-cycle"
+    monkeypatch.setenv("DATABASE_URL", str(engine.url))
+    monkeypatch.setattr(sys, "argv", ["worker", "--input", str(private), "--output", str(output)])
+
+    def rejected(*args, **kwargs):
+        raise gpt_fallback.FallbackValidationError("PRIVATE_ERROR", code="request_expired")
+
+    monkeypatch.setattr(worker, "save_batch_rank", rejected)
+    with pytest.raises(SystemExit) as stopped:
+        worker.main()
+    assert stopped.value.code == 1
+
+    report = json.loads((output / "server-report.json").read_text(encoding="utf-8"))
+    actions_runtime.report_failure(output, 1)
+    emitted = capsys.readouterr()
+    assert json.loads(emitted.out) == report
+    assert json.loads(emitted.err)["runtime_failure"]["processing_errors"] == [{
+        "stage": "batch_preselection", "error_type": "FallbackValidationError",
+        "reason": "request_expired",
+    }]
+    assert "PRIVATE" not in emitted.out + emitted.err
 
 
 def test_invalid_input_does_not_open_database_or_echo_private_data(tmp_path, monkeypatch, capsys):
