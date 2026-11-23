@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from statistics import median
 from typing import Annotated, Any, Literal, cast
@@ -39,11 +40,22 @@ class Expiry(BaseModel):
     count: Count
 
 
-class Latency(BaseModel):
-    category: str
+class Timing(BaseModel):
     samples: Count
-    missing_timestamp: Count
     median_minutes: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None
+
+
+class LatencyStages(BaseModel):
+    collection: Timing
+    before_post_record: Timing
+    after_post_record: Timing
+    since_ingestion: Timing
+
+
+class Latency(Timing):
+    category: str
+    missing_timestamp: Count
+    stages: LatencyStages | None = None
 
     @field_validator("category")
     @classmethod
@@ -83,7 +95,41 @@ def public_editorial_flow(value: object, source_ids: set[str]) -> dict[str, Any]
         day.expired_unreviewed = [
             entry for entry in day.expired_unreviewed if entry.source_id in source_ids
         ]
-    return flow.model_dump(mode="json")
+    return flow.model_dump(mode="json", exclude_unset=True)
+
+
+def _timing(samples: list[float]) -> Timing:
+    return Timing(
+        samples=len(samples), median_minutes=round(median(samples), 1) if samples else None,
+    )
+
+
+def _record_interval(samples: list[float], start: datetime | None, end: datetime) -> None:
+    if start is not None and start <= end:
+        samples.append((end - start).total_seconds() / 60)
+
+
+@dataclass
+class _DeliveryTimes:
+    total: list[float] = field(default_factory=list)
+    collection: list[float] = field(default_factory=list)
+    before_post_record: list[float] = field(default_factory=list)
+    after_post_record: list[float] = field(default_factory=list)
+    since_ingestion: list[float] = field(default_factory=list)
+    missing_timestamp: int = 0
+
+    def summary(self, category: str) -> Latency:
+        total = _timing(self.total)
+        return Latency(
+            category=category, samples=total.samples, median_minutes=total.median_minutes,
+            missing_timestamp=self.missing_timestamp,
+            stages=LatencyStages(
+                collection=_timing(self.collection),
+                before_post_record=_timing(self.before_post_record),
+                after_post_record=_timing(self.after_post_record),
+                since_ingestion=_timing(self.since_ingestion),
+            ),
+        )
 
 
 def editorial_flow(
@@ -138,11 +184,11 @@ def editorial_flow(
         counted.add(raw.id)
         expiry[closed_at.astimezone(zone).date(), raw.source_id, reason] += 1
 
-    measured: dict[tuple[date, str], list[float]] = defaultdict(list)
-    missing: Counter[tuple[date, str]] = Counter()
+    measured: dict[tuple[date, str], _DeliveryTimes] = defaultdict(_DeliveryTimes)
     delivered = session.execute(
         select(
             Post.published_at, Post.category, RawItem.published_at, RawItem.published_at_precision,
+            RawItem.ingested_at, Post.created_at,
         )
         .join(EditorialRun, EditorialRun.post_id == Post.id)
         .join(RawItem, RawItem.id == EditorialRun.raw_item_id)
@@ -150,23 +196,27 @@ def editorial_flow(
         .where(public_sources, Post.city == city, EditorialRun.delivery_status == "sent",
                Post.telegram_message_id > 0, Post.published_at.between(start, now))
     )
-    for sent_at, category, source_time, precision in delivered:
+    for sent_at, category, source_time, precision, ingested_at, created_at in delivered:
         if sent_at is None:
             continue
         key = sent_at.astimezone(zone).date(), category if category in _CATEGORIES else "other"
-        if precision != "instant" or source_time is None or source_time > sent_at:
-            missing[key] += 1
+        times = measured[key]
+        exact_time = source_time if precision == "instant" else None
+        if exact_time is None or exact_time > sent_at:
+            times.missing_timestamp += 1
         else:
-            measured[key].append((sent_at - source_time).total_seconds() / 60)
+            _record_interval(times.total, exact_time, sent_at)
+        if ingested_at is None or ingested_at > sent_at:
+            continue
+        _record_interval(times.collection, exact_time, ingested_at)
+        _record_interval(times.since_ingestion, ingested_at, sent_at)
+        if created_at is not None and ingested_at <= created_at <= sent_at:
+            _record_interval(times.before_post_record, ingested_at, created_at)
+            _record_interval(times.after_post_record, created_at, sent_at)
 
     latency_by_day: dict[date, list[Latency]] = defaultdict(list)
-    for key in sorted(measured.keys() | missing.keys()):
-        observed, category = key
-        samples = measured.get(key, [])
-        latency_by_day[observed].append(Latency(
-            category=category, samples=len(samples), missing_timestamp=missing[key],
-            median_minutes=round(median(samples), 1) if samples else None,
-        ))
+    for (observed, category), times in sorted(measured.items()):
+        latency_by_day[observed].append(times.summary(category))
 
     days = []
     for offset in range(_DAYS):

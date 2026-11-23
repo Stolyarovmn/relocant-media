@@ -11,7 +11,7 @@ from relocant_media.ops import newsroom_export
 from relocant_media.ops.daily_analysis import build_status, markdown
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.scheduler.models import SchedulerRun
-from relocant_media.services.editorial_flow import editorial_flow
+from relocant_media.services.editorial_flow import editorial_flow, public_editorial_flow
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,15 +51,18 @@ def closed(session, raw, at, attempts=0):
     ))
 
 
-def sent(session, raw, at, message_id, *, category="transport", status="sent"):
+def sent(session, raw, at, message_id, *, category="transport", status="sent",
+         created_at=None, outcome=None):
     post = Post(
         city="belgrade", category=category, status="published", title="Опубликовано", body="Текст",
         confidence=Decimal("1"), published_at=at, telegram_message_id=message_id,
+        created_at=created_at,
     )
     session.add(post)
     session.flush()
     session.add(EditorialRun(
-        raw_item_id=raw.id, post_id=post.id, outcome={}, evidence={}, delivery_status=status,
+        raw_item_id=raw.id, post_id=post.id, outcome=outcome or {}, evidence={},
+        delivery_status=status,
     ))
 
 
@@ -109,14 +112,17 @@ def test_daily_report_reads_measured_latency_and_allowlists_aggregate_fields(mon
         session.add_all([source(OFFICIAL), source(NATIONAL, "media")])
         session.flush()
         for number, delay in enumerate((12, 42), start=1):
-            raw = item(session, OFFICIAL, NOW - timedelta(minutes=delay), MIDNIGHT)
-            sent(session, raw, NOW, number)
+            raw = item(
+                session, OFFICIAL, NOW - timedelta(minutes=delay), NOW - timedelta(minutes=10),
+            )
+            sent(session, raw, NOW, number, created_at=NOW - timedelta(minutes=4))
         dated_only = item(session, NATIONAL, MIDNIGHT, MIDNIGHT, precision="day")
-        sent(session, dated_only, NOW, 3)
+        sent(session, dated_only, NOW, 3, created_at=MIDNIGHT + timedelta(minutes=5),
+             outcome={"_package": {"editor_model": "gpt"}})
         pending = item(session, NATIONAL, MIDNIGHT, MIDNIGHT)
         sent(session, pending, NOW, 4, status="pending")
         future = item(session, OFFICIAL, NOW + timedelta(minutes=5), MIDNIGHT)
-        sent(session, future, NOW, 5, category="events")
+        sent(session, future, NOW, 5, category="events", created_at=MIDNIGHT - timedelta(minutes=1))
         session.commit()
         saved = newsroom_export.snapshot(ROOT, session)
 
@@ -128,11 +134,66 @@ def test_daily_report_reads_measured_latency_and_allowlists_aggregate_fields(mon
     })
     saved = merge(newsroom_export.snapshot(ROOT), saved)
     daily = build_status(saved, city="belgrade", now=NOW)
-    assert daily["editorial_flow"]["days"][-1]["delivery_latency"] == [
+    rows = daily["editorial_flow"]["days"][-1]["delivery_latency"]
+    assert [{key: value for key, value in row.items() if key != "stages"} for row in rows] == [
         {"category": "events", "samples": 0, "missing_timestamp": 1, "median_minutes": None},
         {"category": "transport", "samples": 2, "missing_timestamp": 1, "median_minutes": 27.0},
+    ]
+    assert [row["stages"] for row in rows] == [
+        {
+            "collection": {"samples": 0, "median_minutes": None},
+            "before_post_record": {"samples": 0, "median_minutes": None},
+            "after_post_record": {"samples": 0, "median_minutes": None},
+            "since_ingestion": {"samples": 1, "median_minutes": 90.0},
+        },
+        {
+            "collection": {"samples": 2, "median_minutes": 17.0},
+            "before_post_record": {"samples": 3, "median_minutes": 6.0},
+            "after_post_record": {"samples": 3, "median_minutes": 4.0},
+            "since_ingestion": {"samples": 3, "median_minutes": 10.0},
+        },
     ]
     assert "SECRET" not in json.dumps(daily)
     assert "PRIVATE_SOURCE" not in json.dumps(daily)
     assert "27.0 | 2 | 1" in markdown(daily)
     assert "2026-11-22 (неполный)" in markdown(daily)
+    assert "17.0 (2) | 6.0 (3) | 4.0 (3) | 10.0 (3)" in markdown(daily)
+    assert "| events | — | — | — | 90.0 (1) |" in markdown(daily)
+
+
+def test_night_hold_observed_on_belgrade_delivery_day():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    published = MIDNIGHT + timedelta(hours=8, minutes=10)
+    with Session(engine) as session:
+        session.add(source(OFFICIAL))
+        session.flush()
+        ingested = MIDNIGHT - timedelta(minutes=50)
+        raw = item(session, OFFICIAL, ingested - timedelta(minutes=5), ingested)
+        sent(session, raw, published, 6, category="events",
+             created_at=MIDNIGHT - timedelta(minutes=40))
+        session.commit()
+        report = editorial_flow(session, "belgrade", {OFFICIAL}, now=published, zone=ZONE)
+    assert report["days"][-2]["delivery_latency"] == []
+    assert report["days"][-1]["local_date"] == "2026-11-22"
+    assert report["days"][-1]["delivery_latency"][0]["stages"] == {
+        "collection": {"samples": 1, "median_minutes": 5.0},
+        "before_post_record": {"samples": 1, "median_minutes": 10.0},
+        "after_post_record": {"samples": 1, "median_minutes": 530.0},
+        "since_ingestion": {"samples": 1, "median_minutes": 540.0},
+    }
+
+
+def test_previous_snapshots_keep_the_existing_latency_shape():
+    old = {
+        "observed_at": NOW.isoformat(), "timezone": ZONE.key, "days": [{
+            "local_date": "2026-11-22", "expired_unreviewed": [],
+            "delivery_latency": [{
+                "category": "transport", "samples": 0,
+                "missing_timestamp": 1, "median_minutes": None,
+            }],
+        }],
+    }
+    assert public_editorial_flow(old, {OFFICIAL}) == {
+        **old, "observed_at": "2026-11-22T00:30:00Z",
+    }
