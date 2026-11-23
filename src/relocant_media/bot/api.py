@@ -17,6 +17,8 @@ from relocant_media.domain.map_links import is_map_event_url
 from relocant_media.domain.quiet_hours import silent_channel_post
 from relocant_media.domain.source_locations import is_public_https_url
 
+MAP_BUTTON_TEXT = "Посмотреть на карте"
+
 
 class TelegramAPIError(RuntimeError):
     pass
@@ -31,7 +33,7 @@ class PhotoUpload:
 def map_reply_markup(url: str) -> dict[str, object]:
     if not is_map_event_url(url):
         raise ValueError("map button URL is not approved")
-    return {"inline_keyboard": [[{"text": "Посмотреть на карте", "url": url, "style": "success"}]]}
+    return {"inline_keyboard": [[{"text": MAP_BUTTON_TEXT, "url": url, "style": "success"}]]}
 
 
 def inline_keyboards_match(actual: object, expected: Mapping[str, object]) -> bool:

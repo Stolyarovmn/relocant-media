@@ -34,8 +34,10 @@ def test_belgrade_navigation_uses_current_tags_and_public_links():
 
     bot = "https://t.me/relocant_media_belgrade_bot"
     ads = f"https://t.me/{draft['channel']}/{pin_policy['service_channel_messages'][1]}"
-    assert set(re.findall(r'href="([^"]+)"', text)) == {bot, ads}
+    assert set(re.findall(r'href="([^"]+)"', text)) == {bot, ads, MAP_HOME_URL}
+    assert text.splitlines()[0] == f'<b><a href="{MAP_HOME_URL}">Посмотреть на карте</a></b>'
     assert navigation["map_button"]["url"] == f"{bot}?startapp"
+    assert navigation["map_button"]["text"] == "Посмотреть на карте"
     assert MAP_HOME_URL in draft["description"].split()
     assert navigation["map_button"]["style"] == "success"
     assert "t.me/c/" not in draft["description"] + text
@@ -49,7 +51,7 @@ def test_belgrade_navigation_lists_the_configured_digest_times():
 
 
 def test_keyboard_receipt_accepts_only_the_absence_of_style():
-    home = {"text": "🗺 Открыть карту", "url": MAP_HOME_URL}
+    home = {"text": "Посмотреть на карте", "url": MAP_HOME_URL}
     callback = {"text": "Меню", "callback_data": "menu"}
     expected = {"inline_keyboard": [[{**home, "style": "success"}, callback]]}
     assert inline_keyboards_match({"inline_keyboard": [[home, callback]]}, expected)
@@ -73,7 +75,7 @@ async def test_service_pin_update_preserves_other_buttons_and_checks_before_writ
     other_button = {"text": "Партнёрство", "url": "https://example.net", "style": "primary"}
     channel = {"id": policy["channel_id"], "type": "channel"}
     old_button = {**button, "style": "primary"} if echo_style else {
-        "text": "Карта", "url": MAP_HOME_URL,
+        "text": "🗺 Открыть карту", "url": MAP_HOME_URL,
     }
     old_markup = {"inline_keyboard": [[old_button, other_button]]}
     pin = {"message_id": message_id, "reply_markup": old_markup, "chat": channel}

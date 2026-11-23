@@ -3,7 +3,12 @@ from typing import Any
 
 import httpx
 
-from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI, inline_keyboards_match
+from relocant_media.bot.api import (
+    MAP_BUTTON_TEXT,
+    TelegramAPIError,
+    TelegramBotAPI,
+    inline_keyboards_match,
+)
 from relocant_media.domain.map_links import MAP_HOME_URL
 from relocant_media.services.pin_policy import CHANNEL
 
@@ -18,7 +23,7 @@ async def ensure_service_pin_map_button(
     description = presentation["description"]
     if (
         policy["channel_id"] != CHANNEL or presentation["channel"] != "eduvbelgrad"
-        or button != {"text": "🗺 Открыть карту", "url": MAP_HOME_URL, "style": "success"}
+        or button != {"text": MAP_BUTTON_TEXT, "url": MAP_HOME_URL, "style": "success"}
         or not isinstance(description, str) or len(description.encode("utf-16-le")) // 2 > 255
         or MAP_HOME_URL not in description.split()
     ):

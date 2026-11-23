@@ -2,12 +2,14 @@ version: 1
 channel: eduvbelgrad
 description: |-
   Белград по-русски. Транспорт, отключения, события и сводки.
-  🗺 Карта: https://t.me/relocant_media_belgrade_bot?startapp
+  Посмотреть на карте: https://t.me/relocant_media_belgrade_bot?startapp
   Предложить новость или исправление: @relocant_media_belgrade_bot
 navigation:
   message_id: 4
   # Подготовлено для существующего закрепа. Автоматической публикации нет.
   html: |-
+    <b><a href="https://t.me/relocant_media_belgrade_bot?startapp">Посмотреть на карте</a></b>
+
     <b>Навигация по «Еду в Белград»</b>
 
     <b>Карта Белграда</b>
@@ -27,6 +29,6 @@ navigation:
 
     <blockquote expandable>Обращение видите вы и редакция. Не присылайте документы, банковские данные и чужие личные контакты. Редакция проверяет материалы перед публикацией. Если материал подойдёт, бот отдельно спросит разрешение и предложит выбрать подпись. В комментариях уважаем собеседников. Спам, травлю и раскрытие чужих данных удаляем.</blockquote>
   map_button:
-    text: 🗺 Открыть карту
+    text: Посмотреть на карте
     url: https://t.me/relocant_media_belgrade_bot?startapp
     style: success
