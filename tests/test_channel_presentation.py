@@ -86,10 +86,17 @@ async def test_service_pin_update_preserves_other_buttons_and_checks_before_writ
         method = request.url.path.split("/")[-1]
         calls.append(method)
         data = json.loads(request.content)
-        assert data["chat_id"] == channel["id"]
-        if method == "getChat":
+        if method == "getMe":
+            assert data == {}
+            result = {"id": 789}
+        elif method == "getChatMember":
+            assert data == {"chat_id": channel["id"], "user_id": 789}
+            result = {"status": "administrator", "can_change_info": True}
+        elif method == "getChat":
+            assert data["chat_id"] == channel["id"]
             result = info
         elif method == "setChatDescription":
+            assert data["chat_id"] == channel["id"]
             info["description"] = data["description"]
             result = True
         else:
@@ -111,9 +118,10 @@ async def test_service_pin_update_preserves_other_buttons_and_checks_before_writ
         preview = await ensure_service_pin_map_button(
             bot, policy, presentation, apply=False, update_description=True,
         )
-        assert calls == ["getChat"]
+        assert calls == ["getChat", "getMe", "getChatMember"]
         assert preview == {
-            "description": "would_update", "map_button": "would_update",
+            "description": "would_update", "description_permission": "granted",
+            "map_button": "would_update",
             "message_id": message_id, "owner_action_required": False,
         }
         applied = await ensure_service_pin_map_button(
@@ -125,8 +133,45 @@ async def test_service_pin_update_preserves_other_buttons_and_checks_before_writ
         )
         assert repeat["description"] == repeat["map_button"] == "unchanged"
     assert calls == [
-        "getChat", "getChat", "setChatDescription", "editMessageReplyMarkup", "getChat",
+        "getChat", "getMe", "getChatMember", "getChat", "getMe", "getChatMember",
+        "setChatDescription", "editMessageReplyMarkup", "getChat",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("apply", [False, True])
+async def test_description_permission_denial_does_not_block_service_button(apply):
+    presentation = yaml.safe_load(PRESENTATION.read_text(encoding="utf-8"))
+    policy = json.loads((BELGRADE / "pin-policy.json").read_text(encoding="utf-8"))
+    channel = {"id": policy["channel_id"], "type": "channel"}
+    calls = []
+
+    def handler(request):
+        method = request.url.path.split("/")[-1]
+        calls.append(method)
+        if method == "getChat":
+            result = {**channel, "pinned_message": {"message_id": 6}}
+        elif method == "getMe":
+            result = {"id": 789}
+        elif method == "getChatMember":
+            result = {"status": "administrator", "can_change_info": False}
+        else:
+            assert method == "editMessageReplyMarkup"
+            result = {**json.loads(request.content), "chat": channel}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await ensure_service_pin_map_button(
+            TelegramBotAPI("test-token", client), policy, presentation,
+            apply=apply, update_description=True,
+        )
+    assert result["description_permission"] == "denied"
+    assert result["owner_action_required"]
+    assert result["map_button"] == ("updated" if apply else "would_update")
+    expected = ["getChat", "getMe", "getChatMember"]
+    if apply:
+        expected.append("editMessageReplyMarkup")
+    assert calls == expected
 
 
 @pytest.mark.asyncio

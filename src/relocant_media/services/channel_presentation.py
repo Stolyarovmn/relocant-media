@@ -13,6 +13,27 @@ from relocant_media.domain.map_links import MAP_HOME_URL
 from relocant_media.services.pin_policy import CHANNEL
 
 
+async def _description_permission(bot: TelegramBotAPI) -> str:
+    try:
+        identity = await bot._call("getMe", {})
+        if not isinstance(identity, dict) or type(identity.get("id")) is not int:
+            return "unknown"
+        member = await bot._call("getChatMember", {"chat_id": CHANNEL, "user_id": identity["id"]})
+    except (httpx.HTTPError, TelegramAPIError, ValueError):
+        return "unknown"
+    if not isinstance(member, dict):
+        return "unknown"
+    status = member.get("status")
+    if status == "creator":
+        return "granted"
+    if status == "administrator":
+        capability = member.get("can_change_info")
+        if type(capability) is bool:
+            return "granted" if capability else "denied"
+        return "unknown"
+    return "denied" if status in ("member", "restricted", "left", "kicked") else "unknown"
+
+
 async def ensure_service_pin_map_button(
     bot: TelegramBotAPI, policy: dict[str, Any], presentation: dict[str, Any], *,
     apply: bool, update_description: bool = False,
@@ -36,7 +57,11 @@ async def ensure_service_pin_map_button(
         result["description"] = "unchanged"
         if info.get("description") != description:
             result["description"] = "would_update"
-            if apply:
+            permission = await _description_permission(bot)
+            result["description_permission"] = permission
+            if permission == "denied":
+                result.update(description="owner_action_required", owner_action_required=True)
+            elif apply:
                 try:
                     changed = await bot._call("setChatDescription", {
                         "chat_id": CHANNEL, "description": description,
@@ -47,6 +72,8 @@ async def ensure_service_pin_map_button(
                 except (httpx.HTTPError, TelegramAPIError, ValueError) as error:
                     result.update(description="owner_action_required", owner_action_required=True,
                                   description_error_type=type(error).__name__)
+                    if isinstance(error, httpx.HTTPStatusError):
+                        result["description_http_status"] = error.response.status_code
 
     pin = info.get("pinned_message")
     message_id = pin.get("message_id") if isinstance(pin, dict) else None
