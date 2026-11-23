@@ -99,6 +99,26 @@ def _without_map_buttons(markup: object) -> dict[str, Any] | None:
     return None if kept == rows else {"inline_keyboard": kept}
 
 
+def _is_map_post(pin: object) -> bool:
+    if not isinstance(pin, dict) or pin.get("text") != MAP_PIN_TEXT:
+        return False
+    rows = (pin.get("reply_markup") or {}).get("inline_keyboard")
+    return inline_keyboards_match({"inline_keyboard": rows}, MAP_PIN_MARKUP)
+
+
+async def _clear_keyboard(bot: TelegramBotAPI, message_id: int,
+                          cleaned: dict[str, Any]) -> None:
+    if cleaned["inline_keyboard"]:
+        await bot.edit_inline_keyboard(CHANNEL, message_id, cleaned)
+        return
+    # Пустая клавиатура: Telegram возвращает пост без reply_markup.
+    edited = await bot._call("editMessageReplyMarkup", {
+        "chat_id": CHANNEL, "message_id": message_id, "reply_markup": cleaned})
+    if (not isinstance(edited, dict) or edited.get("message_id") != message_id
+            or (edited.get("reply_markup") or {}).get("inline_keyboard")):
+        raise TelegramAPIError("service keyboard removal not confirmed")
+
+
 async def _pin(bot: TelegramBotAPI, message_id: int) -> None:
     if await bot._call("pinChatMessage", {"chat_id": CHANNEL, "message_id": message_id,
                                           "disable_notification": True}) is not True:
@@ -140,21 +160,16 @@ async def ensure_map_pin_on_top(
     if type(current) is int and top == current:
         result["map_pin"] = "on_top"
         return result
+    if _is_map_post(pin):
+        # Пост карты уже сверху, но его ID ещё не внесён в pin-policy.json.
+        result.update(map_pin="on_top_unregistered", map_channel_message=top,
+                      owner_action_required=True)
+        return result
+    cleaned = None
     if isinstance(pin, dict) and type(top) is int and top in service and top != current:
         cleaned = _without_map_buttons(pin.get("reply_markup", {"inline_keyboard": []}))
         if cleaned is not None:
             result["service_button"] = "would_remove"
-            if apply:
-                if cleaned["inline_keyboard"]:
-                    await bot.edit_inline_keyboard(CHANNEL, top, cleaned)
-                else:
-                    # Пустая клавиатура: Telegram возвращает пост без reply_markup.
-                    edited = await bot._call("editMessageReplyMarkup", {
-                        "chat_id": CHANNEL, "message_id": top, "reply_markup": cleaned})
-                    if (not isinstance(edited, dict) or edited.get("message_id") != top
-                            or (edited.get("reply_markup") or {}).get("inline_keyboard")):
-                        raise TelegramAPIError("service keyboard removal not confirmed")
-                result["service_button"] = "removed"
     result["map_pin"] = "would_send" if pin_existing is None else "would_pin"
     result["owner_action_required"] = True
     if not apply:
@@ -177,6 +192,14 @@ async def ensure_map_pin_on_top(
                       error_type=type(error).__name__)
         return result
     result["map_pin"] = "pinned"
+    if cleaned is not None and type(top) is int:
+        # Кнопку прежнего верхнего поста снимаем только после подтверждённого закрепа.
+        try:
+            await _clear_keyboard(bot, top, cleaned)
+            result["service_button"] = "removed"
+        except Exception as error:
+            result.update(service_button="remove_failed", owner_action_required=True,
+                          service_button_error_type=type(error).__name__)
     if type(current) is int and current != message_id:
         try:
             unpinned = await bot._call("unpinChatMessage",

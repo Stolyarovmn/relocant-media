@@ -263,9 +263,9 @@ async def test_apply_moves_the_map_button_to_one_silent_map_post():
     assert MAP_PIN_MARKUP["inline_keyboard"][0][0] == {
         "text": "Посмотреть на карте", "url": MAP_HOME_URL, "style": "success"}
     assert [m for m, _ in bot.calls] == [
-        "getChat", "editMessageReplyMarkup", "sendMessage", "pinChatMessage",
+        "getChat", "sendMessage", "pinChatMessage", "editMessageReplyMarkup",
         "unpinChatMessage"]
-    assert bot.calls[1][1]["reply_markup"] == {"inline_keyboard": [[other]]}
+    assert bot.calls[3][1]["reply_markup"] == {"inline_keyboard": [[other]]}
     assert result["service_button"] == "removed"
     assert result["map_channel_message"] == 200 and result["map_pin"] == "pinned"
     assert bot.calls[-1][1] == {"chat_id": CHANNEL_ID, "message_id": 150}
@@ -277,7 +277,7 @@ async def test_only_map_button_on_service_post_is_cleared_to_an_empty_keyboard()
 
     bot = MapPinBot(top=6, markup={"inline_keyboard": [[{"text": "x", "url": MAP_HOME_URL}]]})
     await ensure_map_pin_on_top(bot, _policy(), apply=True)
-    assert bot.calls[1] == ("editMessageReplyMarkup", {
+    assert bot.calls[3] == ("editMessageReplyMarkup", {
         "chat_id": CHANNEL_ID, "message_id": 6, "reply_markup": {"inline_keyboard": []}})
 
 
@@ -318,3 +318,56 @@ async def test_map_pin_message_is_silent_without_link_preview():
                                               {"inline_keyboard": []}) == 201
     assert sent[0]["disable_notification"] is True
     assert sent[0]["link_preview_options"] == {"is_disabled": True}
+
+
+@pytest.mark.asyncio
+async def test_unregistered_map_post_on_top_is_recognised_and_not_resent():
+    from relocant_media.services.channel_presentation import (
+        MAP_PIN_MARKUP,
+        MAP_PIN_TEXT,
+        ensure_map_pin_on_top,
+    )
+
+    bot = MapPinBot(top=200, markup={"inline_keyboard": [[
+        {k: v for k, v in MAP_PIN_MARKUP["inline_keyboard"][0][0].items() if k != "style"}]]})
+    original = bot._call
+
+    async def with_text(method, payload):
+        info = await original(method, payload)
+        if method == "getChat":
+            info["pinned_message"]["text"] = MAP_PIN_TEXT
+        return info
+
+    bot._call = with_text
+    result = await ensure_map_pin_on_top(bot, _policy(), apply=True)
+    assert result["map_pin"] == "on_top_unregistered" and result["map_channel_message"] == 200
+    assert [m for m, _ in bot.calls] == ["getChat"]
+
+
+@pytest.mark.asyncio
+async def test_service_button_is_kept_when_the_new_pin_fails():
+    from relocant_media.services.channel_presentation import ensure_map_pin_on_top
+
+    bot = MapPinBot(top=6, markup={"inline_keyboard": [[{"text": "x", "url": MAP_HOME_URL}]]},
+                    pin_ok=False)
+    result = await ensure_map_pin_on_top(bot, _policy(), apply=True)
+    assert result["map_pin"] == "sent_not_pinned" and result["map_channel_message"] == 200
+    assert "editMessageReplyMarkup" not in [m for m, _ in bot.calls]
+    assert result["service_button"] == "would_remove"
+
+
+@pytest.mark.asyncio
+async def test_failed_button_cleanup_is_reported_with_the_pinned_id():
+    from relocant_media.services.channel_presentation import ensure_map_pin_on_top
+
+    other = {"text": "Написать", "url": "https://t.me/relocant_media_belgrade_bot"}
+    bot = MapPinBot(top=6, markup={"inline_keyboard": [[{"text": "x", "url": MAP_HOME_URL},
+                                                         other]]})
+
+    async def fail(chat_id, message_id, markup):
+        raise RuntimeError("edit failed")
+
+    bot.edit_inline_keyboard = fail
+    result = await ensure_map_pin_on_top(bot, _policy(), apply=True)
+    assert result["map_pin"] == "pinned" and result["map_channel_message"] == 200
+    assert result["service_button"] == "remove_failed" and result["owner_action_required"]
