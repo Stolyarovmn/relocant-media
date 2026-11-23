@@ -2,6 +2,7 @@ import asyncio
 import json
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -557,6 +558,73 @@ def test_uncertain_send_is_recorded_and_never_repeated():
     assert receipt["state"] == "uncertain"
     assert asyncio.run(deliver(slot, digest, state, "updated", commit, send)) == receipt
     assert seen == ["sending", "uncertain"]
+
+
+@pytest.mark.parametrize(("priority", "offset", "count", "expected"), [
+    (False, 5, 2, "sent"),
+    (True, 5, 2, "reminder_source_unconfirmed"),
+    (False, 5, 1, "reminder_source_unconfirmed"),
+    (True, 31, 2, "sent"),
+])
+@pytest.mark.asyncio
+async def test_optional_unconfirmed_reminder_does_not_delay_a_ready_evening_digest(
+    tmp_path, monkeypatch, priority, offset, count, expected,
+):
+    scheduled = datetime(2026, 11, 22, 19, 30, tzinfo=UTC)
+    slot = due_slot(scheduled)
+    assert slot is not None and slot.kind == "evening"
+    now = scheduled + timedelta(minutes=offset)
+    current_policy = belgrade_digests._policy()
+    candidate = Entry("Отключение воды", "Объявление на завтра.",
+                      "https://www.beograd.rs/notice")
+    tomorrow = slot.scheduled.date() + timedelta(days=1)
+    policy = current_policy.model_copy(update={
+        "official_reminder_sources": {tomorrow: (candidate.url,)} if priority else {},
+    })
+    monkeypatch.setattr(belgrade_digests, "_policy", lambda: policy)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr(belgrade_digests, "datetime", Clock)
+    entries = [Entry(f"Материал {index}", "", f"https://t.me/eduvbelgrad/{index}")
+               for index in range(1, count + 1)]
+    monkeypatch.setattr(belgrade_digests, "evening_entries", lambda *_: entries)
+    monkeypatch.setattr(belgrade_digests, "_tomorrow_entries", lambda *_: [candidate])
+    confirm = AsyncMock(return_value=None)
+    monkeypatch.setattr(belgrade_digests, "_confirm_reminder", confirm)
+    monkeypatch.setattr(belgrade_digests, "_with_cover", lambda _, _entries, digest, _app: (
+        digest, None,
+    ))
+    bot = Mock(send_digest_message=AsyncMock(return_value=200))
+    monkeypatch.setattr(belgrade_digests, "TelegramBotAPI", lambda *_: bot)
+    database = tmp_path / "editorial.sqlite3"
+    engine = create_engine(f"sqlite:///{database}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    state = {}
+
+    def commit(current, sha, updates):
+        state.update(updates)
+        return state, "saved"
+
+    outcome = await belgrade_digests.run(database, slot, state, "base", commit, {
+        "TELEGRAM_BOT_TOKEN": "test-token",
+    })
+    assert outcome["state"] == expected
+    confirm.assert_awaited_once()
+    if expected == "sent":
+        bot.send_digest_message.assert_awaited_once()
+        message = bot.send_digest_message.await_args.args[1]
+        assert "Главное за день" in message
+        assert "Материал 1" in message and "Материал 2" in message
+        assert candidate.url not in message
+    else:
+        bot.send_digest_message.assert_not_awaited()
+        assert not state
+
 
 def test_baraevo_near_date_keeps_the_published_scope():
     from relocant_media.services.water_outage_scope import (

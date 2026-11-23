@@ -296,7 +296,7 @@ def test_drain_workflow_has_separate_chain_and_same_canonical_lock():
     assert "secrets." not in json.dumps(chain)
     assert set(cycle["outputs"]) == {
         "projection", "worker_mode", "start_status", "drain_continue", "drain_next_delay_seconds",
-        "morning_watch_date",
+        "morning_watch_date", "evening_watch_date",
     }
     worker_env = next(step['env'] for step in steps if step.get('id') == 'runtime')
     for key in ('GEMINI_API_KEY', 'TELEGRAM_BOT_TOKEN', 'TYPESAFE_API_KEY',

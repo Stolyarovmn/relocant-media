@@ -1,7 +1,8 @@
 name: Editorial Watchdog
 run-name: >-
-  ${{ inputs.morning_date && !inputs.dry_run &&
-    !inputs.test_intake_notification && format('Утренняя сводка · {0}', inputs.morning_date)
+  ${{ !inputs.dry_run && !inputs.test_intake_notification &&
+    ((inputs.morning_date && format('Утренняя сводка · {0}', inputs.morning_date)) ||
+      (inputs.evening_date && format('Вечерняя сводка · {0}', inputs.evening_date)))
     || inputs.editorial_only && !inputs.dry_run && 'Editorial Watchdog · редакция'
     || 'Editorial Watchdog' }}
 on:
@@ -29,6 +30,10 @@ on:
         description: Check only this Belgrade morning issue date (YYYY-MM-DD)
         type: string
         required: false
+      evening_date:
+        description: Проверить вечерний выпуск Белграда за указанную дату (YYYY-MM-DD)
+        type: string
+        required: false
 
 permissions:
   actions: read
@@ -43,7 +48,7 @@ jobs:
     if: >-
       github.ref == 'refs/heads/main' &&
       github.event_name != 'workflow_run' &&
-      !inputs.morning_date &&
+      !inputs.morning_date && !inputs.evening_date &&
       !inputs.editorial_only &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
       vars.ACTIONS_CUTOVER_CONFIRMED == 'true'
@@ -123,6 +128,7 @@ jobs:
           EDITORIAL_SEND_ENABLED: ${{ vars.ACTIONS_SEND_ENABLED }}
           EDITORIAL_CHANNEL_MODE: public
           MORNING_DATE: ${{ inputs.morning_date }}
+          EVENING_DATE: ${{ inputs.evening_date }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           set -euo pipefail
@@ -137,6 +143,7 @@ jobs:
           args=()
           if [ "$DRY_RUN" = true ]; then args+=(--dry-run); fi
           if [ -n "$MORNING_DATE" ]; then args+=(--morning-date "$MORNING_DATE"); fi
+          if [ -n "$EVENING_DATE" ]; then args+=(--evening-date "$EVENING_DATE"); fi
           python -m relocant_media.ops.editorial_watchdog --state .editorial-watchdog-state \
             --work "$RUNNER_TEMP/editorial-watchdog-recovery" "${args[@]}"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
