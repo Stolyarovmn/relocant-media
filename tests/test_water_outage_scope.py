@@ -112,7 +112,9 @@ def test_service_notice_reads_bulleted_streets_within_their_municipal_window() -
     block, streets = scope.extract_water_outage_scopes(notice)
     assert (block.municipality, block.starts_at.hour, block.ends_at.hour) == ("Savski venac", 8, 15)
     assert len(block.boundary) == 4
-    assert (streets.municipality, streets.starts_at.hour, streets.ends_at.hour) == ("Voždovac", 8, 16)
+    assert (streets.municipality, streets.starts_at.hour, streets.ends_at.hour) == (
+        "Voždovac", 8, 16,
+    )
     assert streets.whole_streets == ("Katarine Ivanović", "Rastka Petrovića")
     assert [(item.street, item.first, item.last) for item in streets.ranges] == [
         ("Brane Ćosića", 16, 42), ("Ignjata Joba", 1, 15),

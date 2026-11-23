@@ -485,7 +485,8 @@ def test_public_map_schema_rejects_unexpected_private_fields():
         read_map_feed(b'{"version":1,"incidents":[],"bot_token":"test"}')
 
 
-def test_water_copy_remains_a_valid_link_and_does_not_duplicate_the_morning_block():
+@pytest.mark.parametrize("bulleted", [False, True])
+def test_water_copy_remains_a_valid_link_and_does_not_duplicate_the_morning_block(bulleted):
     base = "https://www.beograd.rs/lat/"
     narrow_url = (base + "servisne-informacije/vodovod-i-kanalizacija/"
                   "a116752/Planirani-radovi-na-vodovodnoj-mrezi.html")
@@ -500,6 +501,14 @@ def test_water_copy_remains_a_valid_link_and_does_not_duplicate_the_morning_bloc
         "U opštini Voždovac, u utorak, 24. novembra, u periodu od 8 do 16 sati, "
         "bez vode će ostati potrošači u ulicama Katarine Ivanović i Rastka Petrovića."
     )
+    service = savski
+    if bulleted:
+        service = (
+            f"{savski}\n\nVOŽDOVAC\n\n"
+            "U opštini Voždovac, u utorak, 24. novembra, u periodu od 8 do 16 sati, "
+            "bez vode će ostati potrošači u sledećim ulicama:\n\n"
+            "Katarine Ivanović\n\nRastka Petrovića"
+        )
     now = datetime.fromisoformat("2026-11-24T07:30:00+01:00")
     source = load_source_file(Path("cities/belgrade/sources/city_beograd_news.yaml"))
     engine = create_engine("sqlite://")
@@ -513,7 +522,7 @@ def test_water_copy_remains_a_valid_link_and_does_not_duplicate_the_morning_bloc
                 published_at=datetime(2026, 11, 22, 7, tzinfo=UTC),
                 published_at_precision="day",
             ) for url, external_id, body in (
-                (narrow_url, "a116752", savski), (full_url, "a116747", f"{savski}\n\n{vozdovac}"),
+                (narrow_url, "a116752", service), (full_url, "a116747", f"{savski}\n\n{vozdovac}"),
             )
         ]
         capture_collected_batch(session, items)
@@ -526,6 +535,12 @@ def test_water_copy_remains_a_valid_link_and_does_not_duplicate_the_morning_bloc
                         for event_id in (narrow_id, full_id))
         municipalities = {scope.municipality for scope in full.water_districts}
         assert municipalities == {"Voždovac", "Savski venac"}
+        if bulleted:
+            assert set(narrow.water_districts) == set(full.water_districts)
+            assert _water_aliases((narrow, full), frozenset({narrow_id})) == {full_id: narrow_id}
+            distinct_map = narrow.model_copy(update={"source_map_url": narrow_url})
+            distinct_full = full.model_copy(update={"source_map_url": full_url})
+            assert not _water_aliases((distinct_map, distinct_full))
         changed = narrow.water_districts[0].model_copy(
             update={"ends_at": narrow.water_districts[0].ends_at + timedelta(minutes=30)},
         )

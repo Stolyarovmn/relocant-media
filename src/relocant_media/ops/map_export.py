@@ -603,19 +603,26 @@ def _secretariat_road(
 
 
 def _covered_water_scope(narrow: Incident, full: Incident) -> bool:
-    if (not set(narrow.water_districts) < set(full.water_districts)
+    narrow_districts, full_districts = set(narrow.water_districts), set(full.water_districts)
+    if (not narrow_districts <= full_districts
             or narrow.archived != full.archived
             or narrow.reported_scope and narrow.reported_scope != full.reported_scope
             or narrow.source_map_url and narrow.source_map_url != full.source_map_url):
         return False
     fields = ("windows", "segments", "ranges", "addresses", "points", "lines", "areas",
               "settlements")
+    if narrow_districts == full_districts:
+        return all(set(getattr(narrow, field)) == set(getattr(full, field)) for field in fields)
     return all(set(getattr(narrow, field)) <= set(getattr(full, field)) for field in fields)
 
 
-def _water_aliases(incidents: tuple[Incident, ...]) -> dict[str, str]:
+def _water_aliases(
+    incidents: tuple[Incident, ...], published: frozenset[str] = frozenset(),
+) -> dict[str, str]:
     waters = [event for event in incidents if event.kind == "water" and event.water_districts]
-    waters.sort(key=lambda event: len(event.water_districts), reverse=True)
+    waters.sort(key=lambda event: (-len(event.water_districts), not event.source_map_url,
+                                   not event.reported_scope, event.id not in published,
+                                   event.source_url))
     canonical: list[Incident] = []
     aliases = {}
     for event in waters:
@@ -722,6 +729,7 @@ def export_map(
     )
     incidents: dict[str, Incident] = {}
     road_aliases: set[str] = set()
+    published_water: set[str] = set()
     for item, run, post in rows:
         document = EvidenceDocument.model_validate(item, from_attributes=True)
         sent = run is not None and run.delivery_status == "sent" and post is not None
@@ -765,6 +773,8 @@ def export_map(
                 and incident.source_map_url != incident.source_url):
             assert incident.source_map_url is not None
             road_aliases.add(incident.source_map_url)
+        if incident.kind == "water" and title is not None:
+            published_water.add(incident.id)
         incidents.setdefault(incident.id, incident)
         if len(incidents) >= _MAX_INCIDENTS:
             break
@@ -773,7 +783,7 @@ def export_map(
     )
     # Keep both official source IDs so already sent buttons can still be resolved.
     return MapFeed(generated_at=observed_at.astimezone(UTC), incidents=visible,
-                   water_aliases=_water_aliases(visible))
+                   water_aliases=_water_aliases(visible, frozenset(published_water)))
 
 
 def export_map_snapshot(
