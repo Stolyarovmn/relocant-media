@@ -52,6 +52,7 @@ from relocant_media.collectors.beograd_article import (
 )
 from relocant_media.collectors.beograd_news import parse_beograd_news_list
 from relocant_media.collectors.bgprevoz_changes import BgprevozChangesCollector
+from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as TRAFFIC_SECRETARIAT_SOURCE
 from relocant_media.collectors.cukarica_news import (
     CukaricaNewsCollector,
     parse_cukarica_article,
@@ -459,8 +460,11 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     documents = []
     # Each source is re-read through the same parser used at intake.
-    venues = {**venue_sources(), **media_sources(), **guide_sources(),
-              BVK_NEWS_SOURCE: load_source_file(SOURCES / f"{BVK_NEWS_SOURCE}.yaml")}
+    registered = {**venue_sources(), **media_sources(), **guide_sources()}
+    registered.update({
+        key: load_source_file(SOURCES / f"{key}.yaml")
+        for key in (BVK_NEWS_SOURCE, TRAFFIC_SECRETARIAT_SOURCE)
+    })
     async def fetch_venue(source: SourceConfig, url: str) -> Any:
         async with httpx.AsyncClient(
             timeout=25, trust_env=False, verify=source_ssl_context(),
@@ -468,9 +472,9 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             return await fetch_public_article(source, url, venue_client)
     with httpx.Client(timeout=25, trust_env=False) as client:
         for document in package.event.documents:
-            if document.source_id in venues:
+            if document.source_id in registered:
                 with _note_source_unavailable(document.source_id):
-                    item = _run_sync(fetch_venue(venues[document.source_id], document.url))
+                    item = _run_sync(fetch_venue(registered[document.source_id], document.url))
                 documents.append(_live_document(document, item))
                 verify_live_map(package.presentation, documents[-1], item.source_html)
                 continue
@@ -569,7 +573,8 @@ async def collect_sources(
     discovery_venues = discovery_venue_sources()
     news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY_REGISTRY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
-               for key in ("city_beograd_news", "cukarica_news", BVK_NEWS_SOURCE)}
+               for key in ("city_beograd_news", "cukarica_news", BVK_NEWS_SOURCE,
+                           TRAFFIC_SECRETARIAT_SOURCE)}
     sources.update(runtime_venues)
     sources.update(media)
     sources.update(guides)
@@ -651,6 +656,9 @@ async def collect_sources(
             "city_beograd_news": BelgradeArticleCollector(sources["city_beograd_news"], client),
             "cukarica_news": CukaricaNewsCollector(sources["cukarica_news"], client),
             BVK_NEWS_SOURCE: build_collector(sources[BVK_NEWS_SOURCE], client),
+            TRAFFIC_SECRETARIAT_SOURCE: build_collector(
+                sources[TRAFFIC_SECRETARIAT_SOURCE], client,
+            ),
         }
 
         collectors.update({
@@ -799,6 +807,25 @@ async def collect_sources(
                             register_official(item)
             except (TimeoutError, ValueError, httpx.HTTPError) as error:
                 result["bvk_outage_source_error"] = type(error).__name__
+            traffic = collectors[TRAFFIC_SECRETARIAT_SOURCE]
+            try:
+                async with asyncio.timeout(35):
+                    notices = await traffic.collect()
+                    result["traffic_secretariat_items"] = len(notices)
+                    for item in notices:
+                        fresh = freshness_decision(
+                            item.title, item.body, item.published_at, now,
+                            published_at_precision=item.published_at_precision,
+                        )
+                        if fresh.action == "keep":
+                            register_official(item)
+                        else:
+                            result["discarded_before_persistence"] += 1
+            except (TimeoutError, ValueError, httpx.HTTPError) as error:
+                result["traffic_secretariat_error"] = type(error).__name__
+            result["traffic_secretariat_article_failures"] = len(
+                getattr(traffic, "item_failures", []),
+            )
         for source_id in (() if submissions_only else runtime_venues):
             collector = collectors[source_id]
             try:

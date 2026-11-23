@@ -11,6 +11,8 @@ from relocant_media.collectors.aero_telegraf import SOURCE_ID as AVIATION_SOURCE
 from relocant_media.collectors.aero_telegraf import article_id as aviation_article_id
 from relocant_media.collectors.base import RawItem
 from relocant_media.collectors.beograd_article import match_beograd_article_url
+from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as TRAFFIC_SECRETARIAT_SOURCE
+from relocant_media.collectors.bgsaobracaj_notices import match_bgsaobracaj_notice
 from relocant_media.collectors.cukarica_news import ARTICLE_PATH
 from relocant_media.collectors.venue_feed import _allowed
 from relocant_media.sources.registry import SourceConfig
@@ -86,6 +88,8 @@ def source_for_url(url: str, sources: dict[str, SourceConfig]) -> str | None:
             return None
         if "city_beograd_news" in sources and match_beograd_article_url(url):
             return "city_beograd_news"
+        if TRAFFIC_SECRETARIAT_SOURCE in sources and match_bgsaobracaj_notice(url):
+            return TRAFFIC_SECRETARIAT_SOURCE
         if ("cukarica_news" in sources and parts.hostname in {"cukarica.rs", "www.cukarica.rs"}
                 and ARTICLE_PATH.fullmatch(parts.path)):
             return "cukarica_news"

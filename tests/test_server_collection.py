@@ -112,6 +112,43 @@ async def test_road_map_notices_are_collected_without_an_editorial_anchor(collec
 
 
 @pytest.mark.asyncio
+async def test_traffic_secretariat_notice_is_ingested_with_nights_and_stable_identity(
+    collection, monkeypatch,
+):
+    from test_bgsaobracaj_notices import ARTICLE, SOURCE, article_html
+
+    from relocant_media.collectors.bgsaobracaj_notices import parse_notice_article
+    from relocant_media.ops.candidates_cli import select_candidates
+
+    engine, _, _, _, _ = collection
+    now = datetime(2026, 11, 23, 5, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(server_cycle, "datetime", Clock)
+    notice = parse_notice_article(article_html(), SOURCE, ARTICLE)
+
+    class Collector:
+        async def collect(self):
+            return [notice]
+
+    build = server_cycle.build_collector
+    monkeypatch.setattr(server_cycle, "build_collector", lambda source, client:
+                        Collector() if source.id == SOURCE.id else build(source, client))
+    result = await server_cycle.collect_sources(engine)
+    assert result["traffic_secretariat_items"] == 1
+    with Session(engine) as session:
+        manifest = select_candidates(session, city="belgrade", since=now - timedelta(days=5),
+                                     until=now, limit=10)
+        assert [item["article_id"] for item in manifest["candidates"]] == ["5437"]
+        assert manifest["candidates"][0]["evidence"]["url"] == ARTICLE
+        assert manifest["candidates"][0]["evidence"]["body"] == notice.body
+
+
+@pytest.mark.asyncio
 async def test_ten_day_old_card_never_fetches_full_article_or_spends_ai(collection, tmp_path):
     engine, cards, _, requests, _ = collection
     cards.append(item(timedelta(days=10), body="Спектакль уже завершился"))

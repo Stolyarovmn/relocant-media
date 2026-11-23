@@ -11,6 +11,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from relocant_media.domain.publication_time import publication_interval
+from relocant_media.domain.road_work_time import overnight_road_windows
 
 
 @dataclass(frozen=True)
@@ -296,10 +297,20 @@ def freshness_decision(
     if age >= RESOLVED_DISRUPTION_AGE and resolved_disruption(title, body):
         return FreshnessDecision("discard", "disruption_already_resolved")
     local_published = published_at.astimezone(ZoneInfo(timezone_name))
-    deadlines = _event_deadlines(text, local_published) + _relative_deadlines(
-        text, published_at, timezone_name)
+    timed_ends: list[datetime] = []
+    other_clauses = []
+    for clause in re.split(r"[\n;!?]|(?<=[а-яa-z])\.\s+", text, flags=re.IGNORECASE):
+        if windows := overnight_road_windows(clause, local_published):
+            timed_ends.extend(end for _, end in windows)
+        else:
+            other_clauses.append(clause)
+    if any(end > now for end in timed_ends):
+        return FreshnessDecision("keep", "dated_event_still_relevant")
+    deadline_text = "\n".join(other_clauses) if timed_ends else text
+    deadlines = _event_deadlines(deadline_text, local_published) + _relative_deadlines(
+        deadline_text, published_at, timezone_name)
     local_date = now.astimezone(ZoneInfo(timezone_name)).date()
-    if deadlines and all(deadline < local_date for deadline in deadlines):
+    if (deadlines or timed_ends) and all(deadline < local_date for deadline in deadlines):
         return FreshnessDecision("discard", "event_expired")
     if (published_at_precision == "day" and age > timedelta(hours=horizon_hours)
             and now - interval_end <= timedelta(hours=horizon_hours)
