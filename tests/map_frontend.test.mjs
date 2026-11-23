@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
 import { buildCalendar, googleCalendarUrl } from "../web/newsroom/map/calendar.js";
+import { addressWatch, watchedIncidents } from "../web/newsroom/map/address-watch.js";
 import {
   addressHits, addressWindowText, agendaDays, belgradeDate, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
@@ -17,6 +18,82 @@ import {
   timelineLabel, timelineSteps,
 } from "../web/newsroom/map/layer-views.js";
 import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
+
+const savedAddress = {
+  street: "Kralja Bodina", number: "7", municipality: "Voždovac", lat: 44.78, lon: 20.48,
+};
+const savedNow = Date.parse("2026-11-23T08:30:00+01:00");
+const savedWindow = { starts_at: "2026-11-23T08:00:00+01:00", ends_at: "2026-11-23T14:00:00+01:00" };
+const watchIncident = (id, overrides = {}) => ({
+  id: `event_${id.repeat(20)}`, kind: "water", title: "Работы на водопроводе",
+  source_url: "https://www.beograd.rs/", ...savedWindow, ...overrides,
+});
+
+test("сохранённый адрес учитывает своё время, границы поселения и только близкие дороги", () => {
+  const outer = [[44.77, 20.47], [44.77, 20.49], [44.79, 20.49], [44.79, 20.47], [44.77, 20.47]];
+  const hole = [[44.779, 20.479], [44.779, 20.481], [44.781, 20.481], [44.781, 20.479], [44.779, 20.479]];
+  const road = { coordinates: [[44.781, 20.478], [44.781, 20.482]], ...savedWindow };
+  const feed = { version: 1, incidents: [
+    watchIncident("a", { addresses: [{ ...savedAddress, ...savedWindow }] }),
+    watchIncident("b", { addresses: [{ ...savedAddress, municipality: "Zvezdara", ...savedWindow }] }),
+    watchIncident("c", { areas: [{ scope: "settlement", rings: [outer], ...savedWindow }] }),
+    watchIncident("d", { areas: [{ scope: "settlement", rings: [outer, hole], ...savedWindow }] }),
+    watchIncident("e", { kind: "road", lines: [road] }),
+    watchIncident("f", { kind: "road", lines: [{ ...road, boundary: true }] }),
+    watchIncident("1", { kind: "road", lines: [{ ...road,
+      coordinates: [[44.782, 20.478], [44.782, 20.482]],
+    }] }),
+    watchIncident("2", { addresses: [{ ...savedAddress, ...savedWindow,
+      ends_at: "2026-11-23T08:15:00+01:00",
+    }, { ...savedAddress, number: "9", ...savedWindow }] }),
+  ] };
+  const rows = watchedIncidents(savedAddress, readIncidents(feed), savedNow);
+  assert.deepEqual(rows.map(({ incident, nearby }) => [incident.id, nearby]), [
+    [watchIncident("a").id, false], [watchIncident("c").id, false], [watchIncident("e").id, true],
+  ]);
+  assert.equal(rows[0].windows[0].end, Date.parse(savedWindow.ends_at));
+});
+
+test("метки изменений сохраняются до просмотра и учитывают график именно этого дома", () => {
+  const saved = new Map();
+  const storage = () => ({
+    getItem: (key) => saved.get(key) ?? null,
+    setItem: (key, value) => saved.set(key, value),
+    removeItem: (key) => saved.delete(key),
+  });
+  const rows = (end, withNew = false, otherEnd = savedWindow.ends_at) => watchedIncidents(savedAddress,
+    readIncidents({ version: 1, incidents: [
+      watchIncident("a", { addresses: [
+        { ...savedAddress, ...savedWindow, ends_at: end },
+        { ...savedAddress, ...savedWindow, number: "9", ends_at: otherEnd },
+      ] }),
+      ...(withNew ? [watchIncident("b", { addresses: [{ ...savedAddress, ...savedWindow }] })] : []),
+    ] }), savedNow);
+  const first = addressWatch(storage);
+  assert(first.save(savedAddress));
+  const before = rows(savedWindow.ends_at);
+  assert.equal(first.changes(before, savedNow).size, 0);
+  first.observe(before, savedNow);
+  const next = addressWatch(storage);
+  const unrelated = rows(savedWindow.ends_at, false, "2026-11-23T13:00:00+01:00");
+  assert.equal(next.changes(unrelated, savedNow + 1000).size, 0);
+  const newRows = rows("2026-11-23T12:00:00+01:00", true);
+  const updatedAt = savedNow + 2000;
+  const changed = new Map([[watchIncident("a").id, "updated"], [watchIncident("b").id, "new"]]);
+  assert.deepEqual(next.changes(newRows, updatedAt), changed);
+  assert.deepEqual(addressWatch(storage).changes(newRows, updatedAt), changed);
+  assert.equal(next.changes(newRows, null).size, 0);
+  next.observe(newRows, null);
+  assert.deepEqual(addressWatch(storage).changes(newRows, updatedAt), changed);
+  next.observe(newRows, updatedAt);
+  assert.deepEqual(next.changes(newRows, updatedAt), changed);
+  assert.equal(addressWatch(storage).changes(newRows, updatedAt).size, 0);
+  first.observe(before, savedNow + 1000);
+  assert.equal(addressWatch(storage).changes(newRows, updatedAt).size, 0);
+  assert(next.remove());
+  assert.equal(addressWatch(storage).address, null);
+  assert.equal(addressWatch(() => { throw new Error("Хранилище выключено"); }).save(savedAddress), false);
+});
 
 test("старый снимок не открывает архив старше 14 дней", () => {
   const start = "2026-11-01T08:00:00+01:00";
