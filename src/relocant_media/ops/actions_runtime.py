@@ -640,12 +640,7 @@ def run_child(command: list[str], environment: dict[str, str]) -> int:
         return code
 
 
-def print_failure_coordinates(report: dict[str, Any]) -> None:
-    fields: dict[str, Any] = {
-        key: value for key in ("status", "error_type", "error_site", "backup_error_type")
-              if isinstance(value := report.get(key), str)
-              and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
-    errors = report.get("processing_errors")
+def _processing_error_coordinates(errors: object) -> list[dict[str, str]]:
     coordinates = []
     for error in errors[:5] if isinstance(errors, list) else []:
         if not isinstance(error, dict):
@@ -655,6 +650,15 @@ def print_failure_coordinates(report: dict[str, Any]) -> None:
                 and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
         if safe:
             coordinates.append(safe)
+    return coordinates
+
+
+def print_failure_coordinates(report: dict[str, Any]) -> None:
+    fields: dict[str, Any] = {
+        key: value for key in ("status", "error_type", "error_site", "backup_error_type")
+              if isinstance(value := report.get(key), str)
+              and re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", value)}
+    coordinates = _processing_error_coordinates(report.get("processing_errors"))
     if coordinates:
         fields["processing_errors"] = coordinates
     print(json.dumps({"runtime_failure": fields}), file=sys.stderr)
@@ -678,13 +682,26 @@ def _counters(value: object, keys: tuple[str, ...]) -> dict[str, int]:
     return {key: value[key] for key in keys if type(value.get(key)) is int}
 
 
-def _report_obsolete_fallback_responses(run_dir: Path) -> None:
+def _report_fallback_result(run_dir: Path) -> None:
     try:
         report = json.loads((run_dir / "server-report.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
     if not isinstance(report, dict) or report.get("mode") != "subscription_gpt_fallback":
         return
+    status = report.get("status")
+    if status in ("PRIMARY_OK", "PRIMARY_PARTIAL"):
+        counts = _counters(report, (
+            "imported", "declined", "rejected", "unresolved", "awaiting_owner",
+            "sent_count", "delivery_blocked",
+        ))
+        result: dict[str, Any] = {"status": status}
+        result.update({key: count for key, count in counts.items() if 0 <= count <= 5})
+        errors = _processing_error_coordinates(report.get("processing_errors"))
+        if errors:
+            result["processing_errors"] = errors
+        print(json.dumps({"gpt_fallback_result": result}), flush=True)
+
     counters = _counters(report.get("obsolete_responses"), (
         "already_resolved", "attempt_in_progress", "material_expired",
         "request_expired", "request_superseded",
@@ -1106,7 +1123,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             code = code or 1
     report_failure(run_dir, code)
     if mode == "fallback":
-        _report_obsolete_fallback_responses(run_dir)
+        _report_fallback_result(run_dir)
     # A signal/forced termination has uncertain effects: do not unlock even if bytes survived.
     if code < 0:
         raise RuntimeError("runtime terminated; reconcile busy generation")
