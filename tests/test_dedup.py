@@ -62,6 +62,7 @@ def test_single_route_detour_reprint_resolves_tomorrow_in_belgrade() -> None:
     original, reprint = single_route_detour_reprint()
     assert same_event(original, reprint)
     assert same_event(reprint, original)
+    assert cluster_events([reprint, original]) == [[original, reprint]]
     assert not same_event(replace(original, published_at=datetime(2026, 11, 14, 23, tzinfo=UTC)),
                           reprint)
 
