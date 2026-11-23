@@ -1,5 +1,6 @@
 """Close reader submissions and deliver the outcome to their verified private chat."""
 
+import json
 import re
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -23,8 +24,9 @@ from relocant_media.services.reader_source_discovery import (
     DISCOVERY_FIELD,
     confirmed_source_signal,
     discovery_deadline_reached,
+    review_candidates,
 )
-from relocant_media.services.submission_feedback import INCIDENT
+from relocant_media.services.submission_feedback import INCIDENT, resolve_submission
 from relocant_media.services.submission_queue import tip_urls
 from relocant_media.services.submission_reference import submission_reference
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
@@ -38,7 +40,8 @@ _OWNER_KINDS = {
     "question": "Вопрос или предложение",
 }
 _OWNER_ACTION = re.compile(
-    r"rr:(close|media|approve_media|reject_media|primary):([1-9][0-9]{0,17})",
+    r"rr:(?:(close|media|approve_media|reject_media|primary):([1-9][0-9]{0,17})|"
+    r"candidate:([1-9][0-9]{0,17}):([1-9][0-9]{0,17}):([0-9a-f]{10}))",
 )
 _MEDIA_METHODS = {"photo": "sendPhoto", "video": "sendVideo",
                   "document": "sendDocument", "voice": "sendVoice", "audio": "sendAudio"}
@@ -174,6 +177,8 @@ def _news_state(session: Session, row: Submission, now: datetime) -> str | None:
         if discovery_deadline_reached(row, now):
             _close(row, _NO_PUBLIC_CONFIRMATION, "public_confirmation_missing", now=now)
             return None
+        if review_candidates(row):
+            return "Нашли возможные источники. Сверьте событие и выберите подходящий."
         if _primary_review_available(row):
             return ("Сигнал из чужого источника. Можно проверить первоисточник отдельной кнопкой. "
                     "Присланные текст и файлы остаются только редакции.")
@@ -294,11 +299,26 @@ def record_reader_resolution_callback(
     ):
         return None
     assert owner_chat_id is not None
-    row = session.get(Submission, int(match.group(2)))
+    row = session.get(Submission, int(match.group(2) or match.group(3)))
     message_id = message.get("message_id")
     if not _exact_owner_card(row, owner_chat_id, message_id):
         return OwnerUpdateResult(True, False, "Карточка обращения не найдена.")
     assert row is not None
+    if selected := match.group(4):
+        raw_id = int(selected)
+        candidate = next((item for item in review_candidates(row) if item["id"] == raw_id), None)
+        outdated = "Вариант устарел. Проверьте обновлённую карточку."
+        if candidate is None or candidate["sha256"][:10] != match.group(5):
+            return OwnerUpdateResult(True, False, outdated)
+        if session.scalar(select(RawItem.id).join(Source).where(
+            RawItem.id == raw_id, Source.city == row.payload["city"],
+            RawItem.url == candidate["url"], RawItem.content_sha256 == candidate["sha256"],
+        )) is None:
+            return OwnerUpdateResult(True, False, outdated)
+        resolve_submission(row, [raw_id], now=datetime.now(UTC))
+        return OwnerUpdateResult(
+            True, True, "Источник поставлен в очередь редакционной проверки.",
+        )
     if match.group(1) == "primary":
         if row.status == "source_linked" and session.scalar(select(EditorialRun.raw_item_id).where(
             EditorialRun.raw_item_id.in_(row.payload.get("raw_item_ids", [])),
@@ -437,6 +457,13 @@ def _owner_card(row: Submission, reason: str, owner_chat_id: int) -> dict[str, A
         publication_details += "Ручной контроль: " + (
             human_review_reason(row.payload, owner_chat_id) or "пройден для этой версии."
         ) + "\n"
+    candidates = review_candidates(row)
+    source_list = "".join(
+        f"{index}. {item['title']}\n{item['url']}\n"
+        for index, item in enumerate(candidates, start=1)
+    )
+    if source_list:
+        source_list += "\n"
     return {
         "chat_id": owner_chat_id,
         "text": (
@@ -445,9 +472,13 @@ def _owner_card(row: Submission, reason: str, owner_chat_id: int) -> dict[str, A
             f"Вложений: {len(row.payload.get('attachments', []))}.\n"
             f"{publication_details}"
             f"{instructions}\n\n"
+            f"{source_list}"
             "Ответьте на эту карточку готовым текстом. Он уйдёт автору обращения."
         ),
         "reply_markup": {"inline_keyboard": [
+            *[[{"text": f"Проверить источник {index}",
+                "callback_data": f"rr:candidate:{row.id}:{item['id']}:{item['sha256'][:10]}"}]
+              for index, item in enumerate(candidates, start=1)],
             *([[{"text": ("Проверить первоисточник" if row.status == "reader_review"
                           else "Повторить проверку источника"),
                  "callback_data": f"rr:primary:{row.id}"}]]
@@ -466,7 +497,13 @@ def _owner_card(row: Submission, reason: str, owner_chat_id: int) -> dict[str, A
 
 
 def _owner_card_hash(params: dict[str, Any]) -> str:
-    return sha256(str(params["text"]).encode()).hexdigest()
+    buttons = params["reply_markup"]["inline_keyboard"]
+    callbacks = [item["callback_data"] for row in buttons for item in row
+                 if item["callback_data"].startswith("rr:candidate:")]
+    content = str(params["text"])
+    if callbacks:
+        content += json.dumps(callbacks)
+    return sha256(content.encode()).hexdigest()
 
 
 async def _refresh_owner_card(
