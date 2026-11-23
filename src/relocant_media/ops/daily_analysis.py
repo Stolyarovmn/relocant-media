@@ -149,8 +149,8 @@ def build_status(
         actions.append("Изучить повторяющиеся причины удержания в закрытом аудите, "
                        "сохраняя facts/utility guards.")
     actions.extend([
-        ("Подключить подтверждённые метрики публикаций и продвижения за сутки."
-         if day_snapshot is None else "Сверить отдельно результаты продвижения за сутки."),
+        "Подключить подтверждённые метрики публикаций и продвижения "
+        "для оценки результата за сутки.",
         "Проверить доступность агрегированных сигналов комментариев и входящих обращений "
         "без выгрузки личных данных.",
         "Сверить фактический охват источников и стабильность Actions + Drive "
@@ -165,8 +165,7 @@ def build_status(
                      "observed_at": observed.isoformat() if observed else None,
                      "queue_counts": safe_counts if available else None},
         "rolling_kpi": _rolling_kpi(recorded) if available else None,
-        "daily_results": {"published_posts": day_snapshot["post_count"] if day_snapshot else None,
-                          "promotion": None,
+        "daily_results": {"published_posts": None, "promotion": None,
                           "audience_metrics": None, "comment_signals": None,
                           "incoming_submissions": None},
         "owner_brief": {"local_date": local_date, "timezone": zone.key,
@@ -271,14 +270,10 @@ def owner_markdown(report: dict[str, Any]) -> str:
 def markdown(report: dict[str, Any]) -> str:
     observed = _time(report["snapshot"]["observed_at"])
     stamp = observed.astimezone(ZONE).strftime("%d.%m.%Y %H:%M МСК") if observed else "неизвестно"
-    daily = report["daily_results"]["published_posts"]
-    daily_stamp = report["owner_brief"]["local_date"]
-    daily_line = ("Публикации за календарные сутки: неизвестно." if daily is None else
-                  f"Публикации за календарные сутки на момент снимка ({daily_stamp}): {daily}.")
     lines = [f"# Ежедневный статус · {report['report_date']} · {report['city']}", "",
              f"Состояние снимка: {report['snapshot']['status']}. Наблюдение БД: {stamp}.", "",
              *_kpi_lines(report.get("rolling_kpi")),
-             daily_line + " Продвижение: недоступно.",
+             "Публикации за календарные сутки: неизвестно. Продвижение: недоступно.",
              "Сигналы комментариев и входящих обращений: недоступны.", ""]
     counts = report["snapshot"]["queue_counts"]
     if counts is not None:

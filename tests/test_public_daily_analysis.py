@@ -214,7 +214,7 @@ def test_owner_brief_has_evidence_links_and_clear_scope():
     text = owner_markdown(report)
     assert report["report_date"] == "2026-10-27"
     assert report["owner_brief"]["local_date"] == "2026-10-26"
-    assert report["daily_results"]["published_posts"] == 3
+    assert report["owner_brief"]["publications"]["post_count"] == 3
     assert len(text.splitlines()) == 7
     assert "[№101](https://t.me/eduvbelgrad/101)" in text
     assert "[«Белград сегодня»](https://t.me/eduvbelgrad/104)" in text
@@ -224,9 +224,9 @@ def test_owner_brief_has_evidence_links_and_clear_scope():
     assert "с неизвестным исходом — 1" in text
     assert "SECRET" not in json.dumps(report) and "example.com" not in text
     assert build_status(value, city="belgrade", now=NOW, day=date(2026, 10, 25))[
-        "daily_results"]["published_posts"] == 0
+        "owner_brief"]["publications"]["post_count"] == 0
     assert build_status(value, city="belgrade", now=NOW + timedelta(days=1))[
-        "daily_results"]["published_posts"] is None
+        "owner_brief"]["publications"] is None
 
 
 def test_old_snapshot_stays_unknown_in_a_short_report():
