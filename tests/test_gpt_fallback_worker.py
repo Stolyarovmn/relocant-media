@@ -13,7 +13,7 @@ from test_gpt_fallback_service import NOW, package_for_request
 from test_gpt_fallback_service import fallback_session as service_session
 from test_server_cycle import seeded as server_seeded
 
-from relocant_media.ai.models import EditorialOutcome, EvidenceDocument
+from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, RussianDraft
 from relocant_media.ai.package import EditorialPackage, canonical_json, context_sha256, draft_sha256
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import event_key
@@ -26,6 +26,7 @@ from relocant_media.services.editorial import _candidate, _snapshot_member
 from relocant_media.services.editorial_products import build_presentation, present_draft
 from relocant_media.services.gpt_batch_fallback import build_batch_request, build_ranked_request
 from relocant_media.services.material_lifecycle import can_retry_snapshot, lifecycle_state
+from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 seeded = server_seeded
@@ -278,6 +279,120 @@ def test_real_fallback_validation_requires_the_recorded_gemini_failure(
     assert result["fallback_required"] is invalidate
     assert fetched == ([] if invalidate else [True])
     assert (session.get(EditorialRun, raw.id) is None) is invalidate
+
+
+@pytest.mark.parametrize("case", ["repeat", "changed_dates", "late_repeat"])
+def test_fallback_resolves_transport_retellings_without_retry(
+    fallback_session, monkeypatch, case,
+):
+    monkeypatch.setenv("EDITORIAL_CHANNEL_MODE", "public")
+    session, raw, scheduler = fallback_session
+    now = datetime.now(UTC) - timedelta(seconds=1)
+    start = (now + timedelta(days=1)).date()
+    end = start + timedelta(days=3)
+    raw.published_at = raw.ingested_at = now - timedelta(minutes=30)
+    scheduler.scheduled_for = scheduler.started_at = now - timedelta(minutes=20)
+    scheduler.finished_at = now - timedelta(minutes=5)
+    raw.title = "Izmena trase linije 82"
+    raw.body = (
+        f"Linija 82 ide izmenjenom trasom od {start:%d.%m.%Y} do {end:%d.%m.%Y} zbog radova."
+    )
+    session.commit()
+    request = gpt_fallback.build_request(session, now=now)
+    original = package_for_request(request)
+    draft = present_draft(RussianDraft(
+        title="Автобус №82 пойдёт в объезд",
+        body=f"С {start:%d.%m.%Y} по {end:%d.%m.%Y} автобус №82 идёт в объезд из-за ремонта.",
+        claim_ids=("c1",),
+    ), original.presentation, category="transport")
+    payload = original.model_dump(mode="json")
+    payload["urgent"] = True
+    payload["outcome"]["draft"] = draft.model_dump(mode="json")
+    claim = payload["outcome"]["claims"]["claims"][0]
+    claim["text"] = raw.body
+    claim["citations"][0]["quote"] = raw.body
+    payload["presentation"] = bind_native_map_draft(original.presentation, draft).model_dump(
+        mode="json",
+    )
+    for review in payload["reviews"]:
+        review["draft_sha256"] = draft_sha256(draft)
+    bind_facts_check(payload)
+    digest = context_sha256(EditorialPackage.model_validate_json(json.dumps(payload)))
+    for review in payload["reviews"]:
+        review["context_sha256"] = digest
+    package = EditorialPackage.model_validate_json(json.dumps(payload))
+
+    older = RawItem(
+        source_id=raw.source_id, external_id="previous-route-update",
+        url="https://www.beograd.rs/previous-route.html",
+        title="Архивная статья", body="Снимок предыдущего источника.",
+    )
+    previous_end = end + timedelta(days=int(case == "changed_dates"))
+    sent = Post(
+        city="belgrade", category="transport", status="ready", confidence=.99,
+        title="На линии 82 изменили схему движения",
+        body=f"Маршрут 82 с {start:%d.%m.%Y} до {previous_end:%d.%m.%Y} идёт по временной схеме.",
+        published_at=now - timedelta(hours=1) if case != "late_repeat" else None,
+        telegram_message_id=124 if case != "late_repeat" else None,
+    )
+    session.add_all([older, sent])
+    session.flush()
+    previous_post_id = sent.id
+    earlier_run = EditorialRun(raw_item_id=older.id, post_id=sent.id, outcome={"status": "ready"},
+                              evidence={}, delivery_status=(
+                                  "pending" if case == "late_repeat" else "sent"))
+    session.add(earlier_run)
+    session.commit()
+    monkeypatch.setattr(worker, "_check_live_evidence", lambda package: None)
+    result = worker.run_worker(session.get_bind(), _parse(_input(package, request)), now=now)
+
+    assert result["status"] == "PRIMARY_OK"
+    assert result["processing_errors"] == []
+    assert not result["fallback_required"]
+    session.expire_all()
+    run = session.get(EditorialRun, raw.id)
+    if case == "repeat":
+        assert result["declined"] == 1 and result["imported"] == 0
+        assert run.post_id is None
+        assert run.outcome["reason"] == "lifecycle_published_transport_duplicate"
+        state = lifecycle_state(session, raw.id, now=now)
+        assert (state["state"], state["next_action"]) == ("blocked", None)
+        assert state["duplicate_of_post_id"] == previous_post_id
+        assert gpt_fallback.pending_gpt_ids(session, now=now) == set()
+    else:
+        assert result["imported"] == 1 and result["declined"] == 0
+        assert run.outcome["status"] == "ready" and run.post_id is not None
+    if case == "late_repeat":
+        import asyncio
+
+        def live(value):
+            return tuple(EvidenceDocument.model_validate(doc.model_dump())
+                         for doc in value.event.documents)
+
+        class Bot:
+            def __init__(self, *args):
+                pass
+
+            async def send_message(self, *args, **kwargs):
+                pytest.fail("Повтор не должен доходить до Telegram")
+
+        prior = session.get(Post, previous_post_id)
+        prior.telegram_message_id = 124
+        prior.published_at = now
+        earlier_run.delivery_status = "sent"
+        session.commit()
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-test-value")
+        monkeypatch.setattr(worker.server_cycle, "fetch_documents", live)
+        monkeypatch.setattr(worker.server_cycle, "TelegramBotAPI", Bot)
+        blocked = []
+        assert asyncio.run(worker.server_cycle.publish_pending(
+            session.get_bind(), enabled=True, only_raw_ids={raw.id}, blocked=blocked,
+        )) == []
+        assert blocked == []
+        session.expire_all()
+        assert run.outcome["reason"] == "lifecycle_published_transport_duplicate"
+        assert lifecycle_state(session, raw.id, now=datetime.now(UTC))["next_action"] is None
+    assert session.get(Post, previous_post_id).telegram_message_id == 124
 
 
 @pytest.mark.parametrize("approve", [True, False])

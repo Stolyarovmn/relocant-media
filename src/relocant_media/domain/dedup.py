@@ -58,9 +58,10 @@ _TRANSPORT_ACTION = re.compile(
     flags=re.IGNORECASE | re.UNICODE,
 )
 _BEOGRADE_WORK_SECTION = re.compile(r"\bradovi se izvode na ([^.]+)\.", re.I)
+_BEOGRADE_SECTION_STREET = re.compile(r"^(kolovozu ulice )([^()]+)(?=\()", re.I)
 _BEOGRADE_ORDERED_DETOUR = re.compile(
-    r"\bu smeru ka ([^.,]+?) (?:vozila )?će saobraćati ulicama ([^.]*) "
-    r"i dalje redovnom trasom\s*, dok će u suprotnom smeru saobraćati redovnom trasom",
+    r"\bu smeru ka ([^.,]+?),? (?:vozila )?će saobraćati ulicama ([^.]*) "
+    r"i dalje redovn(?:o|om trasom)\s*, dok će u suprotnom smeru saobraćati redovnom trasom",
     re.I,
 )
 _BEOGRADE_SKIPPED_STOP = re.compile(
@@ -289,7 +290,9 @@ def _same_source_transport_reprint(
         if (
             left_detour is not None
             and left_detour == _single_route_detour(right)
-            and _body_token_similarity(left.body, right.body) >= _SAME_SOURCE_BODY_TOKEN_SIMILARITY
+            and _body_token_similarity(
+                _serbian_inflection_key(left.body), _serbian_inflection_key(right.body),
+            ) >= _SAME_SOURCE_BODY_TOKEN_SIMILARITY
         ):
             return True
 
@@ -340,6 +343,15 @@ def _same_source_transport_reprint(
     return _body_token_similarity(left.body, right.body) >= _SAME_SOURCE_BODY_TOKEN_SIMILARITY
 
 
+def _serbian_inflection_key(value: str) -> str:
+    # Короткие окончания в официальных вариантах одного сообщения о маршруте.
+    # Порядок улиц, даты, номера, остановка и направление сверяются отдельно.
+    return " ".join(
+        re.sub(r"(?:om|em|im|oj|a|e|i|u)$", "", word) if len(word) > 4 else word
+        for word in normalize_text(value).split()
+    )
+
+
 def _single_route_detour(candidate: EventCandidate) -> tuple[object, ...] | None:
     """Опознаёт повтор объявления об объезде одного маршрута по точным деталям."""
     if candidate.published_at is None or len(candidate.body) > _SAME_SOURCE_MAX_BODY_CHARS:
@@ -358,7 +370,7 @@ def _single_route_detour(candidate: EventCandidate) -> tuple[object, ...] | None
     direction, streets = detour.groups()
     if normalize_text(direction) != normalize_text(stop[1]):
         return None
-    ordered_streets = tuple(normalize_text(street) for street in streets.split(","))
+    ordered_streets = tuple(_serbian_inflection_key(street) for street in streets.split(","))
     if len(ordered_streets) < 3 or not all(ordered_streets):
         return None
 
@@ -371,9 +383,12 @@ def _single_route_detour(candidate: EventCandidate) -> tuple[object, ...] | None
         numbers |= {start}
     if len(dates) != 2:
         return None
+    section = _BEOGRADE_SECTION_STREET.sub(
+        lambda match: match[1] + _serbian_inflection_key(match[2]) + " ", site[1],
+    )
     return (
         routes, dates, numbers, candidate._facts(include_title=True).material,
-        re.sub(r"\bu smeru ka ulici ", "u smeru ka ", normalize_text(site[1])),
+        re.sub(r"\bu smeru ka ulici ", "u smeru ka ", normalize_text(section)),
         normalize_text(direction), ordered_streets,
         normalize_text(stop[2]),
     )

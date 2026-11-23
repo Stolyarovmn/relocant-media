@@ -167,6 +167,7 @@ def test_retold_transport_story_is_skipped_before_reviews(seeded, tmp_path, monk
             published_at=now - timedelta(hours=4),
             body="Маршрут 82 с 17.11 до 11.12 пойдёт по временной схеме.",
         )
+        previous.title = "Линия 82: объезд с 17.11 по 11.12"
         session.commit()
         previous_id = previous.id
 

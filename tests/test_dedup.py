@@ -42,7 +42,11 @@ def single_route_detour_reprint() -> tuple[EventCandidate, EventCandidate]:
     )
     original = EventCandidate(
         1, "city_beograd_news", "https://www.beograd.rs/a116679", "Promena trase linije 82",
-        f"Od sutra do 11. decembra doći će do promene u radu linije 82. {details}",
+        "Od sutra do 11. decembra doći će do promene u radu linije 82. "
+        + details.replace("Ulice Gandijeva", "Ulice Gandijeve").replace(
+            "Zemunu vozila će saobraćati ulicama Gandijeva, Egipatska, Tošin bunar ",
+            "Zemunu, vozila će saobraćati ulicama Gandijevom, Egipatskom, Tošinim bunarom ",
+        ).replace("i dalje redovnom trasom", "i dalje redovno"),
         publication,
     )
     reprint = EventCandidate(
