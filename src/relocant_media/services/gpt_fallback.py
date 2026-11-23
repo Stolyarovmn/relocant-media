@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -78,6 +79,12 @@ GEMINI_FAILURES = frozenset({
 })
 _RECOVERABLE_FAILURES = GEMINI_FAILURES | {"SourceUnavailableError"}
 _TASK = "editorial-primary:belgrade"
+
+
+class FallbackDeferredReason(StrEnum):
+    SENSITIVE_REVIEW = "sensitive_review_required"
+    SOURCE_CONFIRMATION = "source_confirmation_missing"
+    INDEPENDENT_REVIEW = "independent_review_incomplete"
 
 
 class FallbackValidationError(ValueError):

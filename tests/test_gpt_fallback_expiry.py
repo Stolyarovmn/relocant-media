@@ -116,6 +116,9 @@ def test_runtime_logs_partial_fallback_without_private_content(tmp_path, capsys)
         "status": "PRIMARY_PARTIAL",
         "imported": 0, "declined": 1, "rejected": 1, "unresolved": 2,
         "awaiting_owner": True, "sent_count": 0, "delivery_blocked": 99,
+        "deferred_reasons": {"sensitive_review_required": 2, "foreign": 1,
+                             "independent_review_incomplete": True,
+                             "source_confirmation_missing": 99},
         "processing_errors": [
             {"stage": "validate", "error_type": "FallbackValidationError",
              "reason": "material_closed", "message": "PRIVATE"},
@@ -126,6 +129,7 @@ def test_runtime_logs_partial_fallback_without_private_content(tmp_path, capsys)
     assert json.loads(capsys.readouterr().out) == {"gpt_fallback_result": {
         "status": "PRIMARY_PARTIAL",
         "imported": 0, "declined": 1, "rejected": 1, "unresolved": 2, "sent_count": 0,
+        "deferred_reasons": {"sensitive_review_required": 2},
         "processing_errors": [
             {"stage": "validate", "error_type": "FallbackValidationError",
              "reason": "material_closed"},
@@ -148,6 +152,22 @@ def test_expired_result_is_detected_read_only(file_database, tmp_path, closed):
 def test_unknown_material_is_left_to_the_worker(file_database, tmp_path):
     path, _, _, request = file_database
     assert runtime._gpt_result_expired(path, _exchange(tmp_path, request, 999_999), NOW) is False
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_deferral_only_response_still_checks_the_material_deadline(
+    file_database, tmp_path, expired,
+):
+    path, engine, raw_id, request = file_database
+    if expired:
+        with Session(engine) as session:
+            close_material(session, raw_id, now=NOW, expired=True)
+    exchange = _exchange(tmp_path, request, raw_id)
+    value = json.loads(exchange.read_text(encoding="utf-8"))
+    value["result"].pop("rejected")
+    value["result"]["deferred"] = [{"raw_item_id": raw_id, "reason": "source_confirmation_missing"}]
+    exchange.write_text(canonical_json(value), encoding="utf-8")
+    assert runtime._gpt_result_expired(path, exchange, NOW) is expired
 
 
 def test_reconciliation_block_is_not_interpreted_as_expiration(file_database, tmp_path):
