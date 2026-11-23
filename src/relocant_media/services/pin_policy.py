@@ -68,10 +68,12 @@ async def maintain_pins(bot: TelegramBotAPI, policy: dict[str, Any], *,
                 if message_id in service or original_id in active:
                     result["preserved"].append({"chat_id": chat, "message_id": message_id})
                     break
-                known_news = ((chat == CHANNEL or linked)
-                              and (original_id in (news_message_ids or set())
-                                   or str(pin.get("text", pin.get("caption", ""))).startswith(
-                                       "[тестовый запуск]")))
+                # Telegram сам закрепляет в обсуждении каждую автопересылку поста канала,
+                # включая сводки. Всё, что не служебное и не активная реклама, снимается.
+                known_news = linked or (chat == CHANNEL
+                                        and (original_id in (news_message_ids or set())
+                                             or str(pin.get("text", pin.get("caption", "")))
+                                             .startswith("[тестовый запуск]")))
                 if not known_news and original_id not in registered_ads:
                     result["blocked"].append({"chat_id": chat, "reason": "unknown_pin"})
                     break

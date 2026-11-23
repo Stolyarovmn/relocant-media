@@ -6,6 +6,10 @@ on:
         description: Применить описание и кнопку карты к рабочему каналу
         type: boolean
         default: false
+      pin_map:
+        description: Сверить верхний закреп карты; с apply отправить и тихо закрепить пост карты
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,8 +43,10 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           APPLY_CHANNEL_PRESENTATION: ${{ inputs.apply }}
+          PIN_MAP: ${{ inputs.pin_map }}
         run: |
           set -euo pipefail
           args=()
           if [ "$APPLY_CHANNEL_PRESENTATION" = true ]; then args+=(--apply); fi
+          if [ "$PIN_MAP" = true ]; then args+=(--pin-map); fi
           python -m relocant_media.ops.channel_presentation "${args[@]}"

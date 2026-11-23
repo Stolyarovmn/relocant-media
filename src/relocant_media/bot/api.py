@@ -337,6 +337,15 @@ class TelegramBotAPI:
             raise TelegramAPIError("sendMessage returned an invalid message_id")
         return message_id
 
+    async def send_map_pin_message(
+        self, chat_id: int, text: str, markup: Mapping[str, object],
+    ) -> int:
+        """Тихий служебный пост карты: без превью ссылки и без звука у подписчиков."""
+        return self._message_id(await self._call("sendMessage", {
+            "chat_id": chat_id, "text": text, "reply_markup": dict(markup),
+            "disable_notification": True, "link_preview_options": {"is_disabled": True},
+        }))
+
     async def send_notice_message(
         self, chat_id: int | str, html: str, *, source_url: str, map_url: str | None = None,
         reply_to: int | None = None,

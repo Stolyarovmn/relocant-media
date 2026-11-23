@@ -9,17 +9,23 @@ import httpx
 import yaml
 
 from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
-from relocant_media.services.channel_presentation import ensure_service_pin_map_button
+from relocant_media.services.channel_presentation import (
+    ensure_map_pin_on_top,
+    ensure_service_pin_map_button,
+)
 
 BELGRADE = Path("cities/belgrade")
 
 
-async def run(*, apply: bool) -> dict[str, object]:
+async def run(*, apply: bool, pin_map: bool = False) -> dict[str, object]:
     policy = json.loads((BELGRADE / "pin-policy.json").read_text(encoding="utf-8"))
     config_file = BELGRADE / "channel-presentation.yaml"
     presentation = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
         bot = TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client)
+        if pin_map:
+            # Отдельный ручной режим: единственный путь, который отправляет пост карты.
+            return await ensure_map_pin_on_top(bot, policy, apply=apply)
         return await ensure_service_pin_map_button(
             bot, policy, presentation, apply=apply, update_description=True,
         )
@@ -28,9 +34,10 @@ async def run(*, apply: bool) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--pin-map", action="store_true")
     args = parser.parse_args()
     try:
-        result = asyncio.run(run(apply=args.apply))
+        result = asyncio.run(run(apply=args.apply, pin_map=args.pin_map))
     except (
         httpx.HTTPError, TelegramAPIError, ValueError, OSError, KeyError, yaml.YAMLError,
     ) as error:

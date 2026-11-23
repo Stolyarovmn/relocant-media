@@ -166,3 +166,96 @@ async def test_non_service_pins_and_failed_edit_never_create_messages(
     assert result["map_button"] == expected
     assert result["owner_action_required"] is (expected == "owner_action_required")
     assert calls == expected_calls
+
+
+class MapPinBot:
+    def __init__(self, top, *, pin_ok=True):
+        self.top, self.pin_ok, self.calls = top, pin_ok, []
+
+    async def _call(self, method, payload):
+        self.calls.append((method, payload))
+        if method == "getChat":
+            info = {"id": -1003967014133, "type": "channel"}
+            if self.top is not None:
+                info["pinned_message"] = {"message_id": self.top}
+            return info
+        if method == "pinChatMessage":
+            assert payload["disable_notification"] is True
+            self.top = payload["message_id"]
+            return self.pin_ok
+        assert method == "unpinChatMessage"
+        return True
+
+    async def send_map_pin_message(self, chat_id, text, markup):
+        self.calls.append(("sendMessage", {"text": text, "reply_markup": markup}))
+        return 200
+
+
+def _policy(**extra):
+    policy = json.loads((BELGRADE / "pin-policy.json").read_text(encoding="utf-8"))
+    return {**policy, **extra}
+
+
+@pytest.mark.asyncio
+async def test_map_pin_is_checked_without_sending_by_default():
+    from relocant_media.services.channel_presentation import ensure_map_pin_on_top
+
+    bot = MapPinBot(top=6)
+    result = await ensure_map_pin_on_top(bot, _policy(), apply=False)
+    assert result["map_pin"] == "would_send" and result["owner_action_required"]
+    assert [m for m, _ in bot.calls] == ["getChat"]
+    bot = MapPinBot(top=150)
+    result = await ensure_map_pin_on_top(bot, _policy(map_channel_message=150), apply=True)
+    assert result["map_pin"] == "on_top" and [m for m, _ in bot.calls] == ["getChat"]
+
+
+@pytest.mark.asyncio
+async def test_active_paid_ad_stays_on_top_of_the_map_pin():
+    from datetime import UTC, datetime
+
+    from relocant_media.services.channel_presentation import ensure_map_pin_on_top
+
+    ad = dict(channel_message_id=170, paid=True, owner_approved=True,
+              starts_at="2026-11-23T00:00:00+00:00", ends_at="2026-11-24T00:00:00+00:00")
+    bot = MapPinBot(top=170)
+    result = await ensure_map_pin_on_top(
+        bot, _policy(map_channel_message=150, advertisements=[ad]), apply=True,
+        now=datetime(2026, 11, 23, 12, tzinfo=UTC))
+    assert result["map_pin"] == "active_ad_on_top"
+    assert [m for m, _ in bot.calls] == ["getChat"]
+
+
+@pytest.mark.asyncio
+async def test_apply_sends_one_silent_map_post_pins_it_and_unpins_the_old_one():
+    from relocant_media.services.channel_presentation import (
+        MAP_PIN_MARKUP,
+        MAP_PIN_TEXT,
+        ensure_map_pin_on_top,
+    )
+
+    bot = MapPinBot(top=6)
+    result = await ensure_map_pin_on_top(bot, _policy(map_channel_message=150), apply=True)
+    assert MAP_PIN_TEXT.splitlines()[0] == "🗺 Посмотреть на карте"
+    assert MAP_PIN_MARKUP["inline_keyboard"][0][0]["style"] == "success"
+    assert [m for m, _ in bot.calls] == [
+        "getChat", "sendMessage", "pinChatMessage", "unpinChatMessage"]
+    assert result["map_channel_message"] == 200 and result["map_pin"] == "pinned"
+    assert bot.calls[-1][1] == {"chat_id": -1003967014133, "message_id": 150}
+    # Новый ID нужно записать в pin-policy.json.
+    assert result["owner_action_required"]
+
+
+@pytest.mark.asyncio
+async def test_map_pin_message_is_silent_without_link_preview():
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 201}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot = TelegramBotAPI("test-token", client)
+        assert await bot.send_map_pin_message(-1003967014133, "🗺 Посмотреть на карте",
+                                              {"inline_keyboard": []}) == 201
+    assert sent[0]["disable_notification"] is True
+    assert sent[0]["link_preview_options"] == {"is_disabled": True}
