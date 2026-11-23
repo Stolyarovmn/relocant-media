@@ -48,16 +48,23 @@ export function heatOverview(view, zoom, preciseRoute) {
   return view === "heat" && zoom < 15 && !preciseRoute;
 }
 
-export function heatCells(points, project, size) {
+// Leaflet's projected world pixels keep cell membership fixed across screen sizes at a given zoom.
+const HEAT_CELL_SIZE = 76;
+
+export function heatCells(points, project) {
   const cells = new Map();
   for (const { lat, lon, incident, approximate } of points) {
     if (approximate) continue;
     const { x, y } = project([lat, lon]);
-    const column = Math.floor(x / size);
-    const row = Math.floor(y / size);
+    const column = Math.floor(x / HEAT_CELL_SIZE);
+    const row = Math.floor(y / HEAT_CELL_SIZE);
     const key = `${column}:${row}`;
     if (!cells.has(key)) {
-      cells.set(key, { x: (column + .5) * size, y: (row + .5) * size, incidents: new Map() });
+      cells.set(key, {
+        x: (column + .5) * HEAT_CELL_SIZE,
+        y: (row + .5) * HEAT_CELL_SIZE,
+        incidents: new Map(),
+      });
     }
     cells.get(key).incidents.set(incident.id, incident);
   }

@@ -648,7 +648,7 @@ function renderPointClusters() {
       target.push({ ...point, incident, archived, now });
     }
   }
-  const cells = heatCells(density, project, mobile.matches ? 76 : 68);
+  const cells = heatCells(density, project);
   byId("heat-legend").hidden = !cells.length;
   for (const cell of cells) drawHeatCell(cell, zoom);
   for (const group of clusterMapPoints(markers, project, mobile.matches ? 49 : 43)) {
