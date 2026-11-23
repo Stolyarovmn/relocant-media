@@ -172,6 +172,7 @@ def test_preflight_retry_requires_an_unstarted_cycle_and_releases_the_writer():
     assert retry["needs"] == "cycle"
     assert retry["concurrency"]["group"] != data["jobs"]["cycle"]["concurrency"]["group"]
     assert retry["concurrency"]["cancel-in-progress"] == "false"
+    assert retry["concurrency"]["queue"] == "max"
     assert retry["permissions"] == {"actions": "write", "contents": "read"}
     assert "github.run_attempt == '1' && !inputs.preflight_retry" in retry["if"]
     assert "needs.cycle.result == 'success'" in retry["if"]
@@ -182,6 +183,24 @@ def test_preflight_retry_requires_an_unstarted_cycle_and_releases_the_writer():
     assert data["on"]["workflow_dispatch"]["inputs"]["preflight_retry"]["default"] == "false"
     assert retry["steps"][0]["with"]["persist-credentials"] == "false"
     assert "secrets." not in str(retry)
+    gate = next(step for step in data["jobs"]["cycle"]["steps"] if step.get("id") == "start")
+    for name in ("GPT_FALLBACK_BLOB_SHA256", "GPT_FALLBACK_CYCLE_ID"):
+        assert retry["steps"][-1]["env"][name] == gate["env"][name]
+
+
+def _workflow_group(mode, schedule="", blob="", cycle_id=""):
+    expression = workflow()['concurrency']['group'].removeprefix('${{').removesuffix('}}')
+    expression = expression.replace(
+        "startsWith(inputs.mode, 'map-')", repr(mode.startswith("map-")),
+    )
+    expression = expression.replace("inputs.fallback_blob_sha256", repr(blob))
+    expression = expression.replace("inputs.fallback_cycle_id", repr(cycle_id))
+    expression = expression.replace("inputs.mode", repr(mode))
+    event = "schedule" if schedule else "workflow_dispatch"
+    expression = expression.replace("github.event_name", repr(event))
+    expression = expression.replace("github.event.schedule", repr(schedule))
+    expression = " ".join(expression.replace("&&", " and ").replace("||", " or ").split())
+    return eval(expression, {"__builtins__": {}}, {"format": str.format})
 
 
 @pytest.mark.parametrize(('mode', 'schedule', 'expected'), [
@@ -193,8 +212,7 @@ def test_preflight_retry_requires_an_unstarted_cycle_and_releases_the_writer():
     ('drain', '', 'editorial-manual-drain'),
     ('drain-close', '', 'editorial-close-backlog'),
     ('preview', '', 'editorial-preview'),
-    ('fallback-preview', '', 'editorial-subscription-gpt'),
-    ('fallback', '', 'editorial-subscription-gpt'),
+    ('fallback-preview', '', 'editorial-subscription-gpt-preview-latest'),
     ('map-backfill', '', 'editorial-map-operations'),
     ('digest-preview', '', 'editorial-digest-preview'),
     ('digest', '', 'editorial-digest'),
@@ -202,17 +220,19 @@ def test_preflight_retry_requires_an_unstarted_cycle_and_releases_the_writer():
     ('', '30 18,19 * * *', 'editorial-digest'),
 ])
 def test_workflow_queue_isolated_from_the_automatic_chain(mode, schedule, expected):
-    expression = workflow()['concurrency']['group'].removeprefix('${{').removesuffix('}}')
-    event = 'schedule' if schedule else 'workflow_dispatch'
-    for prefix in ('fallback', 'map-'):
-        expression = expression.replace(
-            f"startsWith(inputs.mode, '{prefix}')", repr(mode.startswith(prefix)),
-        )
-    expression = expression.replace('inputs.mode', repr(mode))
-    expression = expression.replace('github.event_name', repr(event))
-    expression = expression.replace('github.event.schedule', repr(schedule))
-    expression = ' '.join(expression.replace('&&', ' and ').replace('||', ' or ').split())
-    assert eval(expression, {'__builtins__': {}}, {}) == expected
+    assert _workflow_group(mode, schedule) == expected
+
+
+def test_gpt_workflow_queue_does_not_replace_a_different_pending_payload():
+    first, second = "a" * 64, "b" * 64
+    assert _workflow_group("fallback", blob=first) == f"editorial-subscription-gpt-result-{first}"
+    assert _workflow_group("fallback", blob=first) != _workflow_group("fallback", blob=second)
+    assert _workflow_group("fallback-preview", cycle_id="12313") != _workflow_group(
+        "fallback-preview", cycle_id="12314",
+    )
+    assert _workflow_group("fallback-preview", cycle_id="12313") != _workflow_group(
+        "fallback-preview",
+    )
 
 
 def test_published_correction_is_manual_main_only_and_shares_state_lock():

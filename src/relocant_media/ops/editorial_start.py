@@ -19,6 +19,8 @@ RETRY_TITLES = {
     "intake": "Editorial Actions · intake",
     "digest": "Editorial Actions · digest",
 }
+GPT_RETRY_MODES = frozenset({"fallback-preview", "fallback"})
+RETRY_MODES = RETRY_TITLES.keys() | GPT_RETRY_MODES
 ACTIVE = frozenset({"in_progress", "queued", "requested", "waiting", "pending"})
 StartStatus = Literal["ready", "superseded", "ci_pending", "ci_failed"]
 
@@ -72,21 +74,39 @@ def already_scheduled(repo: str, *, sha: str, mode: str, source_run: str) -> boo
     )
 
 
-def restart(repo: str, *, mode: str, source_run: str) -> str:
-    if mode not in RETRY_TITLES or not re.fullmatch(r"[1-9][0-9]{0,19}", source_run):
+def retry_inputs(mode: str, *, blob: str, cycle_id: str) -> list[str]:
+    if mode == "fallback":
+        if not re.fullmatch(r"[a-f0-9]{64}", blob):
+            raise ValueError("invalid fallback result digest")
+        return ["-f", f"fallback_blob_sha256={blob}"]
+    if mode == "fallback-preview" and cycle_id:
+        if not re.fullmatch(r"[1-9][0-9]{0,19}", cycle_id):
+            raise ValueError("invalid fallback scheduler run")
+        return ["-f", f"fallback_cycle_id={cycle_id}"]
+    return []
+
+
+def restart(
+    repo: str, *, mode: str, source_run: str, blob: str = "", cycle_id: str = "",
+) -> str:
+    if mode not in RETRY_MODES or not re.fullmatch(r"[1-9][0-9]{0,19}", source_run):
         raise ValueError("invalid editorial retry")
+    preserved = retry_inputs(mode, blob=blob, cycle_id=cycle_id)
     deadline = time.monotonic() + 360
     while time.monotonic() < deadline:
         sha = main_sha(repo)
         status = ci_status(repo, sha)
         if status == "ready":
-            queued = already_scheduled(repo, sha=sha, mode=mode, source_run=source_run)
+            # A different GPT payload with the same run title is not a replacement.
+            # Its own workflow concurrency key coalesces only the same scope.
+            queued = (mode in RETRY_TITLES
+                      and already_scheduled(repo, sha=sha, mode=mode, source_run=source_run))
             if main_sha(repo) == sha and time.monotonic() < deadline:
                 if queued:
                     return "already_scheduled"
                 subprocess.run([
                     "gh", "workflow", "run", EDITORIAL_WORKFLOW, "-R", repo, "--ref", "main",
-                    "-f", f"mode={mode}", "-f", "preflight_retry=true",
+                    "-f", f"mode={mode}", "-f", "preflight_retry=true", *preserved,
                 ], check=True, timeout=20)
                 return "dispatched"
         elif status == "ci_failed" and main_sha(repo) == sha:
@@ -99,21 +119,31 @@ def restart(repo: str, *, mode: str, source_run: str) -> str:
 def main() -> int:
     repo = os.environ["GITHUB_REPOSITORY"]
     mode = os.environ["WORKER_MODE"]
+    blob = os.environ.get("GPT_FALLBACK_BLOB_SHA256", "")
+    cycle_id = os.environ.get("GPT_FALLBACK_CYCLE_ID", "")
     if sys.argv[1:] == ["gate"]:
         result = start_status(repo, os.environ["GITHUB_SHA"])
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
             stream.write(f"status={result}\n")
         print(f"editorial_start={result}")
-        if result == "ready" or (
-            result in {"superseded", "ci_pending"} and mode in RETRY_TITLES
+        if result == "ready":
+            return 0
+        if (
+            result in {"superseded", "ci_pending"} and mode in RETRY_MODES
             and os.environ.get("PREFLIGHT_RETRY_ENABLED") == "true"
             and os.environ.get("GITHUB_RUN_ATTEMPT") == "1"
             and os.environ.get("PREFLIGHT_RETRY") != "true"
         ):
+            try:
+                retry_inputs(mode, blob=blob, cycle_id=cycle_id)
+            except ValueError:
+                return 1
             return 0
         return 1
     if sys.argv[1:] == ["retry"]:
-        outcome = restart(repo, mode=mode, source_run=os.environ["GITHUB_RUN_ID"])
+        outcome = restart(
+            repo, mode=mode, source_run=os.environ["GITHUB_RUN_ID"], blob=blob, cycle_id=cycle_id,
+        )
         print(f"editorial_start_retry={outcome} mode={mode}")
         return 0 if outcome in {"dispatched", "already_scheduled"} else 1
     raise ValueError("invalid editorial start command")
