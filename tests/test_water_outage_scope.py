@@ -87,6 +87,54 @@ def test_municipal_sections_keep_their_own_dates_and_times(second_day, expected_
     assert len(streets.ranges) == 1
 
 
+_VOZDOVAC_STREET_LIST = (
+    "U opštini Voždovac, 24. novembra 2026. godine, od 8.00 do 16.00 sati, "
+    "bez vode će ostati potrošači u sledećim ulicama:"
+)
+
+
+def test_service_notice_reads_bulleted_streets_within_their_municipal_window() -> None:
+    notice = document(body="\n\n".join((
+        "U opštini Savski venac, 24. novembra 2026. godine, od 8.00 do 15.00 sati, "
+        "bez vode će ostati potrošači u bloku oivičenom Fabrisovom, Zvečanskom, "
+        "Dr Milutina Ivkovića i Oblakovskom ulicom.",
+        "VOŽDOVAC",
+        _VOZDOVAC_STREET_LIST,
+        "Brane Ćosića (od broja 16 do broja 42)",
+        "Katarine Ivanović",
+        "Rastka Petrovića",
+        "Medakovićevoj (od Zaplanjske do Katarine Ivanović)",
+        "Ignjata Joba (od broja 1 do broja 15)",
+        "Raspored auto cisterni:",
+        "Treća Ulica",
+    )))
+
+    block, streets = scope.extract_water_outage_scopes(notice)
+    assert (block.municipality, block.starts_at.hour, block.ends_at.hour) == ("Savski venac", 8, 15)
+    assert len(block.boundary) == 4
+    assert (streets.municipality, streets.starts_at.hour, streets.ends_at.hour) == ("Voždovac", 8, 16)
+    assert streets.whole_streets == ("Katarine Ivanović", "Rastka Petrovića")
+    assert [(item.street, item.first, item.last) for item in streets.ranges] == [
+        ("Brane Ćosića", 16, 42), ("Ignjata Joba", 1, 15),
+    ]
+    assert streets.segments == ({
+        "municipality": "Voždovac", "street": "Medakovićevoj",
+        "start": "Zaplanjske", "end": "Katarine Ivanović",
+    },)
+
+
+@pytest.mark.parametrize("following", [
+    "Katarine Ivanović\n\nOsim jednog dela.",
+    "VRAČAR\n\nTreća Ulica",
+    "Medakovićevoj (deo ulice)",
+    "Spisak nije objavljen.",
+])
+def test_incomplete_or_excluded_bulleted_scope_stays_unmapped(following: str) -> None:
+    assert scope.extract_water_outage_scopes(document(
+        body=f"{_VOZDOVAC_STREET_LIST}\n\n{following}",
+    )) == ()
+
+
 def test_only_explicit_full_settlement_is_eligible() -> None:
     text = CITY_BODY.split("potrošači", 1)[0] + "potrošači u celom naselju Ripanj."
     assert scope.extract_water_settlement(document(body=text)) == ("Voždovac", "Ripanj")
