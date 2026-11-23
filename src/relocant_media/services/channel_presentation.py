@@ -3,12 +3,7 @@ from typing import Any
 
 import httpx
 
-from relocant_media.bot.api import (
-    MAP_BUTTON_TEXT,
-    TelegramAPIError,
-    TelegramBotAPI,
-    inline_keyboards_match,
-)
+from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI, inline_keyboards_match
 from relocant_media.domain.map_links import MAP_HOME_URL
 from relocant_media.services.pin_policy import CHANNEL
 
@@ -34,9 +29,47 @@ async def _description_permission(bot: TelegramBotAPI) -> str:
     return "denied" if status in ("member", "restricted", "left", "kicked") else "unknown"
 
 
+async def ensure_channel_description(
+    bot: TelegramBotAPI, policy: dict[str, Any], presentation: dict[str, Any], *, apply: bool,
+) -> dict[str, Any]:
+    description = presentation.get("description") if isinstance(presentation, dict) else None
+    if (
+        policy.get("channel_id") != CHANNEL or not isinstance(description, str)
+        or presentation.get("channel") != "eduvbelgrad" or MAP_HOME_URL not in description.split()
+        or len(description.encode("utf-16-le")) // 2 > 255
+    ):
+        raise ValueError("invalid Belgrade channel description")
+    info = await bot._call("getChat", {"chat_id": CHANNEL})
+    if not isinstance(info, dict) or info.get("id") != CHANNEL or info.get("type") != "channel":
+        raise TelegramAPIError("channel presentation target mismatch")
+    if info.get("description") == description:
+        return {"description": "unchanged", "owner_action_required": False}
+    permission = await _description_permission(bot)
+    result: dict[str, Any] = {
+        "description": "would_update", "description_permission": permission,
+        "owner_action_required": False,
+    }
+    if permission == "denied":
+        result.update(description="owner_action_required", owner_action_required=True)
+    elif apply:
+        try:
+            changed = await bot._call("setChatDescription", {
+                "chat_id": CHANNEL, "description": description,
+            })
+            if changed is not True:
+                raise TelegramAPIError("channel description change was not confirmed")
+            result["description"] = "updated"
+        except (httpx.HTTPError, TelegramAPIError, ValueError) as error:
+            result.update(description="owner_action_required", owner_action_required=True,
+                          description_error_type=type(error).__name__)
+            if isinstance(error, httpx.HTTPStatusError):
+                result["description_http_status"] = error.response.status_code
+    return result
+
+
 async def ensure_service_pin_map_button(
     bot: TelegramBotAPI, policy: dict[str, Any], presentation: dict[str, Any], *,
-    apply: bool, update_description: bool = False,
+    apply: bool,
 ) -> dict[str, Any]:
     if not isinstance(presentation, dict) or not isinstance(presentation.get("navigation"), dict):
         raise ValueError("invalid Belgrade channel presentation")
@@ -44,7 +77,7 @@ async def ensure_service_pin_map_button(
     description = presentation["description"]
     if (
         policy["channel_id"] != CHANNEL or presentation["channel"] != "eduvbelgrad"
-        or button != {"text": MAP_BUTTON_TEXT, "url": MAP_HOME_URL, "style": "success"}
+        or button != {"text": "🗺 Открыть карту", "url": MAP_HOME_URL, "style": "success"}
         or not isinstance(description, str) or len(description.encode("utf-16-le")) // 2 > 255
         or MAP_HOME_URL not in description.split()
     ):
@@ -53,28 +86,6 @@ async def ensure_service_pin_map_button(
     if not isinstance(info, dict) or info.get("id") != CHANNEL or info.get("type") != "channel":
         raise TelegramAPIError("channel presentation target mismatch")
     result: dict[str, Any] = {"owner_action_required": False, "map_button": "no_service_pin"}
-    if update_description:
-        result["description"] = "unchanged"
-        if info.get("description") != description:
-            result["description"] = "would_update"
-            permission = await _description_permission(bot)
-            result["description_permission"] = permission
-            if permission == "denied":
-                result.update(description="owner_action_required", owner_action_required=True)
-            elif apply:
-                try:
-                    changed = await bot._call("setChatDescription", {
-                        "chat_id": CHANNEL, "description": description,
-                    })
-                    if changed is not True:
-                        raise TelegramAPIError("channel description change was not confirmed")
-                    result["description"] = "updated"
-                except (httpx.HTTPError, TelegramAPIError, ValueError) as error:
-                    result.update(description="owner_action_required", owner_action_required=True,
-                                  description_error_type=type(error).__name__)
-                    if isinstance(error, httpx.HTTPStatusError):
-                        result["description_http_status"] = error.response.status_code
-
     pin = info.get("pinned_message")
     message_id = pin.get("message_id") if isinstance(pin, dict) else None
     if (

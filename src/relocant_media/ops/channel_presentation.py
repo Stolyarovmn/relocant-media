@@ -1,4 +1,4 @@
-"""Проверяет описание канала и верхний служебный закреп Белграда."""
+"""Проверяет и при необходимости обновляет описание канала Белграда."""
 import argparse
 import asyncio
 import json
@@ -9,7 +9,7 @@ import httpx
 import yaml
 
 from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
-from relocant_media.services.channel_presentation import ensure_service_pin_map_button
+from relocant_media.services.channel_presentation import ensure_channel_description
 
 BELGRADE = Path("cities/belgrade")
 
@@ -20,9 +20,7 @@ async def run(*, apply: bool) -> dict[str, object]:
     presentation = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
         bot = TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client)
-        return await ensure_service_pin_map_button(
-            bot, policy, presentation, apply=apply, update_description=True,
-        )
+        return await ensure_channel_description(bot, policy, presentation, apply=apply)
 
 
 def main() -> int:

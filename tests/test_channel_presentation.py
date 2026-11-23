@@ -9,7 +9,10 @@ import yaml
 from relocant_media.bot.api import TelegramBotAPI, inline_keyboards_match
 from relocant_media.domain.map_links import MAP_HOME_URL
 from relocant_media.domain.topic_tags import TAGS_V2_PRESENTATION, topic_tags
-from relocant_media.services.channel_presentation import ensure_service_pin_map_button
+from relocant_media.services.channel_presentation import (
+    ensure_channel_description,
+    ensure_service_pin_map_button,
+)
 
 BELGRADE = Path(__file__).resolve().parents[1] / "cities" / "belgrade"
 PRESENTATION = BELGRADE / "channel-presentation.yaml"
@@ -34,10 +37,8 @@ def test_belgrade_navigation_uses_current_tags_and_public_links():
 
     bot = "https://t.me/relocant_media_belgrade_bot"
     ads = f"https://t.me/{draft['channel']}/{pin_policy['service_channel_messages'][1]}"
-    assert set(re.findall(r'href="([^"]+)"', text)) == {bot, ads, MAP_HOME_URL}
-    assert text.splitlines()[0] == f'<b><a href="{MAP_HOME_URL}">Посмотреть на карте</a></b>'
+    assert set(re.findall(r'href="([^"]+)"', text)) == {bot, ads}
     assert navigation["map_button"]["url"] == f"{bot}?startapp"
-    assert navigation["map_button"]["text"] == "Посмотреть на карте"
     assert MAP_HOME_URL in draft["description"].split()
     assert navigation["map_button"]["style"] == "success"
     assert "t.me/c/" not in draft["description"] + text
@@ -51,7 +52,7 @@ def test_belgrade_navigation_lists_the_configured_digest_times():
 
 
 def test_keyboard_receipt_accepts_only_the_absence_of_style():
-    home = {"text": "Посмотреть на карте", "url": MAP_HOME_URL}
+    home = {"text": "🗺 Открыть карту", "url": MAP_HOME_URL}
     callback = {"text": "Меню", "callback_data": "menu"}
     expected = {"inline_keyboard": [[{**home, "style": "success"}, callback]]}
     assert inline_keyboards_match({"inline_keyboard": [[home, callback]]}, expected)
@@ -75,7 +76,7 @@ async def test_service_pin_update_preserves_other_buttons_and_checks_before_writ
     other_button = {"text": "Партнёрство", "url": "https://example.net", "style": "primary"}
     channel = {"id": policy["channel_id"], "type": "channel"}
     old_button = {**button, "style": "primary"} if echo_style else {
-        "text": "🗺 Открыть карту", "url": MAP_HOME_URL,
+        "text": "Карта", "url": MAP_HOME_URL,
     }
     old_markup = {"inline_keyboard": [[old_button, other_button]]}
     pin = {"message_id": message_id, "reply_markup": old_markup, "chat": channel}
@@ -115,32 +116,44 @@ async def test_service_pin_update_preserves_other_buttons_and_checks_before_writ
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         bot = TelegramBotAPI("test-token", client)
-        preview = await ensure_service_pin_map_button(
-            bot, policy, presentation, apply=False, update_description=True,
+        description_preview = await ensure_channel_description(
+            bot, policy, presentation, apply=False,
         )
-        assert calls == ["getChat", "getMe", "getChatMember"]
-        assert preview == {
+        assert description_preview == {
             "description": "would_update", "description_permission": "granted",
+            "owner_action_required": False,
+        }
+        assert calls == ["getChat", "getMe", "getChatMember"]
+        preview = await ensure_service_pin_map_button(
+            bot, policy, presentation, apply=False,
+        )
+        assert calls == ["getChat", "getMe", "getChatMember", "getChat"]
+        assert preview == {
             "map_button": "would_update",
             "message_id": message_id, "owner_action_required": False,
         }
-        applied = await ensure_service_pin_map_button(
-            bot, policy, presentation, apply=True, update_description=True,
-        )
-        assert applied["description"] == applied["map_button"] == "updated"
-        repeat = await ensure_service_pin_map_button(
-            bot, policy, presentation, apply=True, update_description=True,
-        )
-        assert repeat["description"] == repeat["map_button"] == "unchanged"
+        assert (await ensure_channel_description(
+            bot, policy, presentation, apply=True,
+        ))["description"] == "updated"
+        assert (await ensure_service_pin_map_button(
+            bot, policy, presentation, apply=True,
+        ))["map_button"] == "updated"
+        assert (await ensure_channel_description(
+            bot, policy, presentation, apply=True,
+        ))["description"] == "unchanged"
+        assert (await ensure_service_pin_map_button(
+            bot, policy, presentation, apply=True,
+        ))["map_button"] == "unchanged"
     assert calls == [
-        "getChat", "getMe", "getChatMember", "getChat", "getMe", "getChatMember",
-        "setChatDescription", "editMessageReplyMarkup", "getChat",
+        "getChat", "getMe", "getChatMember", "getChat",
+        "getChat", "getMe", "getChatMember", "setChatDescription",
+        "getChat", "editMessageReplyMarkup", "getChat", "getChat",
     ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("apply", [False, True])
-async def test_description_permission_denial_does_not_block_service_button(apply):
+async def test_description_permission_denial_only_reads_telegram(apply):
     presentation = yaml.safe_load(PRESENTATION.read_text(encoding="utf-8"))
     policy = json.loads((BELGRADE / "pin-policy.json").read_text(encoding="utf-8"))
     channel = {"id": policy["channel_id"], "type": "channel"}
@@ -153,25 +166,19 @@ async def test_description_permission_denial_does_not_block_service_button(apply
             result = {**channel, "pinned_message": {"message_id": 6}}
         elif method == "getMe":
             result = {"id": 789}
-        elif method == "getChatMember":
-            result = {"status": "administrator", "can_change_info": False}
         else:
-            assert method == "editMessageReplyMarkup"
-            result = {**json.loads(request.content), "chat": channel}
+            assert method == "getChatMember"
+            result = {"status": "administrator", "can_change_info": False}
         return httpx.Response(200, json={"ok": True, "result": result})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await ensure_service_pin_map_button(
+        result = await ensure_channel_description(
             TelegramBotAPI("test-token", client), policy, presentation,
-            apply=apply, update_description=True,
+            apply=apply,
         )
     assert result["description_permission"] == "denied"
     assert result["owner_action_required"]
-    assert result["map_button"] == ("updated" if apply else "would_update")
-    expected = ["getChat", "getMe", "getChatMember"]
-    if apply:
-        expected.append("editMessageReplyMarkup")
-    assert calls == expected
+    assert calls == ["getChat", "getMe", "getChatMember"]
 
 
 @pytest.mark.asyncio
