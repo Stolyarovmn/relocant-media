@@ -1,6 +1,8 @@
 """Source-bound calendar context for explicit overnight road work."""
 
+import re
 from datetime import UTC, datetime
+from typing import cast
 from zoneinfo import ZoneInfo
 
 from relocant_media.ai.models import EvidenceDocument
@@ -16,6 +18,10 @@ ROAD_WORK_CONTEXT_INSTRUCTION = (
     "смена этого объявления, не считай его истекшим из-за завершения другой смены. "
     "Истекшие смены не дают основания для выпуска как текущей новости. "
     "Подсказка вычислена из исходной цитаты и не заменяет проверенные claims и evidence. "
+)
+_MONTHS = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
 )
 
 
@@ -56,3 +62,26 @@ def road_work_context(
                 "windows": windows,
             })
     return result
+
+
+def matching_live_road_window(
+    draft: str, clauses: list[dict[str, object]],
+) -> dict[str, object] | None:
+    """Find an explicitly printed overnight interval in the unchanged draft."""
+    for clause in clauses:
+        for window in cast(list[dict[str, str]], clause["windows"]):
+            if window["status"] == "ended":
+                continue
+            start = datetime.fromisoformat(window["starts_at"])
+            end = datetime.fromisoformat(window["ends_at"])
+            first_month = rf"\s+{_MONTHS[start.month - 1]}(?:\s+{start.year}(?:\s+года)?)?"
+            if (start.month, start.year) == (end.month, end.year):
+                first_month = f"(?:{first_month})?"
+            interval = (
+                rf"\bночь\s+с\s+{start.day}{first_month}\s+на\s+"
+                rf"{end.day}\s+{_MONTHS[end.month - 1]}(?:\s+{end.year}(?:\s+года)?)?"
+                rf"\s*,?\s+с\s+{start:%H:%M}\s+до\s+{end:%H:%M}\b"
+            )
+            if re.search(interval, draft, re.I):
+                return {"source_id": clause["source_id"], "url": clause["url"], **window}
+    return None
