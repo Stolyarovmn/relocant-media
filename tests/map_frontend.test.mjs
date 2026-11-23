@@ -17,7 +17,7 @@ import {
   corridorCaps, heatCells, heatComposition, heatOverview, layerView, timelineBands, timelineInstant,
   timelineLabel, timelineSteps,
 } from "../web/newsroom/map/layer-views.js";
-import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
+import { loadSnapshot, snapshotRefreshDue } from "../web/newsroom/map/snapshots.js";
 
 const savedAddress = {
   street: "Kralja Bodina", number: "7", municipality: "Voždovac", lat: 44.78, lon: 20.48,
@@ -27,6 +27,13 @@ const savedWindow = { starts_at: "2026-11-23T08:00:00+01:00", ends_at: "2026-11-
 const watchIncident = (id, overrides = {}) => ({
   id: `event_${id.repeat(20)}`, kind: "water", title: "Работы на водопроводе",
   source_url: "https://www.beograd.rs/", ...savedWindow, ...overrides,
+});
+
+test("возврат к карте обновляет давние данные без повторного запроса раньше минуты", () => {
+  assert.equal(snapshotRefreshDue(0, savedNow), true);
+  assert.equal(snapshotRefreshDue(savedNow, savedNow + 59_999), false);
+  assert.equal(snapshotRefreshDue(savedNow, savedNow + 60_000), true);
+  assert.equal(snapshotRefreshDue(savedNow, savedNow - 1), true);
 });
 
 test("сохранённый адрес учитывает своё время, границы поселения и только близкие дороги", () => {
@@ -586,11 +593,15 @@ test("ссылка на событие показывает трассы, а и�
   const other = { ...race, id: "event_22222222222222222222", courses: [],
     venue: { ...race.venue, latitude: 44.75 } };
   const keys = new Map();
+  let requests = 0;
   const places = setupPlaces({
     map, mobile: { matches: true, addEventListener() {} }, animate: false, byId, make,
     telegram: favoritesTelegram(keys),
     link: (_url, title) => make("a", "", title),
-    loadSnapshot: async (_path, decode) => ({ entries: decode({ version: 1, events: [race, other] }), cached: false }),
+    loadSnapshot: async (_path, decode) => {
+      requests += 1;
+      return { entries: decode({ version: 1, events: [race, other] }), cached: false };
+    },
     onSync() {},
   });
   t.after(() => places.leave());
@@ -634,6 +645,18 @@ test("ссылка на событие показывает трассы, а и�
   assert.deepEqual(groups[0].layers, []);
   places.enter(roadId);
   assert.equal(byId("toggle-favorites").attributes["aria-pressed"], "false");
+  const loadCount = requests;
+  const afterWait = Date.now() + 60_001;
+  t.mock.method(Date, "now", () => afterWait);
+  places.resume();
+  assert.equal(requests, loadCount);
+  globalThis.document.hidden = false;
+  places.resume();
+  places.resume();
+  await new Promise(setImmediate);
+  assert.equal(requests, loadCount + 1);
+  assert.equal(detail.hidden, false);
+  assert.deepEqual(map.bounds, [[44.816, 20.459], ...first.points, ...second.points]);
   places.leave();
   assert.deepEqual(courses.layers, []);
 });
