@@ -1,10 +1,10 @@
 import copy
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from relocant_media.ops.daily_analysis import build_status, markdown
+from relocant_media.ops.daily_analysis import build_status, markdown, owner_markdown
 
 NOW = datetime(2026, 10, 26, 22, tzinfo=UTC)
 
@@ -81,6 +81,7 @@ def test_cli_missing_snapshot_writes_unavailable_artifacts(tmp_path, monkeypatch
     assert report["snapshot"]["status"] == "unavailable"
     assert report["daily_results"]["published_posts"] is None
     assert (output / "status.md").is_file()
+    assert "Рабочий снимок недоступен" in (output / "owner.md").read_text(encoding="utf-8")
 
 
 def test_cli_legacy_empty_novi_sad_is_unavailable(tmp_path, monkeypatch):
@@ -188,3 +189,65 @@ def test_unknown_subscriber_time_has_no_delta():
     report = build_status(value, city="belgrade", now=NOW)
     assert report["rolling_kpi"]["subscribers_delta_24h"] is None
     assert "за 24 ч нет данных, за 7 дней нет данных" in markdown(report)
+
+
+def test_owner_brief_has_evidence_links_and_clear_scope():
+    value = snapshot()
+    city = value["cities"][0]
+    city["daily_brief"] = {
+        "timezone": "Europe/Belgrade", "days": [
+            {"local_date": "2026-10-25", "post_count": 0, "message_ids": [], "views": None,
+             "measured_posts": 0},
+            {"local_date": "2026-10-26", "post_count": 3, "message_ids": [101, 102, 103],
+             "views": 0, "measured_posts": 1, "private_text": "SECRET",
+             "morning": {"status": "sent", "message_id": 104, "url": "https://example.com/secret"},
+             "evening": {"status": "unconfirmed"}},
+        ],
+    }
+    city["kpi"] = {"subscribers": {"count": 2, "observed_at": NOW.isoformat()}}
+    city["last_cycle"] = {"observed_at": NOW.isoformat(), "processing_error_count": 2,
+                          "fallback_required": True, "detail": "SECRET"}
+    value["last_attempt"] = {
+        "observed_at": NOW.isoformat(), "status": "failure", "mode": "editorial",
+    }
+    report = build_status(value, city="belgrade", now=NOW)
+    text = owner_markdown(report)
+    assert report["report_date"] == "2026-10-27"
+    assert report["owner_brief"]["local_date"] == "2026-10-26"
+    assert report["owner_brief"]["publications"]["post_count"] == 3
+    assert len(text.splitlines()) == 7
+    assert "[№101](https://t.me/eduvbelgrad/101)" in text
+    assert "[«Белград сегодня»](https://t.me/eduvbelgrad/104)" in text
+    assert "«Главное за день» — выход не подтверждён" in text
+    assert "Просмотры — 0 по 1 из 3 постов" in text
+    assert "завершился ошибкой" in text and "запросил резервную проверку" in text
+    assert "Записей для сверки с Telegram — 1. Снимок без разбивки по статусам." in text
+    assert "SECRET" not in json.dumps(report) and "example.com" not in text
+    assert build_status(value, city="belgrade", now=NOW, day=date(2026, 10, 25))[
+        "owner_brief"]["publications"]["post_count"] == 0
+    assert build_status(value, city="belgrade", now=NOW + timedelta(days=1))[
+        "owner_brief"]["publications"] is None
+
+
+def test_old_snapshot_stays_unknown_in_a_short_report():
+    value = snapshot()
+    value["cities"][0]["observed_at"] = (NOW - timedelta(hours=7)).isoformat()
+    text = owner_markdown(build_status(value, city="belgrade", now=NOW))
+    assert "Снимок устарел" in text
+    assert "Отдельных постов за день — нет данных" in text
+    assert "Просмотры — нет данных" in text
+
+
+@pytest.mark.parametrize(("unfinished", "label"), [
+    (1, "исход отправки неизвестен — 1 · статус «отправлено» без квитанции — 1"),
+    (0, "статус «отправлено» без квитанции — 1"),
+])
+def test_short_report_separates_live_delivery_from_status_without_receipt(unfinished, label):
+    value = snapshot()
+    value["cities"][0]["delivery_checks"] = {
+        "uncertain_send": unfinished, "sent_without_receipt": 1,
+        "sending": 0, "receipt_conflict": 0, "private": "SECRET",
+    }
+    report = build_status(value, city="belgrade", now=NOW)
+    assert owner_markdown(report).splitlines()[-1] == f"Сверка доставки · {label}."
+    assert "SECRET" not in json.dumps(report)

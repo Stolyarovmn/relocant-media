@@ -251,6 +251,32 @@ def morning_delivery(state: dict[str, Any], now: datetime) -> MorningDelivery | 
     return MorningDelivery(slot, "missed", "no_recorded_result")
 
 
+def public_digest_days(state: dict[str, Any], now: datetime) -> dict[str, dict[str, Any]]:
+    """Report scheduled editions and public receipts without exporting state details."""
+    local = _local_clock(now)
+    policy = _policy()
+    receipts = state.get(_HISTORY, {})
+    days: dict[str, dict[str, Any]] = {}
+    for offset in (1, 0):
+        day = local - timedelta(days=offset)
+        editions: dict[str, Any] = {}
+        for kind in ("morning", "evening"):
+            slot = _regular_slot(policy, day, kind)
+            status = "not_scheduled"
+            if slot is not None:
+                receipt = receipts.get(slot.key) if isinstance(receipts, dict) else None
+                if isinstance(receipt, dict) and receipt.get("state") == "sent":
+                    message_id = receipt.get("message_id")
+                    if type(message_id) is int and 0 < message_id < 2**63:
+                        editions[kind] = {"status": "sent", "message_id": message_id}
+                        continue
+                undelivered = isinstance(receipts, dict) and slot.key not in receipts
+                status = "pending" if undelivered and local < slot.expires else "unconfirmed"
+            editions[kind] = {"status": status}
+        days[day.date().isoformat()] = editions
+    return days
+
+
 def _clip_text(value: str, limit: int) -> str:
     text = " ".join(value.split())
     if len(text) <= limit:

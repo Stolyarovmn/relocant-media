@@ -364,12 +364,20 @@ def test_sent_without_valid_receipt_stays_visible_for_reconciliation(message_id)
         session.flush()
         session.add_all([_closed(raw.id, now), _run(raw, post, delivery="sent")])
         session.commit()
-        item = build_newsroom_inbox(session)["items"][0]
+        result = build_newsroom_inbox(session)
+        item = result["items"][0]
         assert item["state"] == "uncertain"
         assert item["retry"]["policy"] == "manual_reconciliation"
+        assert result["delivery_checks"] == {
+            "uncertain_send": 0, "sending": 0, "sent_without_receipt": 1, "receipt_conflict": 0,
+        }
 
 
-def test_uncertain_member_has_priority_over_sent_member_of_closed_cluster():
+@pytest.mark.parametrize("message_id", [11, None])
+@pytest.mark.parametrize(("delivery", "check"), [
+    ("uncertain", "uncertain_send"), ("sending", "sending"),
+])
+def test_incomplete_member_has_priority_over_sent_member_of_cluster(message_id, delivery, check):
     engine, now = _engine(), datetime(2026, 11, 19, tzinfo=UTC)
     with Session(engine) as session:
         session.add_all([_source("city"), _source("venue")])
@@ -379,11 +387,38 @@ def test_uncertain_member_has_priority_over_sent_member_of_closed_cluster():
         session.add_all([sent, uncertain])
         session.flush()
         first, second = _post(sent.title), _post(sent.title)
-        first.telegram_message_id = 11
+        first.telegram_message_id = message_id
         session.add_all([first, second])
         session.flush()
         session.add_all([_closed(sent.id, now), _closed(uncertain.id, now),
-            _run(sent, first, delivery="sent"), _run(uncertain, second, delivery="uncertain")])
+            _run(sent, first, delivery="sent"), _run(uncertain, second, delivery=delivery)])
         session.commit()
-        item = build_newsroom_inbox(session)["items"][0]
-        assert item["state"] == "uncertain" and item["anchor_raw_item_id"] == uncertain.id
+        result = build_newsroom_inbox(session)
+        item = result["items"][0]
+        assert item["state"] == delivery and item["anchor_raw_item_id"] == uncertain.id
+        assert result["delivery_checks"][check] == 1
+        assert result["delivery_checks"]["sent_without_receipt"] == 0
+
+
+def test_delivery_checks_include_the_queue_outside_the_display_limit():
+    engine, now = _engine(), datetime(2026, 11, 19, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add(_source("city"))
+        session.flush()
+        for index, (title, status, message) in enumerate([
+            ("Изменение маршрута автобуса 20", "uncertain", None),
+            ("Открытие фестиваля керамики", "sent", None),
+            ("Подорожание билетов аэропорта", "pending", 42),
+            ("Временное отключение воды", "sending", None),
+        ]):
+            raw = _raw("city", str(index), title, now + timedelta(hours=index))
+            post = _post(title)
+            post.telegram_message_id = message
+            session.add_all([raw, post])
+            session.flush()
+            session.add(_run(raw, post, delivery=status))
+        result = build_newsroom_inbox(session, limit=1)
+        assert len(result["items"]) == 1 and result["total_events"] == 4
+        assert result["delivery_checks"] == {
+            "uncertain_send": 1, "sending": 1, "sent_without_receipt": 1, "receipt_conflict": 1,
+        }

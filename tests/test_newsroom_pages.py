@@ -2,7 +2,7 @@ import json
 import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -13,7 +13,15 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ops.newsroom_export import snapshot
 from relocant_media.ops.newsroom_merge import merge
-from relocant_media.storage.models import Base, EditorialRun, RawItem, Source, Submission
+from relocant_media.storage.models import (
+    Base,
+    EditorialRun,
+    Post,
+    PostSnapshot,
+    RawItem,
+    Source,
+    Submission,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,6 +84,7 @@ def test_public_projection_is_read_only_and_does_not_leak_private_material() -> 
         assert "Public transport notice" in serialized
         bg = result["cities"][0]
         assert bg["counts"] == {"uncertain": 2}
+        assert bg["delivery_checks"]["uncertain_send"] == 2
         assert all(item["discovered_by"] is None for item in bg["items"])
         assert all(item["reviews"][0]["verdict"] == "hold" for item in bg["items"])
         assert any(item['url'] == 'https://example.org/official' for item in bg['items'])
@@ -94,6 +103,62 @@ def test_cli_missing_database_does_not_create_queue(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert not database.exists()
     assert not (tmp_path / "data.json").exists()
+
+
+def test_daily_brief_uses_unique_sends_and_only_latest_confirmed_view_measurements():
+    observed = datetime(2026, 11, 23, 22, tzinfo=UTC)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Source(id="reader", city="belgrade", name="reader", url="https://example.org",
+                           source_type="reader_report", trust=Decimal("1"), ownership="unknown"))
+        session.flush()
+
+        def add_publication(message, sent_at, delivery):
+            post = Post(city="belgrade", status="sent", category="city",
+                        title="PRIVATE_TITLE", body="PRIVATE_BODY", confidence=Decimal("1"),
+                        telegram_message_id=message, published_at=sent_at)
+            session.add(post)
+            session.flush()
+            if delivery:
+                raw = RawItem(source_id="reader", external_id=str(post.id),
+                              url=f"https://example.org/{post.id}", title="PRIVATE_TITLE",
+                              body="PRIVATE_BODY")
+                session.add(raw)
+                session.flush()
+                session.add(EditorialRun(raw_item_id=raw.id, post_id=post.id,
+                                         evidence={}, outcome={"reason": "approved"},
+                                         delivery_status=delivery))
+            return post
+
+        first = add_publication(101, observed - timedelta(hours=4), "sent")
+        add_publication(101, observed - timedelta(hours=3), "sent")
+        add_publication(102, observed, "sent")
+        add_publication(100, observed - timedelta(hours=24), "sent")
+        add_publication(103, observed, "uncertain")
+        add_publication(104, observed, None)
+        add_publication(105, observed + timedelta(seconds=1), "sent")
+        session.add_all([
+            PostSnapshot(post_id=first.id, captured_at=observed - timedelta(hours=5), views=100),
+            PostSnapshot(post_id=first.id, captured_at=observed - timedelta(hours=1), views=10),
+            PostSnapshot(post_id=first.id, captured_at=observed, views=12),
+            PostSnapshot(post_id=first.id, captured_at=observed + timedelta(seconds=1), views=200),
+        ])
+        session.commit()
+        result = snapshot(ROOT, session, observed_at=observed)
+        brief = result["cities"][0]["daily_brief"]
+        assert brief == {"timezone": "Europe/Belgrade", "days": [
+            {"local_date": "2026-11-22", "post_count": 1, "message_ids": [100],
+             "views": None, "measured_posts": 0},
+            {"local_date": "2026-11-23", "post_count": 2, "message_ids": [101, 102],
+             "views": 12, "measured_posts": 1},
+        ]}
+        brief["days"][0]["private_title"] = "SECRET"
+        result["cities"][0]["delivery_checks"]["private_token"] = "SECRET"
+        projected = merge(snapshot(ROOT), result)["cities"][0]
+        safe = json.dumps([projected["daily_brief"], projected["delivery_checks"]])
+        assert "SECRET" not in safe and "PRIVATE" not in safe
+        assert not session.dirty and not session.new
 
 
 def test_build_does_not_retimestamp_runtime_or_cross_city() -> None:
