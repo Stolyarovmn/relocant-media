@@ -2,7 +2,7 @@
 
 import re
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Protocol
@@ -149,21 +149,37 @@ def public_search_plan(
 
 
 def _matches_article(text: str, article: RawItem) -> bool:
-    if topic_matches(text, article.title):
-        return True
     if article.source_id != AVIATION_SOURCE:
-        return False
+        return topic_matches(text, article.title)
+    carriers = city_carriers("belgrade")
+    found = [_carriers_in(value, carriers) for value in (text[:8000], article.title)]
+    if not any(found):
+        return topic_matches(text, article.title)
     return _same_carrier_report(text, article.title)
 
 
+# Даты не различают направления: одинаковый месяц или число не делают новость той же.
+_MONTH_PREFIXES = ("janu", "janv", "febr", "fevr", "mart", "apri", "aprel", "maj", "maja",
+                   "jun", "juna", "ijun", "jul", "jula", "ijul", "avgu", "sept", "sent",
+                   "okto", "oktj", "nove", "noja", "dece", "deka")
+
+
+def _is_date_term(term: str) -> bool:
+    return term.isdigit() or term.startswith(_MONTH_PREFIXES)
+
+
+def _carriers_in(value: str, carriers: Mapping[str, re.Pattern[str]]) -> set[str]:
+    return {carrier for carrier, pattern in carriers.items() if pattern.search(value)}
+
+
 def _same_carrier_report(lead: str, title: str, *, city: str = "belgrade") -> bool:
-    """Один перевозчик из реестра города и ещё два общих признака: число или название.
+    """Один перевозчик из реестра города, общее направление и ещё один общий признак.
 
     Названия в разных алфавитах сравниваются по сходству транслитерации, без списков замен.
+    Дата и общие слова об отмене без совпадающего направления недостаточны.
     """
     carriers = city_carriers(city)
-    found = [{c for c, pattern in carriers.items() if pattern.search(value)}
-             for value in (lead[:8000], title)]
+    found = [_carriers_in(value, carriers) for value in (lead[:8000], title)]
     if len(found[0]) != 1 or found[0] != found[1]:
         return False
     pattern = carriers[next(iter(found[0]))]
@@ -173,13 +189,23 @@ def _same_carrier_report(lead: str, title: str, *, city: str = "belgrade") -> bo
                 if w not in _STOP}
 
     lead_terms = terms(lead[:8000])
-    shared = 0
+    shared: list[str] = []
     for term in terms(title):
         if term in lead_terms or (len(term) >= 5 and not term.isdigit() and any(
                 len(other) >= 5 and SequenceMatcher(None, term, other).ratio() >= 0.75
                 for other in lead_terms)):
-            shared += 1
-    return shared >= 2
+            shared.append(term)
+    names = [term for term in shared if not _is_date_term(term)]
+    # Направление: общее название из одного алфавита в другой или из того же,
+    # но не служебное слово об отмене, которое есть почти в каждой авиановости.
+    return len(shared) >= 2 and any(term not in _AVIATION_WORDS for term in names)
+
+
+_AVIATION_WORDS = frozenset({
+    "letove", "letova", "letovi", "ukida", "ukinut", "obustavlja", "otkazuje", "otkazan",
+    "rejsy", "rejsov", "otmenjaet", "otmenila", "otmenil", "aviakompanija", "flights",
+    "kompanija", "linija", "liniju", "beograd", "beograda", "belgrade", "belgrada",
+})
 
 
 async def resolve_public_discovery(

@@ -91,3 +91,29 @@ def test_aviation_pointer_rule_is_general_for_any_registered_carrier(lead, title
     from relocant_media.services.primary_discovery import _same_carrier_report
 
     assert _same_carrier_report(lead, title) is expected
+
+
+@pytest.mark.parametrize("lead,title", [
+    ("Lufthansa ukida letove za Minhen od 15. januara",
+     "Wizz Air ukida letove za Minhen od 15. januara"),
+    ("Wizz Air отменяет рейсы в Берлин с 15 января",
+     "Wizz Air ukida letove za Pariz od 15. januara"),
+    ("Wizz Air ukida letove za Pariz od 15. januara",
+     "Wizz Air ukida letove za Minhen od 15. januara"),
+])
+def test_aviation_article_needs_same_carrier_and_direction(lead, title):
+    from relocant_media.collectors.base import RawItem
+    from relocant_media.services.primary_discovery import _matches_article
+
+    report = RawItem("media_aero_telegraf", "1", "https://aero.telegraf.rs/avio-kompanije/1-a",
+                     title, "Содержание", None)
+    assert not _matches_article(lead, report)
+
+
+def test_aviation_article_same_carrier_and_direction_matches_across_scripts():
+    from relocant_media.collectors.base import RawItem
+    from relocant_media.services.primary_discovery import _matches_article
+
+    report = RawItem("media_aero_telegraf", "1", "https://aero.telegraf.rs/avio-kompanije/1-a",
+                     "Wizz Air ukida letove za Malme od 15. januara", "Содержание", None)
+    assert _matches_article("Wizz Air отменяет рейсы в Мальмё с 15 января.", report)
