@@ -212,23 +212,35 @@ def markdown(report: dict[str, Any]) -> str:
             if date_label == measured_at.date().isoformat():
                 date_label += " (неполный)"
             lines.append(f"| {date_label} | {sum(row['count'] for row in expired)} | {breakdown} |")
-        lines.extend(["", "| День | Рубрика | Медиана, мин | С точным временем | Без времени |",
-                      "| --- | --- | ---: | ---: | ---: |"])
+        lines.extend([
+            "", "Медианы в минутах. «От источника» считается только при точном времени "
+            "источника; «С момента сбора» и этапы считаются для всех постов. "
+            "Этапы: сбор (источник → сборщик), отбор и проверка (сборщик → готовый "
+            "черновик), ожидание выпуска (черновик → пост).", "",
+            "| День | Рубрика | От источника | С точным временем | Без времени "
+            "| С момента сбора | Сбор | Отбор и проверка | Ожидание выпуска |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"])
         for day in flow["days"]:
             for latency in day["delivery_latency"]:
-                minutes = latency["median_minutes"]
-                label = "—" if minutes is None else str(minutes)
+                stages = " | ".join(_minutes_label(latency.get(field)) for field in (
+                    "seen_median_minutes", "collection_median_minutes",
+                    "review_median_minutes", "release_median_minutes"))
                 lines.append(
-                    f"| {day['local_date']} | {latency['category']} | {label} | "
-                    f"{latency['samples']} | {latency['missing_timestamp']} |"
+                    f"| {day['local_date']} | {latency['category']} | "
+                    f"{_minutes_label(latency['median_minutes'])} | "
+                    f"{latency['samples']} | {latency['missing_timestamp']} | {stages} |"
                 )
         if not any(day["delivery_latency"] for day in flow["days"]):
-            lines.append("| — | — | — | — | — |")
+            lines.append("| — | — | — | — | — | — | — | — | — |")
     lines.extend(["", "Следующие действия:", ""])
     lines.extend(f"{index}. {action}" for index, action in enumerate(report["next_actions"], 1))
     lines.extend(["", "Ограничения:", ""])
     lines.extend(f"- {value}" for value in report["limitations"])
     return "\n".join(lines) + "\n"
+
+
+def _minutes_label(value: object) -> str:
+    return "—" if value is None else str(value)
 
 
 def main() -> None:

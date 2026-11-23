@@ -31,6 +31,7 @@ _EXPIRY_REASONS: tuple[ExpiryReason, ...] = (
     "disruption_already_resolved",
 )
 Count = Annotated[int, Field(strict=True, ge=0)]
+Minutes = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
 
 class Expiry(BaseModel):
@@ -43,7 +44,13 @@ class Latency(BaseModel):
     category: str
     samples: Count
     missing_timestamp: Count
-    median_minutes: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None
+    median_minutes: Minutes | None
+    # Этапы задержки (#435). Необязательные: старые снимки остаются валидными.
+    seen_samples: Count = 0
+    seen_median_minutes: Minutes | None = None
+    collection_median_minutes: Minutes | None = None
+    review_median_minutes: Minutes | None = None
+    release_median_minutes: Minutes | None = None
 
     @field_validator("category")
     @classmethod
@@ -140,9 +147,12 @@ def editorial_flow(
 
     measured: dict[tuple[date, str], list[float]] = defaultdict(list)
     missing: Counter[tuple[date, str]] = Counter()
+    stages: dict[tuple[date, str], dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list))
     delivered = session.execute(
         select(
             Post.published_at, Post.category, RawItem.published_at, RawItem.published_at_precision,
+            RawItem.ingested_at, Post.created_at,
         )
         .join(EditorialRun, EditorialRun.post_id == Post.id)
         .join(RawItem, RawItem.id == EditorialRun.raw_item_id)
@@ -150,22 +160,40 @@ def editorial_flow(
         .where(public_sources, Post.city == city, EditorialRun.delivery_status == "sent",
                Post.telegram_message_id > 0, Post.published_at.between(start, now))
     )
-    for sent_at, category, source_time, precision in delivered:
+    for sent_at, category, source_time, precision, ingested_at, drafted_at in delivered:
         if sent_at is None:
             continue
         key = sent_at.astimezone(zone).date(), category if category in _CATEGORIES else "other"
-        if precision != "instant" or source_time is None or source_time > sent_at:
-            missing[key] += 1
+        exact: datetime | None = source_time if (
+            precision == "instant" and source_time is not None and source_time <= sent_at
+        ) else None
+        if exact is not None:
+            measured[key].append(_minutes(exact, sent_at))
         else:
-            measured[key].append((sent_at - source_time).total_seconds() / 60)
+            missing[key] += 1
+        bucket = stages[key]
+        seen, drafted = ingested_at, drafted_at
+        if seen is not None and seen <= sent_at:
+            bucket["seen"].append(_minutes(seen, sent_at))
+            if exact is not None and exact <= seen:
+                bucket["collection"].append(_minutes(exact, seen))
+            if drafted is not None and seen <= drafted <= sent_at:
+                bucket["review"].append(_minutes(seen, drafted))
+                bucket["release"].append(_minutes(drafted, sent_at))
 
     latency_by_day: dict[date, list[Latency]] = defaultdict(list)
     for key in sorted(measured.keys() | missing.keys()):
         observed, category = key
         samples = measured.get(key, [])
+        bucket = stages.get(key, {})
         latency_by_day[observed].append(Latency(
             category=category, samples=len(samples), missing_timestamp=missing[key],
-            median_minutes=round(median(samples), 1) if samples else None,
+            median_minutes=_median(samples),
+            seen_samples=len(bucket.get("seen", [])),
+            seen_median_minutes=_median(bucket.get("seen", [])),
+            collection_median_minutes=_median(bucket.get("collection", [])),
+            review_median_minutes=_median(bucket.get("review", [])),
+            release_median_minutes=_median(bucket.get("release", [])),
         ))
 
     days = []
@@ -181,3 +209,11 @@ def editorial_flow(
             delivery_latency=latency_by_day[day],
         ))
     return EditorialFlow(observed_at=now, timezone=zone.key, days=days).model_dump(mode="json")
+
+
+def _minutes(start: datetime, end: datetime) -> float:
+    return (end - start).total_seconds() / 60
+
+
+def _median(values: list[float]) -> float | None:
+    return round(median(values), 1) if values else None

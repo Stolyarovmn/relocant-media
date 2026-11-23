@@ -51,11 +51,13 @@ def closed(session, raw, at, attempts=0):
     ))
 
 
-def sent(session, raw, at, message_id, *, category="transport", status="sent"):
+def sent(session, raw, at, message_id, *, category="transport", status="sent", drafted=None):
     post = Post(
         city="belgrade", category=category, status="published", title="Опубликовано", body="Текст",
         confidence=Decimal("1"), published_at=at, telegram_message_id=message_id,
     )
+    if drafted is not None:
+        post.created_at = drafted
     session.add(post)
     session.flush()
     session.add(EditorialRun(
@@ -128,11 +130,62 @@ def test_daily_report_reads_measured_latency_and_allowlists_aggregate_fields(mon
     })
     saved = merge(newsroom_export.snapshot(ROOT), saved)
     daily = build_status(saved, city="belgrade", now=NOW)
-    assert daily["editorial_flow"]["days"][-1]["delivery_latency"] == [
-        {"category": "events", "samples": 0, "missing_timestamp": 1, "median_minutes": None},
-        {"category": "transport", "samples": 2, "missing_timestamp": 1, "median_minutes": 27.0},
-    ]
+    events, transport = daily["editorial_flow"]["days"][-1]["delivery_latency"]
+    assert {key: events[key] for key in ("category", "samples", "missing_timestamp",
+                                         "median_minutes")} == {
+        "category": "events", "samples": 0, "missing_timestamp": 1, "median_minutes": None}
+    assert {key: transport[key] for key in ("category", "samples", "missing_timestamp",
+                                            "median_minutes")} == {
+        "category": "transport", "samples": 2, "missing_timestamp": 1, "median_minutes": 27.0}
     assert "SECRET" not in json.dumps(daily)
     assert "PRIVATE_SOURCE" not in json.dumps(daily)
     assert "27.0 | 2 | 1" in markdown(daily)
     assert "2026-11-22 (неполный)" in markdown(daily)
+
+
+def test_latency_splits_collection_review_and_release_stages():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all([source(OFFICIAL), source(NATIONAL, "media")])
+        session.flush()
+        # Точное время: 10 мин сбор, 60 мин очередь и проверка, 20 мин ожидание выпуска.
+        exact = item(session, NATIONAL, NOW - timedelta(minutes=90), NOW - timedelta(minutes=80))
+        sent(session, exact, NOW, 1, drafted=NOW - timedelta(minutes=20))
+        # Только дата: от источника не считается, этапы после сбора считаются.
+        dated = item(session, OFFICIAL, MIDNIGHT, NOW - timedelta(minutes=30), precision="day")
+        sent(session, dated, NOW, 2, drafted=NOW - timedelta(minutes=10))
+        # Черновик переписан после выпуска: этапы проверки и выпуска не выдумываются.
+        rewritten = item(session, OFFICIAL, MIDNIGHT, NOW - timedelta(minutes=50),
+                         precision="day")
+        sent(session, rewritten, NOW, 3, drafted=NOW + timedelta(minutes=5))
+        # Отложенный ночным окном пост: ожидание выпуска видно отдельно.
+        night = item(session, OFFICIAL, MIDNIGHT, MIDNIGHT, precision="day")
+        sent(session, night, NOW, 4, category="city", drafted=MIDNIGHT + timedelta(minutes=5))
+        session.commit()
+        report = editorial_flow(session, "belgrade", {OFFICIAL, NATIONAL}, now=NOW, zone=ZONE)
+
+    city, transport = report["days"][-1]["delivery_latency"]
+    assert transport == {
+        "category": "transport", "samples": 1, "missing_timestamp": 2, "median_minutes": 90.0,
+        "seen_samples": 3, "seen_median_minutes": 50.0, "collection_median_minutes": 10.0,
+        "review_median_minutes": 40.0, "release_median_minutes": 15.0,
+    }
+    assert city["seen_median_minutes"] == 90.0
+    assert city["collection_median_minutes"] is None
+    assert city["review_median_minutes"] == 5.0
+    assert city["release_median_minutes"] == 85.0
+
+
+def test_old_snapshots_without_stage_fields_stay_valid():
+    old_flow = {"observed_at": NOW.isoformat(), "timezone": "Europe/Belgrade", "days": [{
+        "local_date": "2026-11-22", "expired_unreviewed": [], "delivery_latency": [{
+            "category": "transport", "samples": 0, "missing_timestamp": 2,
+            "median_minutes": None}]}]}
+    from relocant_media.services.editorial_flow import public_editorial_flow
+
+    flow = public_editorial_flow(old_flow, set())
+    assert flow is not None
+    latency = flow["days"][0]["delivery_latency"][0]
+    assert latency["seen_samples"] == 0
+    assert latency["review_median_minutes"] is None
