@@ -221,6 +221,22 @@ async def test_auto_publish_and_cross_host_redirect_are_rejected() -> None:
     assert len(requested) == 1
 
 
+@pytest.mark.asyncio
+async def test_live_review_fetches_the_exact_card_without_a_program_scan() -> None:
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(200, text=_detail())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        item = await BitefArtCafeEventsCollector(_source(), client).collect_url(FIRST_URL)
+
+    assert requested == [FIRST_URL]
+    assert item.url == FIRST_URL
+    assert item.published_at is None
+
+
 def test_source_is_structured_review_only_without_rss() -> None:
     source = _source()
 

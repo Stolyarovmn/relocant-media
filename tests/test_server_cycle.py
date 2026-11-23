@@ -549,7 +549,7 @@ def _live_package(*documents):
     ]))
 
 
-def test_live_check_covers_media_and_guide_sources_but_still_refuses_unknown_ones(monkeypatch):
+def test_live_check_covers_media_venue_and_guide_sources_but_refuses_unknown_ones(monkeypatch):
     from relocant_media.collectors.base import RawItem
 
     _enable_guide(monkeypatch)
@@ -564,18 +564,31 @@ def test_live_check_covers_media_and_guide_sources_but_still_refuses_unknown_one
             return [RawItem("guide_nsz_foreigner_employment", "guide-x", url, "Guide", "Body", None,
                             canonical_url=url)]
 
+    class VenueCollector:
+        async def collect_url(self, url):
+            return RawItem("venue_bitefartcafe", url, url, "Koncert", "Mitropolita Petra 8", None)
+
     def build(source, client):
-        return MediaCollector() if source.id == "media_rts" else GuideCollector()
+        return {
+            "media_rts": MediaCollector,
+            "venue_bitefartcafe": VenueCollector,
+            "guide_nsz_foreigner_employment": GuideCollector,
+        }[source.id]()
 
     monkeypatch.setattr(server_cycle, "build_collector", build)
     guide_url = "https://www.nsz.gov.rs/nsz/employment-of-foreigners-in-the-republic-of-serbia/11181"
-    package = _live_package(("media_rts", "https://www.rts.rs/lat/vesti/a.html"),
-                            ("guide_nsz_foreigner_employment", guide_url))
+    venue_url = "https://bitefartcafe.rs/dogadjaji/koncert/"
+    package = _live_package(
+        ("media_rts", "https://www.rts.rs/lat/vesti/a.html"),
+        ("venue_bitefartcafe", venue_url), ("guide_nsz_foreigner_employment", guide_url),
+    )
 
     documents = server_cycle.fetch_documents(package)
 
     assert [(d.source_id, d.title, d.published_at) for d in documents] == [
-        ("media_rts", "Naslov", None), ("guide_nsz_foreigner_employment", "Guide", None)]
+        ("media_rts", "Naslov", None), ("venue_bitefartcafe", "Koncert", None),
+        ("guide_nsz_foreigner_employment", "Guide", None),
+    ]
     with pytest.raises(ValueError, match="unsupported live source"):
         server_cycle.fetch_documents(_live_package(("telegram_unknown", "https://t.me/x/1")))
 
