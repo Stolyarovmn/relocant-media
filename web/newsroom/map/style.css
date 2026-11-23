@@ -379,7 +379,8 @@ h1 {
     linear-gradient(currentColor, currentColor) 4px 11px / 12px 2px no-repeat;
 }
 .picked-address {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   justify-content: space-between;
@@ -389,7 +390,115 @@ h1 {
   background: #e7eddf;
 }
 .picked-address p { margin: 0; color: var(--muted); font-size: .82rem; }
+.picked-address strong { overflow-wrap: anywhere; }
+.picked-actions { display: flex; align-items: center; }
+#save-address-note { grid-column: 1 / -1; }
+#save-address, .watch-actions button {
+  min-height: 38px;
+  padding: 4px 9px;
+  border: 1px solid var(--stroke);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--ink);
+  font-size: .84rem;
+  font-weight: 700;
+}
+#save-address:disabled { color: var(--muted); }
 .icon-button { border: 0; background: transparent; font-size: 1.5rem; line-height: 1; padding: 4px; }
+
+.address-watch {
+  margin: 0 0 4px;
+  border-bottom: 1px solid var(--stroke);
+  color: var(--ink);
+}
+.address-watch summary {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto 12px;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 4px 2px;
+  cursor: pointer;
+  list-style: none;
+}
+.address-watch summary::-webkit-details-marker { display: none; }
+.address-watch summary::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  grid-column: 4;
+  margin: 0 0 4px 1px;
+  border: solid var(--muted);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+.address-watch[open] summary::after { transform: rotate(225deg); margin-top: 7px; }
+.address-watch summary small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: .79rem;
+}
+.watch-pin {
+  justify-self: center;
+  width: 16px;
+  height: 16px;
+  border: 2px solid currentColor;
+  border-radius: 50% 50% 50% 2px;
+  transform: rotate(-45deg);
+  color: var(--city);
+}
+.watch-pin::after {
+  content: "";
+  display: block;
+  width: 4px;
+  height: 4px;
+  margin: 4px auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+.watch-count, .watch-update {
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--city-tint);
+  color: var(--city);
+  white-space: nowrap;
+  font-size: .74rem;
+  font-weight: 750;
+}
+.watch-body { padding: 3px 0 9px; }
+.watch-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; }
+.watch-actions button:last-child { border-color: transparent; background: transparent; color: var(--muted); }
+#watch-status { margin: 6px 0; color: var(--muted); font-size: .84rem; }
+.watch-items {
+  display: grid;
+  gap: 5px;
+  max-height: min(28dvh, 310px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 2px;
+  margin: 0;
+  list-style: none;
+}
+.watch-item-link {
+  width: 100%;
+  display: flex;
+  align-items: start;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 8px;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  text-align: left;
+  line-height: 1.25;
+}
+.watch-item-link small { color: var(--muted); }
+.watch-type { color: var(--city); font-size: .77rem; }
+.watch-type i { margin-right: 3px; font-style: normal; }
 
 .map-frame {
   position: sticky;
@@ -877,6 +986,8 @@ h1 {
     box-shadow: 0 2px 10px #172e2129;
   }
   .picked-address .icon-button { min-width: 40px; min-height: 38px; }
+  #save-address, .watch-actions button { min-height: 43px; }
+  .watch-items { max-height: min(23dvh, 200px); }
   .map-frame {
     position: relative;
     top: 0;

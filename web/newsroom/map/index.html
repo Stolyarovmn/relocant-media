@@ -13,11 +13,11 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin>
-  <link rel="stylesheet" href="style.css?v=15">
+  <link rel="stylesheet" href="style.css?v=16">
   <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin defer></script>
-  <script type="module" src="app.js?v=23"></script>
+  <script type="module" src="app.js?v=24"></script>
 </head>
 <body>
   <a class="skip-link" href="#announcements">К списку объявлений</a>
@@ -90,7 +90,11 @@
         </div>
         <div id="picked-address" class="picked-address" hidden>
           <div><strong id="picked-label"></strong><p id="picked-match"></p></div>
-          <button id="clear-address" class="icon-button" type="button" aria-label="Сбросить выбранный адрес">×</button>
+          <div class="picked-actions">
+            <button id="save-address" type="button">Сохранить</button>
+            <button id="clear-address" class="icon-button" type="button" aria-label="Сбросить выбранный адрес">×</button>
+          </div>
+          <p id="save-address-note" role="status" hidden></p>
         </div>
       </div>
       <div id="places-controls" class="places-controls" hidden>
@@ -112,6 +116,21 @@
     </section>
 
     <section id="announcements" class="announcements" aria-labelledby="announcements-title">
+      <details id="address-watch" class="address-watch" hidden>
+        <summary>
+          <span class="watch-pin" aria-hidden="true"></span>
+          <span><strong>Мой адрес</strong><small id="watched-address"></small></span>
+          <span id="watch-count" class="watch-count" hidden></span>
+        </summary>
+        <div class="watch-body">
+          <div class="watch-actions">
+            <button id="focus-saved-address" type="button">На карте</button>
+            <button id="remove-saved-address" type="button">Удалить адрес</button>
+          </div>
+          <p id="watch-status" role="status"></p>
+          <ul id="watch-items" class="watch-items"></ul>
+        </div>
+      </details>
       <header class="list-header">
         <h2 id="announcements-title">
           <button id="toggle-announcements" type="button" aria-expanded="true" aria-controls="announcement-body">

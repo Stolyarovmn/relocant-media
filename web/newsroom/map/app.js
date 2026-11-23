@@ -10,6 +10,7 @@ import {
 } from "./layer-views.js?v=2";
 import { setupPlaces } from "./places.js?v=19";
 import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=1";
+import { addressWatch, watchedIncidents } from "./address-watch.js?v=1";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -23,6 +24,8 @@ const timelineInput = byId("timeline-time");
 const announcementBody = byId("announcement-body");
 const announcementToggle = byId("toggle-announcements");
 const selectedPreview = byId("selected-preview");
+const watchPanel = byId("address-watch");
+const watch = addressWatch();
 const telegram = globalThis.Telegram?.WebApp;
 const initialRoute = launchMap(location.search, telegram?.initDataUnsafe?.start_param);
 const digestIds = launchDigestEvents(location.search, telegram?.initDataUnsafe?.start_param);
@@ -49,6 +52,7 @@ const state = {
   digestIds,
   mode: "",
   stamp: "",
+  watchStamp: null,
   loading: false,
   map: null,
   eventLayer: null,
@@ -713,6 +717,11 @@ function renderAddress(now) {
   state.addressLayer?.clearLayers();
   if (!value) return;
   byId("picked-label").textContent = addressLabel(value);
+  const save = byId("save-address");
+  save.disabled = watch.isSaved(value);
+  save.textContent = save.disabled ? "Сохранён" : watch.address ? "Заменить" : "Сохранить";
+  save.setAttribute("aria-label", save.disabled ? "Адрес сохранён на этом устройстве" : watch.address
+    ? "Заменить сохранённый адрес на этом устройстве" : "Сохранить адрес на этом устройстве");
   const matches = state.incidents.filter((event) => incidentStatus(event, now) !== "closed")
     .map((incident) => incidentInPeriod(incident, now, viewPeriod()))
     .filter((event) => event && addressHits(event, value).some((address) => unexpired(address.window, now)));
@@ -727,11 +736,75 @@ function renderAddress(now) {
     .addTo(state.addressLayer);
 }
 
+let watchRenderKey = "";
+function renderSavedAddress(now) {
+  const address = watch.address;
+  watchPanel.hidden = !address;
+  if (!address) {
+    watchRenderKey = "";
+    return;
+  }
+  const matches = watchedIncidents(address, state.incidents, now);
+  const changes = watch.changes(matches, state.watchStamp);
+  if (watchPanel.open) watch.observe(matches, state.watchStamp);
+  const ordered = matches.sort((a, b) =>
+    Number(changes.has(b.incident.id)) - Number(changes.has(a.incident.id))
+    || (a.windows[0]?.start ?? Infinity) - (b.windows[0]?.start ?? Infinity));
+  const rows = ordered.map(({ incident, nearby, signature, windows }) => ({
+    incident, nearby, signature, change: changes.get(incident.id),
+    times: windows.filter(({ end }) => end > now).map(addressWindowText),
+  }));
+  const key = JSON.stringify([address, state.loaded, state.loadFailed,
+    rows.map(({ incident, signature, change, times }) => [incident.id, signature, change, times])]);
+  if (watchRenderKey === key) return;
+  watchRenderKey = key;
+  byId("watched-address").textContent = `${addressLabel(address)} · ${address.municipality}`;
+  const count = byId("watch-count");
+  count.hidden = !changes.size;
+  count.textContent = changes.size ? `Изменения · ${changes.size}` : "";
+  byId("watch-status").textContent = state.loadFailed ? "Обновление недоступно."
+    : !state.loaded ? "Загружаем объявления." : !rows.length ? "Актуальных объявлений у адреса нет."
+    : changes.size ? "Изменения с последнего просмотра" : "Актуальные объявления";
+  const items = byId("watch-items");
+  items.replaceChildren(...rows.map(({ incident, nearby, change, times }) => {
+    const row = make("li", "watch-item");
+    row.dataset.kind = incident.kind;
+    const button = make("button", "watch-item-link");
+    button.type = "button";
+    const type = make("span", "watch-type", `${kinds[incident.kind].label}${nearby ? " рядом" : ""}`);
+    const icon = make("i", "", kinds[incident.kind].icon);
+    icon.setAttribute("aria-hidden", "true");
+    type.prepend(icon);
+    button.append(type, make("strong", "", incident.title));
+    if (change) button.append(make("span", "watch-update", change === "new" ? "Новое" : "Обновлено"));
+    if (times.length) button.append(make("small", "", times.join(" · ")));
+    button.addEventListener("click", () => openWatchedIncident(incident));
+    row.append(button);
+    return row;
+  }));
+}
+
+function openWatchedIncident(incident) {
+  state.digestIds = [];
+  if (!incidentInPeriod(incident, viewClock(), viewPeriod())) {
+    state.period = null;
+    state.timelineStep = 0;
+    for (const option of periodButtons) {
+      option.setAttribute("aria-pressed", String(option.dataset.hours === ""));
+    }
+  }
+  watchPanel.open = false;
+  watchPanel.querySelector("summary").focus({ preventScroll: true });
+  openEvent(incident);
+  scheduleClock();
+}
+
 function render() {
   if (state.mode !== "incidents") return;
   const realNow = Date.now();
   renderTimeline(realNow);
   const now = viewClock(realNow);
+  renderSavedAddress(realNow);
   renderAddress(now);
   renderList(now);
   renderPoints(now);
@@ -835,6 +908,7 @@ function showAnnouncements(open, refocus = false) {
 let refreshTimer;
 let clockTimer;
 let deepAttempts = 0;
+let lastEventCheck = 0;
 function updateCountdowns(now) {
   const incidents = new Map(visibleIncidents(now).map((incident) => [incident.id, incident]));
   for (const card of eventList.children) {
@@ -866,15 +940,17 @@ async function loadEvents() {
   if (state.loading) return;
   clearTimeout(refreshTimer);
   state.loading = true;
+  lastEventCheck = Date.now();
   if (state.mode === "incidents") syncFeed(state);
   try {
-    const { entries, generatedAt, cached } = await loadSnapshot(
+    const { entries, generatedAt, timestamp, cached } = await loadSnapshot(
       "./incidents.json", (feed) => readIncidents(feed, Date.now()),
     );
     state.incidents = entries;
     state.loaded = true;
     state.loadFailed = cached;
     state.stamp = updateStamp(generatedAt);
+    state.watchStamp = cached ? null : timestamp;
     if (state.mode !== "incidents") {
       updateCityCount(Date.now());
       return;
@@ -892,7 +968,11 @@ async function loadEvents() {
     scheduleClock();
   } catch {
     state.loadFailed = true;
-    if (state.mode === "incidents") renderList(viewClock());
+    state.watchStamp = null;
+    if (state.mode === "incidents") {
+      renderSavedAddress(Date.now());
+      renderList(viewClock());
+    }
   } finally {
     state.loading = false;
     if (state.mode === "incidents") syncFeed(state);
@@ -944,19 +1024,20 @@ function searchMessage(message) {
   searchResults.hidden = false;
 }
 
-function chooseAddress(value) {
+function chooseAddress(value, focusSearch = true) {
   state.address = value;
   state.refocusEvent = "";
   state.deepPending = "";
   state.focusNote = "";
+  byId("save-address-note").hidden = true;
   input.value = addressLabel(value);
   hideSearch();
   render();
   showMapNote();
   state.map?.setView([value.lat, value.lon], 17, { animate });
-  if (mobile.matches) {
+  if (focusSearch && mobile.matches) {
     input.blur();
-  } else {
+  } else if (focusSearch) {
     input.focus();
   }
 }
@@ -1026,6 +1107,32 @@ document.addEventListener("pointerdown", (event) => {
     hideSearch();
   }
 });
+watchPanel.addEventListener("toggle", () => renderSavedAddress(Date.now()));
+byId("save-address").addEventListener("click", () => {
+  const note = byId("save-address-note");
+  if (!watch.save(state.address)) {
+    note.textContent = state.address?.municipality ? "Браузер не сохранил адрес."
+      : "Для сохранения выберите адрес с районом.";
+    note.hidden = false;
+    return;
+  }
+  note.hidden = true;
+  watchPanel.open = true;
+  render();
+  watchPanel.querySelector("summary").focus({ preventScroll: true });
+});
+byId("focus-saved-address").addEventListener("click", () => {
+  if (watch.address) chooseAddress(watch.address, false);
+});
+byId("remove-saved-address").addEventListener("click", () => {
+  if (!watch.remove()) {
+    byId("watch-status").textContent = "Браузер не удалил адрес.";
+    return;
+  }
+  watchPanel.open = false;
+  render();
+  (state.address ? byId("save-address") : input).focus({ preventScroll: true });
+});
 byId("clear-address").addEventListener("click", () => {
   state.address = null;
   input.value = "";
@@ -1093,6 +1200,7 @@ document.addEventListener("visibilitychange", () => {
   else if (state.mode === "incidents") {
     render();
     scheduleClock();
+    if (watch.address && Date.now() - lastEventCheck >= 60_000) void loadEvents();
   }
 });
 announcementToggle.addEventListener("click", () => showAnnouncements(announcementBody.hidden, true));
@@ -1163,7 +1271,9 @@ function showMode(mode, id = "") {
     else render();
     syncFeed(state);
     scheduleClock();
-    if (!state.loaded || state.deepPending) void loadEvents();
+    if (!state.loaded || state.deepPending || (watch.address && Date.now() - lastEventCheck >= 60_000)) {
+      void loadEvents();
+    }
     void loadAddressIndex();
   }
 }
