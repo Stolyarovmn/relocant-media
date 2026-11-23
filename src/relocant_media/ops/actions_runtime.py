@@ -406,11 +406,28 @@ def _export_committed_fallback(
     """Опциональный public-only v1 на уже сохранённой локальной БД, без нового restore."""
     from relocant_media.services.gpt_fallback import build_request
 
+    preferred_cycle = None
+    if mode == "editorial":
+        try:
+            report = json.loads((work / "cycle" / "server-report.json").read_text(
+                encoding="utf-8",
+            ))
+        except (OSError, ValueError):
+            report = None
+        if isinstance(report, dict) and report.get("status") in ("PRIMARY_OK", "PRIMARY_PARTIAL"):
+            run_id = report.get("run_id")
+            if type(run_id) is int and 0 < run_id < 2**63:
+                preferred_cycle = run_id
+
+    now = datetime.now(UTC)
     engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
     try:
         with Session(engine) as session, session.no_autoflush:
             session.connection().exec_driver_sql("PRAGMA query_only=ON")
-            request = build_request(session, now=datetime.now(UTC))
+            request = (build_request(session, now=now, scheduler_run_id=preferred_cycle)
+                       if preferred_cycle is not None else None)
+            if request is None:
+                request = build_request(session, now=now)
             if request is not None:
                 _require_public_fallback_documents(session, request)
     finally:
