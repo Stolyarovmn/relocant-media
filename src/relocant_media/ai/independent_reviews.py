@@ -105,6 +105,33 @@ def _evidence(document: EvidenceDocument) -> dict[str, object]:
     return values
 
 
+def require_unchanged_review_sources(
+    expected: tuple[EvidenceDocument, ...], actual: tuple[EvidenceDocument, ...],
+) -> None:
+    if sorted((_evidence(d) for d in actual), key=lambda d: str(d["source_id"])) != sorted(
+        (_evidence(d) for d in expected), key=lambda d: str(d["source_id"]),
+    ):
+        raise ValueError("live evidence changed since package preparation")
+
+
+def review_context_profile(
+    package: EditorialPackage, profile: CityEditorialProfile | None = None,
+) -> CityEditorialProfile | None:
+    if package.version != 2 or package.event is None:
+        raise ValueError("independent reviews require package v2")
+    if any(review.verdict != "hold" for review in package.reviews):
+        raise ValueError("independent reviews require hold placeholders")
+    if profile is None and package.outcome.ranking.selection is not None:
+        profile = load_city_profile(package.city)
+    if profile is not None:
+        if profile.city_id != package.city:
+            raise ValueError("Город пакета не совпадает с редакционным профилем")
+        reason = selection_reason(package.outcome.ranking, profile, package.event.documents)
+        if reason:
+            raise ValueError(reason)
+    return profile
+
+
 def reviewed_package(
     package: EditorialPackage,
     provider: StructuredAIProvider,
@@ -115,28 +142,15 @@ def reviewed_package(
     city_profile: CityEditorialProfile | None = None,
 ) -> EditorialPackage:
     """Return reviews only; never rewrite draft, evidence or eligibility guards."""
-    if package.version != 2 or package.event is None:
-        raise ValueError("independent reviews require package v2")
-    if any(review.verdict != "hold" for review in package.reviews):
-        raise ValueError("independent reviews require hold placeholders")
+    profile = review_context_profile(package, city_profile)
     if now is not None and now.tzinfo is None:
         raise ValueError("review time must be timezone-aware")
     review_time = now or datetime.now(UTC)
-    profile = city_profile
-    if profile is None and package.outcome.ranking.selection is not None:
-        profile = load_city_profile(package.city)
-    if profile is not None:
-        if profile.city_id != package.city:
-            raise ValueError("Город пакета не совпадает с редакционным профилем")
-        reason = selection_reason(package.outcome.ranking, profile, package.event.documents)
-        if reason:
-            raise ValueError(reason)
     context = package.model_dump(mode="json", exclude={"reviews"})
     context_hash = context_sha256(package)
     draft_hash = draft_sha256(package.outcome.draft)
+    assert package.event is not None
     documents = package.event.documents
-    expected = sorted((_evidence(d) for d in documents),
-                      key=lambda d: str(d["source_id"]))
     source_road_windows = road_work_context(documents, review_time, profile)
     matching_window = matching_live_road_window(package.outcome.draft.body, source_road_windows)
     verified_ids = set(package.outcome.draft.claim_ids) & {
@@ -151,10 +165,7 @@ def reviewed_package(
 
     reviews: list[ReviewVerdict] = []
     for role in ("facts", "utility"):
-        live = live_documents()
-        actual = sorted((_evidence(d) for d in live), key=lambda d: str(d["source_id"]))
-        if actual != expected:
-            raise ValueError("live evidence changed since package preparation")
+        require_unchanged_review_sources(documents, live_documents())
         response_model = _FactsResponse if role == "facts" else _UtilityResponse
         instructions = (
             "Ты независимо проверяешь точный черновик для русскоязычных жителей Белграда. "

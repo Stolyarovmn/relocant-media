@@ -1,13 +1,14 @@
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 from test_bgsaobracaj_notices import PUBLISHED, SCHEDULE, ZONE
 from test_independent_reviews import Provider, documents, package
 
-from relocant_media.ai.package import context_sha256, draft_sha256
+from relocant_media.ai.package import context_sha256, draft_sha256, evaluate_package
 from relocant_media.ai.provider import StructuredOutputError
 from relocant_media.ai.review_repair import review_with_repairs
+from relocant_media.domain.freshness import draft_date_reason
 
 
 def initial():
@@ -35,6 +36,98 @@ def test_approved_draft_requires_no_repair():
     result = review_with_repairs(value, provider, lambda: documents(value))
     assert len(provider.calls) == 2
     assert result.outcome == value.outcome
+
+
+def dated_water_notice():
+    value = initial()
+    date_fields = {"published_at": datetime(2026, 11, 22, 23, tzinfo=UTC),
+                   "published_at_precision": "day"}
+    document = value.event.documents[0]
+    evidence = value.evidence.model_copy(update=date_fields)
+    draft = value.outcome.draft.model_copy(update={
+        "body": "23 ноября с 08:00 до 18:00 часть Звездары останется без воды.",
+    })
+    relative = draft.model_copy(update={"body": "Сегодня, " + draft.body})
+    ranking = value.outcome.ranking.model_copy(update={"category": "utilities"})
+    value = value.model_copy(update={
+        "outcome": value.outcome.model_copy(update={"draft": relative, "ranking": ranking}),
+        "event": value.event.model_copy(update={"documents": (
+            document.model_copy(update=date_fields),
+        )}),
+        "evidence": evidence,
+    })
+    return value, draft
+
+
+def test_relative_day_is_repaired_before_reviews_even_if_a_calendar_date_is_present():
+    value, corrected = dated_water_notice()
+    provider, audit, fetches = Provider(), [], []
+    provider.responses = [corrected.model_dump(mode="json"), *reviews()]
+
+    def live():
+        fetches.append(len(provider.calls))
+        return documents(value)
+
+    result = review_with_repairs(value, provider, live, audit=audit.append)
+
+    assert [call["task"] for call in provider.calls] == [
+        "repair_draft", "independent_facts", "independent_utility",
+    ]
+    assert fetches == [0, 1, 2]
+    assert audit[0]["role"] == "date_guard" and audit[0]["repair_attempt"] == 0
+    repair_prompt = json.loads(provider.calls[0]["prompt"])
+    assert "«сегодня»" in repair_prompt["review_comments"][0]["instruction"]
+    assert repair_prompt["source_local_dates"][0]["published_on_belgrade"] == "2026-11-23"
+    assert repair_prompt["source_local_dates"][0]["published_at_belgrade"] is None
+    for call in provider.calls[1:]:
+        assert json.loads(call["prompt"])["package"]["outcome"]["draft"]["body"] == corrected.body
+    assert result.outcome.draft == corrected
+    assert result.event == value.event and result.evidence == value.evidence
+    assert all(r.context_sha256 == context_sha256(result)
+               and r.draft_sha256 == draft_sha256(corrected) for r in result.reviews)
+    evaluated = evaluate_package(result)
+    assert (evaluated.status, evaluated.reason) == ("human_review", "package_requires_review")
+
+
+@pytest.mark.parametrize("fails_at", [0, 1])
+def test_early_date_repair_requires_unchanged_sources_before_repair_and_review(fails_at):
+    value, corrected = dated_water_notice()
+    provider = Provider()
+    provider.responses = [corrected.model_dump(mode="json"), *reviews()]
+
+    def live():
+        doc, = documents(value)
+        if len(provider.calls) == fails_at:
+            doc = doc.model_copy(update={"body": "Изменено"})
+        return (doc,)
+
+    with pytest.raises(ValueError, match="live evidence changed"):
+        review_with_repairs(value, provider, live)
+    assert len(provider.calls) == fails_at
+
+
+def test_date_repair_uses_the_same_budget_and_preserves_the_publication_guard():
+    value, corrected = dated_water_notice()
+    provider = Provider()
+    still_relative = corrected.model_copy(update={"body": "Завтра, " + corrected.body})
+    provider.responses = [still_relative.model_dump(mode="json"), *reviews()]
+    result = review_with_repairs(value, provider, lambda: documents(value), max_repairs=1)
+    assert [call["task"] for call in provider.calls] == [
+        "repair_draft", "independent_facts", "independent_utility",
+    ]
+    assert draft_date_reason(result.outcome.draft.title, result.outcome.draft.body)
+    assert evaluate_package(result).reason == "draft_requires_absolute_event_date"
+
+
+def test_unchanged_early_date_repair_does_not_repeat_the_request():
+    value, _ = dated_water_notice()
+    provider = Provider()
+    provider.responses = [value.outcome.draft.model_dump(mode="json"), *reviews()]
+    result = review_with_repairs(value, provider, lambda: documents(value))
+    assert [call["task"] for call in provider.calls] == [
+        "repair_draft", "independent_facts", "independent_utility",
+    ]
+    assert evaluate_package(result).reason == "draft_requires_absolute_event_date"
 
 
 def test_repaired_draft_discards_old_factual_coverage_before_new_review(monkeypatch):
