@@ -303,7 +303,8 @@ export function readIncidents(document, now = null) {
     return [{
       id: record.id,
       kind: record.kind,
-      title,
+      title: textValue(record.display_title) || title,
+      watchTitle: title,
       archived,
       reportedScope: textValue(record.reported_scope),
       source,

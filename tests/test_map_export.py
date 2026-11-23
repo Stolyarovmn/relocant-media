@@ -784,3 +784,52 @@ def test_pages_version_changes_with_a_map_module_but_not_with_new_notices(tmp_pa
     assert build() != before
     assert feed.read_bytes() == b'{"version":1,"incidents":[]}'
     assert b"?v=__MAP_REVISION__" in (source / "index.html").read_bytes()
+
+
+@pytest.mark.parametrize(("subject", "title"), [
+    ("током извођења радова у улици Јурија Гагарина", "Дорожные работы · Јурија Гагарина"),
+    ("током извођења радова на уређењу окретнице „Сремчица“",
+     "Работы на разворотной площадке · „Сремчица“"),
+    ("бр. 76", "Изменения на маршруте №76"),
+])
+def test_unpublished_road_cards_put_the_reason_and_place_in_the_heading(subject, title):
+    notice = _notice().model_copy(update={
+        "title": f"Информација о промени режима рада линија јавног превоза {subject}",
+    })
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", load_source_file(
+            Path("cities/belgrade/sources/bgprevoz_changes.yaml"),
+        ))
+        capture_collected_batch(session, [
+            CollectedItem(**notice.model_dump(), external_id="bgprevoz-1151"),
+        ])
+        (incident,) = export_map(session, observed_at=NOW).incidents
+        assert incident.title == notice.title
+        assert incident.display_title == title
+        assert incident.id == map_event_id(notice.url)
+        assert incident.source_url == notice.url
+        assert incident.ends_on.isoformat() == "2026-12-05"
+        assert not incident.lines
+    engine.dispose()
+
+
+def test_water_map_title_covers_both_parsed_districts_and_keeps_published_title():
+    notice = water_document(body=(
+        "U opštini Savski venac, u petak, 13. novembra 2026. godine, od 8 do 15 sati, "
+        "bez vode će ostati potrošači u ulicama Zvečanska i Oblakovska.\n\n"
+        "U opštini Voždovac, u petak, 13. novembra 2026. godine, od 8 do 16 sati, "
+        "bez vode će ostati potrošači u ulicama Rastka Petrovića i Katarine Ivanović."
+    ))
+    scopes = extract_water_outage_scopes(notice)
+
+    fallback = _water(notice, None, None, {}, None, scopes)
+    published = _water(notice, None, "Плановые отключения воды в двух районах", {}, None, scopes)
+
+    assert fallback.title == notice.title
+    assert fallback.display_title == "Отключение воды · Savski venac, Voždovac"
+    assert published.title == "Плановые отключения воды в двух районах"
+    assert published.display_title is None
+    assert fallback.id == published.id == map_event_id(notice.url)
+    assert [window.ends_at.hour for window in fallback.windows] == [15, 16]
