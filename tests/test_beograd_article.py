@@ -39,7 +39,10 @@ def test_city_water_bulletin_preserves_outage_windows_and_omits_shared_tankers(t
     </article>"""
     item = parse_beograd_article(html, load_source_file(SOURCE_PATH), WATER_URL)
 
-    assert item.body == "Do 15.00\n\nZemun: Probna 4\n\nDo 22.00\n\nZvezdara: Primerna 12"
+    assert item.body == (
+        "18.11.2026.\n\nDo 15.00\n\nZemun: Probna 4\n\n"
+        "Do 22.00\n\nZvezdara: Primerna 12"
+    )
     assert item.external_id == "116702"
     assert item.url == WATER_URL
     assert item.published_at == datetime(2026, 11, 18, tzinfo=ZoneInfo("Europe/Belgrade"))
@@ -173,3 +176,17 @@ async def test_belgrade_article_collector_fetches_and_extracts() -> None:
     assert item.url == ARTICLE_URL
     assert item.source_html == html
     assert item.approved_image_hosts == ("static.beograd.rs",)
+
+
+@pytest.mark.parametrize("visible_date", ["23.11.2026.", "Дата неизвестна"])
+def test_water_bulletin_quotes_only_a_parseable_visible_date(visible_date: str) -> None:
+    html = f"""<article><h1>Kvarovi na vodovodnoj mreži biće otklonjeni tokom dana</h1>
+    <time class="story__time">{visible_date}</time><p>Do 15.00</p>
+    <p>Stari grad: Venizelosova 15</p></article>"""
+    item = parse_beograd_article(html, load_source_file(SOURCE_PATH), WATER_URL)
+    if visible_date == "23.11.2026.":
+        assert item.body.startswith("23.11.2026.\n\nDo 15.00")
+        assert item.published_at == datetime(2026, 11, 23, tzinfo=ZoneInfo("Europe/Belgrade"))
+    else:
+        assert item.body == "Do 15.00\n\nStari grad: Venizelosova 15"
+        assert item.published_at is None
