@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup, Tag
 
 from relocant_media.collectors.base import RawItem
 from relocant_media.collectors.page_snapshot import normalize_visible_text
+from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.sources.registry import SourceConfig
 
 MAX_BYTES = 3_000_000
@@ -23,6 +24,7 @@ _DATE_SEARCH = re.compile(
 )
 _TITLE_SUFFIX = " - BitefArtCafe"
 _BODY_STOP = "Online Rezervacije"
+_CARD_END = {"kupite ulaznice", "rezervišite mesto", "informacije i rezervacije:"}
 
 
 def _item_error_message(error: BaseException) -> str:
@@ -139,6 +141,37 @@ def _bounded_visible_body(lines: list[str], title: str) -> str:
     return max(candidates, key=len)
 
 
+def _event_card(soup: BeautifulSoup, event_date: str, body: str) -> list[str]:
+    cards: list[list[str]] = []
+    for heading in soup.find_all(["h2", "h3"]):
+        if heading.get_text(" ", strip=True) != _BODY_STOP:
+            continue
+        column = heading.find_parent(class_="elementor-column")
+        if column is None:
+            continue
+        for sibling in column.find_next_siblings(class_="elementor-column"):
+            lines = normalize_visible_text(str(sibling)).splitlines()
+            if not lines or lines[0] != event_date:
+                continue
+            details = []
+            for line in lines[1:]:
+                if line.casefold() in _CARD_END:
+                    break
+                details.append(line)
+            if "Lokacija:" not in details or len(details) > 15:
+                continue
+            for link in sibling.find_all("a", href=True):
+                href = link.get("href")
+                if (link.get_text(" ", strip=True).casefold() == "kupite ulaznice"
+                        and isinstance(href, str) and is_public_https_url(href)
+                        and href not in body):
+                    details.append(f"Kupite ulaznice: {href}")
+                    break
+            if details not in cards:
+                cards.append(details)
+    return cards[0] if len(cards) == 1 else []
+
+
 def _detail_body(html: str) -> tuple[str, str]:
     if len(html.encode("utf-8")) > MAX_BYTES:
         raise ValueError("BitefArtCafe event response too large")
@@ -150,12 +183,15 @@ def _detail_body(html: str) -> tuple[str, str]:
         raise ValueError("BitefArtCafe event date missing")
     event_date = dates[0]
 
-    title = _detail_title(BeautifulSoup(html, "html.parser"))
+    soup = BeautifulSoup(html, "html.parser")
+    title = _detail_title(soup)
     body = _bounded_visible_body(lines, title)
     if len(body) < 120:
         raise ValueError("BitefArtCafe event body shorter than 120 characters")
     if event_date not in body:
         body = f"Datum događaja: {event_date}\n{body}"
+    if card := _event_card(soup, event_date, body):
+        body = "\n".join([body, *card])
     return title, body
 
 
