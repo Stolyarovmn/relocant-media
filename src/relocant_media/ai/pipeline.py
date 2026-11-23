@@ -25,6 +25,7 @@ from relocant_media.ai.prompts import (
     VERIFY_SYSTEM,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
+from relocant_media.ai.road_work_context import ROAD_WORK_CONTEXT_INSTRUCTION, road_work_context
 from relocant_media.ai.selection import selection_reason
 from relocant_media.domain.audience import (
     audience_relevance_reason,
@@ -279,22 +280,29 @@ class EditorialPipeline:
                 confidence=ranking.confidence,
             )
 
+        draft_time = now or datetime.now(UTC)
+        source_road_windows = road_work_context(documents, draft_time, profile)
+        claims_instruction = CLAIMS_SYSTEM
+        if source_road_windows:
+            claims_instruction += (
+                " Для каждой ночной смены извлеки даты начала и окончания, часы и привязку "
+                "к своему участку или направлению. Цитируй точные напечатанные даты."
+            )
+        claims_payload = {"city": city, "category": ranking.category, "evidence": evidence}
         claims = _ask(
             self._provider,
             task="claims",
-            system_instruction=CLAIMS_SYSTEM,
-            payload={"city": city, "category": ranking.category, "evidence": evidence},
+            system_instruction=claims_instruction,
+            payload=claims_payload,
             response_model=ClaimSet,
         )
         if not _citations_are_grounded(claims, documents):
             claims = _ask(
                 self._provider,
                 task="claims",
-                system_instruction=CLAIMS_SYSTEM,
+                system_instruction=claims_instruction,
                 payload={
-                    "city": city,
-                    "category": ranking.category,
-                    "evidence": evidence,
+                    **claims_payload,
                     "correction": CITATION_RETRY_NOTE,
                     "ungrounded_quotes": _ungrounded_quotes(claims, documents),
                 },
@@ -353,7 +361,7 @@ class EditorialPipeline:
         draft_payload: dict[str, object] = {
             "city": city,
             "category": ranking.category,
-            "writing_calendar": writing_context(profile, now or datetime.now(UTC)),
+            "writing_calendar": writing_context(profile, draft_time),
             **profile_payload,
             **({"selection": ranking.selection.model_dump(mode="json")}
                if ranking.selection else {}),
@@ -368,6 +376,9 @@ class EditorialPipeline:
             ],
         }
         style = writing_instruction(ranking.category, evergreen=evergreen)
+        if source_road_windows:
+            draft_payload["source_road_windows"] = source_road_windows
+            style += ROAD_WORK_CONTEXT_INSTRUCTION
         if source_update:
             style += (
                 "\nЭто подтверждённая новая версия источника ранее опубликованной новости. "

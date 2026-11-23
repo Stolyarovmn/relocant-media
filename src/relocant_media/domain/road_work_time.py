@@ -15,12 +15,26 @@ _CLOCK_RANGE = re.compile(
     rf"\b(?:od|од)\s+({_HOUR})[.:]([0-5]\d)\s+(?:do|до)\s+({_HOUR})[.:]([0-5]\d)\b",
     re.I,
 )
+_CLAUSE_BOUNDARY = re.compile(r"[\n;!?]|(?<=[а-яa-z])\.\s+", re.IGNORECASE)
 
 
 def overnight_road_windows(
     clause: str, published: datetime,
 ) -> tuple[tuple[datetime, datetime], ...]:
     """Accept consecutive dates and one unambiguous overnight clock range."""
+    return tuple(sorted({(start, end) for start, end, _ in overnight_road_schedule(
+        clause, published,
+    )}))
+
+
+def road_work_clauses(text: str) -> list[str]:
+    return _CLAUSE_BOUNDARY.split(text)
+
+
+def overnight_road_schedule(
+    clause: str, published: datetime,
+) -> tuple[tuple[datetime, datetime, str], ...]:
+    """Keep the printed date pair so each window can be matched to its direction."""
     if not (_ROAD.search(clause) and _WORK.search(clause)):
         return ()
     clocks = _CLOCK_RANGE.findall(clause)
@@ -31,7 +45,7 @@ def overnight_road_windows(
     if start <= end:
         return ()
 
-    windows: set[tuple[datetime, datetime]] = set()
+    windows: set[tuple[datetime, datetime, str]] = set()
     for pair in _DATE_PAIR.finditer(clause):
         month = int(pair["month_to"])
         year = pair["year_to"]
@@ -48,5 +62,6 @@ def overnight_road_windows(
         windows.add((
             datetime.combine(first_day, start, tzinfo=published.tzinfo),
             datetime.combine(last_day, end, tzinfo=published.tzinfo),
+            pair.group(),
         ))
     return tuple(sorted(windows))

@@ -33,6 +33,7 @@ from relocant_media.ai.package import (
     draft_sha256,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
+from relocant_media.ai.road_work_context import ROAD_WORK_CONTEXT_INSTRUCTION, road_work_context
 from relocant_media.ai.selection import selection_reason
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.freshness import publication_date_context
@@ -105,6 +106,7 @@ def reviewed_package(
     draft_hash = draft_sha256(package.outcome.draft)
     expected = sorted((_evidence(d) for d in package.event.documents),
                       key=lambda d: str(d["source_id"]))
+    source_road_windows = road_work_context(package.event.documents, review_time, profile)
     reviews: list[ReviewVerdict] = []
     for role in ("facts", "utility"):
         live = live_documents()
@@ -138,6 +140,8 @@ def reviewed_package(
             ).replace("Europe/Belgrade", profile.timezone).replace(
                 "Дату объявления и слова sutra/завтра", "Дату объявления и относительные даты"
             ).replace("Сербский допустим", "Язык оригинала допустим")
+        if source_road_windows:
+            instructions += ROAD_WORK_CONTEXT_INSTRUCTION
         if package.presentation is not None:
             instructions += (
                 "Поле presentation входит в проверяемый контекст. Строка Рубрика — "
@@ -250,6 +254,7 @@ def reviewed_package(
                         timezone_name=profile.timezone if profile else None))
                     for d in package.event.documents],
                 "now_utc": review_time.astimezone(UTC).isoformat(),
+                **({"source_road_windows": source_road_windows} if source_road_windows else {}),
                 **({"writing_calendar": writing_context(profile, review_time)}
                    if role == "utility" else {}),
                 "draft_sha256": draft_hash, "context_sha256": context_hash,

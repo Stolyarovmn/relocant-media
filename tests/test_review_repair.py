@@ -1,6 +1,8 @@
 import json
+from datetime import datetime
 
 import pytest
+from test_bgsaobracaj_notices import PUBLISHED, SCHEDULE, ZONE
 from test_independent_reviews import Provider, documents, package
 
 from relocant_media.ai.package import context_sha256, draft_sha256
@@ -55,6 +57,34 @@ def test_repaired_draft_discards_old_factual_coverage_before_new_review(monkeypa
     assert len(incoming) == 2 and len(provider.calls) == 5
     assert result.reviews[0].facts_check is not None
     assert result.reviews[0].facts_check.segments[0].text == result.outcome.draft.title
+
+
+def test_repair_uses_same_overnight_window_statuses_as_reviewers(monkeypatch):
+    from relocant_media.ai import review_repair
+
+    value = initial()
+    source = value.event.documents[0]
+    source = source.model_copy(update={
+        "body": source.body + "\n" + SCHEDULE,
+        "published_at": PUBLISHED,
+    })
+    value = value.model_copy(update={
+        "event": value.event.model_copy(update={"documents": (source,)}),
+    })
+    provider = Provider()
+    provider.responses = [*reviews(True), repaired(value), *reviews()]
+    actual_review = review_repair.reviewed_package
+
+    def review(*args, **kwargs):
+        return actual_review(*args, now=datetime(2026, 11, 23, 5, 19, tzinfo=ZONE), **kwargs)
+
+    monkeypatch.setattr(review_repair, "reviewed_package", review)
+    result = review_with_repairs(value, provider, lambda: documents(value))
+    assert [call["task"] for call in provider.calls].count("repair_draft") == 1
+    prompts = [json.loads(call["prompt"]) for call in provider.calls]
+    assert prompts[2]["source_road_windows"] == prompts[0]["source_road_windows"]
+    assert "напечатанный интервал" in provider.calls[2]["system_instruction"]
+    assert result.event == value.event
 
 
 def test_repair_gets_both_fresh_reviews_and_preserves_all_other_fields():

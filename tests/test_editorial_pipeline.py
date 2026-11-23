@@ -1,6 +1,9 @@
+import json
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel
+from test_bgsaobracaj_notices import PUBLISHED, SCHEDULE, ZONE
 
 from relocant_media.ai.models import (
     ClaimSet,
@@ -248,6 +251,9 @@ class _RecordingProvider(FakeProvider):
         if task == "rank":
             self.rank_instruction = system_instruction
             self.rank_prompt = prompt
+        if task == "draft":
+            self.draft_instruction = system_instruction
+            self.draft_prompt = json.loads(prompt)
         return super().generate_json(
             task=task, system_instruction=system_instruction, prompt=prompt,
             response_schema=response_schema,
@@ -264,6 +270,24 @@ def test_evergreen_guides_are_ranked_by_lasting_value_not_news_timeliness() -> N
     news = _RecordingProvider({"rank": ranking})
     EditorialPipeline(news).run(city="belgrade", documents=(_document(),))
     assert "evergreen" not in news.rank_instruction and "evergreen" not in news.rank_prompt
+
+
+def test_draft_gets_overnight_schedule_without_changing_verified_claims() -> None:
+    document = _document().model_copy(update={"body": SCHEDULE, "published_at": PUBLISHED})
+    claims = _claims(SCHEDULE)
+    provider = _RecordingProvider({
+        "rank": _ranking("transport"), "claims": claims, "verify": _verification(),
+        "draft": _draft(),
+    })
+    EditorialPipeline(provider).run(
+        city="belgrade", documents=(document,), now=datetime(2026, 11, 23, 5, 19, tzinfo=ZONE),
+    )
+    assert provider.draft_prompt["claims"] == [claims.claims[0].model_dump(mode="json")]
+    schedule = provider.draft_prompt["source_road_windows"][0]
+    assert [entry["status"] for entry in schedule["windows"]] == [
+        "ended", "ended", "active", "upcoming",
+    ]
+    assert "напечатанный интервал" in provider.draft_instruction
 
 
 def test_serbian_draft_is_regenerated_once_in_russian() -> None:
