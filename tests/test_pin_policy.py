@@ -76,3 +76,22 @@ async def test_ad_expires_at_end_boundary():
               discussion=[forward(17, 20), dict(message_id=3)])
     result = await maintain_pins(bot, policy([ad]), now=NOW)
     assert len(result["unpinned"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_digest_auto_forwards_in_discussion_are_unpinned():
+    digest = dict(message_id=40, text="Белград сегодня", is_automatic_forward=True,
+                  forward_origin=dict(type="channel", chat=dict(id=CHANNEL), message_id=160))
+    bot = Bot(discussion=[digest, dict(message_id=3)])
+    result = await maintain_pins(bot, policy(), now=NOW, news_message_ids=set())
+    assert [r["message_id"] for r in result["unpinned"]] == [40]
+    assert not result["owner_action_required"]
+
+
+@pytest.mark.asyncio
+async def test_discussion_forward_of_a_service_post_is_preserved():
+    rules = dict(message_id=41, text="Навигация", is_automatic_forward=True,
+                 forward_origin=dict(type="channel", chat=dict(id=CHANNEL), message_id=4))
+    bot = Bot(discussion=[rules])
+    result = await maintain_pins(bot, policy(), now=NOW)
+    assert result["unpinned"] == [] and result["preserved"][-1]["message_id"] == 41
