@@ -87,7 +87,8 @@ concurrency:
   group: >-
     ${{ inputs.mode == 'drain-close' && 'editorial-close-backlog'
     || inputs.mode == 'drain' && 'editorial-manual-drain'
-    || startsWith(inputs.mode, 'fallback') && 'editorial-subscription-gpt'
+    || inputs.mode == 'fallback' && format('editorial-subscription-gpt-result-{0}', inputs.fallback_blob_sha256)
+    || inputs.mode == 'fallback-preview' && format('editorial-subscription-gpt-preview-{0}', inputs.fallback_cycle_id || 'latest')
     || startsWith(inputs.mode, 'map-') && 'editorial-map-operations'
     || inputs.mode == 'preview' && 'editorial-preview'
     || inputs.mode == 'digest-preview' && 'editorial-digest-preview'
@@ -147,6 +148,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           WORKER_MODE: ${{ steps.mode.outputs.value }}
           PREFLIGHT_RETRY: ${{ inputs.preflight_retry }}
+          GPT_FALLBACK_BLOB_SHA256: ${{ inputs.fallback_blob_sha256 }}
+          GPT_FALLBACK_CYCLE_ID: ${{ inputs.fallback_cycle_id }}
           PREFLIGHT_RETRY_ENABLED: >-
             ${{ github.repository == 'Stolyarovmn/relocant-media' &&
                 vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
@@ -306,6 +309,7 @@ jobs:
     concurrency:
       group: editorial-start-retry-${{ needs.cycle.outputs.worker_mode }}
       cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 8
     permissions:
@@ -319,6 +323,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           WORKER_MODE: ${{ needs.cycle.outputs.worker_mode }}
+          GPT_FALLBACK_BLOB_SHA256: ${{ inputs.fallback_blob_sha256 }}
+          GPT_FALLBACK_CYCLE_ID: ${{ inputs.fallback_cycle_id }}
         run: python src/relocant_media/ops/editorial_start.py retry
   drain_chain:
     # Ожидание не занимает job с канонической блокировкой состояния.

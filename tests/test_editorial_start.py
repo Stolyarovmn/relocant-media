@@ -9,6 +9,7 @@ from relocant_media.ops import editorial_start as start
 REPO = "Stolyarovmn/relocant-media"
 OLD = "a" * 40
 NEW = "b" * 40
+GPT_RESULT = "c" * 64
 
 
 @pytest.mark.parametrize(("status", "conclusion", "expected"), [
@@ -62,7 +63,8 @@ def test_gate_marks_exact_state_and_only_replaces_plain_first_attempts(
     for key, value in {
         "GITHUB_REPOSITORY": REPO, "WORKER_MODE": mode, "PREFLIGHT_RETRY": retry,
         "GITHUB_SHA": OLD, "GITHUB_OUTPUT": str(output), "GITHUB_RUN_ATTEMPT": "1",
-        "PREFLIGHT_RETRY_ENABLED": "true",
+        "PREFLIGHT_RETRY_ENABLED": "true", "GPT_FALLBACK_BLOB_SHA256": "",
+        "GPT_FALLBACK_CYCLE_ID": "",
     }.items():
         monkeypatch.setenv(key, value)
     assert start.main() == returncode
@@ -157,3 +159,52 @@ def test_pending_ci_exhausts_a_single_budget(monkeypatch):
     assert start.restart(REPO, mode="auto", source_run="456") == "ci_pending"
     assert clock[0] == 360
     dispatch.assert_not_called()
+
+
+@pytest.mark.parametrize(("mode", "blob", "cycle", "expected"), [
+    ("fallback", GPT_RESULT, "", ["-f", f"fallback_blob_sha256={GPT_RESULT}"]),
+    ("fallback-preview", "", "12313", ["-f", "fallback_cycle_id=12313"]),
+    ("fallback-preview", "", "", []),
+])
+def test_gpt_retry_preserves_original_scope_without_coalescing_by_title(
+    monkeypatch, mode, blob, cycle, expected,
+):
+    monkeypatch.setattr(start, "main_sha", Mock(return_value=NEW))
+    monkeypatch.setattr(start, "ci_status", Mock(return_value="ready"))
+    coalesce = Mock(return_value=True)
+    monkeypatch.setattr(start, "already_scheduled", coalesce)
+    dispatch = Mock()
+    monkeypatch.setattr(start.subprocess, "run", dispatch)
+    assert start.restart(
+        REPO, mode=mode, source_run="456", blob=blob, cycle_id=cycle,
+    ) == "dispatched"
+    coalesce.assert_not_called()
+    dispatch.assert_called_once_with([
+        "gh", "workflow", "run", "editorial-actions.yml", "-R", REPO,
+        "--ref", "main", "-f", f"mode={mode}", "-f", "preflight_retry=true", *expected,
+    ], check=True, timeout=20)
+
+
+@pytest.mark.parametrize(("mode", "blob", "cycle", "attempt", "is_retry", "expected"), [
+    ("fallback", GPT_RESULT, "", "1", "false", 0),
+    ("fallback", GPT_RESULT, "", "2", "false", 1),
+    ("fallback", GPT_RESULT, "", "1", "true", 1),
+    ("fallback", "no-digest", "", "1", "false", 1),
+    ("fallback-preview", "", "12313", "1", "false", 0),
+    ("fallback-preview", "", "bad-id", "1", "false", 1),
+])
+def test_gpt_gate_allows_single_replacement_only_with_valid_inputs(
+    monkeypatch, tmp_path, mode, blob, cycle, attempt, is_retry, expected,
+):
+    output = tmp_path / "output"
+    monkeypatch.setattr(start.sys, "argv", ["editorial_start.py", "gate"])
+    monkeypatch.setattr(start, "start_status", Mock(return_value="superseded"))
+    for key, value in {
+        "GITHUB_REPOSITORY": REPO, "WORKER_MODE": mode, "GITHUB_SHA": OLD,
+        "GITHUB_OUTPUT": str(output), "GITHUB_RUN_ATTEMPT": attempt,
+        "PREFLIGHT_RETRY_ENABLED": "true", "PREFLIGHT_RETRY": is_retry,
+        "GPT_FALLBACK_BLOB_SHA256": blob, "GPT_FALLBACK_CYCLE_ID": cycle,
+    }.items():
+        monkeypatch.setenv(key, value)
+    assert start.main() == expected
+    assert output.read_text() == "status=superseded\n"
