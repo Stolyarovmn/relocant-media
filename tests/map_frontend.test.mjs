@@ -181,6 +181,35 @@ test("плотность считает объявления в ячейке и 
   ]);
 });
 
+test("длинный участок считается в каждой пересечённой ячейке и только один раз в каждой", () => {
+  const project = ([lat, lon]) => ({ x: lon, y: lat });
+  const road = { id: "road", kind: "road" };
+  const water = { id: "water", kind: "water" };
+  const result = heatCells([
+    { lat: 15, lon: 84, incident: road },
+    { lat: 15, lon: 82, incident: water },
+  ], project, [
+    { incident: road, coordinates: [[15, 212], [15, 91], [15, 15], [15, 190]] },
+  ]).sort((a, b) => a.x - b.x);
+  assert.deepEqual(result, [
+    { x: 38, y: 38, incidents: [road] },
+    { x: 114, y: 38, incidents: [road, water] },
+    { x: 190, y: 38, incidents: [road] },
+  ]);
+});
+
+test("диагональ не затрагивает ячейки, которых касается только углом", () => {
+  const project = ([lat, lon]) => ({ x: lon, y: lat });
+  const road = { id: "road", kind: "road" };
+  const coordinates = [[-12, -12], [152, 152], [201, 201], [201, 201]];
+  for (const direction of [coordinates, coordinates.toReversed()]) {
+    const result = heatCells([], project, [{ incident: road, coordinates: direction }]);
+    assert.deepEqual(result.map(({ x, y }) => [x, y]).sort((a, b) => a[0] - b[0]), [
+      [-38, -38], [38, 38], [114, 114], [190, 190],
+    ]);
+  }
+});
+
 test("доли тепловой метки следуют порядку фильтров и учитывают уникальные объявления", () => {
   const project = ([lat, lon]) => ({ x: lon, y: lat });
   const point = (lon, id, kind) => ({ lat: 10, lon, incident: { id, kind } });
