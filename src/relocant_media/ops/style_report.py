@@ -31,20 +31,25 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-def build_report(session: Session, *, now: datetime, days: int) -> dict[str, Any]:
+def build_report(session: Session, *, now: datetime, days: int,
+                 city: str) -> dict[str, Any]:
+    """Posts of one city published in the closed window [now - days, now]."""
     if not 1 <= days <= MAX_DAYS:
         raise ValueError(f"days must be between 1 and {MAX_DAYS}")
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
     since = now - timedelta(days=days)
     rows = session.execute(
         select(Post, EditorialRun.outcome).join(EditorialRun, EditorialRun.post_id == Post.id)
         .where(EditorialRun.delivery_status == "sent", Post.telegram_message_id > 0,
-               Post.published_at.is_not(None))).all()
+               Post.city == city, Post.published_at >= since,
+               Post.published_at <= now)).all()
     groups: dict[str, list[Any]] = {}
     reader_posts = 0
     for row in rows:
         post: Post = row[0]
         outcome = row[1]
-        if post.published_at is None or _aware(post.published_at) < since:
+        if post.published_at is None or not since <= _aware(post.published_at) <= now:
             continue
         # Reader material follows the author's text, not the editorial matrix.
         if isinstance(outcome, dict) and "_reader_submission_id" in outcome:
@@ -67,15 +72,21 @@ def build_report(session: Session, *, now: datetime, days: int) -> dict[str, Any
             "with_bureaucratese": sum(1 for item in flags if item.bureaucratese),
             "bureaucratese_terms": dict(sorted(terms.items())),
         }
-    return {"version": 1, "generated_at": now.isoformat(), "days": days,
-            "matrix_version": CHANNEL_STYLE_VERSION,
+    # The rules the sample was measured with; the version each text was written under
+    # is not stored yet (#313).
+    return {"version": 1, "generated_at": now.isoformat(), "city": city, "days": days,
+            "window": {"from": since.isoformat(), "to": now.isoformat()},
+            "measured_with_matrix": CHANNEL_STYLE_VERSION,
             "long_paragraph_words": LONG_PARAGRAPH_WORDS,
             "posts": sum(len(flags) for flags in groups.values()),
             "reader_posts_excluded": reader_posts, "categories": categories}
 
 
 def markdown(report: dict[str, Any]) -> str:
-    lines = [f"## Матрица подачи за {report['days']} дн. ({report['matrix_version']})", "",
+    lines = [f"## Матрица подачи: {report['city']}, {report['days']} дн.", "",
+             f"Период: {report['window']['from']} — {report['window']['to']}. "
+             f"Измерено по правилам {report['measured_with_matrix']}; с какой версией "
+             "матрицы писали каждый текст, пока не хранится.", "",
              f"Постов: {report['posts']}; материалы читателей не считаются "
              f"({report['reader_posts_excluded']}). Флаги — подсказки, не блок.", "",
              "| Категория | Постов | Диапазон | Медиана слов | Длиннее | Короче | "
@@ -103,6 +114,7 @@ def main() -> None:
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--days", type=int, default=7)
+    parser.add_argument("--city", choices=("belgrade", "novi_sad"), default="belgrade")
     args = parser.parse_args()
     stage = "storage"
     try:
@@ -117,7 +129,8 @@ def main() -> None:
         engine = create_engine(f"sqlite:///{database}")
         try:
             with Session(engine) as session:
-                report = build_report(session, now=datetime.now(UTC), days=args.days)
+                report = build_report(session, now=datetime.now(UTC), days=args.days,
+                                      city=args.city)
         finally:
             engine.dispose()
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2),

@@ -10,6 +10,11 @@ on:
         description: Published posts of the last N days, from 1 to 30
         type: number
         default: 7
+      city:
+        description: City of the published posts
+        type: choice
+        options: [belgrade, novi_sad]
+        default: belgrade
 permissions:
   contents: read
 concurrency:
@@ -83,9 +88,11 @@ jobs:
           DRIVE_CREDENTIALS_JSON: ${{ secrets.DRIVE_CREDENTIALS_JSON }}
           DRIVE_STATE_FOLDER_ID: ${{ vars.DRIVE_STATE_FOLDER_ID }}
           REPORT_DAYS: ${{ inputs.days }}
+          REPORT_CITY: ${{ inputs.city }}
         run: |
           python -m relocant_media.ops.style_report --work "$RUNNER_TEMP/style-report-work" \
-            --output "$RUNNER_TEMP/style-report.json" --days "$REPORT_DAYS"
+            --output "$RUNNER_TEMP/style-report.json" --days "$REPORT_DAYS" \
+            --city "$REPORT_CITY"
       - name: Keep report for review
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

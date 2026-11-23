@@ -42,6 +42,11 @@ def test_long_plain_paragraph_is_flagged_but_lists_and_labels_are_not():
     assert lint(body, (50, 500)).long_paragraphs == 1
 
 
+def test_intro_before_colon_is_not_a_format_label():
+    assert lint(f"Редакция уточняет: {_words(56)}", (50, 500)).long_paragraphs == 1
+    assert lint(f"🚧 Объезд: {_words(56)}", (50, 500)).long_paragraphs == 0
+
+
 def test_bureaucratese_from_matrix_is_counted_and_ordinary_words_are_not():
     body = ("В связи с работами движение осуществляется по объезду. Данный участок является "
             "закрытым в целях безопасности, согласно информации ГСП. Подача воды будет "
@@ -70,9 +75,9 @@ def test_report_holds_only_aggregates_of_recent_editorial_posts(reviewed):
     secret = "Секретный заголовок и текст"
     _publish(session, run, category="transport", when=datetime(2026, 11, 22, tzinfo=UTC),
              body=f"{secret}. В связи с работами {_words(120)}")
-    report = style_report.build_report(session, now=NOW, days=7)
+    report = style_report.build_report(session, now=NOW, days=7, city="belgrade")
     stats = report["categories"]["transport"]
-    assert report["posts"] == 1 and report["matrix_version"] == "ru-local-news-v4"
+    assert report["posts"] == 1 and report["measured_with_matrix"] == "ru-local-news-v4"
     assert stats["over_range"] == 1 and stats["with_long_paragraph"] == 1
     assert stats["bureaucratese_terms"] == {"в связи с": 1}
     text = json.dumps(report, ensure_ascii=False) + style_report.markdown(report)
@@ -84,18 +89,36 @@ def test_report_skips_old_and_reader_posts(reviewed):
     session, run = reviewed
     _publish(session, run, category="city", when=datetime(2026, 11, 1, tzinfo=UTC),
              body=_words(60))
-    assert style_report.build_report(session, now=NOW, days=7)["posts"] == 0
+    assert style_report.build_report(session, now=NOW, days=7, city="belgrade")["posts"] == 0
     _publish(session, run, category="city", when=datetime(2026, 11, 22, tzinfo=UTC),
              body=_words(60), _reader_submission_id=5)
-    report = style_report.build_report(session, now=NOW, days=7)
+    report = style_report.build_report(session, now=NOW, days=7, city="belgrade")
     assert report["posts"] == 0 and report["reader_posts_excluded"] == 1
     assert "Канцелярит: не найден" in style_report.markdown(report)
+
+
+def test_report_window_is_closed_and_limited_to_the_city(reviewed):
+    session, run = reviewed
+    _publish(session, run, category="city", when=datetime(2026, 11, 23, 14, tzinfo=UTC),
+             body=_words(60))
+    assert style_report.build_report(session, now=NOW, days=7, city="belgrade")["posts"] == 0
+    _publish(session, run, category="city", when=datetime(2026, 11, 23, 11, tzinfo=UTC),
+             body=_words(60))
+    report = style_report.build_report(session, now=NOW, days=7, city="belgrade")
+    assert report["posts"] == 1
+    assert report["window"] == {"from": "2026-11-16T12:00:00+00:00",
+                                "to": "2026-11-23T12:00:00+00:00"}
+    post = session.get(Post, session.get(EditorialRun, run.raw_item_id).post_id)
+    post.city = "novi_sad"
+    session.commit()
+    assert style_report.build_report(session, now=NOW, days=7, city="belgrade")["posts"] == 0
+    assert style_report.build_report(session, now=NOW, days=7, city="novi_sad")["posts"] == 1
 
 
 def test_report_days_are_bounded(reviewed):
     session, _ = reviewed
     with pytest.raises(ValueError):
-        style_report.build_report(session, now=NOW, days=31)
+        style_report.build_report(session, now=NOW, days=31, city="belgrade")
 
 
 def test_workflow_is_read_only_and_uploads_the_written_file():
@@ -104,4 +127,5 @@ def test_workflow_is_read_only_and_uploads_the_written_file():
     assert '"$RUNNER_TEMP/style-report.json"' in workflow
     assert "path: ${{ runner.temp }}/style-report.json" in workflow
     assert "contents: read" in workflow and "contents: write" not in workflow
+    assert '--city "$REPORT_CITY"' in workflow
     assert "GEMINI_API_KEY" not in workflow and "TELEGRAM" not in workflow
