@@ -1779,17 +1779,17 @@ def main() -> None:
         if engine is not None:
             engine.dispose()
     if args.output.exists():
-        try:
-            database = make_url(os.environ["DATABASE_URL"]).database
-            assert database is not None
-            snapshot = create_snapshot(Path(database), args.output / "snapshot")
-            result.update(backup_ready=True, backup_sha256=snapshot["sha256"],
-                          remote_backup="pending")
-        except Exception as error:
-            result.update(status="SERVER_FAILED", backup_error_type=type(error).__name__)
+        if os.environ.get("EDITORIAL_ACTIONS_CHECKPOINT") != "true":
+            try:
+                database = make_url(os.environ["DATABASE_URL"]).database
+                assert database is not None
+                snapshot = create_snapshot(Path(database), args.output / "snapshot")
+                result.update(backup_ready=True, backup_sha256=snapshot["sha256"],
+                              remote_backup="pending")
+            except Exception as error:
+                result.update(status="SERVER_FAILED", backup_error_type=type(error).__name__)
         (args.output / "server-report.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    if args.output.exists():
         (args.output / "newsroom-summary.json").write_text(
             json.dumps(summarize(args.output), ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False))

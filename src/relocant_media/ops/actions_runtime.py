@@ -1063,7 +1063,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     intake_state = directory / "intake-batch-state.json"
     intake_state.write_text(json.dumps(state.get("intake_state", {})), encoding="utf-8")
     env = {**environment, "DATABASE_URL": f"sqlite:///{database.resolve().as_posix()}",
-           "RELOCANT_RUNTIME_PLATFORM": "github-actions", "TELEGRAM_MTPROTO_ENABLED": "false"}
+           "RELOCANT_RUNTIME_PLATFORM": "github-actions", "TELEGRAM_MTPROTO_ENABLED": "false",
+           "EDITORIAL_ACTIONS_CHECKPOINT": "true"}
     for name in list(env):
         if name.startswith("EDITORIAL_SSH_") or name in {
             "EDITORIAL_STORAGE_BACKEND", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
@@ -1156,14 +1157,15 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         _sweep_material_lifecycle(database)
     _runtime_phase("snapshot_started")
     manifest = create_snapshot(database, work / "saved")
+    _runtime_phase("snapshot_local_verified")
     manifest["drive_file_id"] = (state["snapshot"]["drive_file_id"]
         if manifest["sha256"] == state["snapshot"]["sha256"]
         else drive.upload(work / "saved" / "editorial.sqlite3", folder))
     _runtime_phase("snapshot_verified")
     saved_intake = json.loads(intake_state.read_text())
-    # Retry budget lives outside SQLite; preserve it across ephemeral runners.
+    # Preserve retry and ingress state. The verified snapshot satisfies any local backup request.
     budget = {key: saved_intake[key] for key in (
-        "signature", "attempts", "backup_pending", "ingress", "serverless_sequence")
+        "signature", "attempts", "ingress", "serverless_sequence")
               if key in saved_intake}
     ingress_config(budget)
     canonical_intake = state.get("intake_state", {})

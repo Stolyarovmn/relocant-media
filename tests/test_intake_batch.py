@@ -1,3 +1,4 @@
+import json
 from contextlib import nullcontext
 from datetime import timedelta
 from pathlib import Path
@@ -22,6 +23,7 @@ from relocant_media.ops.primary_cycle import begin_window, run_cycle
 from relocant_media.services.private_intake import receive_private_tips
 from relocant_media.services.submission_queue import batch_submissions
 from relocant_media.storage.models import EditorialRun, RawItem, Submission, TelegramUpdateReceipt
+from relocant_media.storage.sqlite_schema import initialize_sqlite
 
 engine, runtime, queue, editorial_session = _engine, _runtime, _queue, _editorial_session
 
@@ -41,6 +43,30 @@ def test_actions_intake_gives_editorial_a_fresh_output_directory(engine, tmp_pat
 
     monkeypatch.setattr(intake_batch.subprocess, "run", child)
     assert intake_batch._run_actions_submission_pipeline(tmp_path) == 0
+
+
+@pytest.mark.parametrize("actions_managed", [False, True])
+def test_intake_saves_local_backup_only_without_actions_checkpoint(
+    tmp_path, monkeypatch, actions_managed,
+):
+    database = tmp_path / "intake.sqlite3"
+    initialize_sqlite(database)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database.as_posix()}")
+    monkeypatch.setenv("EDITORIAL_INTAKE_MODE", "batch")
+    monkeypatch.setenv("EDITORIAL_OWNER_REVIEW_ENABLED", "false")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("EDITORIAL_ACTIONS_CHECKPOINT", str(actions_managed).lower())
+
+    async def collect(*args, **kwargs):
+        return {"status": "ready", "intake": {"inspected": 1}}
+
+    monkeypatch.setattr(intake_batch, "collect_batch", collect)
+    intake_batch.main()
+
+    state = json.loads((tmp_path / "intake-batch-state.json").read_text(encoding="utf-8"))
+    assert state["backup_pending"] is actions_managed
+    manifests = list(tmp_path.glob("intake-snapshots/*/manifest.json"))
+    assert len(manifests) == int(not actions_managed)
 
 
 @pytest.mark.asyncio
