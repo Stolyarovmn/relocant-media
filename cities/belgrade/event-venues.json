@@ -3,6 +3,13 @@
   "checked_at": "2026-11-19",
   "venues": [
     {
+      "id": "bitefartcafe-winter",
+      "aliases": ["mitropolita petra 8"],
+      "venue": {"name": "BitefArtCafe", "address": "Mitropolita Petra 8, Beograd", "latitude": 44.8166243, "longitude": 20.4860226},
+      "coordinate_source_url": "https://www.openstreetmap.org/node/6844070707",
+      "venue_source_url": "https://bitefartcafe.rs/kontakt/"
+    },
+    {
       "id": "vox",
       "aliases": ["у vox blues clubu"],
       "venue": {"name": "Vox Blues Club", "address": "Lješka 26, Beograd", "latitude": 44.7842182, "longitude": 20.41605365},

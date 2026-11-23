@@ -3,12 +3,15 @@ from pathlib import Path
 import httpx
 import pytest
 
+from relocant_media.ai.models import EvidenceDocument
 from relocant_media.collectors.bitefartcafe_events import (
     BitefArtCafeEventsCollector,
     _concert_links,
     parse_bitefartcafe_event,
 )
 from relocant_media.collectors.factory import build_collector
+from relocant_media.domain.city_profile import load_city_profile
+from relocant_media.services.event_place import resolve_event_place
 from relocant_media.sources.registry import load_source_file
 
 SOURCE_PATH = Path("cities/belgrade/sources/venue_bitefartcafe.yaml")
@@ -156,6 +159,48 @@ def test_card_does_not_preserve_a_nonpublic_ticket_target() -> None:
     )
     assert "Mitropolita Petra 8" in item.body
     assert "localhost" not in item.body
+
+
+def _map_snapshot(html: str) -> EvidenceDocument:
+    item = parse_bitefartcafe_event(html, FIRST_URL, _source())
+    return EvidenceDocument.model_validate(item, from_attributes=True)
+
+
+def test_concert_map_uses_program_start_and_verified_club_point() -> None:
+    html = _detail_with_cards(
+        _event_card("30.10.2026.", "Mitropolita Petra 8", "https://bilet.rs/events/455/concert")
+    )
+    place = resolve_event_place(_map_snapshot(html), html, profile=load_city_profile("belgrade"))
+    assert place is not None
+    assert place["starts_at"] == "2026-10-30T21:00:00+01:00"
+    assert place["ends_at"] is None
+    assert place["venue"]["address"] == "Mitropolita Petra 8, Beograd"
+    assert place["coordinate_source_url"] == "https://www.openstreetmap.org/node/6844070707"
+    assert place["schedule_source_url"] == FIRST_URL
+
+
+@pytest.mark.parametrize("old_value,new_value", [
+    ("Mitropolita Petra 8", "Mali Kalemegdan 2"),
+    ("Program traje od 21h", "Vrata otvaramo u 21h"),
+    ("Program traje od 21h", "Program traje od 90h"),
+    ("Na koncertima postoji", "Koncert je otkazan. Na koncertima postoji"),
+])
+def test_concert_map_rejects_unproven_address_start_or_cancellation(
+    old_value: str, new_value: str,
+) -> None:
+    html = _detail_with_cards(_event_card("30.10.2026.", "Mitropolita Petra 8", "#"))
+    html = html.replace(old_value, new_value)
+    assert resolve_event_place(
+        _map_snapshot(html), html, profile=load_city_profile("belgrade"),
+    ) is None
+
+
+def test_concert_map_rejects_changes_after_evidence_was_saved() -> None:
+    html = _detail_with_cards(_event_card("30.10.2026.", "Mitropolita Petra 8", "#"))
+    assert resolve_event_place(
+        _map_snapshot(html), html.replace("Program traje od 21h", "Program traje od 22h"),
+        profile=load_city_profile("belgrade"),
+    ) is None
 
 
 @pytest.mark.asyncio

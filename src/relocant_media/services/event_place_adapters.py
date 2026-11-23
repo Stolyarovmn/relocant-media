@@ -68,6 +68,12 @@ _ARTICLE_TIME = re.compile(
 )
 _DOB_MENTION = re.compile(r"\bdomu omladine beograda\b", re.IGNORECASE)
 _CHANGE = re.compile(r"\b(?:otkazan\w*|odložen\w*|premešten\w*)\b", re.IGNORECASE)
+_BITEF_DAY = re.compile(r"(?<!\d)([0-9]{1,2})\.([0-9]{1,2})\.(20[0-9]{2})\.(?!\d)")
+_BITEF_SCHEDULE = re.compile(
+    r"^Program traje od (?P<hour>[0-9]{1,2})(?::(?P<minute>[0-9]{2})|h)\n"
+    r"Lokacija:\nBitefArtCafe\n(?P<address>Mitropolita Petra 8)\n[0-9]{5} Beograd$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _tag(root: BeautifulSoup | Tag, selector: str) -> Tag | None:
@@ -294,6 +300,49 @@ def _kolarac_facts(
         return None
 
 
+def _bitef_facts(
+    document: EvidenceDocument, source_html: str, profile: CityEditorialProfile,
+) -> dict[str, Any] | None:
+    from relocant_media.collectors.bitefartcafe_events import parse_bitefartcafe_event
+    from relocant_media.sources.registry import load_source_file
+
+    try:
+        config = load_source_file(DEFAULT_CITIES_ROOT / "belgrade/sources/venue_bitefartcafe.yaml")
+        live = parse_bitefartcafe_event(source_html, document.url, config)
+        if (document.published_at is not None
+                or (live.title, live.body) != (document.title, document.body)
+                or _CHANGE.search(f"{live.title}\n{live.body}")):
+            return None
+        days = {tuple(map(int, day)) for day in _BITEF_DAY.findall(live.body)}
+        schedules = list(_BITEF_SCHEDULE.finditer(live.body))
+        if len(days) != 1 or len(schedules) != 1:
+            return None
+        day, month, year = days.pop()
+        schedule = schedules[0]
+        start = datetime(year, month, day, int(schedule["hour"]), int(schedule["minute"] or 0))
+        venues = [entry for entry in registered_event_venues(profile)
+                  if entry["id"] == "bitefartcafe-winter"
+                  and schedule["address"].casefold() in entry["aliases"]]
+        if len(venues) != 1:
+            return None
+        venue = venues[0]
+        location = venue["venue"]
+        if not all(is_public_https_url(venue[field]) for field in (
+            "coordinate_source_url", "venue_source_url",
+        )) or not (44.2 <= location["latitude"] <= 45.2 and 19.8 <= location["longitude"] <= 21.1):
+            return None
+        return {
+            "event_name": live.title, "venue": location,
+            "starts_at": start.isoformat(), "ends_at": None,
+            "time_basis": "source_bitefartcafe_program_start",
+            "schedule_source_url": document.url,
+            "coordinate_source_url": venue["coordinate_source_url"],
+            "venue_source_url": venue["venue_source_url"],
+        }
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def extract_event_adapter(
     document: EvidenceDocument, source_html: str, *, profile: CityEditorialProfile,
 ) -> dict[str, Any] | None:
@@ -303,6 +352,8 @@ def extract_event_adapter(
         return None
     if document.source_id == "venue_kolarac":
         return _kolarac_facts(document, source_html, profile)
+    if document.source_id == "venue_bitefartcafe":
+        return _bitef_facts(document, source_html, profile)
     if document.source_id == "cukarica_news":
         from relocant_media.collectors.cukarica_news import (
             CukaricaExtractionError,
