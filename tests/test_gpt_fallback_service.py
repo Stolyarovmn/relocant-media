@@ -100,7 +100,9 @@ def seed_fallback(session: Session) -> tuple[RawItem, SchedulerRun]:
     return raw, run
 
 
-def package_for_request(request: dict) -> EditorialPackage:
+def package_for_request(
+    request: dict, *, manual_category: str | None = None,
+) -> EditorialPackage:
     candidate = request["candidates"][0]
     primary = candidate["documents"][0]
     profile = load_city_profile("belgrade")
@@ -132,6 +134,10 @@ def package_for_request(request: dict) -> EditorialPackage:
             {"source_id": primary["source_id"], "url": primary["url"], "quote": primary["body"]}
         ],
     }
+    if manual_category is not None:
+        payload["outcome"]["ranking"]["category"] = manual_category
+        payload["outcome"]["status"] = "human_review"
+        payload["outcome"]["reason"] = "package_requires_review"
     for claim in payload["outcome"]["claims"]["claims"]:
         for citation in claim["citations"]:
             citation.update(source_id=primary["source_id"], url=primary["url"])

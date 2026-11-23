@@ -399,6 +399,7 @@ def run_worker(
     imported = 0
     rejected = 0
     ready = 0
+    awaiting_owner = 0
     declined = 0
     delivery_ids: set[int] = set()
     errors: list[dict[str, str]] = []
@@ -455,12 +456,14 @@ def run_worker(
                                      replace_map_hold=True, replace_flight_hold=True)
                 from relocant_media.services.material_lifecycle import after_result
 
-                after_result(session, package.raw_item_id, now=now or datetime.now(UTC))
+                lifecycle = after_result(session, package.raw_item_id, now=now or datetime.now(UTC))
                 session.commit()
                 if run.outcome.get("reason") == PUBLISHED_TRANSPORT_DUPLICATE:
                     declined += 1
                 else:
                     imported += 1
+                if lifecycle.get("next_action") == "owner_approval":
+                    awaiting_owner += 1
                 if run.outcome.get("status") == "ready":
                     ready += 1
                     if run.delivery_status == "pending":
@@ -516,6 +519,7 @@ def run_worker(
     return {
         "status": status, "mode": "subscription_gpt_fallback",
         "received": len(payload.result.packages), "imported": imported, "ready": ready,
+        "awaiting_owner": awaiting_owner,
         "rejected": rejected, "declined": declined, "sent_count": sent_count,
         "delivery_blocked": len(blocked),
         "flight_review_pending": sum(
