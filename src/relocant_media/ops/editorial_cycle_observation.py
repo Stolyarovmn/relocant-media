@@ -93,6 +93,21 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
             (now.astimezone(UTC).isoformat(),),
         ).fetchone()
         details = json.loads(cycle[1]) if cycle else {}
+        reader = db.execute(
+            """SELECT status,
+                      json_extract(payload, '$.reader_publication.ownership'),
+                      json_extract(payload, '$.reader_publication.permission'),
+                      COALESCE(json_extract(payload, '$.reader_resolution.outcome'),
+                               json_extract(payload, '$.triage_reason')),
+                      COUNT(*)
+               FROM submission
+               WHERE kind = 'news_tip'
+                 AND json_extract(payload, '$.reader_intake') = 1
+                 AND COALESCE(json_extract(payload, '$.test_only'), 0) = 0
+                 AND julianday(created_at) >= julianday(?)
+               GROUP BY 1, 2, 3, 4 ORDER BY 5 DESC LIMIT 30""",
+            ((now - timedelta(days=30)).astimezone(UTC).isoformat(),),
+        ).fetchall()
     return {
         "local_date": local.date().isoformat(), "timezone": QUIET_ZONE.key,
         "standalone_published_count": len(rows),
@@ -113,6 +128,12 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
         "latest_cycle_status": _token(cycle[0]) if cycle else None,
         "gpt_deferred_count": details.get("gpt_deferred_count", 0),
         "remaining_count": details.get("remaining_count"),
+        # Counts only (#470): why reader submissions did or did not reach the channel.
+        "reader_submissions_30d": [
+            {"status": _token(status), "ownership": _token(ownership),
+             "permission": _token(permission), "outcome": _token(outcome), "count": count}
+            for status, ownership, permission, outcome, count in reader
+        ],
     }
 
 

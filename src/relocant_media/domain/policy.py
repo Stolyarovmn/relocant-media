@@ -9,6 +9,12 @@ SOURCE_REPLACED_REASON = "unavailable_source_replaced"
 # Категории риска и проверка источников применяются независимо от этого списка.
 AUTO_PUBLISH_CATEGORIES = frozenset({"transport", "events", "culture", "sport", "city"})
 
+# Владелец 23.11.2026: присланное читателем должно чаще доходить до канала. Один
+# неподтверждённый читатель не устанавливает происшествия, перекрытия и факты высокого
+# риска, поэтому без владельца выходит только атрибутированное сообщение в этих категориях.
+READER_REPORT_CATEGORIES = frozenset({"city", "culture", "events", "sport"})
+READER_REPORT_REVIEW_REASON = "reader_report_requires_review"
+
 HIGH_RISK_CATEGORIES = {
     "immigration",
     "law",
@@ -29,6 +35,7 @@ OWNER_DECISION_REASONS = frozenset({
     "source_auto_publish_disabled",
     "policy_requires_human_review",
     "sensitive_topic_requires_human_review",
+    READER_REPORT_REVIEW_REASON,
 })
 
 
@@ -54,6 +61,8 @@ def primary_evidence_kind(ownerships: Iterable[str], category: str) -> str | Non
         return "official"
     if "media" in kinds and category.strip().lower() not in HIGH_RISK_CATEGORIES:
         return "media"
+    if "reader" in kinds and category.strip().lower() in READER_REPORT_CATEGORIES:
+        return "reader"
     return None
 
 
