@@ -1,0 +1,23 @@
+id: bgsaobracaj_notices
+name: Sekretarijat za saobraćaj — Privremeni režim saobraćaja
+publisher: City Administration of Belgrade, Secretariat for Traffic
+ownership: official
+url: https://www.bgsaobracaj.rs/vesti
+language: sr-Cyrl
+source_type: official_transport
+trust: 1.0
+check_every: 30m
+categories:
+  - transport
+extraction:
+  strategy: bgsaobracaj_notices
+  status: active
+  approved_hosts:
+    - bgsaobracaj.rs
+    - www.bgsaobracaj.rs
+policy:
+  high_risk: false
+  auto_publish: true
+verification:
+  checked_at: 2026-11-23
+  note: Только объявления отдела временного режима движения. Дата публикации задаётся с точностью до дня. Ограничения и направления берутся из полной исходной карточки.

@@ -6,6 +6,7 @@ from relocant_media.collectors.beoelektrane_network_works import BeoelektraneNet
 from relocant_media.collectors.beograd_news import BelgradeNewsListCollector
 from relocant_media.collectors.bgprevoz_changes import BgprevozChangesCollector
 from relocant_media.collectors.bgprevoz_news import BgprevozNewsCollector
+from relocant_media.collectors.bgsaobracaj_notices import TrafficSecretariatCollector
 from relocant_media.collectors.bitefartcafe_events import BitefArtCafeEventsCollector
 from relocant_media.collectors.bvk_outage_news import BvkOutageNewsCollector
 from relocant_media.collectors.bvk_planned_works import BvkPlannedWorksCollector
@@ -56,6 +57,8 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return BgprevozChangesCollector(source, client)
     if strategy == "bgprevoz_news":
         return BgprevozNewsCollector(source, client)
+    if strategy == "bgsaobracaj_notices":
+        return TrafficSecretariatCollector(source, client)
     if strategy == "health_duty":
         return HealthDutyCollector(source, client)
     if strategy == "euprava_service":
