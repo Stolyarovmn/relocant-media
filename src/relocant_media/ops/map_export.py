@@ -80,6 +80,7 @@ Latitude = Annotated[float, Field(ge=44.2, le=45.2, allow_inf_nan=False)]
 Longitude = Annotated[float, Field(ge=19.8, le=21.1, allow_inf_nan=False)]
 Coordinate = tuple[Latitude, Longitude]
 Kind = Literal["water", "power", "road"]
+EventId = Annotated[str, Field(pattern=r"^event_[a-f0-9]{20}$")]
 
 
 class PublicModel(BaseModel):
@@ -184,7 +185,7 @@ class Line(PublicModel):
 
 
 class Incident(PublicModel):
-    id: Annotated[str, Field(pattern=r"^event_[a-f0-9]{20}$")]
+    id: EventId
     kind: Kind
     title: Label
     source_url: str
@@ -236,6 +237,17 @@ class MapFeed(PublicModel):
     version: Literal[1] = 1
     generated_at: datetime | None = None
     incidents: Annotated[tuple[Incident, ...], Field(max_length=_MAX_INCIDENTS)] = ()
+    water_aliases: dict[EventId, EventId] = Field(default_factory=dict, max_length=_MAX_INCIDENTS)
+
+    @model_validator(mode="after")
+    def validate_water_aliases(self) -> MapFeed:
+        waters = {event.id for event in self.incidents if event.kind == "water"}
+        for alias, target in self.water_aliases.items():
+            if alias == target or alias not in waters or target not in waters:
+                raise ValueError("water alias must point to a distinct water announcement")
+            if target in self.water_aliases:
+                raise ValueError("water alias chains are not supported")
+        return self
 
 
 def read_map_feed(content: bytes) -> MapFeed:
@@ -244,10 +256,17 @@ def read_map_feed(content: bytes) -> MapFeed:
     return MapFeed.model_validate_json(content)
 
 
-def write_map_feed(path: Path, feed: MapFeed) -> None:
-    content = feed.model_dump_json(exclude_none=True).encode()
+def encode_map_feed(feed: MapFeed) -> bytes:
+    content = feed.model_dump_json(
+        exclude_none=True, exclude=None if feed.water_aliases else {"water_aliases"},
+    ).encode()
     if len(content) > _MAX_FEED_BYTES:
         raise ValueError("map feed too large")
+    return content
+
+
+def write_map_feed(path: Path, feed: MapFeed) -> None:
+    content = encode_map_feed(feed)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_bytes(content)
@@ -583,6 +602,31 @@ def _secretariat_road(
                      source_map_url=document.url, lines=tuple(lines), **dates)
 
 
+def _covered_water_scope(narrow: Incident, full: Incident) -> bool:
+    if (not set(narrow.water_districts) < set(full.water_districts)
+            or narrow.archived != full.archived
+            or narrow.reported_scope and narrow.reported_scope != full.reported_scope
+            or narrow.source_map_url and narrow.source_map_url != full.source_map_url):
+        return False
+    fields = ("windows", "segments", "ranges", "addresses", "points", "lines", "areas",
+              "settlements")
+    return all(set(getattr(narrow, field)) <= set(getattr(full, field)) for field in fields)
+
+
+def _water_aliases(incidents: tuple[Incident, ...]) -> dict[str, str]:
+    waters = [event for event in incidents if event.kind == "water" and event.water_districts]
+    waters.sort(key=lambda event: len(event.water_districts), reverse=True)
+    canonical: list[Incident] = []
+    aliases = {}
+    for event in waters:
+        covered_by = [full.id for full in canonical if _covered_water_scope(event, full)]
+        if len(covered_by) == 1:
+            aliases[event.id] = covered_by[0]
+        else:
+            canonical.append(event)
+    return aliases
+
+
 def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
     snapshot = session.get(RawItemMediaSnapshot, item.id)
     if (snapshot is None or snapshot.source_page != item.url or snapshot.source_html is None
@@ -724,9 +768,12 @@ def export_map(
         incidents.setdefault(incident.id, incident)
         if len(incidents) >= _MAX_INCIDENTS:
             break
-    return MapFeed(generated_at=observed_at.astimezone(UTC), incidents=tuple(
+    visible = tuple(
         value for value in incidents.values() if value.source_url not in road_aliases
-    ))
+    )
+    # Keep both official source IDs so already sent buttons can still be resolved.
+    return MapFeed(generated_at=observed_at.astimezone(UTC), incidents=visible,
+                   water_aliases=_water_aliases(visible))
 
 
 def export_map_snapshot(

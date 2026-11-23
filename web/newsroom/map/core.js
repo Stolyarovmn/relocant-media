@@ -285,7 +285,7 @@ export function readIncidents(document, now = null) {
     throw new Error("Не удалось прочитать список объявлений");
   }
   const seen = new Set();
-  return document.incidents.flatMap((record) => {
+  const incidents = document.incidents.flatMap((record) => {
     if (!record || typeof record.id !== "string" || !eventId.test(record.id)
         || !Object.hasOwn(kinds, record.kind) || seen.has(record.id)) return [];
     const title = textValue(record.title);
@@ -345,6 +345,23 @@ export function readIncidents(document, now = null) {
       }),
     }];
   });
+  const aliases = document.water_aliases;
+  if (!aliases || typeof aliases !== "object" || Array.isArray(aliases)) return incidents;
+  const index = new Map(incidents.map((event) => [event.id, event]));
+  const merged = new Set();
+  for (const [alias, target] of Object.entries(aliases)) {
+    if (alias === target || typeof target !== "string" || Object.hasOwn(aliases, target)) continue;
+    const source = index.get(alias);
+    const canonical = index.get(target);
+    if (source?.kind !== "water" || canonical?.kind !== "water") continue;
+    (canonical.aliasIds ??= []).push(alias);
+    merged.add(alias);
+  }
+  return incidents.filter((event) => !merged.has(event.id));
+}
+
+export function incidentMatchesId(incident, id) {
+  return incident.id === id || (incident.aliasIds?.includes(id) ?? false);
 }
 
 export function incidentStatus(incident, now) {

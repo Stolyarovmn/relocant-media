@@ -281,6 +281,8 @@ def _incidents(session: Session, now: datetime, policy: Pilot) -> list[Entry]:
         (item.starts_at or tomorrow).astimezone(now.tzinfo).date() != now.date(),
         item.starts_at or tomorrow,
     )):
+        if notice.id in feed.water_aliases:
+            continue
         if notice.archived or notice.starts_at is None or notice.ends_at is None:
             continue
         if not any(window.starts_at < tomorrow and now < window.ends_at
