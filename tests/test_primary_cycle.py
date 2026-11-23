@@ -9,6 +9,8 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 from test_editorial_integration import editorial_session as _editorial_session
 
+from relocant_media.ai.batch_preselection import preselect_candidates
+from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
 from relocant_media.ingestion.persistence import sync_source
 from relocant_media.ops.primary_cycle import begin_window, run_cycle
 from relocant_media.scheduler.models import SchedulerRun
@@ -55,6 +57,59 @@ def queue(request, tmp_path):
 
 def ingest_ok():
     return {"failures": 0, "raw_items_written": 0, "review_required": 0}
+
+
+def test_belgrade_road_notice_reaches_review_despite_national_volume_and_batch_rank(
+    queue, tmp_path,
+):
+    engine, process = queue
+    profile = load_city_profile("belgrade")
+    with Session(engine) as session:
+        official = session.scalar(select(RawItem).where(
+            RawItem.source_id == "city_beograd_news", RawItem.external_id == "0",
+        ))
+        official.title = "Obustava saobraćaja u Geteovoj ulici"
+        media = load_source_file(Path("cities/belgrade/sources/media_n1_srbija.yaml"))
+        sync_source(session, "belgrade", media)
+        for index in range(32):
+            session.add(RawItem(source_id=media.id, external_id=f"national-{index}",
+                                url=f"https://n1info.rs/vesti/topic-{index}/",
+                                title=f"Vesti o svetu i diplomatiji: tema {index}",
+                                body=f"Nacionalna vest {index} bez gradske teme.",
+                                published_at=NOW - timedelta(minutes=20)))
+        closure = RawItem(
+            source_id=media.id, external_id="local-road", url="https://n1info.rs/vesti/local-road/",
+            title="Na Zvezdari deo ulice zatvoren zbog bezbednosti",
+            body="Saobraćajna policija zatvorila je deo ulice kod raskrsnice na Zvezdari.",
+            published_at=NOW - timedelta(minutes=55),
+        )
+        session.add(closure)
+        session.commit()
+        official_id, closure_id = official.id, closure.id
+
+    class LowerLocalPriority:
+        def generate_json(self, **request):
+            rows = json.loads(request["prompt"])["candidates"]
+            assert rows[0]["raw_item_id"] == closure_id
+            return json.dumps({"ranking": [
+                {"raw_item_id": row["raw_item_id"], "reason": "Порядок модели"}
+                for row in reversed(rows)
+            ]})
+
+    report = run_cycle(
+        engine, city="belgrade", output=tmp_path / "local-road", now=NOW,
+        ingest=ingest_ok, process=process, limit=3, newest_first=True,
+        locality_aliases=profile.geography.city_aliases,
+        local_place_aliases=load_queue_place_aliases("belgrade"),
+        preselect=lambda items, limit: preselect_candidates(
+            items, LowerLocalPriority(), profile=profile, limit=limit, now=NOW,
+        ),
+    )
+    assert report["processed_raw_item_ids"][:2] == [official_id, closure_id]
+    assert report["batch_preselection"]["protected_ids"] == [official_id]
+    assert report["batch_preselection"]["prioritized_local_road_closure_id"] == closure_id
+    assert len(report["processed_raw_item_ids"]) == 3
+    assert report["remaining_count"] > 30
 
 
 def test_twelve_candidates_are_drained_in_three_windows_without_losing_tail(queue, tmp_path):

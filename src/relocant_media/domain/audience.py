@@ -8,6 +8,47 @@ from relocant_media.domain.attention import normalize
 AUDIENCE_POLICY_VERSION = "belgrade-audience-v1"
 READER_VALUE_POLICY_VERSION = "reader-value-v2"
 
+_ROAD = re.compile(
+    r"\b(?:ulic\w*|deonic\w*|raskrsnic\w*|bulevar\w*|tunel\w*|"
+    r"улиц\w*|деониц\w*|раскрсниц\w*|булевар\w*|тунел\w*|"
+    r"дорог\w*|перекр[её]ст\w*|бульвар\w*|тоннел\w*)\b",
+    re.IGNORECASE,
+)
+_ROAD_OBJECT = (
+    r"(?:ulic[aeu]|deonic[aeu]|raskrsnic[aeu]|bulevar|tunel|"
+    r"улиц[ауы]|део\s+улице|деониц[аеу]|раскрсниц[аеу]|булевар|тунел|дорог[ауы]|"
+    r"перекр[её]сток|бульвар|тоннель)"
+)
+_CLOSED = (
+    r"(?:zatvoren[aeiou]?|zatvoril[aoei]|zatvori[ćc]e\s+se|zatvara\s+se|obustavljen[ao]?|"
+    r"затворен[аеиоу]?|затворил[аоеи]|затвориће\s+се|затвара\s+се|обустављен[ао]?|"
+    r"перекрыт[аоы]?|перекрыли|перекрывают|перекроют|"
+    r"закрыт[аоы]?|закрыли|закрывают|закроют)"
+)
+_ROAD_CLOSED = re.compile(
+    rf"\b{_ROAD_OBJECT}(?:\s+(?:je|su|је|су|будет|будут|частично|полностью)){{0,2}}\s+{_CLOSED}\b"
+    rf"|\b{_CLOSED}(?:\s+(?:je|su|је|су|deo|део|часть|участок)){{0,2}}\s+{_ROAD_OBJECT}\b"
+    rf"|\b{_CLOSED}\s+(?:za\s+saobra[ćc]aj|за\s+саобраћај|для\s+(?:проезда|движения))\b",
+    re.IGNORECASE,
+)
+_UNCERTAIN_CLOSURE = re.compile(
+    r"\b(?:mogu[ćc]\w*|могућ\w*|mo[žz]da|можда|mogl[aoei]|могл[аоеи]|"
+    r"ako|ако|если|возможно|могут|может|обсуждают|"
+    r"(?:nije|nisu|није|нису|не)\s+(?:jo[šs]\s+|још\s+|ещ[её]\s+)?"
+    r"(?:zatvor\w*|затвор\w*|перекры\w*|перекро\w*|закры\w*|закро\w*))\b",
+    re.IGNORECASE,
+)
+
+
+def local_road_closure(title: str, body: str, locality: re.Pattern[str]) -> bool:
+    """Признак для порядка разбора. Локальность, дорога и статус нужны в одной фразе."""
+    phrases = re.split(r"[\n;]+|(?<=[.!?])\s+", f"{title}\n{body[:500]}")
+    return any(
+        locality.search(phrase) and _ROAD.search(phrase) and _ROAD_CLOSED.search(phrase)
+        and not _UNCERTAIN_CLOSURE.search(phrase)
+        for phrase in phrases
+    )
+
 
 def local_reader_interest(title: str, body: str, city_aliases: tuple[str, ...]) -> bool:
     """Повод для повторного рассмотрения, не автоматическое одобрение новости."""

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.domain.city_profile import CityEditorialProfile
-from relocant_media.domain.freshness import evidence_freshness
+from relocant_media.domain.freshness import evidence_freshness, resolved_disruption
 
 MAX_CANDIDATES = 30
 POLICY_VERSION = "batch-preselection-v2"
@@ -151,6 +151,16 @@ def preselect_candidates(
         eligible.append(candidate)
     by_id = {candidate["raw_item_id"]: candidate for candidate in eligible}
     ordered_ids = list(by_id)
+    road_notice_id = next((
+        candidate["raw_item_id"] for candidate in eligible
+        if candidate.get("local_road_closure") is True
+        and candidate["source"].get("type") == "news_media"
+        and candidate["source"].get("ownership") == "media"
+        and not resolved_disruption(
+            str(candidate["evidence"].get("title", "")),
+            str(candidate["evidence"].get("body", "")),
+        )
+    ), None)
     audit["eligible_count"] = len(eligible)
     if len(eligible) > limit:
         # Передаём только публичные поля. Дополнительные private/owner/intake поля
@@ -203,6 +213,10 @@ def preselect_candidates(
                 audit["reasons"] = [entry.model_dump() for entry in response.ranking]
             except Exception as error:
                 _failure(audit, error, "response")
+    if road_notice_id is not None:
+        ordered_ids.remove(road_notice_id)
+        ordered_ids.insert(0, road_notice_id)
+        audit["prioritized_local_road_closure_id"] = road_notice_id
     selected_ids = ordered_ids[:limit]
     audit["selected_ids"] = selected_ids
     audit["deferred_ids"] = ordered_ids[limit:]

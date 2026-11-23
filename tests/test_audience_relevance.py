@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from test_editorial_pipeline import FakeProvider, _document
 from test_independent_reviews import Provider, documents, package
@@ -5,12 +7,30 @@ from test_independent_reviews import Provider, documents, package
 from relocant_media.ai.independent_reviews import reviewed_package
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.ai.review_repair import review_with_repairs
-from relocant_media.domain.audience import audience_relevance_reason
+from relocant_media.domain.audience import audience_relevance_reason, local_road_closure
 
 SOURCE_TITLE = "Одржана прва радионица у оквиру пројекта „Оснажена жена – снажна заједница“"
 SOURCE_BODY = (
     "Бесплатне радионице су намењене женама. Друга радионица, на тему примера добре "
     "праксе и јавних набавки, биће одржана 30. октобра у Галерији ’73.")
+
+
+@pytest.mark.parametrize(("title", "body", "expected"), [
+    ("Na Zvezdari deo ulice zatvoren zbog bezbednosti", "", True),
+    ("На Звездари затворен део улице", "", True),
+    ("В Белграде перекрыли часть улицы", "", True),
+    ("Изменения в центре", "В Белграде улица будет перекрыта с 8:00.", True),
+    ("Na Zvezdari ulica nije zatvorena", "", False),
+    ("Na Zvezdari ulica nije još zatvorena", "", False),
+    ("Na Zvezdari ulica možda će biti zatvorena", "", False),
+    ("В Звездаре улицу могут перекрыть", "", False),
+    ("В Звездаре на улице закрыли магазин", "", False),
+    ("В Белграде закроют музей на соседней улице", "", False),
+    ("В Белграде обсуждают транспорт", "В Загребе закрыли улицу после аварии.", False),
+])
+def test_local_road_priority_requires_a_concrete_closure(title: str, body: str, expected: bool):
+    locality = re.compile(r"\b(?:Zvezdar|Звездар|Белград)\w*", re.I)
+    assert local_road_closure(title, body, locality) is expected
 
 
 def test_real_editorial_miss_is_rejected_before_any_ai_call():
