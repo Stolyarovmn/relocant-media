@@ -138,7 +138,8 @@ def city_snapshot(
         public_items.append(public)
     observed = observed_at or datetime.now(UTC)
     result.update(runtime_status="available", observed_at=observed.isoformat(),
-                  counts=inbox["counts"], total_events=inbox["total_events"],
+                  counts=inbox["counts"], delivery_checks=inbox["delivery_checks"],
+                  total_events=inbox["total_events"],
                   returned_events=inbox["returned_events"], items=public_items,
                   kpi=compute_kpi(session, city, now=observed))
     cities_root = root / "cities"

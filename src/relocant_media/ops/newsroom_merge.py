@@ -11,6 +11,7 @@ from relocant_media.ops.public_observations import public_coverage
 from relocant_media.services.daily_brief import public_daily_brief
 from relocant_media.services.editorial_flow import public_editorial_flow
 from relocant_media.services.kpi import public_kpi
+from relocant_media.services.newsroom_control import public_delivery_checks
 
 
 def safe_ai_phase(value: Any) -> str | None:
@@ -59,6 +60,8 @@ def merge(catalog: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
             city["kpi"] = public_kpi(recorded["kpi"])
         if "daily_brief" in recorded:
             city["daily_brief"] = public_daily_brief(recorded["daily_brief"])
+        if "delivery_checks" in recorded:
+            city["delivery_checks"] = public_delivery_checks(recorded["delivery_checks"])
         if "editorial_flow" in recorded:
             city["editorial_flow"] = public_editorial_flow(
                 recorded["editorial_flow"], {source["id"] for source in city["sources"]},

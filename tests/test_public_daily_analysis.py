@@ -221,7 +221,7 @@ def test_owner_brief_has_evidence_links_and_clear_scope():
     assert "«Главное за день» — выход не подтверждён" in text
     assert "Просмотры — 0 по 1 из 3 постов" in text
     assert "завершился ошибкой" in text and "запросил резервную проверку" in text
-    assert "с неизвестным исходом — 1" in text
+    assert "Записей для сверки с Telegram — 1. Снимок без разбивки по статусам." in text
     assert "SECRET" not in json.dumps(report) and "example.com" not in text
     assert build_status(value, city="belgrade", now=NOW, day=date(2026, 10, 25))[
         "owner_brief"]["publications"]["post_count"] == 0
@@ -236,3 +236,18 @@ def test_old_snapshot_stays_unknown_in_a_short_report():
     assert "Снимок устарел" in text
     assert "Отдельных постов за день — нет данных" in text
     assert "Просмотры — нет данных" in text
+
+
+@pytest.mark.parametrize(("unfinished", "label"), [
+    (1, "исход отправки неизвестен — 1 · статус «отправлено» без квитанции — 1"),
+    (0, "статус «отправлено» без квитанции — 1"),
+])
+def test_short_report_separates_live_delivery_from_status_without_receipt(unfinished, label):
+    value = snapshot()
+    value["cities"][0]["delivery_checks"] = {
+        "uncertain_send": unfinished, "sent_without_receipt": 1,
+        "sending": 0, "receipt_conflict": 0, "private": "SECRET",
+    }
+    report = build_status(value, city="belgrade", now=NOW)
+    assert owner_markdown(report).splitlines()[-1] == f"Сверка доставки · {label}."
+    assert "SECRET" not in json.dumps(report)

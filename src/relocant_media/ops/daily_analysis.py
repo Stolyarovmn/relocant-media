@@ -16,6 +16,7 @@ from relocant_media.ops.newsroom_merge import merge
 from relocant_media.services.daily_brief import public_daily_brief
 from relocant_media.services.editorial_flow import public_editorial_flow
 from relocant_media.services.kpi import public_kpi
+from relocant_media.services.newsroom_control import public_delivery_checks
 
 ZONE = ZoneInfo("Europe/Moscow")
 STATES = (
@@ -27,6 +28,10 @@ _CITY_ZONE = ZoneInfo("Europe/Belgrade")
 _EDITIONS = {"morning": "Белград сегодня", "evening": "Главное за день"}
 _EDITION_STATUS = {"pending": "ожидается", "unconfirmed": "выход не подтверждён",
                    "not_scheduled": "вне расписания"}
+_DELIVERY_LABEL = {"uncertain_send": "исход отправки неизвестен",
+                   "sent_without_receipt": "статус «отправлено» без квитанции",
+                   "receipt_conflict": "расхождение в записях доставки",
+                   "sending": "незавершённая отправка"}
 
 
 def _time(value: Any) -> datetime | None:
@@ -169,7 +174,9 @@ def build_status(
                           "audience_metrics": None, "comment_signals": None,
                           "incoming_submissions": None},
         "owner_brief": {"local_date": local_date, "timezone": zone.key,
-                        "publications": day_snapshot, "cycle": cycle_health},
+                        "publications": day_snapshot, "cycle": cycle_health,
+                        "delivery_checks": (public_delivery_checks(recorded.get("delivery_checks"))
+                                            if available else None)},
         "quality": {"scope": "returned_snapshot_items_only",
                     "repeated_reason_codes": [
                         {"reason_code": key, "occurrences": value}
@@ -210,6 +217,21 @@ def _kpi_lines(kpi: dict[str, Any] | None) -> list[str]:
                  f"за 24 ч {_signed(kpi['subscribers_delta_24h'])}, "
                  f"за 7 дней {_signed(kpi['subscribers_delta_7d'])}.")
     return lines
+
+
+def _delivery_line(report: dict[str, Any]) -> str:
+    checks = report["owner_brief"]["delivery_checks"]
+    if checks is not None:
+        pending = [f"{label} — {checks[key]}" for key, label in _DELIVERY_LABEL.items()
+                   if checks[key]]
+        if pending:
+            return "Сверка доставки · " + " · ".join(pending) + "."
+    else:
+        counts = report["snapshot"]["queue_counts"] or {}
+        unchecked = counts.get("uncertain", 0) + counts.get("sending", 0)
+        if unchecked:
+            return f"Записей для сверки с Telegram — {unchecked}. Снимок без разбивки по статусам."
+    return "Отдельные решения владельца в снимке не отражены."
 
 
 def owner_markdown(report: dict[str, Any]) -> str:
@@ -259,11 +281,7 @@ def owner_markdown(report: dict[str, Any]) -> str:
     failure = " Последний запуск завершился ошибкой." if health["workflow_failed"] else ""
     fallback = " Цикл запросил резервную проверку." if health["fallback_needed"] else ""
     lines.append(f"Ошибки обработки в последнем цикле дня — {health_text}.{failure}{fallback}")
-    counts = report["snapshot"]["queue_counts"] or {}
-    uncertain = counts.get("uncertain", 0)
-    lines.append(f"Сейчас нужно сверить с Telegram отправки с неизвестным исходом — {uncertain}."
-                 if uncertain
-                 else "Отдельные решения владельца в снимке не отражены.")
+    lines.append(_delivery_line(report))
     return "  \n".join(lines) + "\n"
 
 

@@ -84,6 +84,7 @@ def test_public_projection_is_read_only_and_does_not_leak_private_material() -> 
         assert "Public transport notice" in serialized
         bg = result["cities"][0]
         assert bg["counts"] == {"uncertain": 2}
+        assert bg["delivery_checks"]["uncertain_send"] == 2
         assert all(item["discovered_by"] is None for item in bg["items"])
         assert all(item["reviews"][0]["verdict"] == "hold" for item in bg["items"])
         assert any(item['url'] == 'https://example.org/official' for item in bg['items'])
@@ -153,8 +154,10 @@ def test_daily_brief_uses_unique_sends_and_only_latest_confirmed_view_measuremen
              "views": 12, "measured_posts": 1},
         ]}
         brief["days"][0]["private_title"] = "SECRET"
-        projected = merge(snapshot(ROOT), result)["cities"][0]["daily_brief"]
-        assert "SECRET" not in json.dumps(projected) and "PRIVATE" not in json.dumps(projected)
+        result["cities"][0]["delivery_checks"]["private_token"] = "SECRET"
+        projected = merge(snapshot(ROOT), result)["cities"][0]
+        safe = json.dumps([projected["daily_brief"], projected["delivery_checks"]])
+        assert "SECRET" not in safe and "PRIVATE" not in safe
         assert not session.dirty and not session.new
 
 
