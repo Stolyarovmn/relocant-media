@@ -26,6 +26,7 @@ from relocant_media.ai.package import (
     StrictModel,
     canonical_json,
     evaluate_package,
+    package_coverage_reason,
 )
 from relocant_media.domain.audience import local_utility_notice
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
@@ -737,11 +738,26 @@ def validate_fallback_package(
                 "Нужны два новых независимых живых одобрения", code="reviews_not_fresh",
             )
         outcome = evaluate_package(package, now=now)
-        if package.outcome.status != PublicationStatus.READY or outcome.reason not in {
+        explicit_utility_review = (
+            package.outcome.status == outcome.status == PublicationStatus.HUMAN_REVIEW
+            and outcome.reason == "package_requires_review"
+            and outcome.ranking.category == "utilities"
+            and outcome.ranking.should_process
+            and package_coverage_reason(package) is None
+            and any(
+                document.raw_item_id == package.raw_item_id
+                and document.ownership == "official"
+                and document.auto_publish
+                and not document.high_risk
+                for document in requested.documents
+            )
+        )
+        ready_package = package.outcome.status == PublicationStatus.READY and outcome.reason in {
             "package_independently_reviewed",
             "package_requires_review",
             "event_place_requires_verification",
-        }:
+        }
+        if not (ready_package or explicit_utility_review):
             raise FallbackValidationError("Пакет не прошёл действующие редакционные проверки")
         existing = session.get(EditorialRun, package.raw_item_id, populate_existing=True)
         if (existing is not None and flight_review_marker(existing) is None

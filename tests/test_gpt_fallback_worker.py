@@ -210,6 +210,52 @@ def test_worker_revalidates_live_evidence_then_uses_normal_import(ready_package,
     assert "PRIVATE" not in json.dumps(result)
 
 
+def test_fallback_can_handoff_verified_utility_to_owner_without_delivery(
+    fallback_session, monkeypatch,
+):
+    session, raw, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    package = package_for_request(request, manual_category="utilities")
+    engine = session.get_bind()
+
+    def live(package):
+        return tuple(EvidenceDocument.model_validate(
+            document.model_dump(include=set(EvidenceDocument.model_fields)))
+            for document in package.event.documents)
+
+    def no_send(*args, **kwargs):
+        pytest.fail("Ручной пакет не должен запускать автодоставку")
+
+    monkeypatch.setattr(worker.server_runtime, "fetch_documents", live)
+    monkeypatch.setattr(worker, "_publish_imported", no_send)
+    payload = _parse(_input(package, request))
+    result = worker.run_worker(engine, payload, now=NOW, send_enabled=True)
+    assert result["status"] == "PRIMARY_OK"
+    assert result["imported"] == result["awaiting_owner"] == 1
+    assert result["ready"] == result["sent_count"] == 0
+    replay = worker.run_worker(engine, payload, now=NOW, send_enabled=True)
+    assert replay["obsolete_responses"] == {"already_resolved": 1}
+    assert replay["awaiting_owner"] == replay["sent_count"] == 0
+    with Session(engine) as check:
+        saved = check.get(EditorialRun, raw.id)
+        assert saved.outcome["status"] == "human_review"
+        assert saved.delivery_status == "pending"
+        assert check.get(Post, saved.post_id).telegram_message_id is None
+        assert lifecycle_state(check, raw.id, now=NOW)["next_action"] == "owner_approval"
+        assert raw.id not in gpt_fallback.pending_gpt_ids(check, now=NOW)
+
+
+def test_manual_fallback_does_not_open_additional_categories(fallback_session):
+    session, raw, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    package = package_for_request(request, manual_category="transport")
+    with pytest.raises(gpt_fallback.FallbackValidationError, match="редакционные проверки"):
+        gpt_fallback.validate_fallback_package(session, request, package, now=NOW)
+    assert session.get(EditorialRun, raw.id) is None
+
+
 @pytest.mark.parametrize("mutation", ["changed", "missing", "map_error"])
 def test_changed_live_evidence_or_map_never_reaches_import(
     ready_package, offline, monkeypatch, mutation,
