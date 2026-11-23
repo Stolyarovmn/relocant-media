@@ -112,7 +112,9 @@ def execute(context, tmp_path, monkeypatch, **kwargs):
                            environment=kwargs.pop('environment', env), **kwargs)
 
 
-def test_success_claims_before_side_effect_and_restores_receipts(context, tmp_path, monkeypatch):
+def test_success_claims_before_side_effect_and_restores_receipts(
+    context, tmp_path, monkeypatch, capsys,
+):
     store, drive = context
     store.state['intake_state'] = {'signature': '1,2', 'attempts': 2, 'backup_pending': True}
     def child(command, env):
@@ -142,6 +144,12 @@ def test_success_claims_before_side_effect_and_restores_receipts(context, tmp_pa
         return 0
     monkeypatch.setattr(runtime, 'run_child', child)
     assert execute(context, tmp_path, monkeypatch) == 0
+    lines = capsys.readouterr().err.splitlines()
+    phases = [json.loads(line).get('runtime_phase') for line in lines]
+    assert 'lifecycle_before_unchanged' in phases
+    assert 'lifecycle_after_changed' in phases
+    assert 'snapshot_storage_written' in phases
+    assert 'snapshot_storage_reused' not in phases
     assert store.state['status'] == 'ready'
     assert store.state['intake_state']['attempts'] == 2
     assert 'backup_pending' not in store.state['intake_state']
