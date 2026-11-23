@@ -600,7 +600,7 @@ def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
 
 def _verified_transport_revision(
     session: Session, item: RawItem, observed_at: datetime,
-) -> str | None:
+) -> EvidenceDocument | None:
     revision = session.scalar(select(SourceRevision).where(
         SourceRevision.raw_item_id == item.id, SourceRevision.observed_at <= observed_at,
     ).order_by(SourceRevision.observed_at.desc(), SourceRevision.id.desc()).limit(1))
@@ -608,20 +608,24 @@ def _verified_transport_revision(
         return None
     evidence = revision.evidence
     encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    body = evidence.get("body")
+    title, body = evidence.get("title"), evidence.get("body")
     if (hashlib.sha256(encoded.encode()).hexdigest() != revision.snapshot_sha256
             or evidence.get("source_id") != item.source_id
             or evidence.get("article_id") != item.external_id or evidence.get("url") != item.url
+            or not isinstance(title, str) or not title.strip()
             or not isinstance(body, str) or not body.strip()):
         return None
-    return body
+    return EvidenceDocument.model_validate(item, from_attributes=True).model_copy(
+        update={"title": title, "body": body},
+    )
 
 
 def _transport_suspended(session: Session, item: RawItem, observed_at: datetime) -> bool:
     """Скрыть приостановленные работы, сохранив неизменным опубликованный снимок."""
-    return transport_notice_suspended(item.body) or transport_notice_suspended(
-        _verified_transport_revision(session, item, observed_at) or "",
-    )
+    if transport_notice_suspended(item.body):
+        return True
+    revised = _verified_transport_revision(session, item, observed_at)
+    return revised is not None and transport_notice_suspended(revised.body)
 
 
 def _published_road(
@@ -697,7 +701,7 @@ def export_map(
         elif item.source_id == SECRETARIAT_SOURCE_ID:
             revised = _verified_transport_revision(session, item, observed_at)
             if revised is not None:
-                document = document.model_copy(update={"body": revised})
+                document = revised
                 title = None
             incident = (_secretariat_road(document, title, streets or {})
                         if not transport_notice_suspended(document.body) else None)
