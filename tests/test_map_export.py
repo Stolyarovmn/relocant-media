@@ -121,11 +121,22 @@ def test_listed_road_phases_use_the_same_source_for_map_and_delivery(monkeypatch
         native = presentation.native_map
         assert native is not None
         assert native["point"]["mode"] == SECRETARIAT_MAP_MODE
-        assert len(native["point"]["road_phases"]) == 2
+        first_phase, second_phase = native["point"]["road_phases"]
+        assert first_phase["ends_on"] == "2026-11-21" and second_phase["starts_on"] == "2026-11-22"
+        assert first_phase["segment"]["end"] == "Крушевачка"
+        assert first_phase["geometry_sha256"] != second_phase["geometry_sha256"]
         validate_presentation(presentation, profile, (document,), draft,
                               rubric_id="city_changes", category="transport")
         verify_stored_presentation(session, 1, (document,), document_ids=[1],
                                    presentation=presentation)
+        altered = presentation.model_copy(update={"native_map": {**native, "point": {
+            **native["point"], "road_phases": [
+                {**first_phase, "geometry_sha256": "0" * 64}, second_phase,
+            ],
+        }}})
+        with pytest.raises(ValueError, match="road map differs from the exact source snapshot"):
+            verify_stored_presentation(session, 1, (document,), document_ids=[1],
+                                       presentation=altered)
         verify_live_native_map(native, document, html)
         changed = _listed_document(_LISTED_ROAD.replace("22. 11.", "23. 11."))
         with pytest.raises(ValueError, match="road map changed in live source"):

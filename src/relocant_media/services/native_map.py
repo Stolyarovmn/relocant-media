@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
+from relocant_media.ai.package import canonical_json
 from relocant_media.bot.formatting import (
     TELEGRAM_TEXT_LIMIT,
     editorial_html_parts,
@@ -200,7 +201,8 @@ def _secretariat_point(document: EvidenceDocument) -> dict[str, Any] | None:
     except (OSError, ValueError):
         return None
     phases = [
-        {"starts_on": start.isoformat(), "ends_on": end.isoformat(), **geometry}
+        {"starts_on": start.isoformat(), "ends_on": end.isoformat(),
+         "segment": geometry["segment"], "geometry_sha256": _digest(canonical_json(geometry))}
         for start, end, geometry in resolve_secretariat_stretches(document, streets)
     ]
     if not phases:
