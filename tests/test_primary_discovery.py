@@ -110,6 +110,12 @@ def test_aviation_pointer_rule_is_general_for_any_registered_carrier(lead, title
      "Wizz Air uvodi letove za Pariz od 15. januara"),
     ("Wizz Air ukida letove od 15. januara",
      "Wizz Air ukida letove od 15. januara"),
+    ("Wizz Air ukida letove iz Niša za Pariz od 15. januara",
+     "Wizz Air ukida letove iz Niša za Minhen od 15. januara"),
+    ("Wizz Air ukida letove iz Niša za Pariz od 15. januara",
+     "Wizz Air ukida letove iz Beograda za Pariz od 15. januara"),
+    ("Vueling ukida letove za Pariz od 15. januara",
+     "TAP Air Portugal ukida letove za Pariz od 15. januara"),
 ])
 def test_aviation_article_needs_same_carrier_and_direction(lead, title):
     from relocant_media.collectors.base import RawItem
@@ -131,3 +137,7 @@ def test_aviation_article_same_carrier_and_direction_matches_across_scripts():
     london = RawItem("media_aero_telegraf", "2", "https://aero.telegraf.rs/avio-kompanije/2-a",
                      "Wizz Air ukida letove za London Luton", "Содержание", None)
     assert _matches_article("Wizz Air отменяет рейсы в Лондон", london)
+    between = RawItem("media_aero_telegraf", "3", "https://aero.telegraf.rs/avio-kompanije/3-a",
+                      "Wizz Air ukida letove između Beograda i Pariza", "Содержание", None)
+    assert _matches_article("Wizz Air отменяет рейсы из Белграда в Париж", between)
+    assert not _matches_article("Wizz Air отменяет рейсы из Ниша в Париж", between)

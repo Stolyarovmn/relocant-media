@@ -153,21 +153,22 @@ def _matches_article(text: str, article: RawItem) -> bool:
         return topic_matches(text, article.title)
     carriers = city_carriers("belgrade")
     found = [_carriers_in(value, carriers) for value in (text[:8000], article.title)]
-    if not any(found):
-        return topic_matches(text, article.title)
-    return _same_carrier_report(text, article.title)
+    # Без распознанного перевозчика авиатему ищет независимый поиск, а не сходство слов.
+    return any(found) and _same_carrier_report(text, article.title)
 
 
 def _carriers_in(value: str, carriers: Mapping[str, re.Pattern[str]]) -> set[str]:
     return {carrier for carrier, pattern in carriers.items() if pattern.search(value)}
 
 
-# Направление — названия с заглавной буквы после предлога маршрута (сербский/русский);
+# Маршрут: «откуда» и «куда» — названия с заглавной буквы после предлога (сербский/русский);
 # до трёх строчных слов между ними допускаются: «в китайский город Гуанчжоу».
-_ROUTE = re.compile(
-    r"(?<!\w)(?:za|do|iz|u|ka|između|izmedju|в|во|из|до|между|на)\s+"
-    r"(?:[a-zа-яёčćžšđјљњћџ]+\s+){0,3}?"
-    r"((?:[A-ZА-ЯЁČĆŽŠĐЈЉЊЋЏ][\w'-]+)(?:\s+[A-ZА-ЯЁČĆŽŠĐЈЉЊЋЏ][\w'-]+)?)")
+_NAME = r"((?:[A-ZА-ЯЁČĆŽŠĐЈЉЊЋЏ][\w'-]+)(?:\s+[A-ZА-ЯЁČĆŽŠĐЈЉЊЋЏ][\w'-]+)?)"
+_GAP = r"\s+(?:[a-zа-яёčćžšđјљњћџ]+\s+){0,3}?"
+_FROM = re.compile(r"(?<!\w)(?:iz|из|from)" + _GAP + _NAME)
+_TO = re.compile(r"(?<!\w)(?:za|do|u|ka|в|во|до|на|to)" + _GAP + _NAME)
+_BETWEEN = re.compile(r"(?<!\w)(?:između|izmedju|между|between)" + _GAP + _NAME
+                      + r"\s+(?:i|и|and)\s+" + _NAME)
 # Действие перевозчика: разные распознанные действия — разные новости.
 _ACTIONS = {
     "stop": re.compile(r"(?<!\w)(?:ukid\w*|ukinu\w*|obustav\w*|otkaz\w*|prekid\w*|povlač\w*|"
@@ -184,13 +185,30 @@ def _same_name(left: str, right: str) -> bool:
     return a == b or (min(len(a), len(b)) >= 4 and SequenceMatcher(None, a, b).ratio() >= 0.75)
 
 
-def _destinations(text: str, home: tuple[str, ...]) -> list[tuple[str, ...]]:
-    result = []
-    for match in _ROUTE.finditer(text):
-        words = tuple(match[1].split())
-        if not any(_same_name(words[0], alias) for alias in home):
-            result.append(words)
-    return result
+def _route(text: str, home: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Одно «откуда» и одно «куда»; без явного вылета — домашний город. Иначе None."""
+    def is_home(words: tuple[str, ...]) -> bool:
+        return any(_same_name(words[0], alias) for alias in home)
+
+    pairs = [(tuple(m[1].split()), tuple(m[2].split())) for m in _BETWEEN.finditer(text)]
+    rest = _BETWEEN.sub(" ", text)
+    origins = [tuple(m[1].split()) for m in _FROM.finditer(rest)]
+    targets = [tuple(m[1].split()) for m in _TO.finditer(rest)]
+    for left, right in pairs:
+        origin, target = (left, right) if is_home(left) or not is_home(right) else (right, left)
+        origins.append(origin)
+        targets.append(target)
+    targets = [t for t in targets if not is_home(t)]
+    if len(origins) > 1 or len(targets) != 1:
+        return None
+    origin = origins[0] if origins else (home[0],)
+    return origin, targets[0]
+
+
+def _same_place(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    # Уточняющий аэропорт («London Luton») сравнивается, если указан с обеих сторон.
+    return _same_name(left[0], right[0]) and (
+        len(left) < 2 or len(right) < 2 or _same_name(left[1], right[1]))
 
 
 def _actions(text: str) -> set[str]:
@@ -198,11 +216,12 @@ def _actions(text: str) -> set[str]:
 
 
 def _same_carrier_report(lead: str, title: str, *, city: str = "belgrade") -> bool:
-    """Тот же перевозчик из реестра города, то же направление и не противоположное действие.
+    """Тот же перевозчик из реестра города, тот же маршрут и не противоположное действие.
 
+    Маршрут — одно «откуда» (без явного вылета — домашний город) и одно «куда».
     Названия в разных алфавитах сравниваются по сходству транслитерации, без списков замен.
-    Уточняющий аэропорт («London Luton») учитывается, когда указан с обеих сторон.
-    Если направление не извлечено, совпадения нет: тему ищет независимый поиск.
+    Если маршрут не извлечён однозначно, совпадения нет: тему ищет независимый поиск.
+    Это ограничение поисковой подсказки; прямые проверенные ссылки обрабатываются отдельно.
     """
     from relocant_media.domain.city_profile import load_city_profile
 
@@ -216,13 +235,10 @@ def _same_carrier_report(lead: str, title: str, *, city: str = "belgrade") -> bo
     if all(len(a) == 1 for a in actions) and actions[0] != actions[1]:
         return False
     home = load_city_profile(city).geography.city_aliases
-    left, right = _destinations(lead, home), _destinations(title, home)
-    if not left or not right:
+    left, right = _route(lead, home), _route(title, home)
+    if left is None or right is None:
         return False
-    return any(
-        _same_name(a[0], b[0]) and (len(a) < 2 or len(b) < 2 or _same_name(a[1], b[1]))
-        for a in left for b in right
-    )
+    return _same_place(left[0], right[0]) and _same_place(left[1], right[1])
 
 
 async def resolve_public_discovery(
