@@ -81,6 +81,15 @@ _EXPIRY_FLAGS = {
 }
 
 
+READER_REPORT_REVIEW = (
+    "Документ с source_id reader_reports_* — сообщение читателя из предложки, которое "
+    "редакция не подтверждала. Такой текст допустим только как атрибутированное сообщение: "
+    "в первом абзаце сведения прямо приписаны читателю, ничего не выдано за установленный "
+    "факт, нет деталей сверх сообщения, рекламы, политики, контактов и имён частных лиц. "
+    "Отсутствие независимого подтверждения само по себе не повод для reject. "
+)
+
+
 def _ask_review(
     provider: StructuredAIProvider, role: str, instructions: str, payload: dict[str, Any],
     response_model: type[_FactsResponse] | type[_UtilityResponse],
@@ -272,6 +281,8 @@ def reviewed_package(
                         "message_html, подпись карты и соответствие draft. Ошибка места "
                         "блокирует approve. "
                     )
+        if any(d.source_id.startswith("reader_reports_") for d in documents):
+            instructions += READER_REPORT_REVIEW
         if role == "facts":
             instructions += PROCEDURAL_GUIDANCE_POLICY
             instructions += FACTS_COVERAGE_INSTRUCTION

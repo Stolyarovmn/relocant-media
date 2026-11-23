@@ -32,6 +32,10 @@ from relocant_media.services.production_media import (
     prepare_production_media,
 )
 from relocant_media.services.reader_publication import public_reader_material
+from relocant_media.services.reader_reports import (
+    is_reader_report_source,
+    reader_report_delivery_reason,
+)
 from relocant_media.services.rich_delivery import (
     PreparedNativeMessage,
     RichMessageBot,
@@ -120,6 +124,12 @@ async def deliver_reviewed(
                 )
             except ValueError as error:
                 raise DeliveryBlockedError(str(error)) from error
+            raw = session.get(RawItem, raw_item_id)
+            raw_source = session.get(Source, raw.source_id) if raw is not None else None
+            if raw is not None and raw_source is not None and is_reader_report_source(raw_source):
+                if reason := reader_report_delivery_reason(
+                        submission, raw, title=post.title, body=post.body):
+                    raise DeliveryBlockedError(reason)
             if material["credit"] and material["credit"] not in post.body:
                 raise DeliveryBlockedError("reader-selected credit is missing from reviewed text")
             r = submission.payload["reader_publication"]
