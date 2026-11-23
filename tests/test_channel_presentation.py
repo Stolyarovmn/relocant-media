@@ -37,6 +37,7 @@ def test_belgrade_navigation_uses_current_tags_and_public_links():
     ads = f"https://t.me/{draft['channel']}/{submissions['message_id']}"
     assert set(re.findall(r'href="([^"]+)"', text)) == {ads}
     assert set(re.findall(r'href="([^"]+)"', submissions["html"])) == {bot}
+    assert "Редакционное партнёрство" in submissions["html"]
     assert submissions["message_id"] in pin_policy["service_channel_messages"]
     assert submissions["message_id"] != pin_policy["map_channel_message"]
     assert "t.me/c/" not in submissions["html"]
@@ -394,7 +395,8 @@ async def test_pin_texts_are_edited_in_place_without_new_posts_or_buttons():
         if data["message_id"] == 6:
             return httpx.Response(400, json={
                 "ok": False, "description": "Bad Request: message is not modified: same"})
-        return httpx.Response(200, json={"ok": True, "result": {"message_id": data["message_id"]}})
+        return httpx.Response(200, json={"ok": True, "result": {
+            "message_id": data["message_id"], "chat": {"id": data["chat_id"]}}})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         bot = TelegramBotAPI("test-token", client)
@@ -415,3 +417,24 @@ async def test_pin_texts_never_target_the_map_post():
     presentation["submissions"]["message_id"] = policy["map_channel_message"]
     with pytest.raises(ValueError):
         await apply_pin_texts(object(), policy, presentation, apply=True)
+
+
+@pytest.mark.asyncio
+async def test_pin_text_timeout_on_first_post_still_reports_both_ids():
+    from relocant_media.services.channel_presentation import apply_pin_texts
+
+    presentation = yaml.safe_load(PRESENTATION.read_text(encoding="utf-8"))
+    policy = json.loads((BELGRADE / "pin-policy.json").read_text(encoding="utf-8"))
+
+    def handler(request):
+        data = json.loads(request.content)
+        if data["message_id"] == 4:
+            raise httpx.ReadTimeout("timeout")
+        return httpx.Response(200, json={"ok": True, "result": {
+            "message_id": data["message_id"], "chat": {"id": -100}}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await apply_pin_texts(TelegramBotAPI("t", client), policy, presentation,
+                                       apply=True)
+    assert result["posts"] == {"4": "owner_action_required", "6": "owner_action_required"}
+    assert result["owner_action_required"]

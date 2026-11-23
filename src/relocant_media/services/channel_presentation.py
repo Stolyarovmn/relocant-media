@@ -241,7 +241,8 @@ async def apply_pin_texts(
                 edited = await bot._call("editMessageText", {
                     "chat_id": CHANNEL, "message_id": message_id, "text": html,
                     "parse_mode": "HTML", "link_preview_options": {"is_disabled": True}})
-                if not isinstance(edited, dict) or edited.get("message_id") != message_id:
+                if (not isinstance(edited, dict) or edited.get("message_id") != message_id
+                        or (edited.get("chat") or {}).get("id") != CHANNEL):
                     raise TelegramAPIError("edited pin text receipt does not match")
                 status = "edited"
             except httpx.HTTPStatusError as error:
@@ -252,7 +253,8 @@ async def apply_pin_texts(
                 else:
                     status = "owner_action_required"
                     result["owner_action_required"] = True
-            except TelegramAPIError:
+            except (httpx.HTTPError, TelegramAPIError, ValueError):
+                # Таймаут или неверный ответ: статус по каждому ID, следующий пост тоже пробуем.
                 status = "owner_action_required"
                 result["owner_action_required"] = True
         result["posts"][str(message_id)] = status
