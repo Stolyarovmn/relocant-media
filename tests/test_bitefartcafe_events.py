@@ -92,6 +92,72 @@ def test_trailing_duplicate_heading_does_not_hide_substantive_body() -> None:
     assert len(item.body) >= 120
 
 
+def _event_card(date: str, address: str, ticket_url: str) -> str:
+    return f"""
+    <div class="elementor-column">
+      <p>{date}</p><p>Vrata otvaramo u 20:30</p><p>Program traje od 21h</p>
+      <p>Lokacija:</p><h2>BITEFARTCAFE</h2><h2>{address}<br>11000 Beograd</h2>
+      <p>Cena Ulaznice:</p><h2>od 3.000rsd</h2>
+      <a href="{ticket_url}">Kupite ulaznice</a>
+      <p>Informacije i rezervacije:</p><p>Telefon za rezervacije</p>
+    </div>
+    """
+
+
+def _detail_with_cards(*cards: str) -> str:
+    return _detail().replace(
+        "<h2>Online Rezervacije</h2>",
+        '<div class="elementor-container">'
+        '<div class="elementor-column"><h2>Online Rezervacije</h2></div>'
+        f'{"".join(cards)}</div>',
+    )
+
+
+def test_detail_keeps_only_practical_facts_from_its_own_event_card() -> None:
+    tickets = "https://bilet.rs/events/455/concert"
+    item = parse_bitefartcafe_event(
+        _detail_with_cards(
+            _event_card("30.10.2026.", "Mitropolita Petra 8", tickets),
+            _event_card("31.10.2026.", "Other venue", "https://bilet.rs/events/456/concert"),
+        ),
+        FIRST_URL,
+        _source(),
+    )
+    assert "Vrata otvaramo u 20:30" in item.body
+    assert "Mitropolita Petra 8\n11000 Beograd" in item.body
+    assert "Cena Ulaznice:\nod 3.000rsd" in item.body
+    assert f"Kupite ulaznice: {tickets}" in item.body
+    assert "Other venue" not in item.body
+    assert "Telefon za rezervacije" not in item.body
+    assert item.published_at is None
+
+
+def test_ambiguous_cards_do_not_supply_an_address_or_price() -> None:
+    item = parse_bitefartcafe_event(
+        _detail_with_cards(
+            _event_card("30.10.2026.", "Address one", "#"),
+            _event_card("30.10.2026.", "Address two", "#"),
+        ),
+        FIRST_URL,
+        _source(),
+    )
+    assert "Address" not in item.body
+    assert "Cena Ulaznice" not in item.body
+    assert "starosno ograničenje 18+" in item.body
+
+
+def test_card_does_not_preserve_a_nonpublic_ticket_target() -> None:
+    item = parse_bitefartcafe_event(
+        _detail_with_cards(
+            _event_card("30.10.2026.", "Mitropolita Petra 8", "http://localhost/buy")
+        ),
+        FIRST_URL,
+        _source(),
+    )
+    assert "Mitropolita Petra 8" in item.body
+    assert "localhost" not in item.body
+
+
 @pytest.mark.asyncio
 async def test_factory_fetches_full_official_details() -> None:
     source = _source()
