@@ -124,10 +124,19 @@ def test_terminal_gpt_declines_do_not_hold_remaining_or_direct_exports(batch):
     request = build_ranked_request(session, brief, rank, now=NOW)
 
     def decline(raw_id):
-        return worker.FallbackRejection(raw_item_id=raw_id, category="transport",
-            rationale="Исходные сведения не подтверждают значимость события.")
+        payload = worker.FallbackInput.model_validate_json(canonical_json({
+            "request": request,
+            "result": {
+                "version": 1, "request_sha256": _sha(request), "packages": [],
+                "rejected": [{
+                    "raw_item_id": raw_id, "category": "transport",
+                    "rationale": "Исходные сведения не подтверждают значимость события.",
+                }],
+            },
+        }))
+        return worker.run_worker(session.get_bind(), payload, now=NOW)
 
-    worker._save_rejection(session.get_bind(), request, decline(raw.id), now=NOW)
+    assert decline(raw.id)["declined"] == 1
     session.expire_all()
     before = {record.id: copy.deepcopy(record.details)
               for record in session.scalars(select(SchedulerRun))}
@@ -137,10 +146,9 @@ def test_terminal_gpt_declines_do_not_hold_remaining_or_direct_exports(batch):
     assert not session.new and not session.dirty and not session.deleted
     with pytest.raises(gpt_fallback.FallbackValidationError):
         validate_batch_rank(session, brief, rank, now=NOW)
-    with pytest.raises(gpt_fallback.FallbackValidationError):
-        worker._save_rejection(session.get_bind(), request, decline(raw.id), now=NOW)
+    assert decline(raw.id)["obsolete_responses"] == {"already_resolved": 1}
 
-    worker._save_rejection(session.get_bind(), request, decline(other.id), now=NOW)
+    assert decline(other.id)["declined"] == 1
     session.expire_all()
     direct = RawItem(source_id=raw.source_id, external_id="independent-direct",
         url="https://www.beograd.rs/lat/vesti/independent-direct",

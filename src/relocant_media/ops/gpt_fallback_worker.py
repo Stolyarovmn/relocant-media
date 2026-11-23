@@ -8,9 +8,12 @@ import hashlib
 import json
 import os
 import re
+from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Literal, Never, Self
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import create_engine, select
@@ -31,22 +34,51 @@ from relocant_media.services.editorial import EditorialService
 from relocant_media.services.flight_review import flight_review_marker
 from relocant_media.services.gpt_batch_fallback import validate_batch_rank
 from relocant_media.services.gpt_fallback import (
+    FallbackValidationError,
     build_request,
+    obsolete_fallback_response,
+    pending_gpt_ids,
     validate_fallback_candidate,
     validate_fallback_package,
 )
 from relocant_media.services.gpt_refresh import RefreshInput, refresh_gpt_evidence
-from relocant_media.services.material_lifecycle import PUBLISHED_TRANSPORT_DUPLICATE
+from relocant_media.services.material_lifecycle import (
+    PUBLISHED_TRANSPORT_DUPLICATE,
+    LifecycleBlockedError,
+    _read_record,
+)
 from relocant_media.services.package_import import import_package
 from relocant_media.services.policy_reassessment import (
     eligible_empty_policy_hold,
     eligible_policy_reassessment,
     persist_policy_reassessment,
 )
-from relocant_media.storage.models import EditorialRun
+from relocant_media.storage.locks import lock_editorial_city
+from relocant_media.storage.models import EditorialRun, Post
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
 MAX_INPUT_BYTES = 16 * 1024 * 1024
+_OBSOLETE_CHECK_CODES = frozenset({
+    "already_processed", "material_closed", "primary_failure_unconfirmed", "request_expired",
+})
+_CLAIM_REASONS = frozenset({
+    "delivery_reconciliation_required", "related_delivery_reconciliation_required",
+    "fallback_attempt_failed", "fallback_deadline_exceeded", "invalid_lifecycle_state",
+    "material_deadline_exceeded", "separate_publication_approval_required",
+    "source_freshness_not_confirmed", "source_or_evidence_changed",
+})
+
+
+class FallbackClaimError(LifecycleBlockedError):
+    def __init__(self, code: str) -> None:
+        super().__init__("Материал не получил резервную попытку")
+        self.code = code
+
+
+@dataclass
+class _FallbackAttempt:
+    stage: str
+    lease: str | None = None
 
 
 class FallbackRejection(BaseModel):
@@ -141,9 +173,11 @@ def save_batch_rank(
 
 
 def _save_rejection(
-    engine: Engine, request: dict[str, Any], rejection: FallbackRejection, *, now: datetime,
+    engine: Engine, request: dict[str, Any], rejection: FallbackRejection,
+    attempt: _FallbackAttempt, *, now: datetime,
 ) -> None:
     with Session(engine) as session:
+        lock_editorial_city(session, "belgrade")
         raw_id = rejection.raw_item_id
         _, profile, candidate, _ = validate_fallback_candidate(session, request, raw_id, now=now)
         parent = candidate.flight_review_parent
@@ -155,17 +189,36 @@ def _save_rejection(
             run = session.get(EditorialRun, raw_id)
             if run is None or "_package" not in run.outcome:
                 raise ValueError("Отсутствует пакет удержанной авиановости")
-            _check_live_evidence(EditorialPackage.model_validate_json(
-                canonical_json(run.outcome["_package"])))
+            held_json = canonical_json(run.outcome["_package"])
+            held_package = EditorialPackage.model_validate_json(held_json)
+            session.rollback()
+            attempt.stage = "reject_live"
+            _check_live_evidence(held_package)
+            attempt.stage = "reject"
+            lock_editorial_city(session, "belgrade")
             validate_fallback_candidate(session, request, raw_id, now=now)
-            _claim_fallback(session, raw_id, now=now)
+            run = session.get(EditorialRun, raw_id, populate_existing=True)
+            if run is None or canonical_json(run.outcome.get("_package")) != held_json:
+                raise ValueError("Удержанный пакет изменился после проверки источника")
+            attempt.stage = "reject_claim"
+            attempt.lease = _claim_fallback(session, raw_id, now=now)
+            if attempt.lease is None:
+                raise FallbackClaimError("receipt_exists")
+            lock_editorial_city(session, "belgrade")
+            _ensure_fallback_lease(session, raw_id, attempt.lease, now=now)
             confirm_flight_duplicate(session, raw_id, now=now)
             session.commit()
             return
         if rejection.category not in {category for rubric in profile.rubrics
                                       for category in rubric.categories}:
             raise ValueError("Неизвестная категория отказа GPT")
-        _claim_fallback(session, raw_id, now=now)
+        attempt.stage = "reject_claim"
+        attempt.lease = _claim_fallback(session, raw_id, now=now)
+        if attempt.lease is None:
+            raise FallbackClaimError("receipt_exists")
+        attempt.stage = "reject_persist"
+        lock_editorial_city(session, "belgrade")
+        _ensure_fallback_lease(session, raw_id, attempt.lease, now=now)
         documents = tuple(EvidenceDocument.model_validate(
             doc.model_dump(include=set(EvidenceDocument.model_fields)))
             for doc in candidate.documents)
@@ -195,46 +248,104 @@ def _save_rejection(
         session.commit()
 
 
-def _claim_fallback(session: Session, raw_id: int, *, now: datetime) -> bool:
+def _claim_fallback(session: Session, raw_id: int, *, now: datetime) -> str | None:
     """Вызывать только после полной проверки привязки к неуспешному циклу."""
     from relocant_media.services.material_lifecycle import (
-        LifecycleBlockedError,
         adopt_fallback_request,
         archive_for_retry,
         before_attempt,
         can_retry_snapshot,
+        lifecycle_state,
     )
 
-    existing = session.get(EditorialRun, raw_id)
+    lock_editorial_city(session, "belgrade")
+    existing = session.get(EditorialRun, raw_id, populate_existing=True)
     if existing is not None and existing.delivery_status == "sent":
-        # Дальше importer проверит точное совпадение и вернёт прежнюю квитанцию.
-        return False
+        post = session.get(Post, existing.post_id) if existing.post_id is not None else None
+        if (post is None or post.city != "belgrade" or post.published_at is None
+                or not post.telegram_message_id or existing.staging_message_id is not None):
+            raise FallbackClaimError("delivery_reconciliation_required")
+        return None
+    record = _read_record(session, raw_id)
+    if record is not None and record.details.get("state") == "processing":
+        if lifecycle_state(session, raw_id, now=now)["state"] == "processing":
+            _deny_fallback_claim(session, raw_id, "attempt_not_available")
     retry_snapshot = can_retry_snapshot(session, raw_id, now=now)
     if retry_snapshot and not archive_for_retry(session, raw_id, now=now):
-        raise LifecycleBlockedError("Прежний отказ нельзя безопасно заменить резервным пакетом")
+        _deny_fallback_claim(session, raw_id, "snapshot_archive_denied")
     adopt_fallback_request(session, raw_id, now=now)
     allowed = before_attempt(session, raw_id, now=now, channel="fallback")
-    session.commit()
     if not allowed:
-        raise LifecycleBlockedError("Резервная попытка недоступна или срок истёк")
-    return True
+        _deny_fallback_claim(session, raw_id, "attempt_not_available")
+    record = _read_record(session, raw_id)
+    assert record is not None
+    lease = uuid4().hex
+    record.details = {**record.details, "fallback_reply_lease": lease}
+    session.commit()
+    return lease
 
 
-def _fail_claimed_fallback(engine: Engine, raw_id: int, error: Exception, *, now: datetime) -> None:
-    from relocant_media.scheduler.models import SchedulerRun
+def _deny_fallback_claim(session: Session, raw_id: int, default: str) -> Never:
+    record = _read_record(session, raw_id)
+    reason = record.details.get("reason") if record is not None else None
+    session.commit()
+    raise FallbackClaimError(reason if isinstance(reason, str) and reason in _CLAIM_REASONS
+                             else default)
+
+
+def _owns_fallback_lease(session: Session, raw_id: int, lease: str | None) -> bool:
+    record = _read_record(session, raw_id)
+    return bool(lease is not None and record is not None
+                and record.details.get("state") == "processing"
+                and record.details.get("attempt_kind") == "fallback"
+                and record.details.get("fallback_reply_lease") == lease)
+
+
+def _ensure_fallback_lease(
+    session: Session, raw_id: int, lease: str | None, *, now: datetime,
+) -> None:
+    from relocant_media.services.material_lifecycle import lifecycle_state
+
+    if _owns_fallback_lease(session, raw_id, lease):
+        lifecycle_state(session, raw_id, now=now)
+    if not _owns_fallback_lease(session, raw_id, lease):
+        _deny_fallback_claim(session, raw_id, "claim_lost")
+
+
+def _fail_claimed_fallback(
+    engine: Engine, raw_id: int, lease: str | None, error: Exception, *, now: datetime,
+) -> None:
     from relocant_media.services.material_lifecycle import after_error, lifecycle_state
 
+    if lease is None:
+        return
     with Session(engine) as session:
-        record = session.scalar(select(SchedulerRun).where(
-            SchedulerRun.task_type == "material_lifecycle",
-            SchedulerRun.task_key == f"material-lifecycle:belgrade:{raw_id}",
-        ))
-        if record is None:
-            return
-        state = lifecycle_state(session, raw_id, now=now)
-        if state.get("state") == "processing" and state.get("attempt_kind") == "fallback":
+        lock_editorial_city(session, "belgrade")
+        if _owns_fallback_lease(session, raw_id, lease):
+            lifecycle_state(session, raw_id, now=now)
+        if _owns_fallback_lease(session, raw_id, lease):
             after_error(session, raw_id, type(error).__name__, now=now, channel="fallback")
         session.commit()
+
+
+def _obsolete_response(
+    engine: Engine, request: dict[str, Any], raw_id: int, error: Exception, *,
+    now: datetime, package: EditorialPackage | None = None,
+) -> str | None:
+    if not isinstance(error, FallbackClaimError) and (
+        not isinstance(error, FallbackValidationError) or error.code not in _OBSOLETE_CHECK_CODES
+    ):
+        return None
+    try:
+        with Session(engine) as session:
+            lock_editorial_city(session, "belgrade")
+            return obsolete_fallback_response(
+                session, request, raw_id, now=now, package=package,
+                claim_denied=(isinstance(error, FallbackClaimError)
+                              and error.code in {"attempt_not_available", "claim_lost"}),
+            )
+    except (ValueError, TypeError):
+        return None
 
 
 def _check_live_evidence(package: EditorialPackage) -> None:
@@ -291,31 +402,53 @@ def run_worker(
     declined = 0
     delivery_ids: set[int] = set()
     errors: list[dict[str, str]] = []
+    obsolete: dict[int, str] = {}
     for rejection in payload.result.rejected:
+        attempt = _FallbackAttempt("reject")
         try:
-            _save_rejection(engine, payload.request, rejection, now=now or datetime.now(UTC))
+            _save_rejection(
+                engine, payload.request, rejection, attempt, now=now or datetime.now(UTC),
+            )
             declined += 1
         except Exception as error:
-            _fail_claimed_fallback(engine, rejection.raw_item_id, error,
-                                  now=now or datetime.now(UTC))
+            checked_at = now or datetime.now(UTC)
+            reason = _obsolete_response(
+                engine, payload.request, rejection.raw_item_id, error, now=checked_at,
+            )
+            if reason is not None:
+                obsolete[rejection.raw_item_id] = reason
+                continue
+            _fail_claimed_fallback(
+                engine, rejection.raw_item_id, attempt.lease, error, now=checked_at,
+            )
             rejected += 1
-            errors.append(_error_entry("reject", error))
+            errors.append(_error_entry(attempt.stage, error))
     for package in payload.result.packages:
         phase = "validate"
+        lease = None
         try:
             with Session(engine) as session:
+                lock_editorial_city(session, "belgrade")
                 package = validate_fallback_package(
                     session, payload.request, package, now=now or datetime.now(UTC),
                 )
-                _claim_fallback(session, package.raw_item_id, now=now or datetime.now(UTC))
+                phase = "claim"
+                lease = _claim_fallback(session, package.raw_item_id, now=now or datetime.now(UTC))
+                if lease is None:
+                    obsolete[package.raw_item_id] = "already_resolved"
+                    continue
             phase = "live"
             _check_live_evidence(package)
             # Сетевое чтение не держит транзакцию. После него ещё раз проверяем
             # актуальные исходники, решения и привязку к зафиксированной ошибке Gemini.
             phase = "revalidate"
             with Session(engine) as session:
+                lock_editorial_city(session, "belgrade")
                 package = validate_fallback_package(
                     session, payload.request, package, now=now or datetime.now(UTC),
+                )
+                _ensure_fallback_lease(
+                    session, package.raw_item_id, lease, now=now or datetime.now(UTC),
                 )
                 phase = "import"
                 run = import_package(session, package, now=now, replace_empty_hold=True,
@@ -333,8 +466,17 @@ def run_worker(
                     if run.delivery_status == "pending":
                         delivery_ids.add(package.raw_item_id)
         except Exception as error:
-            _fail_claimed_fallback(engine, package.raw_item_id, error,
-                                  now=now or datetime.now(UTC))
+            checked_at = now or datetime.now(UTC)
+            reason = _obsolete_response(
+                engine, payload.request, package.raw_item_id, error,
+                now=checked_at, package=package,
+            )
+            if reason is not None:
+                obsolete[package.raw_item_id] = reason
+                continue
+            _fail_claimed_fallback(
+                engine, package.raw_item_id, lease, error, now=checked_at,
+            )
             rejected += 1
             errors.append(_error_entry(phase, error))
     blocked: list[dict[str, Any]] = []
@@ -363,8 +505,13 @@ def run_worker(
         resolved = {raw_id for raw_id in saved_ids
                     if flight_review_marker(session.get(EditorialRun, raw_id)) is None
                     and not eligible_policy_reassessment(session, raw_id, now=now)}
-    unresolved = len(requested_ids - resolved)
-    status = ("PRIMARY_FAILED" if not (imported or declined) else
+        needs_fresh_check = any(reason in {"request_expired", "request_superseded"}
+                                for reason in obsolete.values())
+        fresh_check_pending = needs_fresh_check and bool(
+            pending_gpt_ids(session, now=now or datetime.now(UTC)) & obsolete.keys(),
+        )
+    unresolved = len(requested_ids - resolved - obsolete.keys())
+    status = ("PRIMARY_FAILED" if not (imported or declined or obsolete) else
               "PRIMARY_PARTIAL" if rejected or errors or blocked or unresolved else "PRIMARY_OK")
     return {
         "status": status, "mode": "subscription_gpt_fallback",
@@ -374,8 +521,9 @@ def run_worker(
         "flight_review_pending": sum(
             item.get("reason") == FLIGHT_REVIEW_REASON for item in blocked),
         "delivery_enabled": send_enabled is True, "processing_errors": errors,
+        "obsolete_responses": dict(sorted(Counter(obsolete.values()).items())),
         "unresolved": unresolved,
-        "fallback_required": bool(unresolved or errors or blocked),
+        "fallback_required": bool(unresolved or errors or blocked or fresh_check_pending),
         "model_calls": 0,
     }
 

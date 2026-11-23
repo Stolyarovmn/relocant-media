@@ -281,6 +281,127 @@ def test_real_fallback_validation_requires_the_recorded_gemini_failure(
     assert (session.get(EditorialRun, raw.id) is None) is invalidate
 
 
+@pytest.mark.parametrize("different_reply", [False, True])
+def test_replaying_a_saved_ready_decision_does_not_send_or_spend_attempts(
+    fallback_session, monkeypatch, different_reply,
+):
+    session, raw, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    package = package_for_request(request)
+    monkeypatch.setattr(worker, "_check_live_evidence", lambda package: None)
+    first = worker.run_worker(session.get_bind(), _parse(_input(package, request)), now=NOW)
+    assert first["imported"] == 1
+    previous = copy.deepcopy(session.get(EditorialRun, raw.id).outcome)
+    if different_reply:
+        reviews = tuple(review.model_copy(update={"reviewer_id": f"new-{review.role}"})
+                        for review in package.reviews)
+        package = package.model_copy(update={"reviews": reviews})
+    monkeypatch.setattr(worker, "_check_live_evidence",
+                        lambda package: pytest.fail("Сохранённый результат не проверяется снова"))
+
+    result = worker.run_worker(
+        session.get_bind(), _parse(_input(package, request)), send_enabled=True, now=NOW,
+    )
+    assert result["status"] == "PRIMARY_OK"
+    assert result["obsolete_responses"] == {"already_resolved": 1}
+    assert result["imported"] == result["sent_count"] == result["unresolved"] == 0
+    assert not result["fallback_required"]
+    session.expire_all()
+    assert session.get(EditorialRun, raw.id).outcome == previous
+    assert lifecycle_state(session, raw.id, now=NOW)["fallback_attempts"] == 1
+
+
+def test_replaying_an_editorial_rejection_uses_the_saved_decision(fallback_session):
+    session, raw, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    result = {
+        "version": 1,
+        "request_sha256": hashlib.sha256(canonical_json(request).encode()).hexdigest(),
+        "packages": [], "rejected": [{"raw_item_id": raw.id, "category": "transport",
+                                     "rationale": "Детали не изменили ситуацию для пассажиров."}],
+    }
+    payload = _parse({"request": request, "result": result})
+    first = worker.run_worker(session.get_bind(), payload, now=NOW)
+    second = worker.run_worker(session.get_bind(), payload, now=NOW)
+    assert first["declined"] == 1
+    assert second["status"] == "PRIMARY_OK", (
+        second, lifecycle_state(session, raw.id, now=NOW).get("reason"),
+    )
+    assert second["obsolete_responses"] == {"already_resolved": 1}
+    assert second["declined"] == second["rejected"] == 0
+    assert lifecycle_state(session, raw.id, now=NOW)["fallback_attempts"] == 1
+
+
+@pytest.mark.parametrize("trusted_scope", [False, True])
+def test_expired_request_checks_scope_and_keeps_a_new_authorized_attempt(
+    fallback_session, monkeypatch, trusted_scope,
+):
+    session, raw, prior = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    package = package_for_request(request)
+    late = NOW + gpt_fallback.REQUEST_TTL + timedelta(seconds=1)
+    session.add(SchedulerRun(
+        task_key=prior.task_key, task_type=prior.task_type, city=prior.city, status="partial",
+        scheduled_for=late - timedelta(minutes=4), started_at=late - timedelta(minutes=4),
+        finished_at=late - timedelta(minutes=1), details=prior.details,
+    ))
+    session.commit()
+    if not trusted_scope:
+        request = {**request, "scheduler_run_id": 999_999}
+    monkeypatch.setattr(worker, "_check_live_evidence",
+                        lambda package: pytest.fail("Просроченный запрос не открывает проверку"))
+    result = worker.run_worker(session.get_bind(), _parse(_input(package, request)), now=late)
+    assert result["obsolete_responses"] == ({"request_expired": 1} if trusted_scope else {})
+    assert result["status"] == ("PRIMARY_OK" if trusted_scope else "PRIMARY_FAILED")
+    assert result["fallback_required"]
+    assert gpt_fallback.pending_gpt_ids(session, now=late) == {raw.id}
+    assert session.get(EditorialRun, raw.id) is None
+    assert session.scalar(select(SchedulerRun).where(
+        SchedulerRun.task_type == "material_lifecycle",
+    )) is None
+
+
+def test_competing_reply_does_not_fail_the_active_fallback_lease(fallback_session, monkeypatch):
+    session, raw, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    payload = _parse(_input(package_for_request(request), request))
+    competing = []
+
+    def live(package):
+        assert not competing, "Конкурирующий ответ не должен обращаться к источнику"
+        competing.append(worker.run_worker(session.get_bind(), payload, now=NOW))
+
+    monkeypatch.setattr(worker, "_check_live_evidence", live)
+    first = worker.run_worker(session.get_bind(), payload, now=NOW)
+    assert first["status"] == "PRIMARY_OK" and first["imported"] == 1
+    assert competing[0]["status"] == "PRIMARY_OK"
+    assert competing[0]["obsolete_responses"] == {"attempt_in_progress": 1}
+    assert competing[0]["processing_errors"] == []
+    assert lifecycle_state(session, raw.id, now=NOW)["fallback_attempts"] == 1
+    assert session.get(EditorialRun, raw.id).outcome["status"] == "ready"
+
+
+def test_uncertain_delivery_remains_a_real_claim_error(fallback_session, monkeypatch):
+    session, raw, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    payload = _parse(_input(package_for_request(request), request))
+    monkeypatch.setattr(worker, "_check_live_evidence", lambda package: None)
+    assert worker.run_worker(session.get_bind(), payload, now=NOW)["imported"] == 1
+    run = session.get(EditorialRun, raw.id)
+    run.delivery_status = "uncertain"
+    session.commit()
+
+    result = worker.run_worker(session.get_bind(), payload, send_enabled=True, now=NOW)
+    assert result["status"] == "PRIMARY_FAILED"
+    assert result["obsolete_responses"] == {} and result["sent_count"] == 0
+    assert result["processing_errors"] == [{
+        "stage": "claim", "error_type": "FallbackClaimError",
+        "reason": "delivery_reconciliation_required",
+    }]
+    session.expire_all()
+    assert run.delivery_status == "uncertain"
+
+
 @pytest.mark.parametrize("case", ["repeat", "changed_dates", "late_repeat"])
 def test_fallback_resolves_transport_retellings_without_retry(
     fallback_session, monkeypatch, case,

@@ -1,5 +1,6 @@
 """Опоздавший GPT-ответ виден в логах и не выглядит как авария цикла."""
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -43,7 +44,9 @@ def file_database(tmp_path):
 def _exchange(tmp_path, request, raw_id):
     path = tmp_path / "exchange.json"
     path.write_text(canonical_json({"request": request, "result": {
-        "version": 1, "request_sha256": "0" * 64, "packages": [{"raw_item_id": raw_id}],
+        "version": 1, "packages": [],
+        "request_sha256": hashlib.sha256(canonical_json(request).encode()).hexdigest(),
+        "rejected": [{"raw_item_id": raw_id, "category": "transport", "rationale": "Тест"}],
     }}), encoding="utf-8")
     return path
 
@@ -92,6 +95,21 @@ def test_failure_coordinates_include_only_safe_processing_errors(capsys):
     }
 
 
+def test_runtime_logs_only_allowlisted_obsolete_response_counts(tmp_path, capsys):
+    (tmp_path / "server-report.json").write_text(json.dumps({
+        "mode": "subscription_gpt_fallback",
+        "obsolete_responses": {
+            "request_expired": 2, "attempt_in_progress": 1, "already_resolved": "PRIVATE",
+            "material_expired": 99, "unknown": 1,
+        },
+        "draft": "PRIVATE",
+    }), encoding="utf-8")
+    runtime._report_obsolete_fallback_responses(tmp_path)
+    assert json.loads(capsys.readouterr().out) == {
+        "gpt_fallback_obsolete": {"request_expired": 2, "attempt_in_progress": 1},
+    }
+
+
 @pytest.mark.parametrize("closed", [False, True])
 def test_expired_result_is_detected_read_only(file_database, tmp_path, closed):
     path, engine, raw_id, request = file_database
@@ -107,6 +125,15 @@ def test_expired_result_is_detected_read_only(file_database, tmp_path, closed):
 def test_unknown_material_is_left_to_the_worker(file_database, tmp_path):
     path, _, _, request = file_database
     assert runtime._gpt_result_expired(path, _exchange(tmp_path, request, 999_999), NOW) is False
+
+
+def test_reconciliation_block_is_not_interpreted_as_expiration(file_database, tmp_path):
+    path, engine, raw_id, request = file_database
+    with Session(engine) as session:
+        record = close_material(session, raw_id, now=NOW)
+        record.details = {**record.details, "reason": "delivery_reconciliation_required"}
+        session.commit()
+    assert runtime._gpt_result_expired(path, _exchange(tmp_path, request, raw_id), NOW) is False
 
 
 def test_response_deadline_uses_the_earliest_window(file_database):
