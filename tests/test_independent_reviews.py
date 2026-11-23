@@ -108,6 +108,85 @@ def test_explicit_overnight_windows_reach_both_reviewers(at, expected):
     }
 
 
+def night_notice(body="Когда: в ночь с 23 на 24 ноября 2026 года с 22:00 до 06:00."):
+    value = package()
+    document = value.event.documents[0].model_copy(update={
+        "body": SCHEDULE, "published_at": PUBLISHED,
+    })
+    claim = value.outcome.claims.claims[0]
+    citation = claim.citations[0].model_copy(update={"quote": SCHEDULE})
+    claims = value.outcome.claims.model_copy(update={
+        "claims": (claim.model_copy(update={
+            "text": "Перемежающиеся ночные работы", "citations": (citation,),
+        }),),
+    })
+    draft = value.outcome.draft.model_copy(update={
+        "title": "Ночью ограничат движение в Теразийском тоннеле",
+        "body": body,
+    })
+    return value.model_copy(update={
+        "evidence": value.evidence.model_copy(update={
+            "body": SCHEDULE, "published_at": PUBLISHED,
+        }),
+        "event": value.event.model_copy(update={"documents": (document,)}),
+        "outcome": value.outcome.model_copy(update={"claims": claims, "draft": draft}),
+    })
+
+
+@pytest.mark.parametrize("corrects_coverage", [True, False])
+def test_repeat_review_of_same_tunnel_draft_corrects_only_verified_answers(corrects_coverage):
+    original = night_notice()
+    provider = Provider()
+    facts, utility = provider.responses
+    broken = facts_check_for(original.model_dump(mode="json"))
+    broken["segments"][-1]["citations"][0]["quote"] = SCHEDULE.split(" ")[0]
+    invalid = {**facts, "facts_check": broken}
+    expired = {**utility, "verdict": "reject", "flags": ["expired_or_passed_shift"]}
+    provider.responses = [invalid, facts if corrects_coverage else invalid, expired, utility]
+    now = datetime(2026, 11, 23, 7, 17, tzinfo=ZONE)
+    audit = []
+    result = reviewed_package(original, provider, lambda: documents(original), now=now,
+                              audit=audit.append)
+
+    assert [call["task"] for call in provider.calls] == [
+        "independent_facts", "independent_facts", "independent_utility", "independent_utility",
+    ]
+    assert result.outcome == original.outcome and result.event == original.event
+    assert result.reviews[0].verdict == ("approve" if corrects_coverage else "hold")
+    assert result.reviews[1].verdict == "approve"
+    if not corrects_coverage:
+        assert result.reviews[0].flags == ("draft_coverage_ungrounded",)
+    prompts = [json.loads(call["prompt"]) for call in provider.calls]
+    assert prompts[1]["coverage_correction"]["allowed_claims"]["c1"]["citations"][0]["quote"] == (
+        SCHEDULE
+    )
+    assert prompts[3]["timing_correction"]["window"]["status"] == "upcoming"
+    assert all(prompt["draft_sha256"] == prompts[0]["draft_sha256"] for prompt in prompts)
+    assert [entry["role"] for entry in audit] == [
+        "facts_answer_retry", "facts", "utility_answer_retry", "utility",
+    ]
+
+
+@pytest.mark.parametrize(("body", "now", "flags"), [
+    ("Ночь с 22 на 23 ноября с 22:00 до 06:00.",
+     datetime(2026, 11, 23, 7, 17, tzinfo=ZONE), ["expired_event"]),
+    ("Ночь с 23 на 24 ноября 2025 года с 22:00 до 06:00.",
+     datetime(2026, 11, 23, 7, 17, tzinfo=ZONE), ["expired_event"]),
+    ("Ночь с 23 на 24 ноября с 22:00 до 06:00.",
+     datetime(2026, 11, 24, 6, 0, tzinfo=ZONE), ["expired_event"]),
+    ("Ночь с 23 на 24 ноября с 22:00 до 06:00.",
+     datetime(2026, 11, 23, 7, 17, tzinfo=ZONE), ["expired_event", "неверное направление"]),
+])
+def test_expiry_retry_requires_matching_live_window_and_no_other_objection(body, now, flags):
+    original = night_notice(body)
+    provider = Provider()
+    provider.responses[1].update(verdict="reject", flags=flags)
+    result = reviewed_package(original, provider, lambda: documents(original), now=now)
+    assert len(provider.calls) == 2
+    assert result.reviews[1].verdict == "reject"
+    assert result.reviews[1].flags == tuple(flags)
+
+
 @pytest.mark.parametrize("changed_fetch", [1, 2])
 def test_live_change_fails_before_approval(changed_fetch):
     original = package()
