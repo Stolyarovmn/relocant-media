@@ -136,12 +136,12 @@ test("плотность считает объявления в ячейке и 
   const project = ([lat, lon]) => ({ x: lon, y: lat });
   const point = (lat, lon, incident, approximate = false) => ({ lat, lon, incident, approximate });
   const result = heatCells([
-    point(22, 15, water), point(20, 30, water), point(22, 21, power), point(32, 19, road, true),
-    point(20, 80, water),
-  ], project, 64);
+    point(22, 67, water), point(20, 71, water), point(22, 75, power), point(32, 19, road, true),
+    point(20, 76, water),
+  ], project);
   assert.deepEqual(result, [
-    { x: 32, y: 32, incidents: [water, power] },
-    { x: 96, y: 32, incidents: [water] },
+    { x: 38, y: 38, incidents: [water, power] },
+    { x: 114, y: 38, incidents: [water] },
   ]);
 });
 
@@ -152,7 +152,7 @@ test("доли тепловой метки следуют порядку фил�
     point(2, "r", "road"), point(3, "r", "road"),
     point(8, "w1", "water"), point(12, "w2", "water"),
     point(17, "p", "power"),
-  ], project, 64);
+  ], project);
   const order = ["water", "power", "road"];
   assert.deepEqual(heatComposition(cell.incidents, order), [
     { kind: "water", count: 2, start: 0, end: 50 },
