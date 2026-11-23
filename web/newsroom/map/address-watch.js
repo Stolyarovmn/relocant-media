@@ -1,4 +1,4 @@
-import { addressHits, incidentStatus } from "./core.js?v=18";
+import { addressHits, incidentStatus } from "./core.js?v=19";
 
 const storageKey = "relocant-map-saved-address-v1";
 const roadRadius = 120;
