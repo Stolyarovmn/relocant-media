@@ -8,6 +8,8 @@ from datetime import datetime
 from importlib.resources import files
 from typing import Any
 
+from relocant_media.services.reader_forwarded_source import has_forwarded_parts, public_forward_urls
+
 POLICY: dict[str, Any] = json.loads(
     files("relocant_media.domain").joinpath("reader_publication_v1.json").read_text("utf-8"),
 )
@@ -143,10 +145,14 @@ def advance_publication(
 
 
 def material_fingerprint(payload: dict[str, Any]) -> str:
-    value = {"text": payload.get("text", ""), "attachments": [
+    value: dict[str, Any] = {"text": payload.get("text", ""), "attachments": [
         {"kind": a["kind"], "file_id": a["file_id"], "file_unique_id": a.get("file_unique_id")}
         for a in payload.get("attachments", [])
     ]}
+    if urls := public_forward_urls(payload):
+        value["public_forward_urls"] = urls
+    if has_forwarded_parts(payload):
+        value["forwarded"] = True
     return hashlib.sha256(json.dumps(
         value, ensure_ascii=False, separators=(",", ":"),
     ).encode()).hexdigest()

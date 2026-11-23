@@ -2,6 +2,9 @@ import {
   PUBLICATION_POLICY, beginPublication, isPublicationControl, planPublication,
   publicationChanged, publicationEnabled,
 } from "./reader-publication.js";
+import {
+  forwardedPublicPost, isForwardedMessage, publicForwardUrls,
+} from "./reader-forwarded-source.js";
 
 const mediaTypes = ["photo", "video", "document", "voice", "audio"];
 export const READER_INTRO = "Напишите, о чем хотите сообщить. Можно отправить несколько сообщений и приложить фото или видео.\n\n" +
@@ -68,19 +71,22 @@ function getParts(message) {
       });
     }
   }
-  return { text: (message.text ?? message.caption ?? "").trim(), attachments };
+  const url = forwardedPublicPost(message);
+  return { text: (message.text ?? message.caption ?? "").trim(), attachments,
+    ...(isForwardedMessage(message) && { forwarded: true }),
+    ...(url && { public_forward_url: url }) };
 }
 
 export function isStartMessage(form, message) {
   const part = getParts(message);
-  return Boolean(part && !part.attachments.length && starts(form, part.text));
+  return Boolean(part && !part.attachments.length && !part.forwarded && starts(form, part.text));
 }
 
 function combineParts(form, parts) {
   const contents = Object.entries(parts).sort(([a], [b]) => Number(a) - Number(b));
   const attachments = new Map();
   const text = contents.map(([, part]) => part.text &&
-    !(!part.attachments.length && starts(form, part.text)) ? part.text : "")
+    !(!part.attachments.length && !part.forwarded && starts(form, part.text)) ? part.text : "")
     .filter(Boolean).join("\n");
   for (const [, part] of contents) {
     for (const file of part.attachments) {
@@ -137,22 +143,25 @@ function sentMenu(draft) {
 
 function accepts(draft, route) {
   return Boolean(draft.payload.text) ||
-    (route === "news_tip" && draft.payload.attachments.length > 0);
+    (route === "news_tip" && (draft.payload.attachments.length > 0 ||
+      publicForwardUrls(draft.payload).length > 0));
 }
 
 export function planDraft(form, current, message, edited, allocateReference, actor, receivedAt) {
   const mid = message.message_id;
   const part = getParts(message);
   if (!part) return null;
-  const start = !edited && isStartMessage(form, message);
+  const forwarded = Boolean(part.forwarded);
+  const control = !part.attachments.length && !forwarded;
+  const start = !edited && control && starts(form, part.text);
   const active = ["choosing", "collecting"].includes(current?.status);
-  if (!active && !edited && isPublicationControl(part.text)) return null;
+  if (!active && !edited && control && isPublicationControl(part.text)) return null;
   const known = { Сотрудничество: "partnership", Реклама: "ad_request" };
   for (const [kind, [label]] of Object.entries(form.routes)) known[label] = kind;
-  const kind = !part.attachments.length && Object.hasOwn(known, part.text) ? known[part.text] : null;
-  const command = !part.attachments.length &&
+  const kind = control && Object.hasOwn(known, part.text) ? known[part.text] : null;
+  const command = control &&
     /^(Отправить|Сменить тему|Отменить) №(RM-[A-Z0-9]{4}-[A-Z0-9]{4}|[0-9]{1,18})$/u.exec(part.text);
-  const legacyCommand = /^\/(tip|correction|ad|cancel)(?:@\w+)?(?:\s|$)/u.test(part.text);
+  const legacyCommand = !forwarded && /^\/(tip|correction|ad|cancel)(?:@\w+)?(?:\s|$)/u.test(part.text);
   const target = message.reply_to_message?.message_id;
   if (legacyCommand || (edited && !Object.hasOwn(current?.payload.reader_parts ?? {}, mid)) ||
       (!start && target && !Object.values(current?.payload.reader_notices ?? {})
@@ -164,7 +173,7 @@ export function planDraft(form, current, message, edited, allocateReference, act
         <= 1_800_000))) {
     return null;
   }
-  if (!part.text && !part.attachments.length && !edited) return null;
+  if (!part.text && !part.attachments.length && !part.public_forward_url && !edited) return null;
   if (!active && (command || (!start && kind && current?.status === "new"))) return null;
 
   const draft = active ? structuredClone(current) : {
@@ -187,10 +196,10 @@ export function planDraft(form, current, message, edited, allocateReference, act
   };
   draft.payload.public_reference ??= draft.reference;
   const unchanged = { draft, notice: null };
-  if (!draft.payload.reader_publication && isPublicationControl(part.text)) {
+  if (!draft.payload.reader_publication && control && isPublicationControl(part.text)) {
     return { draft, notice: menu(form, draft, mid) };
   }
-  const publication = planPublication(draft,
+  const publication = forwarded ? null : planPublication(draft,
     start || kind ? { ...message, text: "/start" } : message, edited, receivedAt);
   if (publication && !publication.ready) return publication;
   if (command && !edited) {

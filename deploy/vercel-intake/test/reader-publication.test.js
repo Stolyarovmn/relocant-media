@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fixture, message, seed } from "./helpers.js";
 import { materialFingerprint, PUBLICATION_POLICY as P, PUBLICATION_LABELS as L } from "../lib/reader-publication.js";
+import { publicForwardUrls } from "../lib/reader-forwarded-source.js";
 
 async function reader(origin = "bot", username = "reader_alias") {
   const settings = seed({ channel_id: P.channel_id });
@@ -92,6 +93,29 @@ test("чужой источник и только для редакции не �
     assert.equal((await f.case()).payload.reader_publication.signature.mode,"anonymous");
   }
 });
+
+for (const origin of ["bot", "channel_dm"]) {
+  test(origin + ": публичная пересылка сохраняет ссылку и меняет отпечаток материала", async () => {
+    const f = await reader(origin);
+    const previous = (await f.case()).payload.reader_publication.material_sha256;
+    await f.send(L.own, {forward_origin: {
+      type: "channel", chat: {type: "channel", username: "Serbia"},
+      message_id: 197, author_signature: "Не сохранять подпись",
+    }});
+    await f.send("Закрытая пересылка", {forward_origin: {
+      type: "channel", chat: {type: "channel"}, message_id: 19,
+    }});
+    const draft = await f.case();
+    assert.ok(draft.payload.text.includes(L.own));
+    assert.equal(draft.payload.reader_publication.stage, "ownership");
+    assert.deepEqual(publicForwardUrls(draft.payload), ["https://t.me/serbia/197"]);
+    assert.notEqual(draft.payload.reader_publication.material_sha256, previous);
+    assert.ok(!JSON.stringify(draft.payload).includes("Не сохранять подпись"));
+    await f.send(L.source);
+    await f.send("Отправить №" + draft.reference);
+    assert.equal((await f.case()).payload.reader_publication.permission, "private");
+  });
+}
 
 test("подпись нельзя подтвердить пропуском отдельного шага", async () => {
   const f=await reader();

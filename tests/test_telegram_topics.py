@@ -7,6 +7,7 @@ from relocant_media.analytics.public_preview import PreviewError
 from relocant_media.collectors.telegram_topics import (
     DEFAULT_CHANNELS,
     DEFAULT_CHANNELS_BY_CITY,
+    collect_forwarded_topic,
     collect_topics,
     default_channels_for_city,
     parse_topics,
@@ -19,6 +20,25 @@ def card(number: int, date: str, text: str = "Новость") -> str:
     return f'''<div class="tgme_widget_message" data-post="example/{number}">
     <time datetime="{date}"></time><div class="tgme_widget_message_text">{text}</div>
     <span class="tgme_widget_message_views">1.2K</span></div>'''
+
+
+@pytest.mark.asyncio
+async def test_forwarded_topic_checks_only_the_requested_current_public_post():
+    calls = []
+    html = card(1, "2026-10-20T13:00:00Z") + card(
+        2, "2026-10-19T09:00:00Z", 'Анонс <a href="https://example.org/news/item">ссылка</a>',
+    ) + card(3, "2026-10-18T02:00:00Z")
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text=html)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        lead = await collect_forwarded_topic("example", 2, client, now=NOW)
+        assert lead is not None and lead.message_id == 2
+        assert lead.outbound_urls == ("https://example.org/news/item",)
+        assert await collect_forwarded_topic("example", 3, client, now=NOW) is None
+    assert calls == ["https://t.me/example/2?embed=1", "https://t.me/example/3?embed=1"]
 
 
 def test_default_channels_are_popular_discovery_sources_only() -> None:
