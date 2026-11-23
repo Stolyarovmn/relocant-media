@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -76,6 +76,7 @@ def test_digests_continue_after_the_pilot_without_an_end_date():
         slot = due_slot(now)
         assert slot is not None and slot.kind == kind
     assert due_slot(datetime(2027, 1, 15, 5, 30, tzinfo=UTC)) is None
+    assert belgrade_digests.digest_end_warning(datetime(2027, 1, 15, 6, 30, tzinfo=UTC)) is None
 
 
 def test_missed_morning_digest_catches_up_until_eleven():
@@ -97,6 +98,17 @@ def test_explicit_end_date_still_stops_regular_digests(monkeypatch):
     assert morning_delivery({"status": "ready"}, datetime(2026, 11, 28, 12, tzinfo=UTC)) is None
     reminder = due_slot(datetime(2026, 11, 27, 19, 30, tzinfo=UTC))
     assert reminder is not None and reminder.kind == "reminder"
+
+
+@pytest.mark.parametrize(("month", "utc_hour"), [(7, 18), (11, 19)])
+def test_digest_end_warning_uses_belgrade_time(month, utc_hour, monkeypatch):
+    end = datetime(2027, month, 27, 20, 30)
+    policy = belgrade_digests._policy().model_copy(update={"ends_before": end})
+    monkeypatch.setattr(belgrade_digests, "_policy", lambda: policy)
+    threshold = datetime(2027, month, 24, utc_hour, 30, tzinfo=UTC)
+    assert belgrade_digests.digest_end_warning(threshold - timedelta(seconds=1)) is None
+    for now in (threshold, threshold + timedelta(days=4)):
+        assert belgrade_digests.digest_end_warning(now) == end.replace(tzinfo=_ZONE)
 
 
 @pytest.mark.parametrize("cutoff", [

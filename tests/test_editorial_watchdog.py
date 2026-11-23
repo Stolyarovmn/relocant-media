@@ -105,7 +105,7 @@ def test_morning_alert_keeps_legacy_queue_state_and_is_deduplicated_by_day(
     send = AsyncMock()
     monkeypatch.setattr(watchdog, "notify_owner", send)
     assert watchdog.update_alerts(check, file)
-    send.assert_awaited_once_with(None, check.morning)
+    send.assert_awaited_once_with(None, check.morning, None)
     assert not watchdog.update_alerts(check, file)
     send.assert_awaited_once()
     assert watchdog.AlertState.read(file).queue == status.key
@@ -152,6 +152,31 @@ def test_redundant_check_targets_the_named_morning_and_does_not_recover_queue(
                          check_digests=True, morning_date=now.date())
 
 
+def test_finite_digest_schedule_alert_survives_storage_failure_without_repeats(
+    tmp_path, monkeypatch,
+):
+    cutoff = datetime(2026, 11, 27, 19, 30, tzinfo=UTC)
+    moved_cutoff = cutoff + timedelta(days=1)
+    client = Mock()
+    client.read_status.side_effect = SSHStorageError("storage_error", "timeout")
+    monkeypatch.setattr(watchdog, "digest_end_warning", lambda now: cutoff)
+    check = watchdog.inspect(client, NOW, tmp_path, allow_recovery=False, check_digests=True)
+    assert check.status == "storage" and check.digest_end == cutoff
+    sender = AsyncMock(side_effect=[RuntimeError("Telegram"), None, None])
+    monkeypatch.setattr(watchdog, "notify_owner", sender)
+    path = tmp_path / "watchdog"
+    with pytest.raises(RuntimeError):
+        watchdog.update_alerts(check, path)
+    assert not path.exists()
+    assert watchdog.update_alerts(check, path)
+    assert not watchdog.update_alerts(check, path)
+    assert sender.await_count == 2
+    assert sender.await_args.args == (check, None, cutoff)
+    assert watchdog.update_alerts(watchdog.Check("storage", digest_end=moved_cutoff), path)
+    assert sender.await_args.args == (None, None, moved_cutoff)
+    client.write.assert_not_called()
+
+
 def test_owner_notice_reports_a_confirmed_reason_in_one_private_message(monkeypatch):
     now = datetime(2026, 11, 22, 10, tzinfo=UTC)
     morning = watchdog.morning_delivery({"status": "ready", "last_morning_digest_attempt": {
@@ -162,12 +187,14 @@ def test_owner_notice_reports_a_confirmed_reason_in_one_private_message(monkeypa
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
     bot = Mock(send_message=AsyncMock())
     monkeypatch.setattr(watchdog, "TelegramBotAPI", lambda *_args: bot)
-    asyncio.run(watchdog.notify_owner(watchdog.Check("stale"), morning))
+    cutoff = datetime(2026, 11, 27, 20, 30, tzinfo=UTC)
+    asyncio.run(watchdog.notify_owner(watchdog.Check("stale"), morning, cutoff))
     bot.send_message.assert_awaited_once()
     chat_id, text = bot.send_message.await_args.args
     assert chat_id == 42
     assert "22.11.2026" in text and "11:00 по Белграду" in text
     assert "не хватило материалов" in text and "больше часа" in text
+    assert "27.11.2026 в 20:30 по Белграду" in text
 
 
 def test_failed_current_main_cycle_can_wake_the_storage_watchdog():

@@ -207,6 +207,15 @@ def due_slot(now: datetime) -> Slot | None:
     return None
 
 
+def digest_end_warning(now: datetime) -> datetime | None:
+    """Обнаружить запланированную остановку за три дня или при первом позднем обходе."""
+    local = _local_clock(now)
+    end = _policy().ends_before
+    if end is None or local.replace(tzinfo=None) < end - timedelta(days=3):
+        return None
+    return end.replace(tzinfo=local.tzinfo)
+
+
 def morning_delivery(state: dict[str, Any], now: datetime) -> MorningDelivery | None:
     if state.get("status") not in ("ready", "busy"):
         return None
