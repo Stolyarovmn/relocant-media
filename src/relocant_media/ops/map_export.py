@@ -629,7 +629,8 @@ def _secretariat_road(
         return None
     fallback = "Работы на тротуаре" if dates else "Дорожные работы"
     return _incident(document, "road", title or f"{fallback} · {street}", tuple(windows),
-                     source_map_url=document.url, lines=tuple(lines), **dates)
+                     source_map_url=document.url, lines=tuple(lines),
+                     starts_on=dates.get("starts_on"), ends_on=dates.get("ends_on"))
 
 
 def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
