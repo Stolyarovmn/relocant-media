@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import and_, create_engine, func, or_, select, text
 from sqlalchemy.orm import Session
 
-from relocant_media.domain.audience import local_reader_interest
+from relocant_media.domain.audience import local_reader_interest, local_road_closure
 from relocant_media.domain.dedup import EventCandidate, cluster_events, event_key
 from relocant_media.domain.freshness import GUIDE_MAX_AGE, GUIDE_SOURCE_TYPE
 from relocant_media.domain.publication_time import publication_interval
@@ -138,6 +138,7 @@ def select_candidates(
         event_inputs.append(_event_candidate(item))
 
     clusters = cluster_events(event_inputs)
+    local_closure_ids: set[int] = set()
     if newest_first:
         priorities = source_priorities or {}
         # Только настроенные местные ориентиры; название общенациональной организации
@@ -154,8 +155,16 @@ def select_candidates(
             r"изложб|концерт|фестивал|отключ|перекры|выставк|рейс|"
             r"авио|аеродром|кашњењ|поплав|киш|непогод|временск|затоп|погод", re.I,
         )
+        if locality is not None:
+            local_closure_ids = {
+                item.id for item, source in by_id.values()
+                if source.source_type == "news_media" and source.ownership == "media"
+                and local_road_closure(item.title, item.body, locality)
+            }
 
-        def queue_order(group: list[EventCandidate]) -> tuple[int, int, int, datetime | None, int]:
+        def queue_order(
+            group: list[EventCandidate],
+        ) -> tuple[int, int, int, int, datetime | None, int]:
             item, source = by_id[group[0].raw_item_id]
             # Direct transport disruptions retain precedence over leisure mentions.
             disruption = re.search(r"obustav|izmen.*saobra|preusmer|затвор|обустав|измен.*саобра",
@@ -169,14 +178,17 @@ def select_candidates(
             local_practical = bool(media and local and (
                 practical.search(lead)
                 or local_reader_interest(item.title, item.body, locality_names)))
+            media_closure = item.id in local_closure_ids
             # Национальный поток не получает транспортный приоритет только из-за
             # слова «отмена» о чужом городе. Локальная практическая новость СМИ
             # не остаётся навечно ниже любой общей официальной заметки.
             band = (4 if private_priority or guide else
-                    3 if disruption and (not media or local) else
+                    3 if media_closure or disruption and (not media or local) else
                     max(0, priorities.get(source.id, 0)) if local_practical else
                     priorities.get(source.id, 0))
-            return (band, int(local_practical), -(recent_source_counts or {}).get(source.id, 0),
+            return (band, int(band == 3 and bool(disruption) and not media),
+                    int(local_practical or media_closure),
+                    -(recent_source_counts or {}).get(source.id, 0),
                     item.published_at or item.ingested_at, item.id)
         clusters.sort(key=queue_order, reverse=True)
     candidates = []
@@ -219,6 +231,8 @@ def select_candidates(
                 "evidence": event_evidence,
             },
         })
+        if item.id in local_closure_ids:
+            candidates[-1]["local_road_closure"] = True
 
     missing = base.where(RawItem.published_at.is_(None), Source.source_type != GUIDE_SOURCE_TYPE)
     missing_count = session.scalar(select(func.count()).select_from(missing.subquery())) or 0

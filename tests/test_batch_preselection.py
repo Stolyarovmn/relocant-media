@@ -143,6 +143,21 @@ def test_unfresh_news_neither_take_slots_nor_reach_model(kind):
     assert len(selected) == 5 and audit["excluded"][0]["raw_item_id"] == 8
 
 
+def test_one_fresh_local_closure_takes_priority_and_stale_or_resolved_closures_do_not():
+    rows = candidates(8)
+    for row in rows[:4]:
+        row["local_road_closure"] = True
+    rows[0]["evidence"]["published_at"] = (NOW - timedelta(days=3)).isoformat()
+    rows[1]["evidence"]["title"] = "Движение в Белграде восстановлено"
+    selected, audit = choose(rows, Provider(), limit=2)
+
+    assert [row["raw_item_id"] for row in selected] == [3, 8]
+    assert audit["prioritized_local_road_closure_id"] == 3
+    assert 1 not in audit["selected_ids"] + audit["deferred_ids"]
+    assert 2 in audit["deferred_ids"]  # Свежее восстановление оценивается в общем пуле.
+    assert 4 in audit["deferred_ids"]
+
+
 def test_culture_sport_city_stories_are_data_and_private_extras_are_not_sent():
     rows = candidates(6)
     rows[0]["evidence"]["title"] = "Белградский художник выпустил новый альбом"
