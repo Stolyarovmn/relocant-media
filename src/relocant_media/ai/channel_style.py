@@ -58,11 +58,16 @@ CHANNEL_DRAFT_STYLE = (
 )
 
 
+def word_range(category: str) -> tuple[int, int]:
+    """Matrix word range of the category; unknown categories use the city format."""
+    return _BY_CATEGORY.get(category, _MATRIX.formats["city"]).words
+
+
 def writing_instruction(category: str, *, evergreen: bool = False) -> str:
     if evergreen:
         return f"\n{_MATRIX.guide}\n"
     rule = _BY_CATEGORY.get(category, _MATRIX.formats["city"])
-    low, high = rule.words
+    low, high = word_range(category)
     return f"\nДля категории {category}: {low}–{high} слов. {rule.structure} {rule.tone}\n"
 
 
