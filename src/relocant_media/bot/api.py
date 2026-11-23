@@ -31,7 +31,7 @@ class PhotoUpload:
 def map_reply_markup(url: str) -> dict[str, object]:
     if not is_map_event_url(url):
         raise ValueError("map button URL is not approved")
-    return {"inline_keyboard": [[{"text": "Посмотреть на карте", "url": url}]]}
+    return {"inline_keyboard": [[{"text": "Посмотреть на карте", "url": url, "style": "success"}]]}
 
 
 class TelegramBot(Protocol):
@@ -216,7 +216,11 @@ class TelegramBotAPI:
 
     async def edit_map_button(self, chat_id: int, message_id: int, url: str) -> bool:
         """Изменить только клавиатуру существующего поста и сверить ответ Telegram."""
-        markup = map_reply_markup(url)
+        return await self.edit_inline_keyboard(chat_id, message_id, map_reply_markup(url))
+
+    async def edit_inline_keyboard(
+        self, chat_id: int, message_id: int, markup: Mapping[str, object],
+    ) -> bool:
         try:
             result = await self._call("editMessageReplyMarkup", {
                 "chat_id": chat_id, "message_id": message_id, "reply_markup": markup,
@@ -233,7 +237,7 @@ class TelegramBotAPI:
         if (not isinstance(result, dict) or self._message_id(result) != message_id
                 or not isinstance(result.get("chat"), dict) or result["chat"].get("id") != chat_id
                 or result.get("reply_markup") != markup):
-            raise TelegramAPIError("edited map button receipt does not match the requested post")
+            raise TelegramAPIError("edited keyboard receipt does not match the requested post")
         return True
 
     async def send_media_group(
