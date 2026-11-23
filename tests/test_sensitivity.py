@@ -109,6 +109,8 @@ def test_confirmed_outcome_in_source_wins_over_russian_draft_wording():
     ([], "Полиция ищет свидетелей ДТП", "У школьника эпилепсия."),
     (["Povređen 15-godišnji putnik"], "В автобусе пострадал пассажир",
      "Пострадавшему назначили лекарства."),
+    (["Povređen 15-godišnji putnik"], "В автобусе пострадал пассажир",
+     "У него эпилепсия."),
     ([], "Объявлен розыск свидетелей ДТП", "У школьника эпилепсия."),
 ])
 def test_individual_minor_health_without_diagnosis_label_is_held(sources, title, body):
@@ -122,6 +124,14 @@ def test_individual_minor_health_without_diagnosis_label_is_held(sources, title,
 ])
 def test_age_and_general_health_mentions_do_not_imply_a_specific_minor(title, body):
     assert personal_detail_reason([], title, body) is None
+
+
+def test_private_case_in_source_does_not_block_general_health_draft():
+    assert personal_detail_reason(
+        ["Lekar je razgovarao sa 15-godišnjim putnikom."],
+        "Врач проведёт школьную лекцию",
+        "На лекции расскажут об эпилепсии и лекарствах.",
+    ) is None
 
 
 def test_old_search_notice_with_fresher_found_message_is_held():

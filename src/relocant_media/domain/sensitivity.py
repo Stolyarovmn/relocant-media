@@ -132,6 +132,18 @@ _HEALTH_DETAIL = re.compile(
     r"posebn\w*\s+potreb|посебн\w*\s+потреб|ментальн|умственн)",
     re.IGNORECASE,
 )
+_INDIVIDUAL_CARE = re.compile(
+    r"(?<!\w)(?:назначил[аи]?|принимает|нуждается|болеет|страдает|"
+    r"диагностировал[аи]?|у\s+(?:него|не[её]|пострадавш(?:его|ей))|"
+    r"проходит\s+лечен\w*|болује\s+од|boluje\s+od)\b",
+    re.IGNORECASE,
+)
+
+
+def _specific_minor(texts: Iterable[str]) -> bool:
+    return any(_INDIVIDUAL_MINOR.search(text) or any(
+        int(match["age"]) < 18 for match in _PERSON_AGE.finditer(text)
+    ) for text in texts)
 
 
 def personal_detail_reason(source_texts: Iterable[str], title: str, body: str) -> str | None:
@@ -149,15 +161,16 @@ def personal_detail_reason(source_texts: Iterable[str], title: str, body: str) -
     if not any(_HEALTH_DETAIL.search(text) for text in draft_texts):
         return None
     story = sensitive_signals(texts)
-    specific_minor = any(_INDIVIDUAL_MINOR.search(text) for text in texts) or any(
-        int(match["age"]) < 18 for text in texts for match in _PERSON_AGE.finditer(text)
-    )
-    if not specific_minor and not story & {"minor", "missing"}:
+    minor_in_draft = _specific_minor(draft_texts)
+    minor_in_source = _specific_minor(sources)
+    if not (minor_in_draft or minor_in_source or story & {"minor", "missing"}):
         return None
     if any(_FOUND.search(text) for text in texts):
         return PERSONAL_DETAIL_REASON
     if any(_ACTIVE_SEARCH.search(text) for text in texts):
         return None
-    if specific_minor or "health" in sensitive_signals(draft_texts):
+    care_in_draft = any(_INDIVIDUAL_CARE.search(text) for text in draft_texts)
+    if minor_in_draft or (minor_in_source and care_in_draft) or (
+            "minor" in story and "health" in sensitive_signals(draft_texts)):
         return PERSONAL_DETAIL_REASON
     return None
