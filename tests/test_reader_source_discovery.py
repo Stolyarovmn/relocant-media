@@ -5,9 +5,11 @@ from sqlalchemy.orm import Session
 from test_reader_publication import POLICY, material
 from test_reader_resolution import READER_ID, Bot, submission
 from test_reader_resolution import engine as reader_engine
-from test_venue_runtime import NOW
+from test_venue_runtime import NOW, URL
 from test_venue_runtime import runtime as venue_runtime
 
+from relocant_media.collectors.base import RawItem as CollectedItem
+from relocant_media.collectors.telegram_topics import TopicLead
 from relocant_media.ops import server_cycle
 from relocant_media.services.reader_publication import material_fingerprint, permission_reason
 from relocant_media.services.reader_resolution import process_reader_resolutions
@@ -59,6 +61,65 @@ async def test_private_signal_links_only_matching_public_feed(runtime):
         raw_id, = priority_raw_ids(session)
         assert "private-label" not in session.get(RawItem, raw_id).body
     assert not any("private-label" in url for url in requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_forward_checks_enabled_channel_and_links_verified_article(
+    runtime, monkeypatch, overflow,
+):
+    engine, venue, _, contents, _ = runtime
+    title = "Mango Night Market u muzeju"
+    body = "Mango Night Market se održava 25. oktobra 2026. u muzeju od 18 časova. " * 5
+    contents.update(title=title, body=body)
+    ids = {}
+    for username in ("serbia", "notregistered"):
+        payload = source_signal("Анонс из канала\nЗакрытая деталь.")
+        posts = range(193, 198) if overflow and username == "serbia" else (197,)
+        payload["reader_parts"] = {
+            str(post): {"public_forward_url": f"https://t.me/{username}/{post}"}
+            for post in posts
+        }
+        payload["reader_publication"]["material_sha256"] = material_fingerprint(payload)
+        ids[username] = submission(engine, status="reader_review", **payload)
+    forwarded = []
+
+    async def exact_post(channel, message_id, client, *, now):
+        forwarded.append((channel, message_id))
+        if message_id != 197:
+            return None
+        return TopicLead(
+            channel=channel, message_id=message_id, url=f"https://t.me/{channel}/{message_id}",
+            published_at=now - timedelta(hours=2), observed_at=now,
+            text="Отдельная публичная публикация", outbound_urls=(URL,), views=None,
+        )
+
+    async def article(_, url):
+        assert url == URL
+        return CollectedItem(venue.id, "verified", URL, title, body, NOW - timedelta(hours=2))
+
+    monkeypatch.setattr(server_cycle, "runtime_channels_for_city", lambda _: ("Serbia",))
+    monkeypatch.setattr(server_cycle, "collect_forwarded_topic", exact_post)
+    monkeypatch.setattr(server_cycle, "_collect_exact_url", article)
+    result = await server_cycle.collect_sources(engine)
+    if overflow:
+        assert forwarded == [("Serbia", post) for post in range(193, 197)]
+        with Session(engine) as session:
+            waiting = session.get(Submission, ids["serbia"])
+            assert waiting.payload[DISCOVERY_FIELD]["status"] == "forward_lookup_deferred"
+        forwarded.clear()
+        result = await server_cycle.collect_sources(engine)
+    assert forwarded == [("Serbia", 197)]
+    assert result["reader_source_discovery"]["linked"] == 1
+    assert result["reader_source_discovery"]["ambiguous"] == 0
+    with Session(engine) as session:
+        linked = session.get(Submission, ids["serbia"])
+        assert linked.status == "source_linked"
+        raw_id, = linked.payload["raw_item_ids"]
+        item = session.get(RawItem, raw_id)
+        assert item.url == URL
+        assert "Закрытая деталь" not in item.body
+        assert session.get(Submission, ids["notregistered"]).status == "reader_review"
 
 
 def test_retry_window_respects_delays_original_policy_and_new_material(engine):

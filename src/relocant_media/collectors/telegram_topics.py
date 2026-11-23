@@ -208,6 +208,31 @@ async def collect_topics(
     return leads
 
 
+async def collect_forwarded_topic(
+    channel: str, message_id: int, client: httpx.AsyncClient, *, now: datetime,
+) -> TopicLead | None:
+    """Fetch only the exact public channel post selected by the reader."""
+    validate_username(channel)
+    if type(message_id) is not int or not 0 < message_id < 2**53:
+        raise ValueError("invalid public Telegram message id")
+    try:
+        response = await client.get(
+            f"https://t.me/{channel}/{message_id}?embed=1", follow_redirects=False, timeout=5,
+        )
+    except httpx.HTTPError as error:
+        raise PreviewError("Публичная пересылка временно недоступна") from error
+    if response.status_code == 429 or response.status_code >= 500:
+        raise PreviewError("Публичная пересылка временно недоступна")
+    if not response.is_success:
+        return None
+    if len(response.content) > 2_000_000:
+        return None
+    return next((
+        lead for lead in parse_topics(response.text, channel, now, max_age=timedelta(hours=48))
+        if lead.message_id == message_id
+    ), None)
+
+
 def _publication_time(value: object) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(str(value))

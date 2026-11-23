@@ -11,6 +11,8 @@ import relocant_media.api.app as api
 from relocant_media.ops.intake_batch import collect_batch
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.private_intake import receive_private_tips
+from relocant_media.services.reader_forwarded_source import public_forward_urls
+from relocant_media.services.reader_publication import material_fingerprint
 from relocant_media.services.submission_feedback import reply_to_submissions, resolve_submission
 from relocant_media.services.submission_queue import batch_submissions, pending_submissions
 from relocant_media.services.submission_reference import PUBLIC_REFERENCE_PATTERN
@@ -99,6 +101,33 @@ def engine():
 def submission_id(engine):
     with Session(engine) as session:
         return session.scalars(select(Submission.id).order_by(Submission.id.desc())).first()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True])
+async def test_public_forward_is_kept_as_content_from_both_reader_entries(engine, direct):
+    bot = Telegram(direct)
+    await bot.receive(engine, bot.message(
+        30, text="Предложить новость", forward_origin={
+            "type": "channel", "chat": {"type": "channel", "username": "Serbia"},
+            "message_id": 197,
+        },
+    ))
+    await bot.receive(engine, bot.message(
+        31, text="Дополнение", forward_origin={
+            "type": "channel", "chat": {"type": "channel"}, "message_id": 20,
+        },
+    ))
+    with Session(engine) as session:
+        row, = session.scalars(select(Submission))
+        assert row.status == "choosing"
+        assert row.payload["text"] == "Предложить новость\nДополнение"
+        assert public_forward_urls(row.payload) == ["https://t.me/serbia/197"]
+        changed = {**row.payload, "reader_parts": {**row.payload["reader_parts"], "30": {
+            "text": "Предложить новость", "attachments": [],
+            "public_forward_url": "https://t.me/serbia/198",
+        }}}
+        assert material_fingerprint(row.payload) != material_fingerprint(changed)
 
 
 def public_reference(engine, sid):

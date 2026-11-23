@@ -11,6 +11,11 @@ from sqlalchemy.orm import Session
 
 from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
+from relocant_media.services.reader_forwarded_source import (
+    forwarded_public_post,
+    is_forwarded_message,
+    public_forward_urls,
+)
 from relocant_media.services.reader_publication import (
     advance_publication,
     begin_publication,
@@ -286,7 +291,12 @@ def _items(message: dict[str, Any]) -> dict[str, Any] | None:
                     "file_unique_id": item.get("file_unique_id"),
                 }
             )
-    return {"text": body.strip(), "attachments": attachments}
+    part: dict[str, Any] = {"text": body.strip(), "attachments": attachments}
+    if is_forwarded_message(message):
+        part["forwarded"] = True
+    if source_url := forwarded_public_post(message):
+        part["public_forward_url"] = source_url
+    return part
 
 
 def _append(row: Submission, message_id: int, items: dict[str, Any]) -> bool:
@@ -296,7 +306,8 @@ def _append(row: Submission, message_id: int, items: dict[str, Any]) -> bool:
     parts[str(message_id)] = items
     ordered = [parts[key] for key in sorted(parts, key=int)]
     text = "\n".join(part["text"] for part in ordered if part["text"] and not (
-        not part["attachments"] and _start_text(part["text"])))
+        not part["attachments"] and not part.get("forwarded") and _start_text(part["text"])
+    ))
     attachments: dict[str, dict[str, Any]] = {}
     for part in ordered:
         for media in part["attachments"]:
@@ -451,15 +462,18 @@ def record_reader_message(
         return False
     user_id, chat_id, message_id, topic_id = identity
     text = items["text"]
-    start = not items["attachments"] and _start_text(text)
-    if not (items["text"] or items["attachments"]):
+    forwarded = bool(items.get("forwarded"))
+    control = not items["attachments"] and not forwarded
+    start = control and _start_text(text)
+    if not (items["text"] or items["attachments"] or items.get("public_forward_url")):
         return False
     received_at = _date(message)
     cases = _recent_cases(session, user_id, chat_id, topic_id)
     draft = next((case for case in cases if case.status in DRAFT_STATES), None)
     if draft is not None and publication_enabled:
         draft.payload = {**draft.payload, "reader_publication_enabled": True}
-        if draft.payload.get("reader_publication") or ROUTE_LABELS.get(text) == "news_tip":
+        if (draft.payload.get("reader_publication")
+                or control and ROUTE_LABELS.get(text) == "news_tip"):
             draft.payload = {**draft.payload,
                              "reader_username": message.get("from", {}).get("username")}
     if edited:
@@ -471,7 +485,7 @@ def record_reader_message(
         if changed and row is not None:
             _reset_publication(row, message_id, received_at)
         return changed
-    if draft is not None and draft.payload.get("reader_publication") and not start:
+    if draft is not None and draft.payload.get("reader_publication") and not (start or forwarded):
         if text in ROUTE_LABELS:
             _publication_notice(draft, message_id, received_at)
             return True
@@ -493,7 +507,7 @@ def record_reader_message(
             return True
     if (
         not start
-        and not items["attachments"]
+        and control
         and _record_keyboard_choice(
             session,
             cases,
@@ -504,7 +518,7 @@ def record_reader_message(
         )
     ):
         return True
-    if not items["attachments"] and text in ROUTE_LABELS and not any(
+    if control and text in ROUTE_LABELS and not any(
         case.status in DRAFT_STATES for case in cases
     ):
         start = True
@@ -714,8 +728,9 @@ def _apply_action(
 
 def _has_submission_content(row: Submission, kind: str) -> bool:
     text = row.payload["text"].strip()
-    return bool((text and not _start_text(text))
-                or (kind == "news_tip" and row.payload["attachments"]))
+    return bool((text and not _start_text(text)) or (
+        kind == "news_tip" and (row.payload["attachments"] or public_forward_urls(row.payload))
+    ))
 
 
 async def reader_destination(
