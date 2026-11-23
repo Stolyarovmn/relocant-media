@@ -13,7 +13,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin>
-  <link rel="stylesheet" href="style.css?v=16">
+  <link rel="stylesheet" href="style.css?v=17">
   <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin defer></script>
@@ -67,23 +67,27 @@
             <button type="button" data-kind="road" aria-pressed="true"><i aria-hidden="true">⛔</i>Дороги</button>
           </div>
           <details id="layer-view" class="layer-view" data-view="detail">
-            <summary title="Вид карты">Вид<span id="layer-view-current" class="sr-only"> · Дома и границы</span></summary>
-            <div class="layer-view-options" role="group" aria-label="Вид городских работ">
+            <summary title="Вид карты">
+              <span class="view-indicator" aria-hidden="true"></span>
+              Вид<span id="layer-view-current" class="sr-only"> · Дома и границы</span>
+            </summary>
+            <div class="layer-view-options" role="group" aria-labelledby="layer-view-title">
+              <strong id="layer-view-title" class="layer-view-title">Вид карты</strong>
               <button type="button" data-view="detail" aria-pressed="true">
-                <span class="view-symbol view-symbol-detail" aria-hidden="true"></span>
-                <span>Дома и границы<small>Точные адреса и контуры</small></span>
+                <span class="view-sample view-sample-detail" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span>Дома и границы<small>Точные адреса и зоны</small></span>
               </button>
               <button type="button" data-view="corridor" aria-pressed="false">
-                <span class="view-symbol view-symbol-corridor" aria-hidden="true"></span>
-                <span>Отрезки улиц<small>Начало, конец и изгибы</small></span>
+                <span class="view-sample view-sample-corridor" aria-hidden="true"><i></i><i></i></span>
+                <span>Отрезки улиц<small>Границы перекрытий</small></span>
               </button>
               <button type="button" data-view="heat" aria-pressed="false">
-                <span class="view-symbol view-symbol-heat" aria-hidden="true"></span>
+                <span class="view-sample view-sample-heat" aria-hidden="true"></span>
                 <span>Тепловая карта<small>Где больше объявлений</small></span>
               </button>
               <button type="button" data-view="timeline" aria-pressed="false">
-                <span class="view-symbol view-symbol-timeline" aria-hidden="true"></span>
-                <span>По времени<small>Работы на выбранный час</small></span>
+                <span class="view-sample view-sample-timeline" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span>По времени<small>Работы в нужный час</small></span>
               </button>
             </div>
           </details>
