@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -72,9 +73,31 @@ def _phase(error: BaseException) -> str:
 
 
 def _retry_seconds(error: BaseException) -> float | None:
+    return _reported_pause(error)
+
+
+def _reported_pause(error: BaseException) -> float | None:
+    """The server's pause for a 429, or ``None`` when absent or not a finite number."""
     quota = getattr(error, "quota", None)
     delay = quota.get("retry_seconds") if isinstance(quota, dict) else None
-    return float(delay) if isinstance(delay, int | float) and delay >= 0 else None
+    if isinstance(delay, bool) or not isinstance(delay, int | float):
+        return None
+    return float(delay) if math.isfinite(delay) and delay >= 0 else None
+
+
+def _quota_429(calls: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per model: how many 429 answers came and the longest pause the server asked for."""
+    result: dict[str, dict[str, Any]] = {}
+    for call in calls:
+        if call.get("phase") != "http_error_429":
+            continue
+        stats = result.setdefault(call["model"], {"count": 0, "max_retry_seconds": None})
+        stats["count"] += 1
+        pause = call.get("retry_seconds")
+        if pause is not None and (stats["max_retry_seconds"] is None
+                                  or pause > stats["max_retry_seconds"]):
+            stats["max_retry_seconds"] = pause
+    return result
 
 
 class TimedProvider:
@@ -124,6 +147,9 @@ class TimedProvider:
         except Exception as error:
             entry["error_type"] = type(error).__name__
             entry["phase"] = _phase(error)
+            if entry["phase"] == "http_error_429":
+                # Only the parsed pause is kept; the response text never is.
+                entry["retry_seconds"] = _reported_pause(error)
             raise
         finally:
             entry["seconds"] = round(time.monotonic() - started, 2)
@@ -347,6 +373,7 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
             "median_input_chars_per_item": _median([row["input_chars"] for row in rows]),
             "median_output_chars_per_item": _median([row["output_chars"] for row in rows]),
             "by_role_and_model": by_model,
+            "quota_429": _quota_429(bundle_calls),
         }
     names = list(result["bundles"])
     result["pairs_published_reviewed"] = sum(
@@ -410,7 +437,7 @@ def run_trial(database: Path, bundles: dict[str, dict[str, str]],
             session.rollback()
     finally:
         engine.dispose()
-    return {"version": 3, "generated_at": datetime.now(UTC).isoformat(), "models": used_models,
+    return {"version": 4, "generated_at": datetime.now(UTC).isoformat(), "models": used_models,
             "summary": summarize(items, bundles, log.calls, unavailable=unavailable,
                                  stopped=budget.stopped, published_only=published_only),
             "items": items}
@@ -461,6 +488,16 @@ def markdown(result: dict[str, Any]) -> str:
         phases = ", ".join(f"{phase}={count}" for phase, count in stats["error_phases"].items())
         lines.append(f"| {name} | {stats['retries']} | {stats['call_error_share']} | "
                      f"{phases or '—'} |")
+    lines += ["", "| Связка | Модель | Ответов 429 | Макс. пауза 429, с |", "|---|---|---|---|"]
+    rows_429 = 0
+    for name, stats in summary["bundles"].items():
+        for model, quota in stats["quota_429"].items():
+            pause = quota["max_retry_seconds"]
+            lines.append(f"| {name} | {model} | {quota['count']} | "
+                         f"{'нет данных' if pause is None else pause} |")
+            rows_429 += 1
+    if not rows_429:
+        lines.append("| — | — | 0 | — |")
     lines += ["", f"Расхождений вердикта фактов по опубликованным: "
               f"{summary['facts_verdicts_differ']}"]
     return "\n".join(lines) + "\n"

@@ -432,3 +432,52 @@ def test_pair_needs_facts_and_utility_verdicts_from_both_bundles():
     assert model_trial._reviewed({"reviews": only_facts}) is False
     assert model_trial._reviewed({"reviews": {**only_facts, "utility": {"verdict": None}}}) \
         is False
+
+
+def test_longest_429_pause_is_reported_per_model_without_response_text(reviewed, fakes):
+    session, run = reviewed
+    _sent(session, run)
+    seen = {"count": 0}
+
+    class Provider(FakeProvider):
+        def generate_json(self, **kwargs):
+            if self.model != "gemini-3.5-flash-lite" and seen["count"] < 2:
+                seen["count"] += 1
+                raise Quota(retry=[20, 45][seen["count"] - 1])
+            return super().generate_json(**kwargs)
+
+    budget = model_trial.WaitBudget(remaining=100, sleep=lambda _: None)
+    result = model_trial.run_trial(session.get_bind().url.database, BUNDLES, Provider,
+                                   limit=1, budget=budget)
+    summary = result["summary"]
+    assert summary["bundles"]["candidate"]["quota_429"] == {
+        "gemini-3.8-flash": {"count": 2, "max_retry_seconds": 45.0}}
+    assert summary["bundles"]["current"]["quota_429"] == {}
+    text = model_trial.markdown(result)
+    assert "| candidate | gemini-3.8-flash | 2 | 45.0 |" in text
+    assert "secret quota body" not in json.dumps(model_trial.public_result(result))
+    assert "secret quota body" not in text
+
+
+@pytest.mark.parametrize("retry", [None, "soon", float("inf"), -1, True])
+def test_429_without_usable_pause_shows_no_data(reviewed, fakes, retry):
+    session, run = reviewed
+    _sent(session, run)
+    result = model_trial.run_trial(session.get_bind().url.database, BUNDLES,
+                                   _flaky(1, lambda: Quota(retry=retry)), limit=1,
+                                   budget=model_trial.WaitBudget(sleep=lambda _: None))
+    quota = result["summary"]["bundles"]["candidate"]["quota_429"]
+    assert quota == {"gemini-3.8-flash": {"count": 1, "max_retry_seconds": None}}
+    json.dumps(model_trial.public_result(result), allow_nan=False)
+    assert "| candidate | gemini-3.8-flash | 1 | нет данных |" in model_trial.markdown(result)
+
+
+def test_cooldown_and_other_errors_are_not_counted_as_429(reviewed, fakes):
+    session, run = reviewed
+    _sent(session, run)
+    result = model_trial.run_trial(
+        session.get_bind().url.database, BUNDLES,
+        _flaky(1, lambda: Quota(phase="quota_cooldown", retry=10)), limit=1,
+        budget=model_trial.WaitBudget(sleep=lambda _: None))
+    assert result["summary"]["bundles"]["candidate"]["quota_429"] == {}
+    assert "| — | — | 0 | — |" in model_trial.markdown(result)
