@@ -75,6 +75,38 @@ def test_history_outside_window_does_not_create_fuzzy_pairs(
     assert calls == 0
 
 
+def test_dense_different_sources_with_common_words_skip_unnecessary_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compare = dedup.same_event
+    calls = 0
+
+    def counted(left: dedup.EventCandidate, right: dedup.EventCandidate) -> bool:
+        nonlocal calls
+        calls += 1
+        return compare(left, right)
+
+    monkeypatch.setattr(dedup, "same_event", counted)
+    items = [
+        replace(candidate(number), source_id=f"feed-{number}",
+                title="Белград " + " ".join(f"тема{number}слово{word}" for word in range(6)))
+        for number in range(250)
+    ]
+    assert len(dedup.cluster_events(items)) == len(items)
+    assert calls == 0
+
+
+def test_cross_source_title_at_threshold_survives_rarest_token_selection() -> None:
+    terms = [f"слово{chr(97 + index // 26)}{chr(97 + index % 26)}" for index in range(50)]
+    first = replace(candidate(1), title=" ".join(terms[:39]), body="Первое описание.")
+    second = replace(candidate(2, day=2), source_id="media", title=" ".join(terms),
+                     body="Второе описание.")
+    assert dedup.same_event(first, second)
+    assert dedup.cluster_events([first, second]) == [[first, second]]
+    later = replace(second, published_at=NOW + timedelta(days=2, seconds=1))
+    assert dedup.cluster_events([first, later]) == [[first], [later]]
+
+
 def test_index_preserves_earliest_cluster_exact_history_and_missing_dates() -> None:
     first, second = candidate(1), candidate(2)
     bridge = replace(
@@ -120,3 +152,6 @@ def test_replaced_candidate_does_not_inherit_cached_text_or_facts() -> None:
     assert correction.resolved_content_sha256 != old_hash
     assert not dedup.same_event(first, correction)
     assert second.resolved_content_sha256 == old_hash
+    revision = replace(second, url=second.url + "?__source_revision=next")
+    assert not dedup.same_event(first, revision)
+    assert dedup.same_event(first, second)
