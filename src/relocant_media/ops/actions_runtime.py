@@ -195,7 +195,8 @@ def _sweep_material_lifecycle(database: Path, *, now: datetime | None = None) ->
         with Session(engine) as session:
             sweep_materials(session, city="belgrade", now=now or datetime.now(UTC))
             # This engine is fresh and used only for this sweep.
-            changes = session.connection().exec_driver_sql("SELECT total_changes()").scalar_one()
+            result = session.connection().exec_driver_sql("SELECT total_changes()")
+            changes = int(result.scalar_one())
             session.commit()
             return changes > 0
     finally:
