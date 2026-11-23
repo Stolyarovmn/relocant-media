@@ -97,21 +97,24 @@ def test_preview_skips_invalid_ranked_handoff_before_blob_read_and_keeps_other_w
     assert store.sha == "initial" and store.state["status"] == "ready"
 
 
-@pytest.mark.parametrize("rank_only", [False, True])
+@pytest.mark.parametrize("result_kind", ["package", "rank", "deferred"])
 def test_fallback_uses_one_canonical_claim_and_no_primary_model(
-    context, tmp_path, monkeypatch, rank_only,
+    context, tmp_path, monkeypatch, result_kind,
 ):
     store, old = context
     store.state["last_editorial_at"] = "editorial-before-fallback"
     storage = PrivateStore(old.files)
     request = {"version": 1, "candidates": [{"raw_item_id": 23}]}
     request_sha = storage.save(canonical_json(request).encode())
-    result = (
-        {"version": 2, "kind": "batch_preselection", "request_sha256": request_sha,
-         "selected_ids": [23]}
-        if rank_only else
-        {"version": 1, "request_sha256": request_sha, "packages": [{"raw_item_id": 23}]}
-    )
+    result = {"request_sha256": request_sha}
+    if result_kind == "rank":
+        result.update(version=2, kind="batch_preselection", selected_ids=[23])
+    elif result_kind == "deferred":
+        result.update(version=1, packages=[], deferred=[
+            {"raw_item_id": 23, "reason": "source_confirmation_missing"},
+        ])
+    else:
+        result.update(version=1, packages=[{"raw_item_id": 23}])
     result_sha = storage.save(canonical_json(result).encode())
     seen = []
 
@@ -124,7 +127,7 @@ def test_fallback_uses_one_canonical_claim_and_no_primary_model(
         assert "GEMINI_API_KEY" not in env
         assert "EDITORIAL_OWNER_CHAT_ID" not in env
         assert "GPT_FALLBACK_BLOB_SHA256" not in env
-        if rank_only:
+        if result_kind != "package":
             assert "TELEGRAM_BOT_TOKEN" not in env
             assert env["EDITORIAL_SEND_ENABLED"] == "false"
         else:

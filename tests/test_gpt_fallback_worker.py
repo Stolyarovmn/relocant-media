@@ -753,6 +753,71 @@ def test_subset_response_keeps_unresolved_tail_but_accepts_a_known_human_hold(
     assert result["processing_errors"] == []
 
 
+def test_deferral_records_a_reason_without_consuming_the_retry_or_creating_a_post(
+    fallback_session, monkeypatch,
+):
+    session, raw, run = fallback_session
+    before = copy.deepcopy(lifecycle_state(session, raw.id, now=NOW))
+    session.commit()
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    digest = hashlib.sha256(canonical_json(request).encode()).hexdigest()
+    value = {"request": request, "result": {"version": 1, "request_sha256": digest,
+             "packages": [], "deferred": [{"raw_item_id": raw.id,
+                                           "reason": "sensitive_review_required"}]}}
+    payload = _parse(value)
+    engine = session.get_bind()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Причина ожидания не должна запускать чтение, импорт или доставку")
+
+    monkeypatch.setattr(worker, "_check_live_evidence", forbidden)
+    monkeypatch.setattr(worker, "import_package", forbidden)
+    monkeypatch.setattr(worker, "_publish_imported", forbidden)
+    for now in (NOW, NOW + timedelta(seconds=1)):
+        report = worker.run_worker(engine, payload, now=now, send_enabled=True)
+        assert report["status"] == "PRIMARY_PARTIAL" and report["fallback_required"]
+        assert report["deferred_reasons"] == {"sensitive_review_required": 1}
+        assert report["unresolved"] == 1
+        assert report["imported"] == report["awaiting_owner"] == report["sent_count"] == 0
+    with Session(engine) as saved:
+        note = saved.get(SchedulerRun, run.id).details["gpt_fallback_deferrals"][str(raw.id)]
+        assert note == {"reason": "sensitive_review_required", "request_sha256": digest,
+                        "requested_at": NOW.isoformat(), "recorded_at": NOW.isoformat()}
+        assert lifecycle_state(saved, raw.id, now=NOW) == before
+        assert saved.get(EditorialRun, raw.id) is None
+        assert not saved.scalars(select(Post)).first()
+        assert gpt_fallback.pending_gpt_ids(saved, now=NOW) == {raw.id}
+
+    value["result"]["deferred"][0]["reason"] = "source_confirmation_missing"
+    conflict = worker.run_worker(engine, _parse(value), now=NOW)
+    assert conflict["status"] == "PRIMARY_FAILED"
+    assert conflict["processing_errors"][0]["reason"] == "deferral_conflict"
+
+
+def test_deferral_requires_an_exact_candidate_and_disallows_multiple_outcomes(fallback_session):
+    session, raw, run = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    digest = hashlib.sha256(canonical_json(request).encode()).hexdigest()
+    value = {"request": request, "result": {
+        "version": 1, "request_sha256": digest,
+        "packages": [], "deferred": [
+            {"raw_item_id": raw.id + 10, "reason": "source_confirmation_missing"},
+        ],
+    }}
+    report = worker.run_worker(session.get_bind(), _parse(value), now=NOW)
+    assert report["status"] == "PRIMARY_FAILED" and not report["deferred_reasons"]
+    session.refresh(run)
+    assert "gpt_fallback_deferrals" not in run.details
+
+    value["result"]["deferred"][0]["raw_item_id"] = raw.id
+    value["result"]["rejected"] = [{"raw_item_id": raw.id, "category": "transport",
+                                    "rationale": "Повтор."}]
+    with pytest.raises(ValidationError, match="уникальных решений"):
+        _parse(value)
+
+
 @pytest.mark.parametrize("kind", ["source_map", "native_map"])
 def test_government_map_fails_closed_until_its_live_adapter_checks_html(
     ready_package, offline, kind,

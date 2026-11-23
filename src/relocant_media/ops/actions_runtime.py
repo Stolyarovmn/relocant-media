@@ -215,11 +215,12 @@ def _prepare_gpt_input(storage: SnapshotStore, digest: str, path: Path) -> bool:
     result = _gpt_blob(storage, digest)
     packages = result.get("packages")
     rejected = result.get("rejected", [])
+    deferred = result.get("deferred", [])
     package_result = (
-        set(result) - {"rejected"} == {"version", "request_sha256", "packages"}
+        set(result) - {"rejected", "deferred"} == {"version", "request_sha256", "packages"}
         and type(result["version"]) is int and result["version"] == 1
         and isinstance(packages, list) and isinstance(rejected, list)
-        and 1 <= len(packages) + len(rejected) <= 5
+        and isinstance(deferred, list) and 1 <= len(packages) + len(rejected) + len(deferred) <= 5
     )
     rank_result = (
         set(result) == {"version", "kind", "request_sha256", "selected_ids"}
@@ -341,6 +342,8 @@ def _gpt_result_expired(database: Path, exchange_file: Path, now: datetime) -> b
         payload = FallbackInput.model_validate_json(exchange_file.read_bytes())
     except ValueError:
         return False
+    non_package_ids = [item.raw_item_id for item in payload.result.rejected]
+    non_package_ids.extend(item.raw_item_id for item in payload.result.deferred)
     engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
     try:
         with Session(engine) as session, session.no_autoflush:
@@ -352,9 +355,9 @@ def _gpt_result_expired(database: Path, exchange_file: Path, now: datetime) -> b
                 for package in payload.result.packages
             ) and all(
                 obsolete_fallback_response(
-                    session, payload.request, rejection.raw_item_id, now=now,
+                    session, payload.request, raw_id, now=now,
                 ) == "material_expired"
-                for rejection in payload.result.rejected
+                for raw_id in non_package_ids
             )
     finally:
         engine.dispose()
@@ -700,6 +703,8 @@ def _counters(value: object, keys: tuple[str, ...]) -> dict[str, int]:
 
 
 def _report_fallback_result(run_dir: Path) -> None:
+    from relocant_media.services.gpt_fallback import FallbackDeferredReason
+
     try:
         report = json.loads((run_dir / "server-report.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -714,6 +719,9 @@ def _report_fallback_result(run_dir: Path) -> None:
         ))
         result: dict[str, Any] = {"status": status}
         result.update({key: count for key, count in counts.items() if 0 <= count <= 5})
+        deferred = _counters(report.get("deferred_reasons"), tuple(FallbackDeferredReason))
+        if safe_deferred := {key: count for key, count in deferred.items() if 1 <= count <= 5}:
+            result["deferred_reasons"] = safe_deferred
         errors = _processing_error_coordinates(report.get("processing_errors"))
         if errors:
             result["processing_errors"] = errors

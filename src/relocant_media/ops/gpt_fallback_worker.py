@@ -30,10 +30,12 @@ from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.ops import server_cycle, server_runtime
 from relocant_media.ops.gpt_export_receipt import require_public_documents
+from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.editorial import EditorialService
 from relocant_media.services.flight_review import flight_review_marker
 from relocant_media.services.gpt_batch_fallback import validate_batch_rank
 from relocant_media.services.gpt_fallback import (
+    FallbackDeferredReason,
     FallbackValidationError,
     build_request,
     obsolete_fallback_response,
@@ -89,6 +91,12 @@ class FallbackRejection(BaseModel):
     duplicate_of_message_id: int | None = Field(default=None, gt=0, lt=2**63)
 
 
+class FallbackDeferral(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    raw_item_id: int = Field(gt=0, lt=2**63)
+    reason: FallbackDeferredReason
+
+
 class FallbackResult(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
@@ -96,6 +104,7 @@ class FallbackResult(BaseModel):
     request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     packages: tuple[EditorialPackage, ...] = Field(max_length=5)
     rejected: tuple[FallbackRejection, ...] = Field(default=(), max_length=5)
+    deferred: tuple[FallbackDeferral, ...] = Field(default=(), max_length=5)
 
     @field_validator("version", mode="before")
     @classmethod
@@ -105,9 +114,10 @@ class FallbackResult(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def unique_packages(self) -> Self:
+    def unique_results(self) -> Self:
         ids = [package.raw_item_id for package in self.packages]
         ids.extend(item.raw_item_id for item in self.rejected)
+        ids.extend(item.raw_item_id for item in self.deferred)
         if not 1 <= len(ids) <= 5 or len(ids) != len(set(ids)):
             raise ValueError("Ожидаются от одного до пяти уникальных решений")
         return self
@@ -246,6 +256,45 @@ def _save_rejection(
 
         after_result(session, raw_id, now=now)
         session.commit()
+
+
+def _record_deferral(
+    engine: Engine, payload: FallbackInput, item: FallbackDeferral, *, now: datetime,
+) -> str | None:
+    """Записать причину ожидания в исходном цикле, не затрагивая материал или его очередь."""
+    with Session(engine) as session:
+        lock_editorial_city(session, "belgrade")
+        obsolete = obsolete_fallback_response(
+            session, payload.request, item.raw_item_id, now=now, claim_denied=True,
+        )
+        if obsolete is not None:
+            return obsolete
+        parsed, _, _, _ = validate_fallback_candidate(
+            session, payload.request, item.raw_item_id, now=now,
+        )
+        run = session.get(SchedulerRun, parsed.scheduler_run_id)
+        assert run is not None
+        notes = run.details.get("gpt_fallback_deferrals", {})
+        key = str(item.raw_item_id)
+        previous = notes.get(key)
+        digest = payload.result.request_sha256
+        if previous is not None:
+            if previous["request_sha256"] == digest:
+                if previous["reason"] != item.reason.value:
+                    raise FallbackValidationError(
+                        "Причина ожидания уже зафиксирована", code="deferral_conflict",
+                    )
+                return None
+            if datetime.fromisoformat(previous["requested_at"]) >= parsed.created_at:
+                return "request_superseded"
+        run.details = {**run.details, "gpt_fallback_deferrals": {**notes, key: {
+            "reason": item.reason.value,
+            "request_sha256": digest,
+            "requested_at": parsed.created_at.isoformat(),
+            "recorded_at": now.isoformat(),
+        }}}
+        session.commit()
+        return None
 
 
 def _claim_fallback(session: Session, raw_id: int, *, now: datetime) -> str | None:
@@ -482,6 +531,17 @@ def run_worker(
             )
             rejected += 1
             errors.append(_error_entry(phase, error))
+    deferrals: dict[int, str] = {}
+    for item in payload.result.deferred:
+        try:
+            reason = _record_deferral(engine, payload, item, now=now or datetime.now(UTC))
+            if reason is None:
+                deferrals[item.raw_item_id] = item.reason.value
+            else:
+                obsolete[item.raw_item_id] = reason
+        except Exception as error:
+            rejected += 1
+            errors.append(_error_entry("defer", error))
     blocked: list[dict[str, Any]] = []
     sent_count = 0
     if send_enabled is True and delivery_ids:
@@ -513,8 +573,9 @@ def run_worker(
         fresh_check_pending = needs_fresh_check and bool(
             pending_gpt_ids(session, now=now or datetime.now(UTC)) & obsolete.keys(),
         )
+    resolved.difference_update(deferrals)
     unresolved = len(requested_ids - resolved - obsolete.keys())
-    status = ("PRIMARY_FAILED" if not (imported or declined or obsolete) else
+    status = ("PRIMARY_FAILED" if not (imported or declined or obsolete or deferrals) else
               "PRIMARY_PARTIAL" if rejected or errors or blocked or unresolved else "PRIMARY_OK")
     return {
         "status": status, "mode": "subscription_gpt_fallback",
@@ -526,6 +587,7 @@ def run_worker(
             item.get("reason") == FLIGHT_REVIEW_REASON for item in blocked),
         "delivery_enabled": send_enabled is True, "processing_errors": errors,
         "obsolete_responses": dict(sorted(Counter(obsolete.values()).items())),
+        "deferred_reasons": dict(sorted(Counter(deferrals.values()).items())),
         "unresolved": unresolved,
         "fallback_required": bool(unresolved or errors or blocked or fresh_check_pending),
         "model_calls": 0,
