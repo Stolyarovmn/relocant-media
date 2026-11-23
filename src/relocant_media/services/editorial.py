@@ -31,6 +31,8 @@ from relocant_media.domain.event_facts import conflicting_facts
 from relocant_media.domain.originality import copies_source_text
 from relocant_media.domain.policy import (
     CURRENT_EDITORIAL_RULE_VERSION,
+    READER_REPORT_CATEGORIES,
+    READER_REPORT_REVIEW_REASON,
     SOURCE_REPLACED_REASON,
     primary_evidence_kind,
 )
@@ -419,6 +421,11 @@ def _auto_publish_policy_reason(
         return "source_policy_requires_review"
     if anchor_source.source_type == "official_venue_events" and category != "events":
         return "venue_events_only"
+    ownerships = {source.ownership.strip().casefold() for _, source in members}
+    if ("reader" in ownerships and not ownerships & {"official", "media"}
+            and (category or "").strip().lower() not in READER_REPORT_CATEGORIES):
+        # One unverified reader: incidents and other topics wait for the owner.
+        return READER_REPORT_REVIEW_REASON
     # Official evidence always counts; a verified media outlet only outside high-risk topics.
     if primary_evidence_kind([source.ownership for _, source in members], category or "") is None:
         return "official_source_required"

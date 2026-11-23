@@ -23,7 +23,11 @@ from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import event_key
 from relocant_media.domain.freshness import evidence_freshness
 from relocant_media.domain.originality import copies_source_text
-from relocant_media.domain.policy import OWNER_DECISION_REASONS, primary_evidence_kind
+from relocant_media.domain.policy import (
+    HIGH_RISK_CATEGORIES,
+    OWNER_DECISION_REASONS,
+    primary_evidence_kind,
+)
 from relocant_media.domain.presentation import presentation_title
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
@@ -55,6 +59,10 @@ def assert_primary_evidence(
 ) -> str:
     """Official evidence, or verified media outside high-risk topics with our own retelling."""
     kind = primary_evidence_kind(ownerships, category)
+    if (kind is None and "reader" in {value.strip().casefold() for value in ownerships}
+            and category.strip().lower() not in HIGH_RISK_CATEGORIES):
+        # The owner's own approval releases an attributed reader report (23.11.2026).
+        kind = "reader"
     if kind is None or independent_sensitive and kind != "official":
         raise DeliveryBlockedError("official primary evidence is required")
     if kind == "media" and copies_source_text(f"{draft.title}\n{draft.body}", source_texts):
