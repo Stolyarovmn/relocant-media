@@ -34,6 +34,7 @@ from relocant_media.ops.belgrade_digests import (
     deliver,
     due_slot,
     morning_delivery,
+    public_digest_days,
     render,
 )
 from relocant_media.ops.map_export import (
@@ -143,6 +144,21 @@ def test_morning_watch_checks_exact_receipt_for_that_day(receipt, status, reason
     del state["digest_receipts"]["belgrade:2026-11-22:morning"]
     assert morning_delivery(state, now).reason == "insufficient_items"
     assert morning_delivery(state, now.replace(day=23)).reason == "no_recorded_result"
+
+
+def test_daily_digest_observation_only_exposes_two_days_of_public_receipts():
+    now = datetime(2026, 11, 23, 16, tzinfo=UTC)
+    state = {"digest_receipts": {
+        "belgrade:2026-11-23:morning": {"state": "sent", "message_id": 163, "private": "SECRET"},
+        "belgrade:2026-11-22:evening": {"state": "sent", "message_id": True},
+        "belgrade:2026-11-21:evening": {"state": "sent", "message_id": 158},
+    }}
+    days = public_digest_days(state, now)
+    assert days == {
+        "2026-11-22": {"morning": {"status": "unconfirmed"}, "evening": {"status": "unconfirmed"}},
+        "2026-11-23": {"morning": {"status": "sent", "message_id": 163},
+                       "evening": {"status": "pending"}},
+    }
 
 
 def test_forecast_uses_dated_belgrade_column_and_skips_stale_html():

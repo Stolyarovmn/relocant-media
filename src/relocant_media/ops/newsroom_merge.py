@@ -8,6 +8,7 @@ from typing import Any
 
 from relocant_media.ai.diagnostics import AI_PHASES
 from relocant_media.ops.public_observations import public_coverage
+from relocant_media.services.daily_brief import public_daily_brief
 from relocant_media.services.editorial_flow import public_editorial_flow
 from relocant_media.services.kpi import public_kpi
 
@@ -56,6 +57,8 @@ def merge(catalog: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
                 city[key] = recorded[key]
         if "kpi" in recorded:
             city["kpi"] = public_kpi(recorded["kpi"])
+        if "daily_brief" in recorded:
+            city["daily_brief"] = public_daily_brief(recorded["daily_brief"])
         if "editorial_flow" in recorded:
             city["editorial_flow"] = public_editorial_flow(
                 recorded["editorial_flow"], {source["id"] for source in city["sources"]},

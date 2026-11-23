@@ -895,6 +895,48 @@ def test_intake_preserves_last_editorial_models(context, tmp_path, monkeypatch):
     assert city['last_cycle']['ai_calls'][0]['model'] == 'verified-model'
 
 
+def test_intake_projection_reports_only_public_digest_receipts(context, tmp_path, monkeypatch):
+    from relocant_media.ops.newsroom_export import snapshot
+
+    observed = '2026-11-23T21:00:00+00:00'
+    store, _ = context
+    store.state['digest_receipts'] = {
+        'belgrade:2026-11-23:morning': {
+            'state': 'sent', 'message_id': 163, 'html_sha256': 'PRIVATE',
+        },
+        'belgrade:2026-11-23:evening': {'state': 'uncertain', 'token': 'PRIVATE'},
+    }
+
+    def archived(database, output):
+        return {**create_snapshot(database, output), 'created_at': observed}
+
+    def exported(database, output, observed_at, run_dir):
+        payload = snapshot(ROOT)
+        payload['cities'][0].update(
+            runtime_source_count=1, runtime_status='available', observed_at=observed_at,
+            daily_brief={'timezone': 'Europe/Belgrade', 'days': [{
+                'local_date': '2026-11-23', 'post_count': 0, 'message_ids': [],
+                'views': None, 'measured_posts': 0,
+            }]},
+        )
+        output.write_text(json.dumps(payload))
+
+    monkeypatch.setattr(runtime, 'create_snapshot', archived)
+    monkeypatch.setattr(runtime, 'export_public', exported)
+    monkeypatch.setattr(runtime, 'run_child', lambda *args: 0)
+    monkeypatch.setattr(runtime, 'due_digest_slot', lambda *_: None)
+    output = tmp_path / 'public.json'
+    runtime.execute(*context, work=tmp_path / 'work', output=output,
+                    folder='folder_id_1', mode='intake', environment={
+                        'ACTIONS_CUTOVER_CONFIRMED': 'true', 'GITHUB_REPOSITORY': runtime.REPO,
+                        'GITHUB_REF': 'refs/heads/main'})
+    saved = output.read_text(encoding='utf-8')
+    day, = json.loads(saved)['cities'][0]['daily_brief']['days']
+    assert day['morning'] == {'status': 'sent', 'message_id': 163}
+    assert day['evening'] == {'status': 'unconfirmed'}
+    assert 'PRIVATE' not in saved
+
+
 def test_capacity_guard_blocks_before_claim_or_child(context, tmp_path, monkeypatch):
     before = context[0].read()
     monkeypatch.setattr(runtime, 'MAX_BYTES', 16 * 1024 * 1024)

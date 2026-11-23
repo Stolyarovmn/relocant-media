@@ -5,13 +5,15 @@ import argparse
 import json
 import re
 from collections import Counter
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from relocant_media.ops.newsroom_export import CITIES
 from relocant_media.ops.newsroom_export import snapshot as public_catalog
 from relocant_media.ops.newsroom_merge import merge
+from relocant_media.services.daily_brief import public_daily_brief
 from relocant_media.services.editorial_flow import public_editorial_flow
 from relocant_media.services.kpi import public_kpi
 
@@ -20,6 +22,11 @@ STATES = (
     "sent", "ready", "review", "held", "failed", "uncertain", "sending",
     "needs_reverify", "expired", "evidence_ready", "discovered", "drafting",
 )
+_CHANNELS = {"belgrade": "https://t.me/eduvbelgrad"}
+_CITY_ZONE = ZoneInfo("Europe/Belgrade")
+_EDITIONS = {"morning": "Белград сегодня", "evening": "Главное за день"}
+_EDITION_STATUS = {"pending": "ожидается", "unconfirmed": "выход не подтверждён",
+                   "not_scheduled": "вне расписания"}
 
 
 def _time(value: Any) -> datetime | None:
@@ -68,7 +75,7 @@ def _rolling_kpi(recorded: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_status(
-    snapshot: dict[str, Any] | None, *, city: str, now: datetime,
+    snapshot: dict[str, Any] | None, *, city: str, now: datetime, day: date | None = None,
 ) -> dict[str, Any]:
     """Never infer daily deliveries from source publication dates or lifetime totals."""
     if now.tzinfo is None:
@@ -100,6 +107,33 @@ def build_status(
     sources = {row["id"] for row in recorded.get("sources", [])
                if isinstance(row, dict) and isinstance(row.get("id"), str)}
     flow = public_editorial_flow(recorded.get("editorial_flow"), sources) if available else None
+    brief = public_daily_brief(recorded.get("daily_brief")) if available else None
+    zone = ZoneInfo(brief["timezone"]) if brief else _CITY_ZONE
+    local_date = (day or now.astimezone(zone).date()).isoformat()
+    day_snapshot = next((value for value in (brief or {}).get("days", [])
+                         if value["local_date"] == local_date), None)
+    if observed is not None and observed > now:
+        day_snapshot = None
+    cycle = recorded.get("last_cycle") if available else None
+    cycle = cycle if isinstance(cycle, dict) else {}
+    cycle_time = _time(cycle.get("observed_at"))
+    same_day = (
+        cycle_time is not None and cycle_time <= now
+        and cycle_time.astimezone(zone).date().isoformat() == local_date
+    )
+    attempt = (snapshot or {}).get("last_attempt")
+    attempt = attempt if isinstance(attempt, dict) else {}
+    attempted = _time(attempt.get("observed_at"))
+    workflow_failed = (
+        city == "belgrade" and attempt.get("mode") in {"editorial", "intake", "fallback", "digest"}
+        and attempt.get("status") == "failure" and attempted is not None and attempted <= now
+        and attempted.astimezone(zone).date().isoformat() == local_date
+    )
+    cycle_health = {
+        "errors": _count(cycle.get("processing_error_count")) if same_day else None,
+        "fallback_needed": same_day and cycle.get("fallback_required") is True,
+        "workflow_failed": workflow_failed,
+    }
     actions = []
     if not available:
         actions.append("Восстановить наблюдение канонической очереди; "
@@ -115,8 +149,8 @@ def build_status(
         actions.append("Изучить повторяющиеся причины удержания в закрытом аудите, "
                        "сохраняя facts/utility guards.")
     actions.extend([
-        "Подключить подтверждённые метрики публикаций и продвижения "
-        "для оценки результата за сутки.",
+        ("Подключить подтверждённые метрики публикаций и продвижения за сутки."
+         if day_snapshot is None else "Сверить отдельно результаты продвижения за сутки."),
         "Проверить доступность агрегированных сигналов комментариев и входящих обращений "
         "без выгрузки личных данных.",
         "Сверить фактический охват источников и стабильность Actions + Drive "
@@ -131,9 +165,12 @@ def build_status(
                      "observed_at": observed.isoformat() if observed else None,
                      "queue_counts": safe_counts if available else None},
         "rolling_kpi": _rolling_kpi(recorded) if available else None,
-        "daily_results": {"published_posts": None, "promotion": None,
+        "daily_results": {"published_posts": day_snapshot["post_count"] if day_snapshot else None,
+                          "promotion": None,
                           "audience_metrics": None, "comment_signals": None,
                           "incoming_submissions": None},
+        "owner_brief": {"local_date": local_date, "timezone": zone.key,
+                        "publications": day_snapshot, "cycle": cycle_health},
         "quality": {"scope": "returned_snapshot_items_only",
                     "repeated_reason_codes": [
                         {"reason_code": key, "occurrences": value}
@@ -176,13 +213,72 @@ def _kpi_lines(kpi: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+def owner_markdown(report: dict[str, Any]) -> str:
+    """A short read-only update with evidence scopes and unknowns made explicit."""
+    brief = report["owner_brief"]
+    zone = ZoneInfo(brief["timezone"])
+    observed = _time(report["snapshot"]["observed_at"])
+    observed_label = observed.astimezone(zone).strftime("%d.%m %H:%M") if observed else "нет"
+    local_date = datetime.fromisoformat(brief["local_date"]).strftime("%d.%m.%Y")
+    city = report["city"]
+    lines = [f"**{CITIES.get(city, city)} · {local_date}**"]
+    if report["snapshot"]["status"] == "stale":
+        lines.append(f"Снимок устарел. Последние данные на {observed_label} по местному времени.")
+    else:
+        lines.append(f"Снимок на {observed_label} по местному времени." if observed
+                     else "Рабочий снимок недоступен.")
+    day = brief["publications"] or {}
+    channel = _CHANNELS.get(city)
+
+    def post_link(message_id: int, label: str) -> str:
+        return f"[{label}]({channel}/{message_id})" if channel else label
+
+    message_ids = day.get("message_ids", ())
+    links = ", ".join(post_link(number, f"№{number}") for number in message_ids)
+    if links and day["post_count"] > len(message_ids):
+        links = f"Последние — {links}"
+    publications = f"Отдельных постов за день — {_shown(day.get('post_count'))}."
+    lines.append(f"{publications} {links}" if links else publications)
+    editions = []
+    for kind, title in _EDITIONS.items():
+        edition = day.get(kind) or {}
+        if edition.get("status") == "sent":
+            editions.append(post_link(edition["message_id"], f"«{title}»"))
+        else:
+            status = _EDITION_STATUS.get(str(edition.get("status")), "нет данных")
+            editions.append(f"«{title}» — {status}")
+    lines.append("Сводки · " + " · ".join(editions) + ".")
+    kpi = report["rolling_kpi"] or {}
+    measured = _time(kpi.get("subscribers_observed_at"))
+    label = measured.astimezone(zone).strftime("%d.%m %H:%M") if measured else "время неизвестно"
+    coverage = (f"{day['views']} по {day['measured_posts']} из {day['post_count']} постов"
+                if day.get("views") is not None else "нет данных")
+    subscribers = _shown(kpi.get("subscribers"))
+    lines.append(f"Подписчики — {subscribers} ({label}). Просмотры — {coverage}.")
+    health = brief["cycle"]
+    health_text = _shown(health["errors"])
+    failure = " Последний запуск завершился ошибкой." if health["workflow_failed"] else ""
+    fallback = " Цикл запросил резервную проверку." if health["fallback_needed"] else ""
+    lines.append(f"Ошибки обработки в последнем цикле дня — {health_text}.{failure}{fallback}")
+    counts = report["snapshot"]["queue_counts"] or {}
+    uncertain = counts.get("uncertain", 0)
+    lines.append(f"Сейчас нужно сверить с Telegram отправки с неизвестным исходом — {uncertain}."
+                 if uncertain
+                 else "Отдельные решения владельца в снимке не отражены.")
+    return "  \n".join(lines) + "\n"
+
+
 def markdown(report: dict[str, Any]) -> str:
     observed = _time(report["snapshot"]["observed_at"])
     stamp = observed.astimezone(ZONE).strftime("%d.%m.%Y %H:%M МСК") if observed else "неизвестно"
+    daily = report["daily_results"]["published_posts"]
+    daily_stamp = report["owner_brief"]["local_date"]
+    daily_line = ("Публикации за календарные сутки: неизвестно." if daily is None else
+                  f"Публикации за календарные сутки на момент снимка ({daily_stamp}): {daily}.")
     lines = [f"# Ежедневный статус · {report['report_date']} · {report['city']}", "",
              f"Состояние снимка: {report['snapshot']['status']}. Наблюдение БД: {stamp}.", "",
              *_kpi_lines(report.get("rolling_kpi")),
-             "Публикации за календарные сутки: неизвестно. Продвижение: недоступно.",
+             daily_line + " Продвижение: недоступно.",
              "Сигналы комментариев и входящих обращений: недоступны.", ""]
     counts = report["snapshot"]["queue_counts"]
     if counts is not None:
@@ -257,17 +353,19 @@ def main() -> None:
     parser.add_argument("--snapshot-unavailable", action="store_true",
                         help="ignore all snapshot bytes after a failed data fetch")
     parser.add_argument("--city", choices=("belgrade", "novi_sad"), default="belgrade")
+    parser.add_argument("--date", type=date.fromisoformat, help="local date of the brief")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     # A missing data branch or snapshot is an unavailable observation, never an empty queue.
     snapshot = None
     if not args.snapshot_unavailable and args.snapshot.is_file():
         snapshot = merge(public_catalog(args.root), json.loads(args.snapshot.read_text()))
-    report = build_status(snapshot, city=args.city, now=datetime.now(UTC))
+    report = build_status(snapshot, city=args.city, now=datetime.now(UTC), day=args.date)
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "status.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     (args.output / "status.md").write_text(markdown(report), encoding="utf-8")
+    (args.output / "owner.md").write_text(owner_markdown(report), encoding="utf-8")
 
 
 if __name__ == "__main__":
