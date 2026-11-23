@@ -19,6 +19,10 @@ on:
         description: Latest published posts to compare, from 1 to 15
         type: number
         default: 15
+      published_only:
+        description: Compare both reviews of the same published text without generating drafts
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -98,9 +102,12 @@ jobs:
           TRIAL_MODEL_DRAFT: ${{ inputs.draft_model }}
           TRIAL_MODEL_REVIEW: ${{ inputs.review_model }}
           TRIAL_LIMIT: ${{ inputs.limit }}
+          TRIAL_PUBLISHED_ONLY: ${{ inputs.published_only }}
         run: |
+          args=()
+          if [ "$TRIAL_PUBLISHED_ONLY" = "true" ]; then args+=(--published-only); fi
           python -m relocant_media.ops.model_trial --work "$RUNNER_TEMP/model-trial-work" \
-            --output "$RUNNER_TEMP/model-trial.json" --limit "$TRIAL_LIMIT"
+            --output "$RUNNER_TEMP/model-trial.json" --limit "$TRIAL_LIMIT" "${args[@]}"
       - name: Keep comparison for review
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

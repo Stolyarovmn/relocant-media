@@ -160,7 +160,8 @@ def published_packages(session: Session, limit: int) -> list[tuple[Post, Editori
     reader_ids = reader_linked_raw_ids(session)
     rows = session.execute(
         select(EditorialRun, Post).join(Post, EditorialRun.post_id == Post.id)
-        .where(EditorialRun.delivery_status == "sent", Post.telegram_message_id.is_not(None))
+        .where(EditorialRun.delivery_status == "sent", Post.telegram_message_id > 0,
+               Post.published_at.is_not(None))
         .order_by(Post.published_at.desc()).limit(limit * 4)).all()
     result: list[tuple[Post, EditorialPackage]] = []
     for run, post in rows:
@@ -172,7 +173,9 @@ def published_packages(session: Session, limit: int) -> list[tuple[Post, Editori
             package = EditorialPackage.model_validate_json(json.dumps(outcome["_package"]))
         except ValueError:
             continue
-        if package.version != 2 or package.event is None:
+        draft = package.outcome.draft
+        if (package.version != 2 or package.event is None or draft is None
+                or (draft.title, draft.body) != (post.title, post.body)):
             continue
         members = {package.raw_item_id, *(doc.raw_item_id for doc in package.event.documents)}
         if members & reader_ids:
@@ -228,7 +231,7 @@ def _with_new_draft(package: EditorialPackage, outcome: EditorialOutcome) -> Edi
 
 
 def trial_bundle(package: EditorialPackage, when: datetime, provider: StructuredAIProvider,
-                 log: CallLog) -> dict[str, Any]:
+                 log: CallLog, *, published_only: bool = False) -> dict[str, Any]:
     """One model bundle on one published package.
 
     ``published`` compares reviewers only: both reviews of the already published draft.
@@ -237,15 +240,17 @@ def trial_bundle(package: EditorialPackage, when: datetime, provider: Structured
     """
     first = len(log.calls)
     documents = tuple(package.event.documents) if package.event is not None else ()
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {"draft_status": "not_run"}
     outcome: EditorialOutcome | None = None
-    try:
-        outcome = EditorialPipeline(provider, city_profile=load_city_profile(package.city)).run(
-            city=package.city, documents=documents, now=when)
-        result["draft_status"] = outcome.status.value
-    except Exception as error:
-        result["draft_status"] = "error"
-        result["draft_error_type"] = type(error).__name__
+    if not published_only:
+        try:
+            outcome = EditorialPipeline(
+                provider, city_profile=load_city_profile(package.city),
+            ).run(city=package.city, documents=documents, now=when)
+            result["draft_status"] = outcome.status.value
+        except Exception as error:
+            result["draft_status"] = "error"
+            result["draft_error_type"] = type(error).__name__
     result["published"] = _review(package, documents, when, provider)
     full: dict[str, Any] = {"double_approval": False, "reviews": {}}
     if (outcome is not None and outcome.status is PublicationStatus.READY
@@ -265,7 +270,8 @@ def trial_bundle(package: EditorialPackage, when: datetime, provider: Structured
 
 
 def trial_item(post: Post, package: EditorialPackage,
-               providers: dict[str, StructuredAIProvider], log: CallLog) -> dict[str, Any]:
+               providers: dict[str, StructuredAIProvider], log: CallLog, *,
+               published_only: bool = False) -> dict[str, Any]:
     assert package.event is not None
     when = post.published_at or datetime.now(UTC)
     if when.tzinfo is None:
@@ -273,7 +279,7 @@ def trial_item(post: Post, package: EditorialPackage,
     item: dict[str, Any] = {"raw_item_id": package.raw_item_id,
                             "category": package.outcome.ranking.category}
     for bundle, provider in providers.items():
-        item[bundle] = trial_bundle(package, when, provider, log)
+        item[bundle] = trial_bundle(package, when, provider, log, published_only=published_only)
     facts = {bundle: item[bundle]["published"]["reviews"].get("facts", {}).get("verdict")
              for bundle in providers}
     item["facts_verdicts_differ"] = None not in facts.values() and len(set(facts.values())) > 1
@@ -296,8 +302,9 @@ def _facts_flags(review: dict[str, Any]) -> int:
 
 def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
               calls: list[dict[str, Any]], *, unavailable: int = 0,
-              stopped: bool = False) -> dict[str, Any]:
-    result: dict[str, Any] = {"items": len(items), "bundles": {}}
+              stopped: bool = False, published_only: bool = False) -> dict[str, Any]:
+    result: dict[str, Any] = {"items": len(items), "bundles": {},
+                            "scope": "published_reviews" if published_only else "full_pipeline"}
     for bundle in bundles:
         rows = [item[bundle] for item in items]
         errors: dict[str, int] = {}
@@ -319,11 +326,14 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
             stats["input_chars"] += call["input_chars"]
             stats["output_chars"] += call["output_chars"]
         result["bundles"][bundle] = {
-            "full_double_approval": sum(1 for row in rows if row["full"]["double_approval"]),
+            "full_double_approval": None if published_only else sum(
+                1 for row in rows if row["full"]["double_approval"]),
             "published_double_approval": sum(
                 1 for row in rows if row["published"]["double_approval"]),
-            "drafts_ready": sum(1 for row in rows if row["draft_status"] == "ready"),
-            "full_facts_flags": sum(_facts_flags(row["full"]) for row in rows),
+            "drafts_ready": None if published_only else sum(
+                1 for row in rows if row["draft_status"] == "ready"),
+            "full_facts_flags": None if published_only else sum(
+                _facts_flags(row["full"]) for row in rows),
             "published_facts_flags": sum(_facts_flags(row["published"]) for row in rows),
             "call_errors": sum(row["call_errors"] for row in rows),
             "error_types": errors,
@@ -341,7 +351,7 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
     names = list(result["bundles"])
     result["pairs_published_reviewed"] = sum(
         1 for item in items if all(_reviewed(item[name]["published"]) for name in names))
-    result["pairs_full_reviewed"] = sum(
+    result["pairs_full_reviewed"] = None if published_only else sum(
         1 for item in items if all(_reviewed(item[name]["full"]) for name in names))
     result["facts_verdicts_differ"] = sum(1 for item in items if item["facts_verdicts_differ"])
     result["unavailable"] = unavailable
@@ -351,7 +361,7 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
                     for stats in result["bundles"].values())
     usable = not stopped and errors_ok
     result["published_comparable"] = usable and result["pairs_published_reviewed"] > 0
-    result["full_comparable"] = usable and result["pairs_full_reviewed"] > 0
+    result["full_comparable"] = usable and not published_only and result["pairs_full_reviewed"] > 0
     result["valid"] = result["published_comparable"] or result["full_comparable"]
     return result
 
@@ -372,7 +382,7 @@ def public_result(result: dict[str, Any]) -> dict[str, Any]:
 
 def run_trial(database: Path, bundles: dict[str, dict[str, str]],
               factory: Callable[[str], Any], *, limit: int,
-              budget: WaitBudget | None = None) -> dict[str, Any]:
+              budget: WaitBudget | None = None, published_only: bool = False) -> dict[str, Any]:
     """Run every model bundle on the same published packages of a private snapshot copy.
 
     When a quota pause does not fit the budget, the item in progress is counted as
@@ -380,17 +390,19 @@ def run_trial(database: Path, bundles: dict[str, dict[str, str]],
     """
     log = CallLog()
     budget = budget if budget is not None else WaitBudget()
+    used_models = ({name: {"review": models["review"]} for name, models in bundles.items()}
+                   if published_only else bundles)
     providers: dict[str, StructuredAIProvider] = {
         name: TimedProvider(RoleRoutedProvider(validate_models(models), factory), log, name,
                             budget)
-        for name, models in bundles.items()}
+        for name, models in used_models.items()}
     engine = create_engine(f"sqlite:///{database}")
     items: list[dict[str, Any]] = []
     unavailable = 0
     try:
         with Session(engine) as session:
             for post, package in published_packages(session, limit):
-                item = trial_item(post, package, providers, log)
+                item = trial_item(post, package, providers, log, published_only=published_only)
                 if budget.stopped:
                     unavailable += 1
                     break
@@ -398,34 +410,44 @@ def run_trial(database: Path, bundles: dict[str, dict[str, str]],
             session.rollback()
     finally:
         engine.dispose()
-    return {"version": 3, "generated_at": datetime.now(UTC).isoformat(), "models": bundles,
+    return {"version": 3, "generated_at": datetime.now(UTC).isoformat(), "models": used_models,
             "summary": summarize(items, bundles, log.calls, unavailable=unavailable,
-                                 stopped=budget.stopped),
+                                 stopped=budget.stopped, published_only=published_only),
             "items": items}
 
 
 def markdown(result: dict[str, Any]) -> str:
     summary = result["summary"]
+    published_only = summary.get("scope") == "published_reviews"
     verdict = "действительна" if summary["valid"] else "недействительна"
-    lines = ["## Проба моделей (#312)", "", f"Материалов в паре: {summary['items']}",
-             f"Пар, где обе связки дошли до вердикта: опубликованный черновик "
-             f"{summary['pairs_published_reviewed']}, новый черновик "
-             f"{summary['pairs_full_reviewed']}",
-             f"Технически недоступно: {summary['unavailable']}; остановлена из-за квоты: "
-             f"{'да' if summary['stopped_for_quota'] else 'нет'}; проба {verdict}",
-             f"Пригодно к сравнению: опубликованный черновик "
-             f"{'да' if summary['published_comparable'] else 'нет'}, новый черновик "
-             f"{'да' if summary['full_comparable'] else 'нет'}", "",
-             "| Связка | Модели | Полная связка: оба ревью одобрили | Черновик готов | "
-             "Флаги фактов в новом черновике | Ревью опубликованного: оба одобрили | "
-             "Ошибки вызовов | Медиана, с | Медиана ввода, симв. | Медиана вывода, симв. |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+    pairs = f"опубликованный текст — {summary['pairs_published_reviewed']}"
+    comparable = f"опубликованный текст — {'да' if summary['published_comparable'] else 'нет'}"
+    if not published_only:
+        pairs += f", новый черновик — {summary['pairs_full_reviewed']}"
+        comparable += f", новый черновик — {'да' if summary['full_comparable'] else 'нет'}"
+    mode = "Ревью опубликованных текстов" if published_only else "Полная редакционная связка"
+    lines = ["## Проба моделей (#312)", "", mode, f"Материалов для сравнения — {summary['items']}",
+             f"Пар, где обе связки дошли до вердикта — {pairs}",
+             f"Технически недоступных материалов — {summary['unavailable']}. Остановка из-за квоты "
+             f"— {'да' if summary['stopped_for_quota'] else 'нет'}. Проба {verdict}.",
+             f"Пригодность к сравнению — {comparable}", ""]
+    columns = ["Связка", "Модели"]
+    if not published_only:
+        columns += ["Полная связка: оба ревью одобрили", "Черновик готов",
+                    "Флаги фактов в новом черновике"]
+    columns += ["Ревью опубликованного: оба одобрили", "Ошибки вызовов", "Медиана, с",
+                "Медиана ввода, симв.", "Медиана вывода, симв."]
+    lines += ["| " + " | ".join(columns) + " |", "|" + "|".join(["---"] * len(columns)) + "|"]
     for name, stats in summary["bundles"].items():
-        models = ", ".join(f"{role}={model}" for role, model in result["models"][name].items())
+        models = result["models"][name]
+        used = {"review": models["review"]} if published_only else models
+        labels = ", ".join(f"{role}={model}" for role, model in used.items())
+        full = "" if published_only else (
+            f"{stats['full_double_approval']} | {stats['drafts_ready']} | "
+            f"{stats['full_facts_flags']} | ")
         lines.append(
-            f"| {name} | {models} | {stats['full_double_approval']} | "
-            f"{stats['drafts_ready']} | {stats['full_facts_flags']} | "
-            f"{stats['published_double_approval']} | {stats['call_errors']} | "
+            f"| {name} | {labels} | {full}{stats['published_double_approval']} | "
+            f"{stats['call_errors']} | "
             f"{stats['median_seconds_per_item']} | {stats['median_input_chars_per_item']} | "
             f"{stats['median_output_chars_per_item']} |")
     lines += ["", "| Связка | Роль и модель | Вызовы | Ошибки | Ввод, симв. | Вывод, симв. |",
@@ -482,6 +504,8 @@ def main() -> None:
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=MAX_ITEMS)
+    parser.add_argument("--published-only", action="store_true",
+                        help="Сравнить только ревью уже опубликованных текстов")
     args = parser.parse_args()
     stage = "configuration"
     try:
@@ -504,7 +528,7 @@ def main() -> None:
         stage = "trial"
         result = run_trial(database, bundles,
                            lambda model: IsolatedGeminiProvider(api_key, model=model),
-                           limit=args.limit)
+                           limit=args.limit, published_only=args.published_only)
         write_outputs(result, args.output, os.environ.get("GITHUB_STEP_SUMMARY"))
         print(json.dumps({"model_trial": result["summary"]}, ensure_ascii=False))
     except Exception as error:

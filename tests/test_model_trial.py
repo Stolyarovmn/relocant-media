@@ -133,6 +133,57 @@ def test_full_bundle_reviews_its_own_new_draft(reviewed, fakes):
     assert result["summary"]["bundles"]["candidate"]["full_facts_flags"] == 1
 
 
+def test_published_only_uses_identical_text_without_draft_calls(reviewed, fakes, monkeypatch):
+    calls, _ = fakes
+    session, run = reviewed
+    _sent(session, run)
+    title = run.outcome["_package"]["outcome"]["draft"]["title"]
+
+    def unexpected_pipeline(*args, **kwargs):
+        pytest.fail("Режим ревью не должен запускать генерацию черновика")
+
+    monkeypatch.setattr(model_trial, "EditorialPipeline", unexpected_pipeline)
+    database = session.get_bind().url.database
+    before = hashlib.sha256(open(database, "rb").read()).hexdigest()
+    created = []
+
+    def factory(model):
+        created.append(model)
+        return FakeProvider(model)
+
+    result = model_trial.run_trial(database, BUNDLES, factory, limit=1, published_only=True)
+    assert hashlib.sha256(open(database, "rb").read()).hexdigest() == before
+    assert calls == [("review", title), ("review", title)]
+    assert created == [CURRENT["review"], MODELS["review"]]
+    assert result["models"] == {
+        name: {"review": models["review"]} for name, models in BUNDLES.items()
+    }
+    summary = model_trial.public_result(result)["summary"]
+    assert summary["scope"] == "published_reviews"
+    assert summary["valid"] and summary["published_comparable"]
+    assert summary["pairs_published_reviewed"] == 1 and summary["pairs_full_reviewed"] is None
+    assert not summary["full_comparable"]
+    for name, stats in summary["bundles"].items():
+        assert stats["call_count"] == 2 and stats["drafts_ready"] is None
+        assert list(stats["by_role_and_model"]) == [f"review:{BUNDLES[name]['review']}"]
+    markdown = model_trial.markdown(result)
+    assert "Ревью опубликованных текстов" in markdown
+    assert "gemini-3.8-flash" not in markdown and "Черновик готов" not in markdown
+
+
+def test_trial_excludes_a_package_that_differs_from_the_published_post(reviewed, fakes):
+    session, run = reviewed
+    _sent(session, run)
+    post = session.get(Post, run.post_id)
+    post.body += "\nУточнение в канонической версии поста."
+    session.commit()
+    result = model_trial.run_trial(
+        session.get_bind().url.database, BUNDLES, FakeProvider, limit=5, published_only=True,
+    )
+    assert result["items"] == []
+    assert fakes[0] == []
+
+
 def test_uploaded_file_holds_only_anonymized_summary(reviewed, fakes, tmp_path):
     session, run = reviewed
     _sent(session, run)
@@ -154,6 +205,8 @@ def test_workflow_uploads_the_file_written_by_the_trial():
     workflow = open(".github/workflows/model-trial.yml", encoding="utf-8").read()
     assert '--output "$RUNNER_TEMP/model-trial.json"' in workflow
     assert "path: ${{ runner.temp }}/model-trial.json" in workflow
+    assert "TRIAL_PUBLISHED_ONLY: ${{ inputs.published_only }}" in workflow
+    assert "args+=(--published-only)" in workflow
 
 
 def test_reader_material_is_excluded_whole(reviewed, fakes):
