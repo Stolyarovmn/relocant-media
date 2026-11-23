@@ -42,7 +42,11 @@ from relocant_media.ai.selection import selection_reason
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.freshness import publication_date_context
 from relocant_media.domain.presentation import title_instruction
-from relocant_media.services.native_map import LEGACY_NOTICE_LAYOUT, NOTICE_LAYOUT
+from relocant_media.services.native_map import (
+    LEGACY_NOTICE_LAYOUT,
+    NOTICE_LAYOUT,
+    SECRETARIAT_MAP_MODE,
+)
 
 
 class _Response(BaseModel):
@@ -229,6 +233,14 @@ def reviewed_package(
                             "Проверь подпись в message_html и соответствие встроенной схемы "
                             "участку, опубликованному секретариатом. "
                         )
+                elif point.get("mode") == SECRETARIAT_MAP_MODE:
+                    instructions += (
+                        "Для road_phases сверь улицу, начало и конец каждого участка "
+                        "и его собственные календарные даты с объявлением в evidence. "
+                        "Последняя дата каждой фазы включительна. Линия по OpenStreetMap "
+                        "обозначает участок улицы, точная полоса движения описана "
+                        "в первоисточнике. При расхождении не одобряй. "
+                    )
                 elif point.get("mode") == "utility_map_review":
                     instructions += (
                         "Для карты отключения проверь дату, время, муниципалитет, точные "

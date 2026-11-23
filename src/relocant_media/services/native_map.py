@@ -2,17 +2,22 @@
 
 import hashlib
 from datetime import datetime
+from functools import lru_cache
 from html import escape
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
+from relocant_media.ai.package import canonical_json
 from relocant_media.bot.formatting import (
     TELEGRAM_TEXT_LIMIT,
     editorial_html_parts,
     formatted_text_units,
 )
+from relocant_media.collectors.bgprevoz_changes import transport_notice_suspended
+from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as SECRETARIAT_SOURCE
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.source_locations import is_public_https_url
@@ -23,8 +28,10 @@ from relocant_media.services.exhibition_map_point import (
     build_exhibition_map_review,
     validate_exhibition_map_review,
 )
+from relocant_media.services.local_street_geometry import StreetIndex, load_street_index
 from relocant_media.services.media_review_packet import _valid_snapshot
 from relocant_media.services.notice_banner import render_notice_banner
+from relocant_media.services.road_scope import resolve_secretariat_stretches
 from relocant_media.services.transport_map import (
     MAP_MODE,
     build_transport_map,
@@ -48,6 +55,9 @@ from relocant_media.storage.models import RawItem, Source
 LEGACY_NOTICE_LAYOUT = "map_notice_v1"
 NOTICE_LAYOUT = "map_notice_v2"
 NOTICE_COVER = "tg://photo?id=notice_cover"
+SECRETARIAT_MAP_MODE = "secretariat_road_map_review"
+_NOTICE_MODES = {MAP_MODE, UTILITY_MAP_MODE, SECRETARIAT_MAP_MODE}
+_BELGRADE_STREETS = Path("cities/belgrade/map/roads.json.gz")
 
 
 def _digest(text: str) -> str:
@@ -61,7 +71,7 @@ def _point(native: dict[str, Any]) -> dict[str, Any]:
         not isinstance(point.get(key), str) for key in required
     ):
         raise ValueError("native map point is missing or malformed")
-    if (point.get("mode") not in {MAP_MODE, UTILITY_MAP_MODE}
+    if (point.get("mode") not in _NOTICE_MODES
             and not isinstance(point.get("source_html_sha256"), str)):
         raise ValueError("native map source HTML digest is missing")
     return point
@@ -85,7 +95,7 @@ def _notice_layout(
     legacy = layout == LEGACY_NOTICE_LAYOUT
     windows: dict[tuple[datetime, datetime], list[str]] = {}
     areas: dict[tuple[datetime, datetime], list[str]] = {}
-    if point["mode"] == MAP_MODE:
+    if point["mode"] in {MAP_MODE, SECRETARIAT_MAP_MODE}:
         kind = "road"
     elif power := extract_power_scopes(document, include_whole_areas=not legacy):
         kind = "power"
@@ -177,6 +187,31 @@ def _window(start: datetime, end: datetime) -> str:
     return f"{start:%d.%m.%Y} · {start:%H:%M}–{end:%H:%M}"
 
 
+@lru_cache(maxsize=1)
+def _secretariat_street_index(path: Path) -> StreetIndex:
+    return load_street_index(path)
+
+
+def _secretariat_point(document: EvidenceDocument) -> dict[str, Any] | None:
+    if (document.source_id != SECRETARIAT_SOURCE or transport_notice_suspended(document.body)
+            or not _BELGRADE_STREETS.is_file()):
+        return None
+    try:
+        streets = _secretariat_street_index(_BELGRADE_STREETS)
+    except (OSError, ValueError):
+        return None
+    phases = [
+        {"starts_on": start.isoformat(), "ends_on": end.isoformat(),
+         "segment": geometry["segment"], "geometry_sha256": _digest(canonical_json(geometry))}
+        for start, end, geometry in resolve_secretariat_stretches(document, streets)
+    ]
+    if not phases:
+        return None
+    return {"mode": SECRETARIAT_MAP_MODE, "source_id": document.source_id,
+            "source_url": document.url, "document_sha256": utility_document_sha256(document),
+            "road_phases": phases}
+
+
 def build_native_map(
     session: Session, document_ids: list[int], documents: tuple[EvidenceDocument, ...], *,
     source_url: str, profile: CityEditorialProfile,
@@ -197,12 +232,12 @@ def build_native_map(
         if snapshot.source_html_bytes > MAX_HTML_BYTES:
             return None
         if profile.city_id == "belgrade":
-            utility = build_utility_point(
+            point = _secretariat_point(document) or build_utility_point(
                 document, snapshot.source_html, snapshot.manifest.get("utility_geography"),
             )
-            if utility is not None:
-                return {"source_raw_item_id": raw_id, "point": utility,
-                        **_notice_layout(document, utility)}
+            if point is not None:
+                return {"source_raw_item_id": raw_id, "point": point,
+                        **_notice_layout(document, point)}
         events = [event for event, _, _ in _events(snapshot.source_html)
                   if event.get("url") == source_url]
         if len(events) != 1:
@@ -418,7 +453,7 @@ def validate_native_map_draft(
     point = _point(native)
     if point["source_url"] != presentation.illustration.get("source_url"):
         raise ValueError("native map must use the exact primary source")
-    if point.get("mode") in {MAP_MODE, UTILITY_MAP_MODE}:
+    if point.get("mode") in _NOTICE_MODES:
         if profile.city_id != "belgrade":
             raise ValueError("native map locality does not match reviewed city profile")
     else:
@@ -435,14 +470,19 @@ def validate_native_map_draft(
                      and doc.source_id == point["source_id"]), None)
     if document is None:
         raise ValueError("native map evidence document is missing")
-    digest = (utility_document_sha256(document) if point.get("mode") == UTILITY_MAP_MODE else
-              _digest(EvidenceDocument.model_validate(document.model_dump()).model_dump_json()))
+    mode = point.get("mode")
+    if mode in {UTILITY_MAP_MODE, SECRETARIAT_MAP_MODE}:
+        digest = utility_document_sha256(document)
+    else:
+        digest = _digest(EvidenceDocument.model_validate(document.model_dump()).model_dump_json())
     if point["document_sha256"] != digest:
         raise ValueError("native map does not match evidence document")
+    if mode == SECRETARIAT_MAP_MODE and native.get("layout") != NOTICE_LAYOUT:
+        raise ValueError("road map requires a source preview notice")
     if "layout" in native:
         layout = native["layout"]
         if (layout not in {LEGACY_NOTICE_LAYOUT, NOTICE_LAYOUT}
-                or point.get("mode") not in {MAP_MODE, UTILITY_MAP_MODE}
+                or mode not in _NOTICE_MODES
                 or any(native.get(key) != value
                        for key, value in _notice_layout(document, point, layout=layout).items())):
             raise ValueError("notice layout does not match evidence document")
@@ -464,6 +504,10 @@ def verify_native_map_snapshot(
         raise ValueError("native map source is not in reviewed event")
     snapshot = _snapshot(session, raw_id, document)
     assert snapshot.source_html is not None
+    if point.get("mode") == SECRETARIAT_MAP_MODE:
+        if _secretariat_point(document) != point:
+            raise ValueError("road map differs from the exact source snapshot")
+        return
     if point.get("mode") == UTILITY_MAP_MODE:
         if build_utility_point(
             document, snapshot.source_html, snapshot.manifest.get("utility_geography"),
@@ -478,6 +522,10 @@ def verify_live_native_map(
 ) -> None:
     point = _point(native)
     if point["source_url"] != document.url or point.get("mode") == MAP_MODE:
+        return
+    if point.get("mode") == SECRETARIAT_MAP_MODE:
+        if _secretariat_point(document) != point:
+            raise ValueError("road map changed in live source")
         return
     if point.get("mode") == UTILITY_MAP_MODE:
         if build_utility_point(document, html or "", point.get("geography")) != point:

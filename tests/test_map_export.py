@@ -2,6 +2,7 @@ import gzip
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -12,8 +13,10 @@ from test_transport_map import _article, _map_html, _notice
 from test_utility_scope import document as power_document
 from test_water_outage_scope import document as water_document
 
+from relocant_media.ai.models import EvidenceDocument, RussianDraft
 from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI, map_reply_markup
 from relocant_media.collectors.base import RawItem as CollectedItem
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops.map_backfill import parse_targets, plan
@@ -27,6 +30,12 @@ from relocant_media.ops.map_export import (
 )
 from relocant_media.ops.newsroom_publish import MAP_PATH, _publish_map
 from relocant_media.ops.pages_assets import copy_assets
+from relocant_media.services.editorial_products import (
+    build_presentation,
+    present_draft,
+    validate_presentation,
+    verify_stored_presentation,
+)
 from relocant_media.services.local_outage_geometry import (
     AddressLocation,
     AreaIndex,
@@ -34,6 +43,13 @@ from relocant_media.services.local_outage_geometry import (
     address_key,
 )
 from relocant_media.services.local_street_geometry import load_street_index
+from relocant_media.services.native_map import (
+    SECRETARIAT_MAP_MODE,
+    bind_native_map_draft,
+    verify_live_native_map,
+)
+from relocant_media.services.rich_delivery import prepare_native_transport
+from relocant_media.services.road_scope import resolve_secretariat_stretches
 from relocant_media.services.transport_map import build_transport_map
 from relocant_media.services.utility_scope import extract_power_scopes
 from relocant_media.services.water_outage_scope import extract_water_outage_scopes
@@ -48,6 +64,107 @@ from relocant_media.storage.models import (
 )
 
 NOW = datetime(2026, 11, 12, 7, tzinfo=UTC)
+_LISTED_URL = (
+    "https://www.bgsaobracaj.rs/vest/5435/izmena-rezima-saobraca%D1%98a-u-ustanicko%D1%98"
+)
+_LISTED_ROAD = (
+    "Доћи ће до заузећа дела коловоза у ул. Устаничкој , на територији градске општине "
+    "Вождовац, у временском периоду од 20. 11. до 25. 11. 2026. године, по фазама:\n\n"
+    "Фаза 1 : заузеће десне коловозне траке од ул. Грчића Миленка до ул. Крушевачке "
+    "у временском периоду од 20. 11. до 21. 11. 2026. године:\n\n"
+    "Фаза 2 : заузеће десне коловозне траке од ул. Јована Суботића до ул. Грчића Миленка "
+    "у временском периоду од 22. 11. до 25. 11. 2026. године.\n\n"
+    "Мапа заузећа"
+)
+
+
+def _listed_document(body: str = _LISTED_ROAD) -> EvidenceDocument:
+    return EvidenceDocument(
+        source_id="bgsaobracaj_notices", url=_LISTED_URL, title="Промена саобраћаја у Устаничкој",
+        body=body, published_at=datetime(2026, 11, 19, tzinfo=UTC), published_at_precision="day",
+    )
+
+
+def test_listed_road_phases_use_the_same_source_for_map_and_delivery(monkeypatch):
+    source = load_source_file(Path("cities/belgrade/sources/bgsaobracaj_notices.yaml"))
+    streets = load_street_index(Path("cities/belgrade/map/roads.json.gz"))
+    document = _listed_document()
+    html = "<article><h2>Промена саобраћаја у Устаничкој</h2></article>"
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        capture_collected_batch(session, [
+            CollectedItem(**document.model_dump(), external_id="5435", source_html=html),
+        ])
+        session.commit()
+        observed_at = datetime(2026, 11, 23, 7, tzinfo=UTC)
+        (incident,) = export_map(session, observed_at=observed_at, streets=streets).incidents
+        first, second = incident.lines
+        switch = datetime(2026, 11, 21, 23, tzinfo=UTC)
+        assert first.ends_at == switch == second.starts_at
+        assert second.ends_at == datetime(2026, 11, 25, 23, tzinfo=UTC)
+        assert first.coordinates[0] == second.coordinates[-1]
+        assert first.coordinates != second.coordinates
+        assert len(first.coordinates) > 2 and len(second.coordinates) > 2
+        assert "Крушевачка" in first.label and "Јована Суботића" in second.label
+
+        profile = load_city_profile("belgrade")
+        presentation = build_presentation(session, 1, (document,), document_ids=[1],
+                                          profile=profile, rubric_id="city_changes")
+        draft = present_draft(
+            RussianDraft(title="Работы на Устаничкой", body="Вторая фаза идёт до 25 ноября.",
+                         claim_ids=("period",)),
+            presentation, category="transport",
+        )
+        presentation = bind_native_map_draft(presentation, draft)
+        native = presentation.native_map
+        assert native is not None
+        assert native["point"]["mode"] == SECRETARIAT_MAP_MODE
+        first_phase, second_phase = native["point"]["road_phases"]
+        assert first_phase["ends_on"] == "2026-11-21" and second_phase["starts_on"] == "2026-11-22"
+        assert first_phase["segment"]["end"] == "Крушевачка"
+        assert first_phase["geometry_sha256"] != second_phase["geometry_sha256"]
+        validate_presentation(presentation, profile, (document,), draft,
+                              rubric_id="city_changes", category="transport")
+        verify_stored_presentation(session, 1, (document,), document_ids=[1],
+                                   presentation=presentation)
+        altered = presentation.model_copy(update={"native_map": {**native, "point": {
+            **native["point"], "road_phases": [
+                {**first_phase, "geometry_sha256": "0" * 64}, second_phase,
+            ],
+        }}})
+        with pytest.raises(ValueError, match="road map differs from the exact source snapshot"):
+            verify_stored_presentation(session, 1, (document,), document_ids=[1],
+                                       presentation=altered)
+        verify_live_native_map(native, document, html)
+        changed = _listed_document(_LISTED_ROAD.replace("22. 11.", "23. 11."))
+        with pytest.raises(ValueError, match="road map changed in live source"):
+            verify_live_native_map(native, changed, html)
+
+        monkeypatch.setenv("RELOCANT_MAP_TELEGRAM_APP", "https://t.me/relocant_media_belgrade_bot")
+        package = SimpleNamespace(presentation=presentation, outcome=SimpleNamespace(draft=draft))
+        publisher = SimpleNamespace(bot=SimpleNamespace(send_notice_message=lambda *args: None))
+        _, prepared = prepare_native_transport(
+            package, publisher, None,
+            editorial_text=f"{draft.title}\n\n{draft.body}\n\nИсточник: {document.url}",
+        )
+        assert prepared.map_url == f"https://t.me/relocant_media_belgrade_bot?startapp={incident.id}"
+        assert prepared.source_preview_url == document.url
+        assert prepared.photo is None
+    engine.dispose()
+
+
+def test_incomplete_or_conflicting_listed_road_phases_are_not_mapped():
+    streets = load_street_index(Path("cities/belgrade/map/roads.json.gz"))
+    for changed in (
+        _LISTED_ROAD.replace("од ул. Јована Суботића", "од почетка улице"),
+        _LISTED_ROAD.replace("22. 11. до 25. 11.", "22. 11. до 26. 11."),
+        _LISTED_ROAD.replace("Фаза 2", "Фаза 1"),
+        _LISTED_ROAD.replace("Вождовац", "Стари град"),
+        _LISTED_ROAD.replace("коловоза у ул. Устаничкој ,", "коловоза у ул. Устаничкој и Јужна,"),
+    ):
+        assert resolve_secretariat_stretches(_listed_document(changed), streets) == []
 
 
 def test_official_road_phases_have_separate_lines_and_follow_valid_revisions():
