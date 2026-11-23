@@ -1429,11 +1429,11 @@ async def publish_pending(
                 category = (str(ranking.get("category", "")) if isinstance(ranking, dict)
                             else "")
                 urgent = isinstance(stored, dict) and stored.get("urgent") is True
-                release = morning_release(category=category, urgent=urgent,
-                                          now=quiet_hours.utc_now())
+                now = quiet_hours.utc_now()
+                release = morning_release(category=category, urgent=urgent, now=now)
                 if release is not None:
                     # Not a failure: the morning cycle re-checks freshness and sends it.
-                    hold_until_morning(session, raw_id, now=quiet_hours.utc_now(),
+                    hold_until_morning(session, raw_id, now=now, release_at=release,
                                        deadline=morning_deadline(release))
                     session.commit()
                     continue

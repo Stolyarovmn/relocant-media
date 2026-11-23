@@ -11,8 +11,8 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
+from relocant_media.domain.quiet_hours import QUIET_END, QUIET_START, QUIET_ZONE
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
 
 _TOKEN = re.compile(r"[a-zA-Z0-9_.:-]{1,80}")
@@ -30,10 +30,14 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
     """
     if now.tzinfo is None:
         raise ValueError("audit time must include timezone")
-    local = now.astimezone(ZoneInfo("Europe/Belgrade"))
+    local = now.astimezone(QUIET_ZONE)
     start = local.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
     bounds = (start.astimezone(UTC).isoformat(), min(now, end).astimezone(UTC).isoformat())
+    evening = datetime.combine(local.date() - timedelta(days=1), QUIET_START, QUIET_ZONE)
+    morning = datetime.combine(local.date(), QUIET_END, QUIET_ZONE)
+    evening_stamp = evening.astimezone(UTC).isoformat()
+    morning_stamp = morning.astimezone(UTC).isoformat()
     uri = snapshot.resolve(strict=True).as_uri() + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True)) as db:
         rows = db.execute(
@@ -61,6 +65,27 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
                  AND julianday(editorial_run.created_at) <= julianday(?)
                GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 20""", bounds,
         ).fetchall()
+        held = db.execute(
+            """SELECT lifecycle.status, json_extract(lifecycle.details, '$.reason'),
+                      post.telegram_message_id
+               FROM scheduler_run AS lifecycle
+               LEFT JOIN editorial_run ON editorial_run.raw_item_id = COALESCE(
+                 json_extract(lifecycle.details, '$.replacement_raw_item_id'),
+                 json_extract(lifecycle.details, '$.raw_item_id')
+               ) AND editorial_run.delivery_status = 'sent'
+               LEFT JOIN post ON post.id = editorial_run.post_id AND post.city = 'belgrade'
+                 AND julianday(post.published_at) >= julianday(?)
+                 AND julianday(post.published_at) <= julianday(?)
+               WHERE lifecycle.city = 'belgrade' AND lifecycle.task_type = 'material_lifecycle'
+                 AND julianday(json_extract(lifecycle.details, '$.morning_hold.at')) >= julianday(?)
+                 AND julianday(json_extract(lifecycle.details, '$.morning_hold.at')) < julianday(?)
+                 AND julianday(json_extract(lifecycle.details, '$.morning_hold.at')) <= julianday(?)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM scheduler_run AS newer
+                   WHERE newer.task_key = lifecycle.task_key AND newer.id > lifecycle.id
+                 )""",
+            (*bounds, evening_stamp, morning_stamp, bounds[1]),
+        ).fetchall()
         cycle = db.execute(
             """SELECT status, details FROM scheduler_run
                WHERE task_key = 'editorial-primary:belgrade'
@@ -69,10 +94,20 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
         ).fetchone()
         details = json.loads(cycle[1]) if cycle else {}
     return {
-        "local_date": local.date().isoformat(), "timezone": "Europe/Belgrade",
+        "local_date": local.date().isoformat(), "timezone": QUIET_ZONE.key,
         "standalone_published_count": len(rows),
         "published_message_ids": [row[0] for row in rows],
         "map_button_delivery_unconfirmed": unconfirmed,
+        "morning_hold": {
+            "materials": len(held),
+            "published_message_ids": sorted({
+                number for _, _, number in held if type(number) is int and number > 0
+            }),
+            "deadline_exceeded": sum(
+                status == "blocked" and reason == "material_deadline_exceeded"
+                for status, reason, _ in held
+            ),
+        },
         "decisions": [{"status": _token(status), "reason": _token(reason), "count": count}
                       for status, reason, count in decisions],
         "latest_cycle_status": _token(cycle[0]) if cycle else None,
