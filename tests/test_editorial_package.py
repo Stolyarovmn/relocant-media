@@ -73,6 +73,50 @@ def test_ready_requires_valid_independent_reviews() -> None:
     assert evaluate_package(parse(package_payload()), now=NOW).status == "ready"
 
 
+@pytest.mark.parametrize(("source_title", "body", "reason"), [
+    (
+        "Kvarovi na vodovodnoj mreži biće otklonjeni tokom dana",
+        "Когда: 18 ноября до 15:00. Автоцистерна приедет на улицу Пробную.",
+        "water_tanker_scope_unverified",
+    ),
+    (
+        "Kvarovi na vodovodnoj mreži biće otklonjeni tokom dana",
+        "Когда: до 15:00. Работы пройдут на улице Пробной.",
+        "draft_requires_absolute_event_date",
+    ),
+    (
+        "Bez vode u Zemunu zbog popravke",
+        "Когда: 18 ноября до 15:00. Автоцистерна приедет на улицу Пробную.",
+        None,
+    ),
+])
+def test_water_notice_scope_is_checked_after_independent_approval(
+    source_title: str, body: str, reason: str | None,
+) -> None:
+    payload = package_payload()
+    url = (
+        "https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/"
+        "a116702/test.html"
+    )
+    payload["evidence"].update(title=source_title, url=url)
+    for claim in payload["outcome"]["claims"]["claims"]:
+        for citation in claim["citations"]:
+            citation["url"] = url
+    payload["outcome"]["draft"].update(title="Отключение воды в Земуне", body=body)
+    bind_facts_check(payload)
+    digest = draft_sha256(parse(payload).outcome.draft)
+    for review in payload["reviews"]:
+        review["draft_sha256"] = digest
+    bind_context(payload)
+
+    result = evaluate_package(parse(payload), now=NOW)
+    if reason is None:
+        assert result.status == "ready"
+    else:
+        assert result.status == "human_review"
+        assert result.reason == reason
+
+
 def test_v1_serialization_preserves_historical_hash_contract() -> None:
     import hashlib
 

@@ -22,6 +22,36 @@ TRANSPORT_URL = (
     "https://www.beograd.rs/lat/servisne-informacije/saobracaj-i-prevoz/"
     "a116238/Informacija-o-radovima-u-ulici-Slanacki-put.html"
 )
+WATER_URL = (
+    "https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/"
+    "a116702/test.html"
+)
+
+
+@pytest.mark.parametrize("tag", ["p", "h3"])
+def test_city_water_bulletin_preserves_outage_windows_and_omits_shared_tankers(tag: str) -> None:
+    html = f"""<article>
+    <h1>Kvarovi na vodovodnoj mreži biće otklonjeni tokom dana</h1>
+    <time class="story__time">18.11.2026.</time>
+    <p>Do 15.00</p><ul><li>Zemun: Probna 4</li></ul>
+    <p>Do 22.00</p><ul><li>Zvezdara: Primerna 12</li></ul>
+    <{tag}>Raspored auto cisterni:</{tag}><ul><li>Voždovac: Treća 6</li></ul>
+    </article>"""
+    item = parse_beograd_article(html, load_source_file(SOURCE_PATH), WATER_URL)
+
+    assert item.body == "Do 15.00\n\nZemun: Probna 4\n\nDo 22.00\n\nZvezdara: Primerna 12"
+    assert item.external_id == "116702"
+    assert item.url == WATER_URL
+    assert item.published_at == datetime(2026, 11, 18, tzinfo=ZoneInfo("Europe/Belgrade"))
+
+
+def test_city_dedicated_water_notice_keeps_its_tanker_details() -> None:
+    html = """<article><h1>Bez vode u Zemunu zbog popravke</h1>
+    <p>Planirana popravka u Probnoj ulici.</p>
+    <p>Raspored auto cisterni:</p><ul><li>Zemun: Probna 4</li></ul></article>"""
+    item = parse_beograd_article(html, load_source_file(SOURCE_PATH), WATER_URL)
+
+    assert "Raspored auto cisterni:\n\nZemun: Probna 4" in item.body
 
 
 def test_parse_transport_service_article_preserves_url_and_id() -> None:

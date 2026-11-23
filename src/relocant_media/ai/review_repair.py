@@ -22,6 +22,7 @@ from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputErr
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import draft_date_reason
 from relocant_media.domain.presentation import title_instruction, valid_title_presentation
+from relocant_media.domain.water_bulletin import draft_water_tanker_reason
 
 
 def review_with_repairs(
@@ -57,14 +58,23 @@ def review_with_repairs(
             return current
         language_reason = draft_language_reason(current.outcome.draft.title,
                                                current.outcome.draft.body)
-        date_reason=draft_date_reason(current.outcome.draft.title,current.outcome.draft.body)
+        date_reason = draft_date_reason(current.outcome.draft.title, current.outcome.draft.body)
+        tanker_reason = draft_water_tanker_reason(
+            current.evidence.url, current.evidence.title,
+            current.outcome.draft.title, current.outcome.draft.body,
+        )
         if language_reason:
             record({"role": "language_guard", "reason": language_reason,
                     "instruction": "Перевести весь основной текст на русский, сохранив имена."})
         if date_reason:
-            record({"role":"date_guard","reason":date_reason,
-                    "instruction":"Укажи абсолютную дату по часовому поясу профиля города."})
-        if language_reason is None and date_reason is None and all(
+            record({"role": "date_guard", "reason": date_reason,
+                    "instruction": "Укажи подтверждённую абсолютную дату рядом со временем по "
+                    "часовому поясу города. Не подставляй дату по догадке."})
+        if tanker_reason:
+            record({"role": "source_scope_guard", "reason": tanker_reason,
+                    "instruction": "Убери общий список автоцистерн из объявления о конкретном "
+                    "отключении. Сохрани подтверждённые адреса и срок."})
+        if not (language_reason or date_reason or tanker_reason) and all(
                r.verdict == "approve" and not r.flags and r.score >= 75
                for r in current.reviews):
             if not valid_title_presentation(current.outcome.draft.title):
