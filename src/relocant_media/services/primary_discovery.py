@@ -2,8 +2,9 @@
 
 import re
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -15,6 +16,7 @@ from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as TRAFFIC_S
 from relocant_media.collectors.bgsaobracaj_notices import match_bgsaobracaj_notice
 from relocant_media.collectors.cukarica_news import ARTICLE_PATH
 from relocant_media.collectors.venue_feed import _allowed
+from relocant_media.domain.flight_notices import city_carriers
 from relocant_media.sources.registry import SourceConfig
 
 _LETTERS = dict(zip(
@@ -147,18 +149,96 @@ def public_search_plan(
 
 
 def _matches_article(text: str, article: RawItem) -> bool:
-    if topic_matches(text, article.title):
-        return True
     if article.source_id != AVIATION_SOURCE:
+        return topic_matches(text, article.title)
+    carriers = city_carriers("belgrade")
+    found = [_carriers_in(value, carriers) for value in (text[:8000], article.title)]
+    # Без распознанного перевозчика авиатему ищет независимый поиск, а не сходство слов.
+    return any(found) and _same_carrier_report(text, article.title)
+
+
+def _carriers_in(value: str, carriers: Mapping[str, re.Pattern[str]]) -> set[str]:
+    return {carrier for carrier, pattern in carriers.items() if pattern.search(value)}
+
+
+# Маршрут: «откуда» и «куда» — названия с заглавной буквы после предлога (сербский/русский);
+# до трёх строчных слов между ними допускаются: «в китайский город Гуанчжоу».
+_NAME = r"((?:[A-ZА-ЯЁČĆŽŠĐЈЉЊЋЏ][\w'-]+)(?:\s+[A-ZА-ЯЁČĆŽŠĐЈЉЊЋЏ][\w'-]+)?)"
+_GAP = r"\s+(?:[a-zа-яёčćžšđјљњћџ]+\s+){0,3}?"
+_FROM = re.compile(r"(?<!\w)(?:iz|из|from)" + _GAP + _NAME)
+_TO = re.compile(r"(?<!\w)(?:za|do|u|ka|в|во|до|на|to)" + _GAP + _NAME)
+_BETWEEN = re.compile(r"(?<!\w)(?:između|izmedju|между|between)" + _GAP + _NAME
+                      + r"\s+(?:i|и|and)\s+" + _NAME)
+# Действие перевозчика: разные распознанные действия — разные новости.
+_ACTIONS = {
+    "stop": re.compile(r"(?<!\w)(?:ukid\w*|ukinu\w*|obustav\w*|otkaz\w*|prekid\w*|povlač\w*|"
+                       r"povuk\w*|отмен\w*|приостан\w*|прекра\w*|закрыва\w*|cancel\w*|"
+                       r"suspend\w*)", re.I),
+    "start": re.compile(r"(?<!\w)(?:obnavlj\w*|obnov\w*|vraća\w*|uvod\w*|uvede\w*|pokreć\w*|"
+                        r"pokrenu\w*|возобнов\w*|запуска\w*|запуст\w*|откр\w*|вводит\w*|"
+                        r"resum\w*|launch\w*)", re.I),
+}
+
+
+def _same_name(left: str, right: str) -> bool:
+    a, b = folded(left), folded(right)
+    return a == b or (min(len(a), len(b)) >= 4 and SequenceMatcher(None, a, b).ratio() >= 0.75)
+
+
+def _route(text: str, home: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Одно «откуда» и одно «куда»; без явного вылета — домашний город. Иначе None."""
+    def is_home(words: tuple[str, ...]) -> bool:
+        return any(_same_name(words[0], alias) for alias in home)
+
+    pairs = [(tuple(m[1].split()), tuple(m[2].split())) for m in _BETWEEN.finditer(text)]
+    rest = _BETWEEN.sub(" ", text)
+    origins = [tuple(m[1].split()) for m in _FROM.finditer(rest)]
+    targets = [tuple(m[1].split()) for m in _TO.finditer(rest)]
+    for left, right in pairs:
+        origin, target = (left, right) if is_home(left) or not is_home(right) else (right, left)
+        origins.append(origin)
+        targets.append(target)
+    targets = [t for t in targets if not is_home(t)]
+    if len(origins) > 1 or len(targets) != 1:
+        return None
+    origin = origins[0] if origins else (home[0],)
+    return origin, targets[0]
+
+
+def _same_place(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    # Уточняющий аэропорт («London Luton») сравнивается, если указан с обеих сторон.
+    return _same_name(left[0], right[0]) and (
+        len(left) < 2 or len(right) < 2 or _same_name(left[1], right[1]))
+
+
+def _actions(text: str) -> set[str]:
+    return {name for name, pattern in _ACTIONS.items() if pattern.search(text)}
+
+
+def _same_carrier_report(lead: str, title: str, *, city: str = "belgrade") -> bool:
+    """Тот же перевозчик из реестра города, тот же маршрут и не противоположное действие.
+
+    Маршрут — одно «откуда» (без явного вылета — домашний город) и одно «куда».
+    Названия в разных алфавитах сравниваются по сходству транслитерации, без списков замен.
+    Если маршрут не извлечён однозначно, совпадения нет: тему ищет независимый поиск.
+    Это ограничение поисковой подсказки; прямые проверенные ссылки обрабатываются отдельно.
+    """
+    from relocant_media.domain.city_profile import load_city_profile
+
+    carriers = city_carriers(city)
+    found = [_carriers_in(value, carriers) for value in (lead[:8000], title)]
+    if len(found[0]) != 1 or found[0] != found[1]:
         return False
-    # Common airline and airport/destination terms survive Serbian/Russian spelling.
-    def terms(value: str) -> set[str]:
-        raw = folded(value).replace("guangdzou", "guangzhou").replace("guanchzhou", "guangzhou")
-        raw = re.sub(r"\bguancz(?:h)?ou\b", "guangzhou", raw)
-        raw = raw.replace("er srbija", "air serbia")
-        return set(re.findall(r"[a-z]{3,}|\d{1,4}", raw))
-    lead, title = terms(text), terms(article.title)
-    return {"air", "serbia"} <= lead & title and len((lead & title) - {"air", "serbia"}) >= 2
+    pattern = carriers[next(iter(found[0]))]
+    lead, title = pattern.sub(" ", lead[:8000]), pattern.sub(" ", title)
+    actions = _actions(lead), _actions(title)
+    if all(len(a) == 1 for a in actions) and actions[0] != actions[1]:
+        return False
+    home = load_city_profile(city).geography.city_aliases
+    left, right = _route(lead, home), _route(title, home)
+    if left is None or right is None:
+        return False
+    return _same_place(left[0], right[0]) and _same_place(left[1], right[1])
 
 
 async def resolve_public_discovery(

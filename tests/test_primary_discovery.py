@@ -76,3 +76,68 @@ def test_russian_air_serbia_pointer_matches_dated_serbian_report_only():
     lead = "Air Serbia отменяет рейсы в китайский город Гуанчжоу с 27 ноября."
     assert _matches_article(lead, report)
     assert not _matches_article(lead.replace("Гуанчжоу", "Подгорицу"), report)
+
+
+@pytest.mark.parametrize("lead,title,expected", [
+    ("Wizz Air отменяет рейсы в Мальмё с 15 января.",
+     "Wizz Air ukida letove za Malme od 15. januara", True),
+    ("Lufthansa отменяет рейсы в Мюнхен с 15 января.",
+     "Wizz Air ukida letove za Minhen od 15. januara", False),
+    ("Авиакомпания отменяет рейсы в Мюнхен с 15 января.",
+     "Neka kompanija ukida letove za Minhen od 15. januara", False),
+    ("Wizz Air отменяет рейсы в Мюнхен.", "Wizz Air ukida letove za Pariz", False),
+])
+def test_aviation_pointer_rule_is_general_for_any_registered_carrier(lead, title, expected):
+    from relocant_media.services.primary_discovery import _same_carrier_report
+
+    assert _same_carrier_report(lead, title) is expected
+
+
+@pytest.mark.parametrize("lead,title", [
+    ("Lufthansa ukida letove za Minhen od 15. januara",
+     "Wizz Air ukida letove za Minhen od 15. januara"),
+    ("Wizz Air отменяет рейсы в Берлин с 15 января",
+     "Wizz Air ukida letove za Pariz od 15. januara"),
+    ("Wizz Air ukida letove za Pariz od 15. januara",
+     "Wizz Air ukida letove za Minhen od 15. januara"),
+    ("Wizz Air obnavlja letove za Pariz od 15. januara",
+     "Wizz Air obnavlja letove za Minhen od 15. januara"),
+    ("Wizz Air otkazuje direktne letove za Pariz od 15. januara",
+     "Wizz Air otkazuje direktne letove za Minhen od 15. januara"),
+    ("Wizz Air ukida letove za London Luton od 15. januara",
+     "Wizz Air ukida letove za London Gatwick od 15. januara"),
+    ("Wizz Air ukida letove za Pariz od 15. januara",
+     "Wizz Air uvodi letove za Pariz od 15. januara"),
+    ("Wizz Air ukida letove od 15. januara",
+     "Wizz Air ukida letove od 15. januara"),
+    ("Wizz Air ukida letove iz Niša za Pariz od 15. januara",
+     "Wizz Air ukida letove iz Niša za Minhen od 15. januara"),
+    ("Wizz Air ukida letove iz Niša za Pariz od 15. januara",
+     "Wizz Air ukida letove iz Beograda za Pariz od 15. januara"),
+    ("Vueling ukida letove za Pariz od 15. januara",
+     "TAP Air Portugal ukida letove za Pariz od 15. januara"),
+])
+def test_aviation_article_needs_same_carrier_and_direction(lead, title):
+    from relocant_media.collectors.base import RawItem
+    from relocant_media.services.primary_discovery import _matches_article
+
+    report = RawItem("media_aero_telegraf", "1", "https://aero.telegraf.rs/avio-kompanije/1-a",
+                     title, "Содержание", None)
+    assert not _matches_article(lead, report)
+
+
+def test_aviation_article_same_carrier_and_direction_matches_across_scripts():
+    from relocant_media.collectors.base import RawItem
+    from relocant_media.services.primary_discovery import _matches_article
+
+    report = RawItem("media_aero_telegraf", "1", "https://aero.telegraf.rs/avio-kompanije/1-a",
+                     "Wizz Air ukida letove za Malme od 15. januara", "Содержание", None)
+    assert _matches_article("Wizz Air отменяет рейсы в Мальмё с 15 января.", report)
+    assert _matches_article("Wizz Air ukida letove iz Beograda za Malme", report)
+    london = RawItem("media_aero_telegraf", "2", "https://aero.telegraf.rs/avio-kompanije/2-a",
+                     "Wizz Air ukida letove za London Luton", "Содержание", None)
+    assert _matches_article("Wizz Air отменяет рейсы в Лондон", london)
+    between = RawItem("media_aero_telegraf", "3", "https://aero.telegraf.rs/avio-kompanije/3-a",
+                      "Wizz Air ukida letove između Beograda i Pariza", "Содержание", None)
+    assert _matches_article("Wizz Air отменяет рейсы из Белграда в Париж", between)
+    assert not _matches_article("Wizz Air отменяет рейсы из Ниша в Париж", between)
