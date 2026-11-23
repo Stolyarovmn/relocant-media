@@ -209,3 +209,51 @@ async def ensure_map_pin_on_top(
             result["previous_unpinned"] = False
     # Новый ID ещё не записан в pin-policy.json: без этого цикл не узнает пост.
     return result
+
+
+async def apply_pin_texts(
+    bot: TelegramBotAPI, policy: dict[str, Any], presentation: dict[str, Any], *, apply: bool,
+) -> dict[str, Any]:
+    """Тексты служебных закрепов «Правила» и «Предложка и сотрудничество» на месте.
+
+    Только ``editMessageText`` существующих служебных постов; кнопок у них нет,
+    новых сообщений и закрепов не появляется. Повтор безопасен.
+    """
+    if policy.get("channel_id") != CHANNEL:
+        raise ValueError("pin policy targets are not approved")
+    service = set(policy.get("service_channel_messages", ()))
+    result: dict[str, Any] = {"owner_action_required": False, "posts": {}}
+    blocks: list[tuple[int, str]] = []
+    for key in ("navigation", "submissions"):
+        block = presentation.get(key)
+        if not isinstance(block, dict) or not isinstance(block.get("html"), str):
+            raise ValueError(f"{key} text is not configured")
+        message_id = block.get("message_id")
+        if (type(message_id) is not int or message_id not in service
+                or message_id == policy.get("map_channel_message")):
+            raise ValueError(f"{key} must target a registered service pin")
+        blocks.append((message_id, block["html"]))
+    # Все цели проверены до первой записи.
+    for message_id, html in blocks:
+        status = "would_edit"
+        if apply:
+            try:
+                edited = await bot._call("editMessageText", {
+                    "chat_id": CHANNEL, "message_id": message_id, "text": html,
+                    "parse_mode": "HTML", "link_preview_options": {"is_disabled": True}})
+                if not isinstance(edited, dict) or edited.get("message_id") != message_id:
+                    raise TelegramAPIError("edited pin text receipt does not match")
+                status = "edited"
+            except httpx.HTTPStatusError as error:
+                body = error.response.json() if error.response.status_code == 400 else {}
+                if str(body.get("description", "")).startswith(
+                        "Bad Request: message is not modified"):
+                    status = "unchanged"
+                else:
+                    status = "owner_action_required"
+                    result["owner_action_required"] = True
+            except TelegramAPIError:
+                status = "owner_action_required"
+                result["owner_action_required"] = True
+        result["posts"][str(message_id)] = status
+    return result

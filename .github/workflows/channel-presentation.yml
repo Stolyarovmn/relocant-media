@@ -10,6 +10,10 @@ on:
         description: Сверить верхний закреп карты; с apply отправить и тихо закрепить пост карты
         type: boolean
         default: false
+      texts:
+        description: Сверить тексты закрепов «Правила» и «Предложка и сотрудничество»; с apply обновить
+        type: boolean
+        default: false
       pin_existing:
         description: ID уже отправленного поста карты, который нужно только закрепить
         type: string
@@ -49,11 +53,13 @@ jobs:
           APPLY_CHANNEL_PRESENTATION: ${{ inputs.apply }}
           PIN_MAP: ${{ inputs.pin_map }}
           PIN_EXISTING: ${{ inputs.pin_existing }}
+          PIN_TEXTS: ${{ inputs.texts }}
         run: |
           set -euo pipefail
           args=()
           if [ "$APPLY_CHANNEL_PRESENTATION" = true ]; then args+=(--apply); fi
           if [ "$PIN_MAP" = true ]; then args+=(--pin-map); fi
+          if [ "$PIN_TEXTS" = true ]; then args+=(--texts); fi
           if [ -n "$PIN_EXISTING" ]; then
             [[ "$PIN_EXISTING" =~ ^[1-9][0-9]*$ ]]
             args+=(--pin-existing "$PIN_EXISTING")
