@@ -34,6 +34,29 @@ def map_reply_markup(url: str) -> dict[str, object]:
     return {"inline_keyboard": [[{"text": "Посмотреть на карте", "url": url, "style": "success"}]]}
 
 
+def inline_keyboards_match(actual: object, expected: Mapping[str, object]) -> bool:
+    """Сверяет полную клавиатуру, учитывая, что Telegram может не вернуть цвет."""
+    if not isinstance(actual, dict):
+        return False
+    rows, desired = actual.get("inline_keyboard"), expected.get("inline_keyboard")
+    if not isinstance(rows, list) or not isinstance(desired, list) or len(rows) != len(desired):
+        return False
+    for row, desired_row in zip(rows, desired, strict=True):
+        if (not isinstance(row, list) or not isinstance(desired_row, list)
+                or len(row) != len(desired_row)):
+            return False
+        for button, desired_button in zip(row, desired_row, strict=True):
+            if not isinstance(button, dict) or not isinstance(desired_button, dict):
+                return False
+            if "style" not in button:
+                desired_button = {
+                    key: value for key, value in desired_button.items() if key != "style"
+                }
+            if button != desired_button:
+                return False
+    return True
+
+
 class TelegramBot(Protocol):
     async def send_message(
         self,
@@ -236,7 +259,7 @@ class TelegramBotAPI:
             raise
         if (not isinstance(result, dict) or self._message_id(result) != message_id
                 or not isinstance(result.get("chat"), dict) or result["chat"].get("id") != chat_id
-                or result.get("reply_markup") != markup):
+                or not inline_keyboards_match(result.get("reply_markup"), markup)):
             raise TelegramAPIError("edited keyboard receipt does not match the requested post")
         return True
 

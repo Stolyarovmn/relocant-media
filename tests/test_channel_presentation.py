@@ -6,7 +6,7 @@ import httpx
 import pytest
 import yaml
 
-from relocant_media.bot.api import TelegramBotAPI
+from relocant_media.bot.api import TelegramBotAPI, inline_keyboards_match
 from relocant_media.domain.map_links import MAP_HOME_URL
 from relocant_media.domain.topic_tags import TAGS_V2_PRESENTATION, topic_tags
 from relocant_media.services.channel_presentation import ensure_service_pin_map_button
@@ -48,15 +48,34 @@ def test_belgrade_navigation_lists_the_configured_digest_times():
     assert all(schedule[slot] in text for slot in ("morning", "evening"))
 
 
+def test_keyboard_receipt_accepts_only_the_absence_of_style():
+    home = {"text": "🗺 Открыть карту", "url": MAP_HOME_URL}
+    callback = {"text": "Меню", "callback_data": "menu"}
+    expected = {"inline_keyboard": [[{**home, "style": "success"}, callback]]}
+    assert inline_keyboards_match({"inline_keyboard": [[home, callback]]}, expected)
+    assert not inline_keyboards_match({
+        "inline_keyboard": [[{**home, "style": "primary"}, callback]],
+    }, expected)
+    assert not inline_keyboards_match({
+        "inline_keyboard": [[home, {**callback, "callback_data": "other"}]],
+    }, expected)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("message_id", [4, 6])
-async def test_service_pin_update_preserves_other_buttons_and_checks_before_writing(message_id):
+@pytest.mark.parametrize("echo_style", [True, False])
+async def test_service_pin_update_preserves_other_buttons_and_checks_before_writing(
+    message_id, echo_style,
+):
     presentation = yaml.safe_load(PRESENTATION.read_text(encoding="utf-8"))
     policy = json.loads((BELGRADE / "pin-policy.json").read_text(encoding="utf-8"))
     button = presentation["navigation"]["map_button"]
     other_button = {"text": "Партнёрство", "url": "https://example.net", "style": "primary"}
     channel = {"id": policy["channel_id"], "type": "channel"}
-    old_markup = {"inline_keyboard": [[{"text": "Карта", "url": MAP_HOME_URL}, other_button]]}
+    old_button = {**button, "style": "primary"} if echo_style else {
+        "text": "Карта", "url": MAP_HOME_URL,
+    }
+    old_markup = {"inline_keyboard": [[old_button, other_button]]}
     pin = {"message_id": message_id, "reply_markup": old_markup, "chat": channel}
     info = {**channel, "description": "Старое описание", "pinned_message": pin}
     calls = []
@@ -77,7 +96,11 @@ async def test_service_pin_update_preserves_other_buttons_and_checks_before_writ
                 "chat_id": channel["id"], "message_id": message_id,
                 "reply_markup": {"inline_keyboard": [[button], [other_button]]},
             }
-            pin["reply_markup"] = data["reply_markup"]
+            rows = data["reply_markup"]["inline_keyboard"]
+            if not echo_style:
+                rows = [[{k: v for k, v in item.items() if k != "style"} for item in row]
+                        for row in rows]
+            pin["reply_markup"] = {"inline_keyboard": rows}
             result = pin
         return httpx.Response(200, json={"ok": True, "result": result})
 

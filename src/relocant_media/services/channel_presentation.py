@@ -3,7 +3,7 @@ from typing import Any
 
 import httpx
 
-from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
+from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI, inline_keyboards_match
 from relocant_media.domain.map_links import MAP_HOME_URL
 from relocant_media.services.pin_policy import CHANNEL
 
@@ -63,7 +63,8 @@ async def ensure_service_pin_map_button(
 
     other_rows = [[item for item in row if item.get("url") != MAP_HOME_URL] for row in rows]
     updated = {"inline_keyboard": [[button], *(row for row in other_rows if row)]}
-    result["map_button"] = "would_update" if updated["inline_keyboard"] != rows else "unchanged"
+    matches = inline_keyboards_match(markup, updated)
+    result["map_button"] = "unchanged" if matches else "would_update"
     if apply and result["map_button"] == "would_update":
         try:
             changed = await bot.edit_inline_keyboard(CHANNEL, message_id, updated)

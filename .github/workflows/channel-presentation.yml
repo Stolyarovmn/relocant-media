@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: belgrade-channel-presentation
@@ -28,6 +29,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/install-python
+      - name: Сверить успешный CI точного коммита main
+        if: inputs.apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_MODE: channel-presentation
+        run: python src/relocant_media/ops/editorial_start.py gate
       - name: Сверить описание канала и кнопку карты
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
