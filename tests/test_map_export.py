@@ -76,6 +76,16 @@ _LISTED_ROAD = (
     "у временском периоду од 22. 11. до 25. 11. 2026. године.\n\n"
     "Мапа заузећа"
 )
+_SIDEWALK_URL = (
+    "https://www.bgsaobracaj.rs/vest/5432/izmena-rezima-saobraca%D1%98a-u-ul-"
+    "vla%D1%98kovicevo%D1%98-i-kosovsko%D1%98"
+)
+_SIDEWALK_BODY = (
+    "Због изградње гараже заузет тротоар у ул. Влајковићевој , од Трга Николе Пашића "
+    "до ул. Косовске, заузет део тротоара и паркинг места у ул. Косовској, у зони бр. 33-35, "
+    "на територији Градске општине Стари град, у временском периоду "
+    "14. 11. 2026. до 1. 5. 2027. године.\n\nМапа заузећа"
+)
 
 
 def _listed_document(body: str = _LISTED_ROAD) -> EvidenceDocument:
@@ -165,6 +175,55 @@ def test_incomplete_or_conflicting_listed_road_phases_are_not_mapped():
         _LISTED_ROAD.replace("коловоза у ул. Устаничкој ,", "коловоза у ул. Устаничкој и Јужна,"),
     ):
         assert resolve_secretariat_stretches(_listed_document(changed), streets) == []
+
+
+def test_secretariat_sidewalk_exports_only_the_bounded_section_and_preserves_its_kind():
+    streets = load_street_index(Path("cities/belgrade/map/roads.json.gz"))
+    document = _listed_document(_SIDEWALK_BODY).model_copy(update={
+        "url": _SIDEWALK_URL, "title": "Измена режима саобраћаја у Старом граду",
+    })
+    source = load_source_file(Path("cities/belgrade/sources/bgsaobracaj_notices.yaml"))
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        capture_collected_batch(session, [
+            CollectedItem(**document.model_dump(), external_id="5432", source_html="<article/>"),
+        ])
+        session.commit()
+        observed_at = datetime(2026, 11, 23, 7, tzinfo=UTC)
+        (incident,) = export_map(session, observed_at=observed_at, streets=streets).incidents
+        assert incident.id == map_event_id(_SIDEWALK_URL)
+        assert incident.starts_on.isoformat() == "2026-11-14"
+        assert incident.ends_on.isoformat() == "2027-05-01"
+        (line,) = incident.lines
+        assert line.scope == "sidewalk"
+        assert line.label == "Тротуар · Влајковићева: Трг Николе Пашића — Косовска"
+        assert len(line.coordinates) > 2
+        assert line.ends_at == datetime(2027, 5, 1, 22, tzinfo=UTC)
+        assert not incident.points
+
+        profile = load_city_profile("belgrade")
+        presentation = build_presentation(session, 1, (document,), document_ids=[1],
+                                          profile=profile, rubric_id="city_changes")
+        assert presentation.native_map is not None
+        (phase,) = presentation.native_map["point"]["road_phases"]
+        assert phase["scope"] == "sidewalk"
+        assert phase["segment"]["start"] == "Трг Николе Пашића"
+        assert phase["segment"]["end"] == "Косовска"
+        verify_stored_presentation(session, 1, (document,), document_ids=[1],
+                                   presentation=presentation)
+    engine.dispose()
+
+    for changed in (
+        _SIDEWALK_BODY.replace("од Трга Николе Пашића до ул. Косовске", "у зони гараже"),
+        _SIDEWALK_BODY.replace("Стари град", "Вождовац"),
+        _SIDEWALK_BODY.replace("Због изградње гараже", "Радови се изводе сваке суботе"),
+        "Датум објаве 18. 11. 2026. године.\n\n" + _SIDEWALK_BODY,
+        _SIDEWALK_BODY.replace("заузет тротоар", "доступан тротоар"),
+    ):
+        modified = document.model_copy(update={"body": changed})
+        assert not resolve_secretariat_stretches(modified, streets)
 
 
 def test_official_road_phases_have_separate_lines_and_follow_valid_revisions():

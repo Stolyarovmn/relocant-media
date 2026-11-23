@@ -1,7 +1,7 @@
 import {
   agendaDays, belgradeDate, clusterMapPoints, incidentTimes, launchPlaces, placeCategory, placeCountdown,
   placeKinds, placeOnDay, placeOptionLabel, placeStatus, readPlaces, shareLink, straightLineDistance, updateStamp,
-} from "./core.js?v=18";
+} from "./core.js?v=19";
 import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
 import { agendaFavorites } from "./favorites.js?v=1";
 import { snapshotNotice } from "./snapshots.js?v=1";

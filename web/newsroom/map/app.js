@@ -2,15 +2,15 @@ import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=18";
+} from "./core.js?v=19";
 import { calendarLink } from "./calendar.js?v=5";
 import {
   corridorCaps, heatCells, heatOverview, layerView, timelineBands, timelineInstant, timelineLabel,
   timelineSteps,
 } from "./layer-views.js?v=2";
-import { setupPlaces } from "./places.js?v=19";
+import { setupPlaces } from "./places.js?v=20";
 import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=1";
-import { addressWatch, watchedIncidents } from "./address-watch.js?v=1";
+import { addressWatch, watchedIncidents } from "./address-watch.js?v=2";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");
@@ -375,6 +375,9 @@ function eventCard(incident, now) {
     const district = segment.municipality ? ` · ${segment.municipality}` : "";
     card.append(make("p", "event-scope", `${segment.street}${extent}${district}`));
   }
+  for (const line of incident.lines) {
+    if (line.scope === "sidewalk") card.append(make("p", "event-scope", line.label));
+  }
   for (const settlement of incident.settlements) {
     const scope = settlement.parent ? `${settlement.name} · часть ${settlement.parent}`
       : settlement.name;
@@ -471,7 +474,11 @@ function bindFeature(layer, group, incident, label, window, fromRegister) {
   const popup = make("div");
   popup.append(make("strong", "", incident.title));
   if (label && label !== incident.title) popup.append(make("p", "", label));
-  if (window) popup.append(make("p", "", addressWindowText(window)));
+  if (window) {
+    const time = incident.startDay !== null && incident.endDay !== null
+      ? incidentTimes(incident)[0] : addressWindowText(window);
+    popup.append(make("p", "", time));
+  }
   if (roadOrientation(incident)) {
     popup.append(make("p", "", "Ориентир. Точные границы перекрытия не подтверждены."));
   }
@@ -668,18 +675,21 @@ function renderVectors(overview, zoom) {
     if (overview && !selected) continue;
     const color = mapColor(incident.kind);
     const road = incident.kind === "road";
-    for (const { coordinates, label, window, boundary } of lines) {
+    for (const { coordinates, label, window, boundary, scope } of lines) {
       const expired = archived || !unexpired(window, now);
+      const sidewalk = scope === "sidewalk";
       const style = road
         ? { opacity: expired ? .30 : selected || corridor ? .68 : .48, weight: roadLineWeight(zoom, selected) }
         : { opacity: expired ? .48 : .94, weight: selected || corridor ? 8 : 5 };
+      const className = sidewalk ? "outage-sidewalk" : road ? "outage-road" : "outage-line";
       const path = leaflet.polyline(coordinates, {
         color, ...style, lineCap: "round", lineJoin: "round",
         ...(boundary ? { dashArray: "5 7", weight: selected ? 6 : 4 } : {}),
-        className: road ? "outage-road" : "outage-line",
+        ...(sidewalk ? { dashArray: "2 6", weight: selected ? 5 : 4, opacity: expired ? .45 : .95 } : {}),
+        className,
       });
       bindFeature(path, state.eventLayer, incident, label, window);
-      if (road && !boundary) item.roadPaths.push(path);
+      if (road && !boundary && !sidewalk) item.roadPaths.push(path);
     }
     for (const area of areas) {
       const expired = archived || !unexpired(area.window, now);
@@ -853,7 +863,9 @@ function focusIncident(item) {
     return false;
   }
   state.focusNote = roadOrientation(incident)
-    ? "Показан ориентир. Точные границы перекрытия не подтверждены." : "";
+    ? "Показан ориентир. Точные границы перекрытия не подтверждены."
+    : incident.lines.some((line) => line.scope === "sidewalk")
+      ? "Линия показывает отрезок улицы с ограничением на тротуаре." : "";
   showMapNote();
   return true;
 }

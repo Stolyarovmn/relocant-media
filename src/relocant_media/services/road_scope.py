@@ -102,6 +102,21 @@ _LIST_PHASE = re.compile(
     rf"\s+до\s+(?:ул(?:ице)?\.?\s+)?(?P<end>{_PLACE})\s*,?\s+"
     rf"{_LIST_PERIOD}\s*[.:;]?\s*\Z"
 )
+_SIDEWALK_STRETCH = re.compile(
+    rf"\b(?:заузет|затворен)\s+(?:тротоар|део\s+тротоара)\s+"
+    rf"у\s+(?:улици|ул\.)\s+(?P<street>{_PLACE})\s*,\s*"
+    rf"од\s+(?:ул(?:ице)?\.?\s+)?(?P<start>{_PLACE})"
+    rf"\s+до\s+(?:ул(?:ице)?\.?\s+)?(?P<end>{_PLACE})\s*,"
+)
+_SIDEWALK_PERIOD = re.compile(
+    rf"\bна територији (?:градске )?општине (?P<municipality>{_PLACE})\s*,\s*"
+    rf"у\s+(?:временском\s+)?периоду\s+(?:од\s+)?(?P<first>{_PRINTED_DATE})"
+    rf"(?:\s+године)?\s+до\s+(?P<last>{_PRINTED_DATE})(?:\s+године)?\s*[.]?\Z"
+)
+_CALENDAR_DATE = re.compile(_PRINTED_DATE)
+_TIMED_OR_PHASED = re.compile(
+    r"\b(?:фаз[аеу]|фазама|свак\w+|часов[аи]?|сати)\b|\b\d{1,2}:\d{2}\b",
+)
 
 
 def _sentences(document: EvidenceDocument) -> list[str]:
@@ -123,6 +138,8 @@ def is_road_restriction(document: EvidenceDocument) -> bool:
 
 def _cross_name(value: str, roads: dict[str, list[list[Any]]]) -> str | None:
     choices = {value}
+    if value.startswith("трга "):
+        choices.add("трг " + value.removeprefix("трга "))
     for suffix, nominative in _CROSS_ENDINGS:
         if value.endswith(suffix):
             choices.add(value.removesuffix(suffix) + nominative)
@@ -216,6 +233,38 @@ def _listed_secretariat_stretches(
     return stretches if phases == _PHASE.findall(_name(body)) else []
 
 
+def _secretariat_sidewalk(body: str, index: StreetIndex) -> list[tuple[date, date, dict[str, Any]]]:
+    # Общий интервал применим, когда в объявлении ровно один календарный период.
+    normalized = _name(body)
+    if len(_CALENDAR_DATE.findall(normalized)) != 2 or _TIMED_OR_PHASED.search(normalized):
+        return []
+    for line in body.splitlines():
+        paragraph = _name(line)
+        period = _SIDEWALK_PERIOD.search(paragraph)
+        if period is None:
+            continue
+        municipality = period["municipality"]
+        if municipality not in _MUNICIPALITIES:
+            return []
+        try:
+            first, last = _printed_date(period["first"]), _printed_date(period["last"])
+        except ValueError:
+            return []
+        if first > last:
+            return []
+        matches = list(_SIDEWALK_STRETCH.finditer(paragraph, 0, period.start()))
+        if not 1 <= len(matches) <= _MAX_SEGMENTS:
+            return []
+        stretches = []
+        for match in matches:
+            geometry = _resolve(match.groupdict(), index, {municipality})
+            if geometry is None:
+                return []
+            stretches.append((first, last, {**geometry, "scope": "sidewalk"}))
+        return stretches
+    return []
+
+
 def resolve_secretariat_stretches(
     document: EvidenceDocument, index: StreetIndex,
 ) -> list[tuple[date, date, dict[str, Any]]]:
@@ -225,6 +274,8 @@ def resolve_secretariat_stretches(
         return []
     if listed := _listed_secretariat_stretches(document.body, index):
         return listed
+    if sidewalk := _secretariat_sidewalk(document.body, index):
+        return sidewalk
     body = _name(document.body)
     road = _DATED_ROAD.search(body)
     if road is None or not _SECRETARIAT_RESTRICTION.search(body[:road.start()]):

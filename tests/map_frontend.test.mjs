@@ -735,6 +735,22 @@ test("одиночная дорожная точка из старой выгр�
   assert.deepEqual(road.areas, []);
 });
 
+test("участок тротуара в слое дорог сохраняет вид линии и календарный срок", () => {
+  const coordinates = [[44.8123, 20.4636], [44.8127, 20.4656]];
+  const fixture = {
+    kind: "road", id: roadId, starts_on: "2026-11-14", ends_on: "2027-05-01",
+    starts_at: "2026-11-14T00:00:00+01:00", ends_at: "2027-05-02T00:00:00+02:00",
+    lines: [{ coordinates, label: "Тротуар · Влајковићева", scope: "sidewalk" }],
+  };
+  const road = incident(fixture);
+  assert.equal(road.lines[0].scope, "sidewalk");
+  assert.match(incidentTimes(road)[0], /1 мая/);
+  assert.doesNotMatch(incidentTimes(road)[0], /00:00/);
+  assert.equal(visibleMapLines(road, Date.parse("2027-05-01T21:59:59Z")).length, 1);
+  assert.equal(visibleMapLines(road, Date.parse("2027-05-01T22:00:00Z")).length, 0);
+  assert.equal(incident({ ...fixture, kind: "water" }).lines[0].scope, null);
+});
+
 test("водный участок с собственным окном исчезает отдельно от остального объявления", () => {
   const geometry = { coordinates: [[44.81, 20.4], [44.81, 20.41]] };
   const event = incident({

@@ -3,14 +3,14 @@ const scope = new URL(self.registration.scope);
 const paths = [
   "./",
   "./style.css?v=17",
-  "./app.js?v=24",
-  "./core.js?v=18",
+  "./app.js?v=25",
+  "./core.js?v=19",
   "./calendar.js?v=5",
-  "./places.js?v=19",
+  "./places.js?v=20",
   "./favorites.js?v=1",
   "./layer-views.js?v=2",
   "./snapshots.js?v=1",
-  "./address-watch.js?v=1",
+  "./address-watch.js?v=2",
 ];
 const shell = paths.map((path) => new URL(path, scope).href);
 const libraries = new Map([
