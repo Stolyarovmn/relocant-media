@@ -266,13 +266,17 @@ def test_revisions_preserve_original_and_each_new_version(reviewed):
 
 
 @pytest.mark.parametrize("status", ["PRIMARY_FAILED", "PRIMARY_BUSY"])
-def test_failed_or_busy_main_never_enters_publisher(seeded, tmp_path, monkeypatch, status):
+@pytest.mark.parametrize("actions_managed", [False, True])
+def test_failed_or_busy_main_never_enters_publisher(
+    seeded, tmp_path, monkeypatch, status, actions_managed,
+):
     engine, _, _ = seeded
     output = tmp_path / "run"
     monkeypatch.setenv("DATABASE_URL", str(engine.url))
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setenv("GEMINI_MODEL", "fake-model")
     monkeypatch.setenv("EDITORIAL_SEND_ENABLED", "true")
+    monkeypatch.setenv("EDITORIAL_ACTIONS_CHECKPOINT", str(actions_managed).lower())
     monkeypatch.setattr(sys, "argv", ["server-cycle", "--output", str(output)])
     def cycle(*args, **kwargs):
         assert kwargs["limit"] == server_cycle.PROCESS_LIMIT == 5
@@ -292,9 +296,9 @@ def test_failed_or_busy_main_never_enters_publisher(seeded, tmp_path, monkeypatc
     assert report["status"] == status
     assert report["sent_message_ids"] == []
     assert report["channel_transport"] == "disabled"
-    assert report["backup_ready"] is True
-    assert (output / "snapshot" / "editorial.sqlite3").is_file()
-    assert (output / "snapshot" / "manifest.json").is_file()
+    assert report.get("backup_ready", False) is not actions_managed
+    assert (output / "snapshot" / "editorial.sqlite3").is_file() is not actions_managed
+    assert (output / "snapshot" / "manifest.json").is_file() is not actions_managed
 
 
 def test_triage_old_holds_closes_without_copying_body_or_touching_receipts(seeded):

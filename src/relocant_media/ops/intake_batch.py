@@ -288,7 +288,7 @@ def main() -> None:
         ):
             state["backup_pending"] = True
         checkpoint()
-        if state.get("backup_pending"):
+        if state.get("backup_pending") and os.environ.get("EDITORIAL_ACTIONS_CHECKPOINT") != "true":
             snapshot_path = directory / "intake-snapshots" / datetime.now(UTC).strftime(
                 "%Y%m%dT%H%M%S.%fZ")
             try:

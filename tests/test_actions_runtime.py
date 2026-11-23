@@ -114,9 +114,10 @@ def execute(context, tmp_path, monkeypatch, **kwargs):
 
 def test_success_claims_before_side_effect_and_restores_receipts(context, tmp_path, monkeypatch):
     store, drive = context
-    store.state['intake_state'] = {'signature': '1,2', 'attempts': 2}
+    store.state['intake_state'] = {'signature': '1,2', 'attempts': 2, 'backup_pending': True}
     def child(command, env):
         assert store.state['status'] == 'busy'
+        assert env['EDITORIAL_ACTIONS_CHECKPOINT'] == 'true'
         assert 'GH_STATE_TOKEN' not in env and 'DRIVE_CREDENTIALS_JSON' not in env
         assert 'GH_STATE_REPOSITORY' not in env
         database = Path(env['DATABASE_URL'].removeprefix('sqlite:///'))
@@ -143,6 +144,7 @@ def test_success_claims_before_side_effect_and_restores_receipts(context, tmp_pa
     assert execute(context, tmp_path, monkeypatch) == 0
     assert store.state['status'] == 'ready'
     assert store.state['intake_state']['attempts'] == 2
+    assert 'backup_pending' not in store.state['intake_state']
     digest = hashlib.sha256(drive.files[store.state['snapshot']['drive_file_id']]).hexdigest()
     assert store.state['snapshot']['sha256'] == digest
     recovery = tmp_path / 'verify-checkpoint'
