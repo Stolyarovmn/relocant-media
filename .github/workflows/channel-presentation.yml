@@ -1,0 +1,54 @@
+name: Channel presentation
+# Применяет шапку и навигационный закреп из cities/<city>/channel-presentation.yaml.
+# Новых сообщений не отправляет, закрепы не добавляет и не снимает.
+on:
+  workflow_dispatch:
+    inputs:
+      city:
+        description: City whose channel header and service pins are applied
+        required: true
+        default: belgrade
+        type: choice
+        options: [belgrade]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: channel-presentation
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-python
+      - name: Verify exact main CI before any runtime side effect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo = 'Stolyarovmn/relocant-media'
+          sha = os.environ['EXPECTED_SHA']
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/{path}']))
+          assert api('git/ref/heads/main')['object']['sha'] == sha, 'main advanced; retry current main'
+          runs = api(f'actions/runs?head_sha={sha}&event=push&per_page=100')['workflow_runs']
+          ci = [r for r in runs if r['path'] == '.github/workflows/ci.yml'
+                and r['head_branch'] == 'main' and r['event'] == 'push']
+          assert ci and ci[0]['status'] == 'completed' and ci[0]['conclusion'] == 'success'
+          PY
+      - name: Apply description, navigation text and map buttons
+        env:
+          SEND_ENABLED: ${{ vars.ACTIONS_SEND_ENABLED }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CITY: ${{ inputs.city }}
+        run: |
+          set -euo pipefail
+          test "$SEND_ENABLED" = true
+          python -m relocant_media.ops.channel_presentation_cli --city "$CITY"

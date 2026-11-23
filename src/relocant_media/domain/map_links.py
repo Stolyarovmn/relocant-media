@@ -11,6 +11,8 @@ MAP_ARCHIVE_AGE = timedelta(days=14)
 _MAP_PAGE = "https://stolyarovmn.github.io/relocant-media/map/"
 _TELEGRAM_BOT = "https://t.me/relocant_media_belgrade_bot"
 _TELEGRAM_APPS = (_TELEGRAM_BOT, f"{_TELEGRAM_BOT}/map")
+# Главная Mini App без конкретного события: шапка канала и служебные закрепы.
+MAP_HOME_URL = f"{_TELEGRAM_BOT}?startapp"
 _MAP_LINK_PREFIXES = (
     f"{_MAP_PAGE}?event=",
     f"{_MAP_PAGE}?mode=places&event=",

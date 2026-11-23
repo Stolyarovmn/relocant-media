@@ -13,7 +13,7 @@ from relocant_media.bot.formatting import (
     source_link_entities,
 )
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
-from relocant_media.domain.map_links import is_map_event_url
+from relocant_media.domain.map_links import MAP_HOME_URL, is_map_event_url
 from relocant_media.domain.quiet_hours import silent_channel_post
 from relocant_media.domain.source_locations import is_public_https_url
 
@@ -28,10 +28,41 @@ class PhotoUpload:
     data: bytes
 
 
+# Bot API 9.4: style "success" — зелёная кнопка; клиенты без поддержки покажут обычную.
+MAP_BUTTON_STYLE = "success"
+MAP_HOME_BUTTON_TEXT = "🗺 Открыть карту"
+
+
 def map_reply_markup(url: str) -> dict[str, object]:
     if not is_map_event_url(url):
         raise ValueError("map button URL is not approved")
-    return {"inline_keyboard": [[{"text": "Посмотреть на карте", "url": url}]]}
+    return {"inline_keyboard": [[{"text": "Посмотреть на карте", "url": url,
+                                  "style": MAP_BUTTON_STYLE}]]}
+
+
+def map_home_reply_markup() -> dict[str, object]:
+    """Кнопка главной карты для служебных закрепов, без привязки к событию."""
+    return {"inline_keyboard": [[{"text": MAP_HOME_BUTTON_TEXT, "url": MAP_HOME_URL,
+                                  "style": MAP_BUTTON_STYLE}]]}
+
+
+def same_reply_markup(actual: object, expected: Mapping[str, object]) -> bool:
+    """Сверка квитанции: текст и адрес обязательны, style сверяется, если Telegram его вернул."""
+    if not isinstance(actual, dict):
+        return False
+    rows, wanted = actual.get("inline_keyboard"), expected.get("inline_keyboard")
+    if not isinstance(rows, list) or not isinstance(wanted, list) or len(rows) != len(wanted):
+        return False
+    for row, wanted_row in zip(rows, wanted, strict=True):
+        if not isinstance(row, list) or len(row) != len(wanted_row):
+            return False
+        for button, wanted_button in zip(row, wanted_row, strict=True):
+            if not isinstance(button, dict) or any(
+                    button.get(key) != wanted_button.get(key) for key in ("text", "url")):
+                return False
+            if "style" in button and button["style"] != wanted_button.get("style"):
+                return False
+    return True
 
 
 class TelegramBot(Protocol):
@@ -232,7 +263,7 @@ class TelegramBotAPI:
             raise
         if (not isinstance(result, dict) or self._message_id(result) != message_id
                 or not isinstance(result.get("chat"), dict) or result["chat"].get("id") != chat_id
-                or result.get("reply_markup") != markup):
+                or not same_reply_markup(result.get("reply_markup"), markup)):
             raise TelegramAPIError("edited map button receipt does not match the requested post")
         return True
 

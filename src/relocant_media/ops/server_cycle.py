@@ -113,6 +113,7 @@ from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.audience_observation import observe_audience
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
+from relocant_media.services.channel_presentation import ensure_service_pin_map_button
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
     EditorialService,
@@ -1342,8 +1343,12 @@ async def cleanup_news_pins(engine: Engine) -> dict[str, Any]:
                 Post.city == "belgrade", EditorialRun.delivery_status == "sent",
                 Post.telegram_message_id.is_not(None))))
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
-        return await maintain_pins(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client),
-                                   policy, news_message_ids={i for i in news_ids if i is not None})
+        bot = TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client)
+        result = await maintain_pins(bot, policy,
+                                     news_message_ids={i for i in news_ids if i is not None})
+        # После снятия новостных закрепов верхний служебный пост получает кнопку карты.
+        result["map_button"] = await ensure_service_pin_map_button(bot, policy)
+        return result
 
 
 async def audience_observation() -> dict[str, Any]:

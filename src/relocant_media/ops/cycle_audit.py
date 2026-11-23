@@ -23,6 +23,9 @@ def audit_cycle(session: Session, report: dict[str, Any]) -> dict[str, Any]:
         no_fallback_needed=report.get("fallback_required") is False,
         pin_maintenance_verified=report.get("channel_transport") == "disabled"
         or (bool(pins) and not pins.get("blocked") and pins.get("owner_action_required") is False),
+        service_pin_map_button=report.get("channel_transport") == "disabled"
+        or pins.get("map_button", {}).get("status") in
+            (None, "present", "edited", "unchanged", "top_pin_not_service"),
         unique_receipts=True,
         receipts_match_database=True,
         russian_copy=True,
