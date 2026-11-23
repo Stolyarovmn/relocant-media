@@ -391,11 +391,12 @@ test("кэш выключен в некоторых браузерах, свеж
 test("офлайн-оболочка содержит текущие версии модулей и стилей карты", async () => {
   const fromMap = (file) => readFile(new URL(`../web/newsroom/map/${file}`, import.meta.url), "utf8");
   const [worker, ...sources] = await Promise.all(
-    ["offline-worker.js", "index.html", "app.js", "places.js"].map(fromMap),
+    ["offline-worker.js", "index.html", "app.js", "places.js", "address-watch.js"].map(fromMap),
   );
   for (const source of sources) {
-    for (const [asset] of source.matchAll(/[\w-]+\.(?:js|css)\?v=\d+/g)) {
-      assert.ok(worker.includes(`"./${asset}"`), asset);
+    for (const [reference, asset] of source.matchAll(/([\w-]+\.(?:js|css))\?v=[\w-]+/g)) {
+      assert.equal(reference, `${asset}?v=__MAP_REVISION__`);
+      assert.ok(worker.includes(`"./${reference}"`), reference);
     }
   }
   assert.ok(!worker.includes("tile.openstreetmap.org"));

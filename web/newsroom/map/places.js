@@ -1,10 +1,10 @@
 import {
   agendaDays, belgradeDate, clusterMapPoints, incidentTimes, launchPlaces, placeCategory, placeCountdown,
   placeKinds, placeOnDay, placeOptionLabel, placeStatus, readPlaces, shareLink, straightLineDistance, updateStamp,
-} from "./core.js?v=19";
-import { calendarLink, googleCalendarUrl } from "./calendar.js?v=5";
-import { agendaFavorites } from "./favorites.js?v=1";
-import { snapshotNotice } from "./snapshots.js?v=1";
+} from "./core.js?v=__MAP_REVISION__";
+import { calendarLink, googleCalendarUrl } from "./calendar.js?v=__MAP_REVISION__";
+import { agendaFavorites } from "./favorites.js?v=__MAP_REVISION__";
+import { snapshotNotice } from "./snapshots.js?v=__MAP_REVISION__";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 const agendaDate = new Intl.DateTimeFormat("ru", { timeZone: "UTC", day: "numeric", month: "long" });
