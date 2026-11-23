@@ -127,6 +127,13 @@ def parse_beograd_article(html: str, source: SourceConfig, url: str) -> RawItem:
         root.stripped_strings
     )
 
+    # Keep the visible bulletin date as quoted evidence as well as metadata.
+    # Draft coverage accepts exact body quotes, so the heading's day must not
+    # disappear when the source separates it from the outage paragraphs.
+    if (is_city_water_bulletin(url, title) and isinstance(date, Tag)
+            and _parse_day_only_date(root_text) is not None):
+        article_text = f"{root_text}\n\n{article_text}"
+
     return RawItem(
         source_id=source.id,
         external_id=match.group("article_id"),
