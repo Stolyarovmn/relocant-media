@@ -1133,8 +1133,8 @@ def delivery_deadline(session: Session, raw_id: int) -> datetime | None:
 
 
 def hold_until_morning(session: Session, raw_id: int, *, now: datetime,
-                       deadline: datetime) -> bool:
-    """Продлить срок жизни готового несрочного материала до утреннего выпуска (#359).
+                       release_at: datetime, deadline: datetime) -> bool:
+    """Записать перенос готового несрочного материала и при необходимости продлить его срок.
 
     Только для проверенного материала в состоянии ready/deliver и только вперёд.
     Свежесть, источник и ревью перепроверяются в обычной доставке утром.
@@ -1144,10 +1144,18 @@ def hold_until_morning(session: Session, raw_id: int, *, now: datetime,
     data = record.details
     if data.get("state") != "ready" or data.get("next_action") != "deliver":
         return False
+    previous_hold = data.get("morning_hold")
+    release_stamp = _now(release_at).isoformat()
+    changes: dict[str, Any] = {}
+    if not isinstance(previous_hold, dict) or previous_hold.get("release_at") != release_stamp:
+        changes["morning_hold"] = {
+            "at": now.isoformat(), "release_at": release_stamp,
+            "previous_deadline_at": data["deadline_at"],
+        }
     if _stamp(data["deadline_at"]) < deadline:
-        record.details = {**data, "deadline_at": deadline.isoformat(),
-                          "morning_hold": {"at": now.isoformat(),
-                                           "previous_deadline_at": data["deadline_at"]}}
+        changes["deadline_at"] = deadline.isoformat()
+    if changes:
+        record.details = {**data, **changes}
     return True
 
 

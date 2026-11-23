@@ -66,13 +66,38 @@ def test_hold_extends_only_ready_material_and_only_forward(reviewed):
     before = delivery_deadline(session, run.raw_item_id)
     assert before is not None
     later = now + timedelta(hours=9)
-    assert hold_until_morning(session, run.raw_item_id, now=now, deadline=later) is True
+    release = later - timedelta(hours=4)
+    assert hold_until_morning(
+        session, run.raw_item_id, now=now, release_at=release, deadline=later,
+    ) is True
     assert delivery_deadline(session, run.raw_item_id) == later
     # Повторный вызов с более ранним сроком ничего не сокращает.
-    assert hold_until_morning(session, run.raw_item_id, now=now, deadline=before) is True
+    assert hold_until_morning(
+        session, run.raw_item_id, now=now, release_at=release, deadline=before,
+    ) is True
     assert delivery_deadline(session, run.raw_item_id) == later
     state = lifecycle_state(session, run.raw_item_id, now=now + timedelta(hours=8))
     assert state["state"] == "ready" and state["next_action"] == "deliver"
+
+
+def test_hold_is_recorded_once_even_without_extending_delivery_deadline(reviewed):
+    session, run = reviewed
+    now = datetime.now(UTC)
+    lifecycle_state(session, run.raw_item_id, now=now)
+    before = delivery_deadline(session, run.raw_item_id)
+    assert before is not None
+    release = now + timedelta(minutes=45)
+    for checked_at in (now, now + timedelta(minutes=10)):
+        assert hold_until_morning(
+            session, run.raw_item_id, now=checked_at, release_at=release,
+            deadline=before - timedelta(minutes=10),
+        )
+    assert delivery_deadline(session, run.raw_item_id) == before
+    assert lifecycle_state(session, run.raw_item_id, now=now)["morning_hold"] == {
+        "at": now.isoformat(),
+        "release_at": release.isoformat(),
+        "previous_deadline_at": before.isoformat(),
+    }
 
 
 @pytest.mark.asyncio
