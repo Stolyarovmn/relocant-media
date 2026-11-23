@@ -145,9 +145,19 @@ def test_published_only_uses_identical_text_without_draft_calls(reviewed, fakes,
     monkeypatch.setattr(model_trial, "EditorialPipeline", unexpected_pipeline)
     database = session.get_bind().url.database
     before = hashlib.sha256(open(database, "rb").read()).hexdigest()
-    result = model_trial.run_trial(database, BUNDLES, FakeProvider, limit=1, published_only=True)
+    created = []
+
+    def factory(model):
+        created.append(model)
+        return FakeProvider(model)
+
+    result = model_trial.run_trial(database, BUNDLES, factory, limit=1, published_only=True)
     assert hashlib.sha256(open(database, "rb").read()).hexdigest() == before
     assert calls == [("review", title), ("review", title)]
+    assert created == [CURRENT["review"], MODELS["review"]]
+    assert result["models"] == {
+        name: {"review": models["review"]} for name, models in BUNDLES.items()
+    }
     summary = model_trial.public_result(result)["summary"]
     assert summary["scope"] == "published_reviews"
     assert summary["valid"] and summary["published_comparable"]

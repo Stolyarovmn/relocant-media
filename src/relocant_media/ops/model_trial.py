@@ -390,10 +390,12 @@ def run_trial(database: Path, bundles: dict[str, dict[str, str]],
     """
     log = CallLog()
     budget = budget if budget is not None else WaitBudget()
+    used_models = ({name: {"review": models["review"]} for name, models in bundles.items()}
+                   if published_only else bundles)
     providers: dict[str, StructuredAIProvider] = {
         name: TimedProvider(RoleRoutedProvider(validate_models(models), factory), log, name,
                             budget)
-        for name, models in bundles.items()}
+        for name, models in used_models.items()}
     engine = create_engine(f"sqlite:///{database}")
     items: list[dict[str, Any]] = []
     unavailable = 0
@@ -408,7 +410,7 @@ def run_trial(database: Path, bundles: dict[str, dict[str, str]],
             session.rollback()
     finally:
         engine.dispose()
-    return {"version": 3, "generated_at": datetime.now(UTC).isoformat(), "models": bundles,
+    return {"version": 3, "generated_at": datetime.now(UTC).isoformat(), "models": used_models,
             "summary": summarize(items, bundles, log.calls, unavailable=unavailable,
                                  stopped=budget.stopped, published_only=published_only),
             "items": items}
