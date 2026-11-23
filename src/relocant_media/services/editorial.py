@@ -22,6 +22,7 @@ from relocant_media.domain.dedup import (
     event_key,
     normalize_text,
     same_event,
+    same_verified_route_detour,
     title_similarity,
 )
 from relocant_media.domain.event_facts import conflicting_facts
@@ -99,10 +100,13 @@ def _document_candidate(document: EvidenceDocument, raw_id: int) -> EventCandida
 
 
 def _same_proven_event(left: EvidenceDocument, right: EvidenceDocument) -> bool:
+    left_candidate, right_candidate = _document_candidate(left, 1), _document_candidate(right, 2)
+    if same_verified_route_detour(left_candidate, right_candidate):
+        return True
     left_body, right_body = normalize_text(left.body), normalize_text(right.body)
     if min(len(left_body.split()), len(right_body.split())) < 4:
         return False
-    return bool(same_event(_document_candidate(left, 1), _document_candidate(right, 2))
+    return bool(same_event(left_candidate, right_candidate)
         and not conflicting_facts(
             f"{left.title}\n{left.body}", f"{right.title}\n{right.body}", 0, 0)
         and (left_body == right_body or title_similarity(left.body, right.body) >= 0.9
