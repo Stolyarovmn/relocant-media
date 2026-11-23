@@ -18,6 +18,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
+from relocant_media.ai.road_work_context import road_work_context
+from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as SECRETARIAT_SOURCE_ID
+from relocant_media.collectors.bgsaobracaj_notices import match_bgsaobracaj_notice
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.domain.freshness import FreshnessDecision, evidence_freshness
@@ -28,7 +31,15 @@ from relocant_media.domain.policy import (
     SOURCE_REPLACED_REASON,
 )
 from relocant_media.scheduler.models import SchedulerRun
-from relocant_media.storage.models import EditorialRun, Post, RawItem, Source, Submission
+from relocant_media.storage.locks import lock_editorial_city
+from relocant_media.storage.models import (
+    EditorialRun,
+    Post,
+    RawItem,
+    Source,
+    SourceRevision,
+    Submission,
+)
 
 POLICY_VERSION = "material-lifecycle-v1"
 TASK_TYPE = "material_lifecycle"
@@ -347,6 +358,114 @@ def _restore_unqueued_utility(
     post.status = "human_review"
     _wait_for_owner(record, now=now)
     record.finished_at = None
+
+
+def _reopen_unexpired_road_work(
+    session: Session, record: SchedulerRun, *, now: datetime,
+) -> None:
+    """Archive one provably premature rejection before any delivery or owner action."""
+    from relocant_media.ai.package import (
+        EditorialPackage,
+        canonical_json,
+        context_sha256,
+        draft_sha256,
+        package_coverage_reason,
+    )
+    from relocant_media.domain.dedup import event_key
+    from relocant_media.services.editorial import (
+        _candidate,
+        _document,
+        _event_items,
+        _snapshot_member,
+    )
+
+    lock_editorial_city(session, record.city)
+    session.refresh(record)
+    data = record.details
+    raw_id = data.get("raw_item_id")
+    if (record.status != "blocked" or data.get("state") != "blocked"
+            or data.get("reason") != "draft_coverage_ungrounded" or record.city != "belgrade"
+            or type(raw_id) is not int or data.get("replacement_raw_item_id") is not None
+            or data.get("lifecycle_root_raw_id") is not None or "road_work_reopened_at" in data
+            or data.get("attempts") != 1 or data.get("fallback_attempts") != 0
+            or data.get("delivery_attempts") != 0 or data.get("attempt_records")
+            or not _validate({**data, "state": "waiting", "next_action": "prepare",
+                              "next_attempt_at": now.isoformat()})
+            or now >= _stamp(data["deadline_at"])):
+        return
+    try:
+        raw, source, run, post = _objects(session, raw_id)
+        if (source.id != SECRETARIAT_SOURCE_ID or source.ownership != "official"
+                or not source.enabled or not source.auto_publish or source.high_risk
+                or not match_bgsaobracaj_notice(raw.url)
+                or data.get("fingerprints", {}).get(str(raw_id)) != _fingerprint(raw)
+                or _fresh(raw, source, now).action != "keep"
+                or run is None or run.delivery_status != "pending" or _has_receipt(run, post)
+                or post is None or post.status != "blocked" or post.category != "transport"
+                or run.outcome.get("status") != "blocked"
+                or run.outcome.get("reason") != "lifecycle_draft_coverage_ungrounded"
+                or {key for key in run.outcome if key.startswith("_")} != {
+                    "_package", "_package_sha256", "_lifecycle_block",
+                }):
+            return
+        block = run.outcome["_lifecycle_block"]
+        if (not isinstance(block, dict) or block.get("policy_version") != POLICY_VERSION
+                or block.get("previous_status") != "human_review"
+                or block.get("previous_reason") != "draft_coverage_ungrounded"):
+            return
+        payload = canonical_json(run.outcome["_package"])
+        if hashlib.sha256(payload.encode()).hexdigest() != run.outcome["_package_sha256"]:
+            return
+        package = EditorialPackage.model_validate_json(payload)
+        current_evidence = _document(raw).model_dump(mode="json")
+        if (package.version != 2 or package.event is None or package.city != source.city
+                or package.event.event_key != event_key(_candidate(raw))
+                or (package.raw_item_id, package.source_id, package.article_id)
+                    != (raw_id, raw.source_id, raw.external_id)
+                or package.evidence.model_dump(mode="json") != current_evidence
+                or package.outcome.ranking.category != "transport"
+                or (post.title, post.body) != (
+                    package.outcome.draft.title, package.outcome.draft.body)
+                or package_coverage_reason(package) != "draft_coverage_ungrounded"):
+            return
+        blocked_at = _stamp(block["at"])
+        facts = next(review for review in package.reviews if review.role == "facts")
+        utility = next(review for review in package.reviews if review.role == "utility")
+        expired_flags = {"expired_event", "истёкший срок события", "истекший срок события"}
+        if (facts.verdict != "hold" or set(facts.flags) != {
+                "expired_event", "draft_coverage_ungrounded",
+        } or utility.verdict not in {"hold", "reject"} or not utility.flags
+                or not {flag.casefold() for flag in utility.flags} <= expired_flags
+                or any(not review.live_source_checked
+                 or review.reviewed_at > blocked_at
+                 or review.context_sha256 != context_sha256(package)
+                 or review.draft_sha256 != draft_sha256(package.outcome.draft)
+                 for review in package.reviews)
+                or blocked_at > now):
+            return
+        members = _event_items(session, anchor=raw, anchor_source=source)
+        exact = [_snapshot_member(member, policy) for member, policy in members]
+        if (len(exact) != 1 or run.evidence.get("documents") != exact
+                or [doc.model_dump(mode="json") for doc in package.event.documents] != exact):
+            return
+        if not any(window["status"] in {"active", "upcoming"}
+                   for clause in road_work_context((package.evidence,), now, None)
+                   for window in cast(list[dict[str, str]], clause["windows"])):
+            return
+    except (KeyError, StopIteration, TypeError, ValueError):
+        return
+    if (session.scalar(select(Submission.id).where(
+            Submission.kind == "owner_editorial_review",
+            Submission.payload["raw_item_id"].as_integer() == raw_id,
+        ).limit(1)) is not None or session.scalar(select(SourceRevision.id).where(
+            SourceRevision.raw_item_id == raw_id,
+        ).limit(1)) is not None):
+        return
+    _set(record, now=now, state="waiting", action="prepare", next_at=now,
+         reason="unexpired_road_work_review_reopened", road_work_reopened_at=now.isoformat(),
+         attempt_records=[{**_attempt_archive(run, now), "post_id": post.id}])
+    record.finished_at = None
+    session.delete(run)
 
 
 def _reissue_unattempted_event_fallback(
@@ -980,6 +1099,12 @@ def can_retry_snapshot(session: Session, raw_id: int, *, now: datetime) -> bool:
         return False
 
 
+def _attempt_archive(run: EditorialRun, now: datetime) -> dict[str, Any]:
+    return {"outcome": copy.deepcopy(run.outcome), "evidence": copy.deepcopy(run.evidence),
+            "created_at": run.created_at.isoformat(),
+            "editorial_rule_version": run.editorial_rule_version, "archived_at": now.isoformat()}
+
+
 def archive_for_retry(session: Session, raw_id: int, *, now: datetime) -> bool:
     """Одноразово убрать безопасный run из обычного отбора, сохранив точную старую запись."""
     now = _now(now)
@@ -991,10 +1116,7 @@ def archive_for_retry(session: Session, raw_id: int, *, now: datetime) -> bool:
     archive = list(record.details.get("attempt_records", []))
     if len(archive) >= PRIMARY_ATTEMPTS:
         return False
-    archive.append({"outcome": copy.deepcopy(run.outcome), "evidence": copy.deepcopy(run.evidence),
-                    "created_at": run.created_at.isoformat(),
-                    "editorial_rule_version": run.editorial_rule_version,
-                    "archived_at": now.isoformat()})
+    archive.append(_attempt_archive(run, now))
     record.details = {**record.details, "attempt_records": archive, "retry_authorized": False}
     session.delete(run)
     session.flush()
@@ -1132,6 +1254,8 @@ def sweep_materials(session: Session, *, city: str, now: datetime,
             continue
         if record.details.get("reason") == "separate_publication_approval_required":
             _restore_unqueued_utility(session, record, now=now)
+        elif record.details.get("reason") == "draft_coverage_ungrounded":
+            _reopen_unexpired_road_work(session, record, now=now)
         elif (reissue_event_fallback
                 and record.details.get("reason") == "fallback_deadline_exceeded"):
             _reissue_unattempted_event_fallback(session, record, now=now)

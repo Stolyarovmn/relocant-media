@@ -6,8 +6,10 @@ import pytest
 from facts_check_helpers import reviewed_package_for
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session
+from test_bgsaobracaj_notices import ARTICLE, PUBLISHED, SCHEDULE
 
 from relocant_media.ai.package import canonical_json
+from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID
 from relocant_media.domain.policy import SOURCE_REPLACED_REASON
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.material_lifecycle import (
@@ -351,6 +353,78 @@ def test_only_fresh_unqueued_verified_utility_recovers_from_false_block(session,
         assert post.status == run.outcome["status"] == "human_review"
         assert "_recovered_owner_hold" in run.outcome
         assert record.finished_at is None
+
+
+@pytest.mark.parametrize("obstacle", [
+    None, "staging", "uncertain", "owner", "changed", "tampered", "other_flag", "ended", "timeout",
+])
+def test_premature_night_road_rejection_gets_one_fresh_attempt(session, obstacle):
+    first_attempt = datetime(2026, 11, 23, 4, 19, tzinfo=UTC)
+    checked = first_attempt + timedelta(hours=1)
+    source = Source(id=SOURCE_ID, city="belgrade", name="Секретариат", url=ARTICLE,
+                    source_type="official_transport", trust=1, ownership="official",
+                    auto_publish=True, high_risk=False, enabled=True)
+    session.add(source)
+    session.flush()
+    notice = session.get(RawItem, 1)
+    notice.source_id, notice.url = source.id, ARTICLE
+    notice.published_at = PUBLISHED.astimezone(UTC)
+    notice.title = "Ограничение в Теразийском тоннеле"
+    notice.body = SCHEDULE if obstacle != "ended" else SCHEDULE.replace(" и 23./24.11.2026", "")
+    notice.ingested_at = first_attempt
+    assert before_attempt(session, 1, now=first_attempt)
+    run = editorial(session, status="human_review", category="transport", post=True,
+                    reason="draft_coverage_ungrounded")
+    post_id = run.post_id
+    post = session.get(Post, post_id)
+    payload = reviewed_package_for(notice, source, title=post.title, body=post.body,
+                                   now=first_attempt)
+    facts = payload["reviews"][0]
+    facts.update(verdict="hold", score=0, flags=["expired_event", "draft_coverage_ungrounded"])
+    facts["facts_check"]["segments"][0]["citations"] = []
+    if obstacle == "other_flag":
+        facts["flags"].append("claim_mismatch")
+    payload["reviews"][1].update(verdict="reject", flags=["истёкший срок события"])
+    run.evidence = {"documents": payload["event"]["documents"]}
+    run.outcome = {**run.outcome, "draft": payload["outcome"]["draft"], "_package": payload,
+                   "_package_sha256": hashlib.sha256(canonical_json(payload).encode()).hexdigest()}
+    state = after_result(session, 1, now=first_attempt)
+    assert state["reason"] == "draft_coverage_ungrounded"
+    if obstacle == "staging":
+        run.staging_message_id = 120
+    if obstacle == "uncertain":
+        run.delivery_status = "uncertain"
+    if obstacle == "owner":
+        session.add(Submission(kind="owner_editorial_review", status="rejected",
+                               payload={"raw_item_id": 1}))
+    if obstacle == "changed":
+        notice.body += " Есть новая версия."
+    if obstacle == "tampered":
+        run.outcome = {**run.outcome, "_package_sha256": "0" * 64}
+    if obstacle == "timeout":
+        checked = first_attempt + MATERIAL_TTL
+    old = copy.deepcopy(run.outcome)
+    session.commit()
+
+    sweep = sweep_materials(session, city="belgrade", now=checked)
+    state = lifecycle_state(session, 1, now=checked)
+    assert state["deadline_at"] == (first_attempt + MATERIAL_TTL).isoformat()
+    assert session.get(Post, post_id).status == "blocked"
+    if obstacle:
+        assert sweep.due_ids == ()
+        assert state["state"] == "blocked"
+        assert session.get(EditorialRun, 1).outcome == old
+        return
+    assert sweep.due_ids == (1,)
+    assert state["attempt_records"][0]["outcome"] == old
+    assert state["attempt_records"][0]["post_id"] == post_id
+    assert session.get(EditorialRun, 1) is None
+    assert before_attempt(session, 1, now=checked)
+    assert not before_attempt(session, 1, now=checked)
+    assert not before_delivery_attempt(session, 1, now=checked)
+    state = after_error(session, 1, "GeminiWorkerError", now=checked).details
+    assert state["next_action"] == "fallback"
+    assert state["attempts"] == 2 and state["fallback_attempts"] == 0
 
 
 def test_pending_owner_request_closes_as_cancelled_without_fake_owner_rejection(session):
