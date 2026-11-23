@@ -33,7 +33,11 @@ from relocant_media.ai.package import (
     draft_sha256,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
-from relocant_media.ai.road_work_context import ROAD_WORK_CONTEXT_INSTRUCTION, road_work_context
+from relocant_media.ai.road_work_context import (
+    ROAD_WORK_CONTEXT_INSTRUCTION,
+    matching_live_road_window,
+    road_work_context,
+)
 from relocant_media.ai.selection import selection_reason
 from relocant_media.domain.city_profile import CityEditorialProfile, load_city_profile
 from relocant_media.domain.freshness import publication_date_context
@@ -63,6 +67,28 @@ class _FactsResponse(_Response):
 
 class _UtilityResponse(_Response):
     rubric: _Rubric
+
+
+_RECHECK_COVERAGE = {
+    "draft_coverage_incomplete", "draft_coverage_invalid_claim", "draft_coverage_ungrounded",
+}
+_EXPIRY_FLAGS = {
+    "expired_event", "expired_or_passed_shift", "истёкший срок события", "истекший срок события",
+}
+
+
+def _ask_review(
+    provider: StructuredAIProvider, role: str, instructions: str, payload: dict[str, Any],
+    response_model: type[_FactsResponse] | type[_UtilityResponse],
+) -> _FactsResponse | _UtilityResponse:
+    raw = provider.generate_json(
+        task=f"independent_{role}", system_instruction=instructions, prompt=canonical_json(payload),
+        response_schema=response_model.model_json_schema(),
+    )
+    try:
+        return response_model.model_validate_json(raw)
+    except ValidationError as error:
+        raise StructuredOutputError(f"invalid independent {role} review") from error
 
 
 def _evidence(document: EvidenceDocument) -> dict[str, object]:
@@ -104,9 +130,21 @@ def reviewed_package(
     context = package.model_dump(mode="json", exclude={"reviews"})
     context_hash = context_sha256(package)
     draft_hash = draft_sha256(package.outcome.draft)
-    expected = sorted((_evidence(d) for d in package.event.documents),
+    documents = package.event.documents
+    expected = sorted((_evidence(d) for d in documents),
                       key=lambda d: str(d["source_id"]))
-    source_road_windows = road_work_context(package.event.documents, review_time, profile)
+    source_road_windows = road_work_context(documents, review_time, profile)
+    matching_window = matching_live_road_window(package.outcome.draft.body, source_road_windows)
+    verified_ids = set(package.outcome.draft.claim_ids) & {
+        claim.claim_id for claim in package.outcome.verification.claims if claim.supported
+    }
+
+    def coverage(response: _FactsResponse) -> str | None:
+        return draft_coverage_reason(
+            response.facts_check, package.outcome.draft, package.outcome.claims,
+            package.outcome.verification, documents, package.outcome.ranking.category,
+        )
+
     reviews: list[ReviewVerdict] = []
     for role in ("facts", "utility"):
         live = live_documents()
@@ -213,6 +251,8 @@ def reviewed_package(
             instructions += FACTS_COVERAGE_INSTRUCTION
             instructions += (
                 "Роль facts: проверь каждое утверждение, цитаты и полный комплект источников, "
+                "Сначала найди подтверждённый claim в package.outcome.claims.claims. "
+                "Для его фрагмента скопируй точную цитату именно из citations этого claim. "
                 "точность заголовка и отсутствие неподтверждённых выводов. "
                 "Сверь номера линий (включая буквы), направления, остановки и даты с "
                 "профильным первоисточником. Проверь, к какому изменению относится каждый срок. "
@@ -243,35 +283,67 @@ def reviewed_package(
                 "Диапазон слов ориентировочный. Замечание о длине само по себе не блокирует "
                 "публикацию. Проверяй, что влияние погоды или сезона подтверждено источником."
             )
-        raw = provider.generate_json(
-            task=f"independent_{role}", system_instruction=instructions,
-            prompt=canonical_json({
-                "role": role, "package": context,
-                **({"city_profile": profile.model_dump(mode="json"),
-                    "profile_sha256": profile.sha256} if profile else {}),
-                "source_local_dates":[dict(source_id=d.source_id,url=d.url,
+        review_payload = {
+            "role": role, "package": context,
+            **({"city_profile": profile.model_dump(mode="json"),
+                "profile_sha256": profile.sha256} if profile else {}),
+            "source_local_dates": [
+                dict(source_id=d.source_id, url=d.url,
                     **publication_date_context(d.published_at, d.published_at_precision,
                         timezone_name=profile.timezone if profile else None))
-                    for d in package.event.documents],
-                "now_utc": review_time.astimezone(UTC).isoformat(),
-                **({"source_road_windows": source_road_windows} if source_road_windows else {}),
-                **({"writing_calendar": writing_context(profile, review_time)}
-                   if role == "utility" else {}),
-                "draft_sha256": draft_hash, "context_sha256": context_hash,
-            }),
-            response_schema=response_model.model_json_schema(),
-        )
-        try:
-            response = response_model.model_validate_json(raw)
-        except ValidationError as error:
-            raise StructuredOutputError(f"invalid independent {role} review") from error
+                for d in documents
+            ],
+            "now_utc": review_time.astimezone(UTC).isoformat(),
+            **({"source_road_windows": source_road_windows} if source_road_windows else {}),
+            **({"draft_matching_live_road_window": matching_window} if matching_window else {}),
+            **({"writing_calendar": writing_context(profile, review_time)}
+               if role == "utility" else {}),
+            **({"verified_draft_claim_ids": sorted(verified_ids)} if role == "facts" else {}),
+            "draft_sha256": draft_hash, "context_sha256": context_hash,
+        }
+        response = _ask_review(provider, role, instructions, review_payload, response_model)
+        coverage_reason = coverage(response) if isinstance(response, _FactsResponse) else None
+        correction: dict[str, Any] | None = None
+        correction_note = ""
+        if (isinstance(response, _FactsResponse) and response.verdict == "approve"
+                and not response.flags and coverage_reason in _RECHECK_COVERAGE
+                and response.facts_check.publication_scope in {
+                    "ordinary_local", "confirmed_transport_notice",
+                }):
+            correction = {"reason": coverage_reason, "allowed_claims": {
+                claim.claim_id: claim.model_dump(mode="json")
+                for claim in package.outcome.claims.claims if claim.claim_id in verified_ids
+            }}
+            correction_note = (
+                " Повтори фактическое ревью того же текста. Предыдущий ответ не прошёл "
+                "машинную проверку покрытия. У каждого фрагмента должны быть только "
+                "действительно доказывающие его claim_ids и точные citations из "
+                "coverage_correction.allowed_claims. Если доказательств не хватает, "
+                "верни отказ с конкретным неподтверждённым фрагментом."
+            )
+        elif (isinstance(response, _UtilityResponse) and matching_window
+              and response.verdict in {"hold", "reject"} and response.flags
+              and {flag.casefold() for flag in response.flags} <= _EXPIRY_FLAGS):
+            correction = {"reason": "draft_matches_live_road_window",
+                          "window": matching_window, "previous_flags": response.flags}
+            correction_note = (
+                " Повтори читательское ревью того же текста. Сопоставь указанную в тексте "
+                "дату и часы с timing_correction.window. Её точный интервал ещё не закончился. "
+                "Сверь направление и смысл с первоисточником и заново оцени все критерии. "
+                "Если осталась другая проблема, укажи её в reason и flags."
+            )
+        if correction is not None:
+            if audit is not None:
+                audit({"role": f"{role}_answer_retry", "reason": correction["reason"],
+                       "context_sha256": context_hash, "draft_sha256": draft_hash})
+            field = "coverage_correction" if role == "facts" else "timing_correction"
+            response = _ask_review(
+                provider, role, instructions + correction_note,
+                {**review_payload, field: correction}, response_model,
+            )
+            coverage_reason = coverage(response) if isinstance(response, _FactsResponse) else None
         score = response.score
         if isinstance(response, _FactsResponse):
-            coverage_reason = draft_coverage_reason(
-                response.facts_check, package.outcome.draft, package.outcome.claims,
-                package.outcome.verification, tuple(package.event.documents),
-                package.outcome.ranking.category,
-            )
             if coverage_reason not in {None, "independent_sensitivity_review_required"}:
                 response = response.model_copy(update={
                     "verdict": "hold", "flags": [*response.flags, coverage_reason],
