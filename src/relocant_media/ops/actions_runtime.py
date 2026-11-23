@@ -333,36 +333,31 @@ def _request_deadlines(session: Session, request: dict[str, Any]) -> list[dateti
 
 
 def _gpt_result_expired(database: Path, exchange_file: Path, now: datetime) -> bool:
-    """Только чтение: все решения ответа относятся к уже закрытым материалам."""
-    from relocant_media.services.material_lifecycle import is_terminal_blocked
-    from relocant_media.storage.models import EditorialRun, RawItem
+    """Определить подлинную просрочку ответа до получения права записи."""
+    from relocant_media.ops.gpt_fallback_worker import FallbackInput
+    from relocant_media.services.gpt_fallback import obsolete_fallback_response
 
-    exchange = json.loads(exchange_file.read_text(encoding="utf-8"))
-    result = exchange.get("result")
-    if not isinstance(result, dict) or result.get("kind") is not None:
-        return False
-    decisions = [*result.get("packages", []), *result.get("rejected", [])]
-    raw_ids = {item.get("raw_item_id") for item in decisions if isinstance(item, dict)}
-    ids = {raw_id for raw_id in raw_ids if type(raw_id) is int and 0 < raw_id < 2**63}
-    if not ids or ids != raw_ids:
+    try:
+        payload = FallbackInput.model_validate_json(exchange_file.read_bytes())
+    except ValueError:
         return False
     engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
     try:
         with Session(engine) as session, session.no_autoflush:
             session.connection().exec_driver_sql("PRAGMA query_only=ON")
-            for raw_id in ids:
-                # Неизвестный материал — не просрочка: пусть воркер явно отклонит ответ.
-                if session.get(RawItem, raw_id) is None:
-                    return False
-                run = session.get(EditorialRun, raw_id)
-                # Отправленный материал сверяется импортом; это не просрочка.
-                if run is not None and run.delivery_status == "sent":
-                    return False
-                if not is_terminal_blocked(session, raw_id, now=now):
-                    return False
+            return all(
+                obsolete_fallback_response(
+                    session, payload.request, package.raw_item_id, now=now, package=package,
+                ) == "material_expired"
+                for package in payload.result.packages
+            ) and all(
+                obsolete_fallback_response(
+                    session, payload.request, rejection.raw_item_id, now=now,
+                ) == "material_expired"
+                for rejection in payload.result.rejected
+            )
     finally:
         engine.dispose()
-    return True
 
 
 def _runtime_phase(phase: str) -> None:
@@ -681,6 +676,22 @@ def _counters(value: object, keys: tuple[str, ...]) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
     return {key: value[key] for key in keys if type(value.get(key)) is int}
+
+
+def _report_obsolete_fallback_responses(run_dir: Path) -> None:
+    try:
+        report = json.loads((run_dir / "server-report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(report, dict) or report.get("mode") != "subscription_gpt_fallback":
+        return
+    counters = _counters(report.get("obsolete_responses"), (
+        "already_resolved", "attempt_in_progress", "material_expired",
+        "request_expired", "request_superseded",
+    ))
+    safe = {key: count for key, count in counters.items() if 1 <= count <= 5}
+    if safe:
+        print(json.dumps({"gpt_fallback_obsolete": safe}), flush=True)
 
 
 def _preparation_details(value: object) -> list[dict[str, Any]]:
@@ -1094,6 +1105,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             # Невалидный отчёт не разрешает chain; квитанции всё равно сохраняются.
             code = code or 1
     report_failure(run_dir, code)
+    if mode == "fallback":
+        _report_obsolete_fallback_responses(run_dir)
     # A signal/forced termination has uncertain effects: do not unlock even if bytes survived.
     if code < 0:
         raise RuntimeError("runtime terminated; reconcile busy generation")

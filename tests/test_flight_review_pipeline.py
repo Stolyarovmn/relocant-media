@@ -204,7 +204,8 @@ def test_held_flight_goes_from_delivery_to_real_bound_fallback(
             int(came_from_fallback), 1,
         )
         assert asyncio.run(server_cycle.publish_pending(engine, enabled=True)) == [156]
-        assert run_answer(packages=[update])["ready"] == 1
+        replay = run_answer(packages=[update])
+        assert replay["ready"] == 0 and replay["obsolete_responses"] == {"already_resolved": 1}
         assert asyncio.run(server_cycle.publish_pending(engine, enabled=True)) == []
         assert calls == [153]
     session.expire_all()

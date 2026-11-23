@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.channel_style import writing_brief
 from relocant_media.ai.linked_update import PublishedPostReference
-from relocant_media.ai.models import PublicationStatus
+from relocant_media.ai.models import EvidenceDocument, PublicationStatus
 from relocant_media.ai.package import (
     EditorialPackage,
     PackageEventDocument,
@@ -48,11 +48,15 @@ from relocant_media.services.editorial_products import (
 )
 from relocant_media.services.flight_review import flight_review_marker, flight_review_reference
 from relocant_media.services.material_lifecycle import (
+    FALLBACK_WAIT,
     LifecycleBlockedError,
+    _read_record,
+    _validate,
     can_retry_snapshot,
     ensure_not_terminal,
     fallback_reissued_at,
     is_terminal_blocked,
+    response_deadline,
 )
 from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.services.policy_reassessment import eligible_policy_reassessment
@@ -431,6 +435,159 @@ def build_request(
     return None
 
 
+def _fallback_origin(
+    session: Session, parsed: _FallbackRequest, raw_id: int, *, as_of: datetime,
+) -> tuple[SchedulerRun, int, bool]:
+    ids = [candidate.raw_item_id for candidate in parsed.candidates]
+    if len(ids) != len(set(ids)) or raw_id not in ids:
+        raise FallbackValidationError("Чужой или повторяющийся кандидат")
+    run = session.get(SchedulerRun, parsed.scheduler_run_id, populate_existing=True)
+    batch = run.details.get("batch_preselection") if run is not None else None
+    failed_ids = set(_failed_ids(run, parsed.created_at)) if run is not None else set()
+    selected_ids = set(batch.get("gpt_selected_ids", ())) if isinstance(batch, dict) else set()
+    from_batch = (
+        parsed.batch_request_sha256 is not None or parsed.batch_result_sha256 is not None
+    )
+    if from_batch:
+        from relocant_media.services.gpt_batch_fallback import validate_batch_handoff
+
+        validate_batch_handoff(run, now=as_of)
+    origins = failed_ids | selected_ids if from_batch else failed_ids
+    pairs = ([(origin, refresh_target(session, run, origin))
+              for origin in origins] if run is not None else [])
+    targets = {target: origin for origin, target in pairs if target == origin}
+    # Уже выбранный официальный документ может оказаться целью замены.
+    # В этом случае приоритет у привязки и хеша пересъёма.
+    targets.update((target, origin) for origin, target in pairs if target != origin)
+    ranked_scope = (
+        isinstance(batch, dict) and batch.get("status") == "gpt_ranked"
+        and parsed.batch_request_sha256 is not None and parsed.batch_result_sha256 is not None
+        and parsed.batch_request_sha256 == batch.get("gpt_request_sha256")
+        and parsed.batch_result_sha256 == batch.get("gpt_rank_sha256")
+        and set(ids) <= targets.keys()
+    )
+    if (
+        run is None
+        or (from_batch and not ranked_scope)
+        or raw_id not in targets
+        or run.finished_at is None
+        or parsed.created_at < run.finished_at
+        or (from_batch and not timedelta(0) <= as_of - run.finished_at <= REQUEST_TTL)
+    ):
+        raise FallbackValidationError(
+            "Исходный сбой Gemini больше не подтверждён", code="primary_failure_unconfirmed",
+        )
+    origin = targets[raw_id]
+    return run, origin, from_batch and origin in selected_ids
+
+
+_SETTLED_REASONS = frozenset({
+    "event_duplicate_confirmed", "fallback_editorial_rejection", "flight_duplicate_confirmed",
+    "owner_closed_backlog", "published_transport_duplicate", "repeated_editorial_rejection",
+})
+_EXPIRY_REASONS = frozenset({
+    "event_expired", "fallback_deadline_exceeded", "material_deadline_exceeded",
+    "publication_older_than_seven_days", "publication_outside_news_window",
+})
+
+
+def _saved_fallback_decision(
+    session: Session, item: RawItem, source: Source, *, now: datetime,
+) -> bool:
+    run = session.get(EditorialRun, item.id, populate_existing=True)
+    if (run is None or run.evidence.get("city") != source.city
+            or run.staging_message_id is not None
+            or any(run.evidence.get(key) != value for key, value in
+                   _snapshot_member(item, source).items() if key in EvidenceDocument.model_fields)):
+        return False
+    post = session.get(Post, run.post_id, populate_existing=True) if run.post_id else None
+    if post is None or post.city != source.city:
+        return False
+    if run.delivery_status == "sent":
+        return bool(post.published_at is not None and (post.telegram_message_id or 0) > 0)
+    draft = run.outcome.get("draft")
+    status = run.outcome.get("status")
+    return bool(
+        run.delivery_status == "pending" and post.telegram_message_id is None
+        and post.published_at is None and status in {"ready", "human_review"}
+        and status == post.status and isinstance(draft, dict)
+        and (draft.get("title"), draft.get("body")) == (post.title, post.body)
+        and flight_review_marker(run) is None
+        and not eligible_policy_reassessment(session, item.id, now=now)
+        and not can_retry_snapshot(session, item.id, now=now)
+    )
+
+
+def obsolete_fallback_response(
+    session: Session, request: dict[str, Any], raw_id: int, *, now: datetime,
+    package: EditorialPackage | None = None, claim_denied: bool = False,
+) -> str | None:
+    """Проверить область устаревшего ответа без новой попытки и внешних вызовов."""
+    try:
+        if type(request.get("version")) is not int:
+            return None
+        parsed = _FallbackRequest.model_validate_json(_bounded_json(request))
+        origin, _, _ = _fallback_origin(session, parsed, raw_id, as_of=parsed.created_at)
+        requested = next(
+            candidate for candidate in parsed.candidates if candidate.raw_item_id == raw_id
+        )
+    except (ValueError, TypeError):
+        return None
+    profile = load_city_profile("belgrade")
+    if (now < parsed.created_at or parsed.profile_sha256 != profile.sha256
+            or parsed.city_profile != profile):
+        return None
+    item = session.get(RawItem, raw_id, populate_existing=True)
+    source = session.get(Source, item.source_id, populate_existing=True) if item else None
+    if (item is None or source is None
+            or not _registered_public(item, source, _registry().get(source.id))
+            or (requested.source_id, requested.article_id) != (source.id, item.external_id)
+            or requested.event_key != event_key(_candidate(item))
+            or not any(doc.model_dump(mode="json") == _snapshot_member(item, source)
+                       for doc in requested.documents if doc.raw_item_id == raw_id)):
+        return None
+    if package is not None and (
+        package.version != 2 or package.city != source.city or package.event is None
+        or (package.source_id, package.article_id, package.event.event_key)
+        != (requested.source_id, requested.article_id, requested.event_key)
+        or list(package.event.documents) != requested.documents
+    ):
+        return None
+    saved = session.get(EditorialRun, raw_id, populate_existing=True)
+    if (saved is not None and saved.delivery_status == "sent"
+            and _saved_fallback_decision(session, item, source, now=now)):
+        return "already_resolved"
+    if saved is not None and (saved.delivery_status in {"sending", "uncertain", "sent"}
+                              or saved.staging_message_id is not None):
+        return None
+    record = _read_record(session, raw_id)
+    data = record.details if record is not None else {}
+    # Валидатор открытых состояний не принимает закрытые строки журнала.
+    if record is not None and data.get("state") == "blocked":
+        if record.status != "blocked" or record.finished_at is None:
+            return None
+        if data.get("reason") in _SETTLED_REASONS:
+            return "already_resolved"
+        return "material_expired" if data.get("reason") in _EXPIRY_REASONS else None
+    if data and not _validate(data):
+        return None
+    if _saved_fallback_decision(session, item, source, now=now):
+        return "already_resolved"
+    deadline = response_deadline(session, raw_id)
+    if deadline is not None and now >= deadline:
+        return "material_expired"
+    reissued = fallback_reissued_at(session, raw_id)
+    batch_expired = (parsed.batch_result_sha256 is not None and origin.finished_at is not None
+                     and now - origin.finished_at >= FALLBACK_WAIT)
+    if now - parsed.created_at > REQUEST_TTL or batch_expired:
+        return "request_expired"
+    if reissued is not None and parsed.created_at < reissued:
+        return "request_superseded"
+    if claim_denied and data.get("state") == "processing":
+        return "attempt_in_progress"
+    return None
+
+
 def validate_fallback_candidate(
     session: Session,
     request: dict[str, Any],
@@ -457,42 +614,7 @@ def validate_fallback_candidate(
             "Резервный запрос выпущен раньше нового окна", code="request_expired",
         )
     with session.no_autoflush:
-        run = session.get(SchedulerRun, parsed.scheduler_run_id, populate_existing=True)
-        batch = run.details.get("batch_preselection") if run is not None else None
-        failed_ids = set(_failed_ids(run, parsed.created_at)) if run is not None else set()
-        selected_ids = set(batch.get("gpt_selected_ids", ())) if isinstance(batch, dict) else set()
-        from_batch = (
-            parsed.batch_request_sha256 is not None or parsed.batch_result_sha256 is not None
-        )
-        if from_batch:
-            from relocant_media.services.gpt_batch_fallback import validate_batch_handoff
-
-            validate_batch_handoff(run, now=now)
-        origins = failed_ids | selected_ids if from_batch else failed_ids
-        pairs = ([(origin, refresh_target(session, run, origin))
-                  for origin in origins] if run is not None else [])
-        targets = {target: origin for origin, target in pairs if target == origin}
-        # Уже выбранный официальный документ может оказаться целью замены.
-        # В этом случае приоритет у привязки и хеша пересъёма.
-        targets.update((target, origin) for origin, target in pairs if target != origin)
-        ranked_scope = (
-            isinstance(batch, dict) and batch.get("status") == "gpt_ranked"
-            and parsed.batch_request_sha256 is not None and parsed.batch_result_sha256 is not None
-            and parsed.batch_request_sha256 == batch.get("gpt_request_sha256")
-            and parsed.batch_result_sha256 == batch.get("gpt_rank_sha256")
-            and set(ids) <= targets.keys()
-        )
-        if (
-            run is None
-            or (from_batch and not ranked_scope)
-            or raw_id not in targets
-            or run.finished_at is None
-            or parsed.created_at < run.finished_at
-            or (from_batch and not timedelta(0) <= now - run.finished_at <= REQUEST_TTL)
-        ):
-            raise FallbackValidationError(
-                "Исходный сбой Gemini больше не подтверждён", code="primary_failure_unconfirmed",
-            )
+        run, origin, batch_candidate = _fallback_origin(session, parsed, raw_id, as_of=now)
         profile = load_city_profile("belgrade")
         if parsed.profile_sha256 != profile.sha256 or request["city_profile"] != profile.model_dump(
             mode="json"
@@ -506,11 +628,10 @@ def validate_fallback_candidate(
         expected = _candidate_request(
             session, raw_id, profile=profile, registry=registry, now=now
         )
-        origin = targets[raw_id]
-        if from_batch and origin in selected_ids:
+        if batch_candidate:
             from relocant_media.services.gpt_refresh import refreshed_anchor_sha256
 
-            assert isinstance(batch, dict)
+            batch = run.details["batch_preselection"]
             anchor = next(doc for doc in expected["documents"]
                           if doc["raw_item_id"] == raw_id)
             hashes = batch.get("gpt_evidence_sha256")
