@@ -19,7 +19,11 @@ import httpx
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.ops.actions_recovery import recover
 from relocant_media.ops.actions_runtime import EDITORIAL_INTERVAL, REPO
-from relocant_media.ops.belgrade_digests import MorningDelivery, morning_delivery
+from relocant_media.ops.belgrade_digests import (
+    MorningDelivery,
+    digest_end_warning,
+    morning_delivery,
+)
 from relocant_media.ops.editorial_failure_streak import (
     ALERT_THRESHOLD,
     CAUSES,
@@ -65,6 +69,7 @@ class Check:
     run_id: str | None = None
     streak: FailureStreak | None = None
     morning: MorningDelivery | None = None
+    digest_end: datetime | None = None
 
     @property
     def key(self) -> str:
@@ -77,6 +82,7 @@ class Check:
 class AlertState:
     queue: str = ""
     morning: str = ""
+    digest_end: str = ""
 
     @classmethod
     def read(cls, path: Path) -> AlertState:
@@ -91,7 +97,7 @@ class AlertState:
             return cls()
         if not isinstance(value, dict):
             return cls()
-        return cls(**{key: stamp for key in ("queue", "morning")
+        return cls(**{key: stamp for key in ("queue", "morning", "digest_end")
                       if isinstance(stamp := value.get(key), str)
                       and re.fullmatch(r"[a-f0-9]{64}", stamp)})
 
@@ -119,12 +125,13 @@ def inspect(
     client: SSHStateClient, now: datetime, work: Path, *,
     allow_recovery: bool, check_digests: bool = False, morning_date: date | None = None,
 ) -> Check:
+    end = digest_end_warning(now) if check_digests and morning_date is None else None
     try:
         state, _, capacity_low = client.read_status()
     except SSHStorageError:
         if morning_date is not None:
             raise
-        return Check("storage")
+        return Check("storage", digest_end=end)
     if morning_date is not None:
         morning = morning_delivery(state, now) if check_digests else None
         if morning is None or morning.slot.scheduled.date() != morning_date:
@@ -132,8 +139,8 @@ def inspect(
         return Check("morning_only", morning=morning)
     result = _inspect_queue(client, state, capacity_low, now, work, allow_recovery=allow_recovery)
     if check_digests and result.status != "restored":
-        return replace(result, morning=morning_delivery(state, now))
-    return result
+        return replace(result, morning=morning_delivery(state, now), digest_end=end)
+    return replace(result, digest_end=end) if end is not None else result
 
 
 def _inspect_queue(
@@ -205,7 +212,10 @@ def notification(check: Check) -> str:
     return MESSAGES[check.status]
 
 
-async def notify_owner(check: Check | None, morning: MorningDelivery | None = None) -> None:
+async def notify_owner(
+    check: Check | None, morning: MorningDelivery | None = None,
+    digest_end: datetime | None = None,
+) -> None:
     chat_id = int(os.environ["EDITORIAL_OWNER_CHAT_ID"])
     if chat_id <= 0 or chat_id != int(os.environ["EDITORIAL_OWNER_USER_ID"]):
         raise ValueError("positive private owner chat required")
@@ -218,6 +228,11 @@ async def notify_owner(check: Check | None, morning: MorningDelivery | None = No
                   else f"пропущена к {morning.slot.expires:%H:%M} по Белграду")
         messages.append(f"Утренняя сводка за {morning.slot.scheduled:%d.%m.%Y} — {status}. "
                         + MORNING_REASONS[morning.reason])
+    if digest_end is not None:
+        messages.append(
+            f"В расписании сводок задано окончание выпуска {digest_end:%d.%m.%Y в %H:%M} "
+            "по Белграду. Чтобы продолжить выпуски, измените срок в настройках расписания."
+        )
     messages.append(link)
     async with httpx.AsyncClient(timeout=18, trust_env=False) as http:
         bot = TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], http)
@@ -235,11 +250,17 @@ def update_alerts(check: Check, path: Path) -> bool:
             morning = None
     else:
         morning = None
-    if queue is not None or morning is not None:
-        asyncio.run(notify_owner(queue, morning))
+    digest_end = check.digest_end
+    end_key = previous.digest_end
+    if digest_end is not None:
+        end_key = hashlib.sha256(digest_end.isoformat().encode()).hexdigest()
+        if end_key == previous.digest_end:
+            digest_end = None
+    if queue is not None or morning is not None or digest_end is not None:
+        asyncio.run(notify_owner(queue, morning, digest_end))
     queue_key = (previous.queue if check.status in {"running", "morning_only"}
                  else Check("healthy").key if check.status == "restored" else check.key)
-    saved = AlertState(queue=queue_key, morning=morning_key)
+    saved = AlertState(queue=queue_key, morning=morning_key, digest_end=end_key)
     if saved == previous:
         return False
     path.write_text(json.dumps(asdict(saved)), encoding="utf-8")
@@ -277,6 +298,7 @@ def main() -> None:
         print(json.dumps({"watchdog": check.status, "run_id": check.run_id,
                           "morning": {"slot": morning.slot.key, "status": morning.status,
                                       "reason": morning.reason} if morning else None,
+                          "digest_end": check.digest_end.isoformat() if check.digest_end else None,
                           "dry_run": args.dry_run}))
         if args.dry_run:
             return
