@@ -51,13 +51,31 @@ export function heatOverview(view, zoom, preciseRoute) {
 // Leaflet's projected world pixels keep cell membership fixed across screen sizes at a given zoom.
 const HEAT_CELL_SIZE = 76;
 
-export function heatCells(points, project) {
+function visitHeatSegment(start, finish, visit) {
+  let column = Math.floor(start.x / HEAT_CELL_SIZE);
+  let row = Math.floor(start.y / HEAT_CELL_SIZE);
+  const endColumn = Math.floor(finish.x / HEAT_CELL_SIZE);
+  const endRow = Math.floor(finish.y / HEAT_CELL_SIZE);
+  const dx = finish.x - start.x;
+  const dy = finish.y - start.y;
+  const stepX = Math.sign(dx);
+  const stepY = Math.sign(dy);
+  visit(column, row);
+  while (column !== endColumn || row !== endRow) {
+    const nextX = column === endColumn ? Infinity
+      : ((column + (stepX > 0 ? 1 : 0)) * HEAT_CELL_SIZE - start.x) / dx;
+    const nextY = row === endRow ? Infinity
+      : ((row + (stepY > 0 ? 1 : 0)) * HEAT_CELL_SIZE - start.y) / dy;
+    // At a corner, advance both axes so the two cells only touched there are not counted.
+    if (nextX <= nextY) column += stepX;
+    if (nextY <= nextX) row += stepY;
+    visit(column, row);
+  }
+}
+
+export function heatCells(points, project, lines = []) {
   const cells = new Map();
-  for (const { lat, lon, incident, approximate } of points) {
-    if (approximate) continue;
-    const { x, y } = project([lat, lon]);
-    const column = Math.floor(x / HEAT_CELL_SIZE);
-    const row = Math.floor(y / HEAT_CELL_SIZE);
+  function add(column, row, incident) {
     const key = `${column}:${row}`;
     if (!cells.has(key)) {
       cells.set(key, {
@@ -67,6 +85,19 @@ export function heatCells(points, project) {
       });
     }
     cells.get(key).incidents.set(incident.id, incident);
+  }
+  for (const { lat, lon, incident, approximate } of points) {
+    if (approximate) continue;
+    const { x, y } = project([lat, lon]);
+    add(Math.floor(x / HEAT_CELL_SIZE), Math.floor(y / HEAT_CELL_SIZE), incident);
+  }
+  for (const { coordinates, incident } of lines) {
+    const projected = coordinates.map(project);
+    for (let index = 1; index < projected.length; index += 1) {
+      visitHeatSegment(projected[index - 1], projected[index], (column, row) => {
+        add(column, row, incident);
+      });
+    }
   }
   return [...cells.values()].map(({ x, y, incidents }) => ({
     x, y, incidents: [...incidents.values()],

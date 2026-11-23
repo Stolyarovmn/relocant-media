@@ -637,18 +637,23 @@ function renderPointClusters() {
   state.pointLayer.clearLayers();
   const markers = [];
   const density = [];
+  const densityLines = [];
   for (const item of state.mapItems) {
     const { incident, lines, areas, points, roadPaths, archived, now } = item;
     for (const path of roadPaths) {
       path.setStyle({ weight: roadLineWeight(zoom, incident.id === state.selected) });
     }
     if (state.layerView === "corridor" && zoom >= 15) drawCorridorCaps(item, project);
-    for (const point of pointsAtScale(points, lines, areas, zoom, project)) {
-      const target = overview && incident.id !== state.selected && !point.approximate ? density : markers;
+    const aggregate = overview && incident.id !== state.selected;
+    const exactLines = aggregate ? lines.filter((line) => !line.boundary) : [];
+    densityLines.push(...exactLines.map(({ coordinates }) => ({ coordinates, incident })));
+    const markerLines = aggregate ? lines.filter((line) => line.boundary) : lines;
+    for (const point of pointsAtScale(points, markerLines, areas, zoom, project)) {
+      const target = aggregate && !point.approximate ? density : markers;
       target.push({ ...point, incident, archived, now });
     }
   }
-  const cells = heatCells(density, project);
+  const cells = heatCells(density, project, densityLines);
   byId("heat-legend").hidden = !cells.length;
   for (const cell of cells) drawHeatCell(cell, zoom);
   for (const group of clusterMapPoints(markers, project, mobile.matches ? 49 : 43)) {
