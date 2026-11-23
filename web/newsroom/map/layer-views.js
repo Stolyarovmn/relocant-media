@@ -66,6 +66,18 @@ export function heatCells(points, project, size) {
   }));
 }
 
+export function heatComposition(incidents, kindOrder) {
+  const counts = new Map();
+  for (const { kind } of incidents) counts.set(kind, (counts.get(kind) || 0) + 1);
+  let seen = 0;
+  return kindOrder.filter((kind) => counts.has(kind)).map((kind) => {
+    const count = counts.get(kind);
+    const start = 100 * seen / incidents.length;
+    seen += count;
+    return { kind, count, start, end: 100 * seen / incidents.length };
+  });
+}
+
 export function corridorCaps(coordinates, project) {
   const first = coordinates[0];
   const last = coordinates.at(-1);

@@ -5,9 +5,9 @@ import {
 } from "./core.js?v=19";
 import { calendarLink } from "./calendar.js?v=5";
 import {
-  corridorCaps, heatCells, heatOverview, layerView, timelineBands, timelineInstant, timelineLabel,
-  timelineSteps,
-} from "./layer-views.js?v=2";
+  corridorCaps, heatCells, heatComposition, heatOverview, layerView, timelineBands, timelineInstant,
+  timelineLabel, timelineSteps,
+} from "./layer-views.js?v=3";
 import { setupPlaces } from "./places.js?v=20";
 import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=1";
 import { addressWatch, watchedIncidents } from "./address-watch.js?v=2";
@@ -25,6 +25,7 @@ const announcementBody = byId("announcement-body");
 const announcementToggle = byId("toggle-announcements");
 const selectedPreview = byId("selected-preview");
 const watchPanel = byId("address-watch");
+const heatDialog = byId("heat-dialog");
 const watch = addressWatch();
 const telegram = globalThis.Telegram?.WebApp;
 const initialRoute = launchMap(location.search, telegram?.initDataUnsafe?.start_param);
@@ -506,13 +507,13 @@ function pointStatus(point) {
   return incidentStatus(incident, now);
 }
 
-function incidentChoices(incidents) {
+function incidentChoices(incidents, choose = openEvent) {
   const list = make("ul");
   for (const incident of incidents) {
     const row = make("li");
     const button = make("button", "", incident.title);
     button.type = "button";
-    button.addEventListener("click", () => openEvent(incident));
+    button.addEventListener("click", () => choose(incident));
     row.append(button);
     list.append(row);
   }
@@ -571,14 +572,20 @@ function roadLineWeight(zoom, selected) {
 function drawHeatCell(cell, zoom) {
   const leaflet = globalThis.L;
   const { incidents } = cell;
-  const types = new Set(incidents.map(({ kind }) => kind));
-  const title = `Объявления · ${incidents.length} · ${[...types].map((kind) => kinds[kind].label).join(", ")}`;
+  const composition = heatComposition(incidents, Object.keys(kinds));
+  const heading = `Объявления в этой зоне · ${incidents.length}`;
+  const breakdown = composition.map(({ kind, count }) => `${kinds[kind].label} · ${count}`).join(", ");
+  const title = `${heading}. ${breakdown}`;
   const surface = make("span", "heat-cell");
   surface.setAttribute("aria-hidden", "true");
-  if (types.size === 1) surface.style.setProperty("--heat-color", mapColor(incidents[0].kind));
+  if (composition.length === 1) surface.style.setProperty("--heat-color", mapColor(composition[0].kind));
+  if (composition.length > 1) {
+    const stops = composition.map(({ kind, start, end }) => `${mapColor(kind)} ${start}% ${end}%`);
+    surface.style.setProperty("--heat-ring", `conic-gradient(${stops.join(", ")})`);
+  }
   surface.style.setProperty("--heat-opacity", String(Math.min(.78, .30 + incidents.length * .11)));
   const symbols = make("span", "cluster-symbols");
-  for (const kind of types) {
+  for (const { kind } of composition) {
     const symbol = make("i", "", kinds[kind].icon);
     symbol.dataset.kind = kind;
     symbols.append(symbol);
@@ -592,9 +599,15 @@ function drawHeatCell(cell, zoom) {
   if (incidents.length === 1) {
     marker.on("click", () => openEvent(incidents[0]));
   } else {
-    const popup = make("div", "map-cluster-popup");
-    popup.append(make("strong", "", title), incidentChoices(incidents));
-    marker.bindPopup(popup);
+    marker.on("click", () => {
+      byId("heat-dialog-title").textContent = heading;
+      byId("heat-dialog-breakdown").textContent = breakdown;
+      byId("heat-dialog-choices").replaceChildren(incidentChoices(incidents, (incident) => {
+        heatDialog.close();
+        openEvent(incident);
+      }));
+      heatDialog.showModal();
+    });
   }
   marker.addTo(state.pointLayer);
 }
