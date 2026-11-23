@@ -74,7 +74,12 @@ _CHANNEL = "https://t.me/eduvbelgrad"
 _HISTORY = "digest_receipts"
 _TRANSPORT_REPEAT_DAYS = 7
 MORNING_ATTEMPT = "last_morning_digest_attempt"
-MORNING_SKIP_REASONS = frozenset({"insufficient_items", "window_closed"})
+EVENING_ATTEMPT = "last_evening_digest_attempt"
+DIGEST_ATTEMPT_KEYS = {"morning": MORNING_ATTEMPT, "evening": EVENING_ATTEMPT}
+DIGEST_SKIP_REASONS = {
+    "morning": frozenset({"insufficient_items", "window_closed"}),
+    "evening": frozenset({"insufficient_items", "window_closed", "reminder_source_unconfirmed"}),
+}
 _PERIOD = re.compile(r"Период измене: (\d{2}\.\d{2}\.\d{4})–(\d{2}\.\d{2}\.\d{4})\.")
 _MONTHS = ("января февраля марта апреля мая июня июля августа сентября октября ноября декабря"
            .split())
@@ -140,10 +145,16 @@ class Slot:
 
 
 @dataclass(frozen=True)
-class MorningDelivery:
+class DigestDelivery:
     slot: Slot
     status: Literal["sent", "unconfirmed", "missed"]
     reason: str
+
+    @property
+    def needs_alert(self) -> bool:
+        return self.status != "sent" and (
+            self.slot.kind != "evening" or self.reason != "insufficient_items"
+        )
 
 
 @dataclass(frozen=True)
@@ -224,31 +235,37 @@ def digest_end_warning(now: datetime) -> datetime | None:
     return end.replace(tzinfo=local.tzinfo)
 
 
-def morning_delivery(state: dict[str, Any], now: datetime) -> MorningDelivery | None:
+def digest_delivery(
+    state: dict[str, Any], now: datetime, kind: Literal["morning", "evening"],
+) -> DigestDelivery | None:
     if state.get("status") not in ("ready", "busy"):
         return None
     local = _local_clock(now)
-    slot = _regular_slot(_policy(), local, "morning")
+    slot = _regular_slot(_policy(), local, kind)
     if slot is None or local < slot.expires:
         return None
     receipts = state.get(_HISTORY, {})
     if not isinstance(receipts, dict):
-        return MorningDelivery(slot, "unconfirmed", "invalid_receipt")
+        return DigestDelivery(slot, "unconfirmed", "invalid_receipt")
     if slot.key in receipts:
         receipt = receipts[slot.key]
         if isinstance(receipt, dict):
             message_id = receipt.get("message_id")
             if receipt.get("state") == "sent" and type(message_id) is int and message_id > 0:
-                return MorningDelivery(slot, "sent", "confirmed")
+                return DigestDelivery(slot, "sent", "confirmed")
             if receipt.get("state") in ("sending", "uncertain"):
-                return MorningDelivery(slot, "unconfirmed", "telegram_unconfirmed")
-        return MorningDelivery(slot, "unconfirmed", "invalid_receipt")
-    attempt = state.get(MORNING_ATTEMPT)
+                return DigestDelivery(slot, "unconfirmed", "telegram_unconfirmed")
+        return DigestDelivery(slot, "unconfirmed", "invalid_receipt")
+    attempt = state.get(DIGEST_ATTEMPT_KEYS[kind])
     if isinstance(attempt, dict) and attempt.get("slot") == slot.key:
         reason = attempt.get("reason")
-        if isinstance(reason, str) and reason in MORNING_SKIP_REASONS:
-            return MorningDelivery(slot, "missed", reason)
-    return MorningDelivery(slot, "missed", "no_recorded_result")
+        if isinstance(reason, str) and reason in DIGEST_SKIP_REASONS[kind]:
+            return DigestDelivery(slot, "missed", reason)
+    return DigestDelivery(slot, "missed", "no_recorded_result")
+
+
+def morning_delivery(state: dict[str, Any], now: datetime) -> DigestDelivery | None:
+    return digest_delivery(state, now, "morning")
 
 
 def public_digest_days(state: dict[str, Any], now: datetime) -> dict[str, dict[str, Any]]:
@@ -1009,9 +1026,8 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
                 now.date() + timedelta(days=1), (),
             )), None)
         priority_missing = bool(priority_url and all(row.url != priority_url for row in confirmed))
-        if (priority_missing or candidates and not confirmed) and (
-            len(entries) < 2 or now < slot.expires - timedelta(minutes=15)
-        ):
+        if (((priority_missing or candidates and not confirmed) and len(entries) < 2)
+                or priority_missing and now < slot.expires - timedelta(minutes=15)):
             return {"state": "reminder_source_unconfirmed", "items": len(candidates),
                     **weather_details}
         if confirmed:

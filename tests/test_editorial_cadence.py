@@ -1,9 +1,11 @@
 """Execute the real schedule selector without running any editorial worker."""
 
 import configparser
+import json
 import os
 import subprocess
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -55,6 +57,49 @@ def test_redundant_schedules_route_editorial_and_intake_without_slot_overlap(tmp
                                   "fallback-preview", "fallback"])
 def test_manual_mode_is_preserved_instead_of_treating_dispatch_as_intake(tmp_path, mode):
     assert select_mode(tmp_path, event="workflow_dispatch", requested=mode) == f"value={mode}"
+
+
+@pytest.mark.parametrize(("event", "title", "status", "conclusion", "age", "dispatch"), [
+    ("schedule", "Editorial Watchdog", "completed", "success", 19, False),
+    ("schedule", "Editorial Watchdog", "completed", "success", 21, True),
+    ("schedule", "Editorial Watchdog", "completed", "failure", 2, True),
+    ("workflow_run", "Editorial Watchdog", "completed", "skipped", 2, True),
+    ("workflow_run", "Editorial Watchdog", "completed", "success", 2, False),
+    ("workflow_dispatch", "Editorial Watchdog", "completed", "success", 2, True),
+    ("workflow_dispatch", "Утренняя сводка · 2026-11-23", "completed", "success", 2, True),
+    ("workflow_dispatch", "Утренняя сводка · 2026-11-23", "pending", "", 2, False),
+    ("workflow_dispatch", "Editorial Watchdog · редакция", "queued", "", 2, False),
+])
+def test_editorial_chain_runs_watchdog_only_when_checks_are_missing(
+    monkeypatch, event, title, status, conclusion, age, dispatch,
+):
+    watch = next(step for step in workflow()["jobs"]["chain"]["steps"]
+                 if step.get("id") == "watchdog-backup")
+    assert watch["continue-on-error"] == "true"
+    assert "EDITORIAL_STORAGE_BACKEND == 'ssh'" in watch["if"]
+    checked = (datetime.now(UTC) - timedelta(minutes=age)).isoformat()
+    reports = [{
+        "displayTitle": title, "status": status, "conclusion": conclusion,
+        "event": event, "updatedAt": checked, "createdAt": checked,
+    }]
+    repo = "test/relocant-media"
+    monkeypatch.setenv("GH_REPO", repo)
+    seen = []
+    monkeypatch.setattr(subprocess, "check_output", lambda command, **kwargs: json.dumps(reports))
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: seen.append(command))
+    exec(watch["run"], {})
+    assert seen == ([
+        ["gh", "workflow", "run", "editorial-watchdog.yml", "-R", repo, "--ref", "main",
+         "-f", "dry_run=false", "-f", "editorial_only=true"],
+    ] if dispatch else [])
+
+
+def test_editorial_watchdog_does_not_repeat_reader_intake_for_a_backup():
+    path = Path(".github/workflows/editorial-watchdog.yml")
+    watch = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert watch["on"]["workflow_dispatch"]["inputs"]["editorial_only"]["default"] == "false"
+    assert "!inputs.editorial_only" in watch["jobs"]["intake"]["if"]
+    assert "EDITORIAL_STORAGE_BACKEND == 'ssh'" in watch["jobs"]["check"]["if"]
 
 
 def test_hourly_timer_retains_single_service_and_persistent_serialized_runtime():

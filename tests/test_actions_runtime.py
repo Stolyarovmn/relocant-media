@@ -15,7 +15,13 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from relocant_media.ops import actions_runtime as runtime
-from relocant_media.ops.belgrade_digests import MORNING_ATTEMPT, due_slot, morning_delivery
+from relocant_media.ops.belgrade_digests import (
+    DIGEST_ATTEMPT_KEYS,
+    MORNING_ATTEMPT,
+    digest_delivery,
+    due_slot,
+    morning_delivery,
+)
 from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.storage.models import Submission
 from relocant_media.storage.sqlite_schema import initialize_sqlite
@@ -210,13 +216,67 @@ def test_morning_watch_output_only_for_an_unconfirmed_public_issue(tmp_path):
     state = {"status": "ready", "digest_receipts": {
         "belgrade:2026-11-22:morning": {"state": "sent", "message_id": 152},
     }}
-    runtime._write_morning_watch(state, env, now=now)
+    runtime._write_digest_watch(state, env, now=now)
     state["digest_receipts"].clear()
-    runtime._write_morning_watch(state, env, now=now - timedelta(seconds=1))
-    runtime._write_morning_watch(state, {**env, "EDITORIAL_SEND_ENABLED": "false"}, now=now)
+    runtime._write_digest_watch(state, env, now=now - timedelta(seconds=1))
+    runtime._write_digest_watch(state, {**env, "EDITORIAL_SEND_ENABLED": "false"}, now=now)
     assert not output.exists()
-    runtime._write_morning_watch(state, env, now=now)
+    runtime._write_digest_watch(state, env, now=now)
     assert output.read_text() == "morning_watch_date=2026-11-22\n"
+
+
+@pytest.mark.parametrize(("hour", "kind", "reason"), [
+    (9, "morning", "insufficient_items"),
+    (20, "evening", "reminder_source_unconfirmed"),
+])
+def test_digest_only_saves_skip_reason_once_without_a_new_snapshot(
+    context, tmp_path, monkeypatch, hour, kind, reason,
+):
+    store, memory = context
+    snapshot = store.state["snapshot"]
+    drive = Mock(spec=runtime.SSHStateClient)
+    drive.download.side_effect = memory.download
+    drive.checkpoint.return_value = "a" * 64
+    slot = due_slot(datetime(2026, 11, 22, hour, tzinfo=UTC))
+    assert slot is not None and slot.kind == kind
+    monkeypatch.setattr(runtime, "due_digest_slot", lambda _now: slot)
+    monkeypatch.setattr(runtime, "run_digest", AsyncMock(return_value={"state": reason}))
+    monkeypatch.setattr(runtime, "run_child", Mock(side_effect=AssertionError("digest only")))
+    env = {
+        "ACTIONS_CUTOVER_CONFIRMED": "true", "GITHUB_REPOSITORY": runtime.REPO,
+        "GITHUB_REF": "refs/heads/main", "GITHUB_ACTIONS": "true",
+        "EDITORIAL_SEND_ENABLED": "true", "EDITORIAL_CHANNEL_MODE": "public",
+    }
+    for step in ("first", "repeat"):
+        assert execute((store, drive), tmp_path / step, monkeypatch,
+                       mode="digest", environment=env) == 0
+        assert store.sha == "initialxx"
+        assert store.state["status"] == "ready" and store.state["snapshot"] == snapshot
+        assert store.state[DIGEST_ATTEMPT_KEYS[kind]] == {"slot": slot.key, "reason": reason}
+        assert digest_delivery(store.state, slot.expires, kind).reason == reason
+        assert "digest_receipts" not in store.state
+    drive.checkpoint.assert_called_once()
+    drive.upload.assert_not_called()
+
+
+def test_evening_watch_reports_error_but_not_a_normal_skip(tmp_path):
+    output = tmp_path / "actions-output"
+    env = {"GITHUB_OUTPUT": str(output), "GITHUB_ACTIONS": "true",
+           "EDITORIAL_SEND_ENABLED": "true", "EDITORIAL_CHANNEL_MODE": "public"}
+    state = {
+        "status": "ready", "digest_receipts": {
+            "belgrade:2026-11-22:morning": {"state": "sent", "message_id": 152},
+        },
+        DIGEST_ATTEMPT_KEYS["evening"]: {
+            "slot": "belgrade:2026-11-22:evening", "reason": "insufficient_items",
+        },
+    }
+    now = datetime(2026, 11, 22, 20, 15, tzinfo=UTC)
+    runtime._write_digest_watch(state, env, now=now)
+    assert not output.exists()
+    state[DIGEST_ATTEMPT_KEYS["evening"]]["reason"] = "reminder_source_unconfirmed"
+    runtime._write_digest_watch(state, env, now=now)
+    assert output.read_text() == "evening_watch_date=2026-11-22\n"
 
 
 def test_editorial_child_receives_a_new_output_directory(context, tmp_path, monkeypatch):
@@ -820,28 +880,28 @@ def test_workflow_never_uploads_private_database_or_runs_on_pr():
     assert worker['env']['GH_STATE_TOKEN'] == '${{ secrets.EDITORIAL_STATE_TOKEN || github.token }}'
 
 
+@pytest.mark.parametrize(("kind", "heading"), [("morning", "Утренняя"), ("evening", "Вечерняя")])
 @pytest.mark.parametrize(("status", "result", "dispatch"), [
     ("in_progress", None, False),
     ("completed", "success", False),
     ("completed", "failure", True),
 ])
 def test_chain_can_check_a_missed_issue_without_waiting_for_cron(
-    monkeypatch, status, result, dispatch,
+    monkeypatch, kind, heading, status, result, dispatch,
 ):
     import yaml
 
     workflow = ROOT / ".github/workflows/editorial-actions.yml"
     jobs = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
-    assert jobs["cycle"]["outputs"]["morning_watch_date"] == (
-        "${{ steps.runtime.outputs.morning_watch_date }}"
-    )
+    field = f"{kind}_watch_date"
+    assert jobs["cycle"]["outputs"][field] == ("${{ steps.runtime.outputs." + field + " }}")
     step = jobs["chain"]["steps"][1]
     assert step["continue-on-error"] is True
-    assert "morning_watch_date" in step["if"]
+    assert field in step["if"]
     monkeypatch.setenv("GH_REPO", runtime.REPO)
-    monkeypatch.setenv("MORNING_DATE", "2026-11-22")
+    monkeypatch.setenv(f"{kind.upper()}_DATE", "2026-11-22")
     monkeypatch.setattr(subprocess, "check_output", lambda *_args, **_options: json.dumps([
-        {"displayTitle": "Утренняя сводка · 2026-11-22", "status": status, "conclusion": result},
+        {"displayTitle": f"{heading} сводка · 2026-11-22", "status": status, "conclusion": result},
     ]))
     run = Mock()
     monkeypatch.setattr(subprocess, "run", run)
@@ -849,7 +909,7 @@ def test_chain_can_check_a_missed_issue_without_waiting_for_cron(
     if dispatch:
         run.assert_called_once()
         assert run.call_args.args[0][-4:] == [
-            "-f", "dry_run=false", "-f", "morning_date=2026-11-22",
+            "-f", "dry_run=false", "-f", f"{kind}_date=2026-11-22",
         ]
     else:
         run.assert_not_called()

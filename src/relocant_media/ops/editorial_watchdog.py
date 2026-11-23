@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 
@@ -20,7 +20,8 @@ from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.ops.actions_recovery import recover
 from relocant_media.ops.actions_runtime import EDITORIAL_INTERVAL, REPO
 from relocant_media.ops.belgrade_digests import (
-    MorningDelivery,
+    DigestDelivery,
+    digest_delivery,
     digest_end_warning,
     morning_delivery,
 )
@@ -53,14 +54,16 @@ MESSAGES = {
     "restored": "Очередь редакции Белграда восстановлена из проверенного снимка.",
     "healthy": "Редакция Белграда снова работает. Очередь доступна, свежий цикл сохранён.",
 }
-MORNING_REASONS = {
+DIGEST_ALERT_REASONS = {
     "insufficient_items": "Редакционный цикл зафиксировал, что для выпуска не хватило материалов.",
-    "window_closed": "Окно догоняющего выпуска закрылось до отправки.",
+    "window_closed": "Окно выпуска закрылось до отправки.",
+    "reminder_source_unconfirmed": "Редакция не смогла подтвердить объявление на завтра.",
     "telegram_unconfirmed": "Telegram не подтвердил результат отправки. Сверьте выпуск в канале.",
     "invalid_receipt": "Запись об отправке неполная. Сверьте выпуск в канале.",
     "no_recorded_result": "В журнале редакции нет записи о результате попытки. "
                           "Проверьте последние запуски.",
 }
+_DIGEST_ONLY = {"morning_only", "evening_only"}
 
 
 @dataclass(frozen=True)
@@ -68,8 +71,9 @@ class Check:
     status: str
     run_id: str | None = None
     streak: FailureStreak | None = None
-    morning: MorningDelivery | None = None
+    morning: DigestDelivery | None = None
     digest_end: datetime | None = None
+    evening: DigestDelivery | None = None
 
     @property
     def key(self) -> str:
@@ -83,6 +87,7 @@ class AlertState:
     queue: str = ""
     morning: str = ""
     digest_end: str = ""
+    evening: str = ""
 
     @classmethod
     def read(cls, path: Path) -> AlertState:
@@ -97,7 +102,7 @@ class AlertState:
             return cls()
         if not isinstance(value, dict):
             return cls()
-        return cls(**{key: stamp for key in ("queue", "morning", "digest_end")
+        return cls(**{key: stamp for key in ("queue", "morning", "digest_end", "evening")
                       if isinstance(stamp := value.get(key), str)
                       and re.fullmatch(r"[a-f0-9]{64}", stamp)})
 
@@ -124,22 +129,28 @@ def checkpoint_from_run(run_id: str, attempt: str) -> str | None:
 def inspect(
     client: SSHStateClient, now: datetime, work: Path, *,
     allow_recovery: bool, check_digests: bool = False, morning_date: date | None = None,
+    evening_date: date | None = None,
 ) -> Check:
-    end = digest_end_warning(now) if check_digests and morning_date is None else None
+    issue_date = morning_date or evening_date
+    end = digest_end_warning(now) if check_digests and issue_date is None else None
     try:
         state, _, capacity_low = client.read_status()
     except SSHStorageError:
-        if morning_date is not None:
+        if issue_date is not None:
             raise
         return Check("storage", digest_end=end)
-    if morning_date is not None:
-        morning = morning_delivery(state, now) if check_digests else None
-        if morning is None or morning.slot.scheduled.date() != morning_date:
-            return Check("morning_only")
-        return Check("morning_only", morning=morning)
+    if issue_date is not None:
+        kind: Literal["morning", "evening"] = "morning" if morning_date is not None else "evening"
+        delivery = digest_delivery(state, now, kind) if check_digests else None
+        if delivery is not None and delivery.slot.scheduled.date() != issue_date:
+            delivery = None
+        if kind == "morning":
+            return Check("morning_only", morning=delivery)
+        return Check("evening_only", evening=delivery)
     result = _inspect_queue(client, state, capacity_low, now, work, allow_recovery=allow_recovery)
     if check_digests and result.status != "restored":
-        return replace(result, morning=morning_delivery(state, now), digest_end=end)
+        return replace(result, morning=morning_delivery(state, now), digest_end=end,
+                       evening=digest_delivery(state, now, "evening"))
     return replace(result, digest_end=end) if end is not None else result
 
 
@@ -187,7 +198,7 @@ def _inspect_queue(
 
 
 def should_notify(check: Check, previous: str) -> bool:
-    if check.status in {"running", "morning_only"} or check.key == previous:
+    if check.status == "running" or check.status in _DIGEST_ONLY or check.key == previous:
         return False
     if check.status == "healthy":
         return bool(previous and previous != Check("healthy").key)
@@ -213,8 +224,8 @@ def notification(check: Check) -> str:
 
 
 async def notify_owner(
-    check: Check | None, morning: MorningDelivery | None = None,
-    digest_end: datetime | None = None,
+    check: Check | None, morning: DigestDelivery | None = None,
+    digest_end: datetime | None = None, evening: DigestDelivery | None = None,
 ) -> None:
     chat_id = int(os.environ["EDITORIAL_OWNER_CHAT_ID"])
     if chat_id <= 0 or chat_id != int(os.environ["EDITORIAL_OWNER_USER_ID"]):
@@ -223,11 +234,13 @@ async def notify_owner(
         f"https://github.com/{REPO}/actions/workflows/editorial-actions.yml"
     )
     messages = [notification(check)] if check else []
-    if morning is not None:
-        status = ("отправка не подтверждена" if morning.status == "unconfirmed"
-                  else f"пропущена к {morning.slot.expires:%H:%M} по Белграду")
-        messages.append(f"Утренняя сводка за {morning.slot.scheduled:%d.%m.%Y} — {status}. "
-                        + MORNING_REASONS[morning.reason])
+    for heading, delivery in (("Утренняя", morning), ("Вечерняя", evening)):
+        if delivery is None:
+            continue
+        status = ("отправка не подтверждена" if delivery.status == "unconfirmed"
+                  else f"пропущена к {delivery.slot.expires:%H:%M} по Белграду")
+        messages.append(f"{heading} сводка за {delivery.slot.scheduled:%d.%m.%Y} — {status}. "
+                        + DIGEST_ALERT_REASONS[delivery.reason])
     if digest_end is not None:
         messages.append(
             f"В расписании сводок задано окончание выпуска {digest_end:%d.%m.%Y в %H:%M} "
@@ -239,28 +252,33 @@ async def notify_owner(
         await bot.send_message(chat_id, "\n\n".join(messages))
 
 
+def _digest_alert(
+    delivery: DigestDelivery | None, previous: str,
+) -> tuple[DigestDelivery | None, str]:
+    if delivery is None or not delivery.needs_alert:
+        return None, previous
+    key = hashlib.sha256(delivery.slot.key.encode()).hexdigest()
+    return (delivery if key != previous else None), key
+
+
 def update_alerts(check: Check, path: Path) -> bool:
     previous = AlertState.read(path)
     queue = check if should_notify(check, previous.queue) else None
-    morning = check.morning
-    morning_key = previous.morning
-    if morning is not None and morning.status != "sent":
-        morning_key = hashlib.sha256(morning.slot.key.encode()).hexdigest()
-        if morning_key == previous.morning:
-            morning = None
-    else:
-        morning = None
+    morning, morning_key = _digest_alert(check.morning, previous.morning)
+    evening, evening_key = _digest_alert(check.evening, previous.evening)
     digest_end = check.digest_end
     end_key = previous.digest_end
     if digest_end is not None:
         end_key = hashlib.sha256(digest_end.isoformat().encode()).hexdigest()
         if end_key == previous.digest_end:
             digest_end = None
-    if queue is not None or morning is not None or digest_end is not None:
-        asyncio.run(notify_owner(queue, morning, digest_end))
-    queue_key = (previous.queue if check.status in {"running", "morning_only"}
+    if queue is not None or morning is not None or evening is not None or digest_end is not None:
+        asyncio.run(notify_owner(queue, morning, digest_end, evening))
+    queue_key = (previous.queue if check.status == "running" or check.status in _DIGEST_ONLY
                  else Check("healthy").key if check.status == "restored" else check.key)
-    saved = AlertState(queue=queue_key, morning=morning_key, digest_end=end_key)
+    saved = AlertState(
+        queue=queue_key, morning=morning_key, digest_end=end_key, evening=evening_key,
+    )
     if saved == previous:
         return False
     path.write_text(json.dumps(asdict(saved)), encoding="utf-8")
@@ -283,21 +301,27 @@ def main() -> None:
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--morning-date", type=date.fromisoformat)
+    issue = parser.add_mutually_exclusive_group()
+    issue.add_argument("--morning-date", type=date.fromisoformat)
+    issue.add_argument("--evening-date", type=date.fromisoformat)
     args = parser.parse_args()
     try:
         client = SSHStateClient(SSHConfig.from_environment(os.environ))
         check = inspect(client, datetime.now(UTC), args.work,
-                        allow_recovery=(args.morning_date is None and not args.dry_run
+                        allow_recovery=(args.morning_date is None and args.evening_date is None
+                                        and not args.dry_run
                                         and current_main_passed_ci()),
                         check_digests=(os.getenv("EDITORIAL_SEND_ENABLED") == "true"
                                        and os.getenv("EDITORIAL_CHANNEL_MODE") == "public"),
-                        morning_date=args.morning_date)
+                        morning_date=args.morning_date, evening_date=args.evening_date)
         check = check_failure_streak(check)
-        morning = check.morning
+        slots = {
+            kind: ({"slot": delivery.slot.key, "status": delivery.status, "reason": delivery.reason}
+                   if delivery else None)
+            for kind, delivery in (("morning", check.morning), ("evening", check.evening))
+        }
         print(json.dumps({"watchdog": check.status, "run_id": check.run_id,
-                          "morning": {"slot": morning.slot.key, "status": morning.status,
-                                      "reason": morning.reason} if morning else None,
+                          **slots,
                           "digest_end": check.digest_end.isoformat() if check.digest_end else None,
                           "dry_run": args.dry_run}))
         if args.dry_run:

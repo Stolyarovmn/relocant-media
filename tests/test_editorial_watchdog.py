@@ -105,7 +105,7 @@ def test_morning_alert_keeps_legacy_queue_state_and_is_deduplicated_by_day(
     send = AsyncMock()
     monkeypatch.setattr(watchdog, "notify_owner", send)
     assert watchdog.update_alerts(check, file)
-    send.assert_awaited_once_with(None, check.morning, None)
+    send.assert_awaited_once_with(None, check.morning, None, None)
     assert not watchdog.update_alerts(check, file)
     send.assert_awaited_once()
     assert watchdog.AlertState.read(file).queue == status.key
@@ -152,6 +152,33 @@ def test_redundant_check_targets_the_named_morning_and_does_not_recover_queue(
                          check_digests=True, morning_date=now.date())
 
 
+def test_evening_check_is_read_only_and_deduplicates_the_missed_slot(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 22, 20, 15, tzinfo=UTC)
+    client = Mock()
+    client.read_status.return_value = ({"status": "ready",
+        "last_evening_digest_attempt": {
+            "slot": "belgrade:2026-11-22:evening", "reason": "reminder_source_unconfirmed",
+        }}, "sha", None)
+    queue = Mock(side_effect=AssertionError("evening-only check must not recover the writer"))
+    monkeypatch.setattr(watchdog, "_inspect_queue", queue)
+    check = watchdog.inspect(client, now, tmp_path, allow_recovery=False,
+                             check_digests=True, evening_date=now.date())
+    assert check.status == "evening_only" and check.morning is None
+    assert check.evening.reason == "reminder_source_unconfirmed"
+    assert not watchdog.should_notify(check, "")
+    send = AsyncMock()
+    monkeypatch.setattr(watchdog, "notify_owner", send)
+    file = tmp_path / "watchdog"
+    assert watchdog.update_alerts(check, file)
+    assert not watchdog.update_alerts(check, file)
+    send.assert_awaited_once_with(None, None, None, check.evening)
+    assert watchdog.AlertState.read(file).queue == ""
+    earlier = watchdog.inspect(client, now - timedelta(seconds=1), tmp_path,
+                                allow_recovery=False, check_digests=True, evening_date=now.date())
+    assert earlier.evening is None
+    client.write.assert_not_called()
+
+
 def test_finite_digest_schedule_alert_survives_storage_failure_without_repeats(
     tmp_path, monkeypatch,
 ):
@@ -171,9 +198,9 @@ def test_finite_digest_schedule_alert_survives_storage_failure_without_repeats(
     assert watchdog.update_alerts(check, path)
     assert not watchdog.update_alerts(check, path)
     assert sender.await_count == 2
-    assert sender.await_args.args == (check, None, cutoff)
+    assert sender.await_args.args == (check, None, cutoff, None)
     assert watchdog.update_alerts(watchdog.Check("storage", digest_end=moved_cutoff), path)
-    assert sender.await_args.args == (None, None, moved_cutoff)
+    assert sender.await_args.args == (None, None, moved_cutoff, None)
     client.write.assert_not_called()
 
 
