@@ -4,6 +4,7 @@ import re
 import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -15,6 +16,7 @@ from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as TRAFFIC_S
 from relocant_media.collectors.bgsaobracaj_notices import match_bgsaobracaj_notice
 from relocant_media.collectors.cukarica_news import ARTICLE_PATH
 from relocant_media.collectors.venue_feed import _allowed
+from relocant_media.domain.flight_notices import city_carriers
 from relocant_media.sources.registry import SourceConfig
 
 _LETTERS = dict(zip(
@@ -151,14 +153,33 @@ def _matches_article(text: str, article: RawItem) -> bool:
         return True
     if article.source_id != AVIATION_SOURCE:
         return False
-    # Common airline and airport/destination terms survive Serbian/Russian spelling.
+    return _same_carrier_report(text, article.title)
+
+
+def _same_carrier_report(lead: str, title: str, *, city: str = "belgrade") -> bool:
+    """Один перевозчик из реестра города и ещё два общих признака: число или название.
+
+    Названия в разных алфавитах сравниваются по сходству транслитерации, без списков замен.
+    """
+    carriers = city_carriers(city)
+    found = [{c for c, pattern in carriers.items() if pattern.search(value)}
+             for value in (lead[:8000], title)]
+    if len(found[0]) != 1 or found[0] != found[1]:
+        return False
+    pattern = carriers[next(iter(found[0]))]
+
     def terms(value: str) -> set[str]:
-        raw = folded(value).replace("guangdzou", "guangzhou").replace("guanchzhou", "guangzhou")
-        raw = re.sub(r"\bguancz(?:h)?ou\b", "guangzhou", raw)
-        raw = raw.replace("er srbija", "air serbia")
-        return set(re.findall(r"[a-z]{3,}|\d{1,4}", raw))
-    lead, title = terms(text), terms(article.title)
-    return {"air", "serbia"} <= lead & title and len((lead & title) - {"air", "serbia"}) >= 2
+        return {w for w in re.findall(r"[a-z]{4,}|\d{1,4}", folded(pattern.sub(" ", value)))
+                if w not in _STOP}
+
+    lead_terms = terms(lead[:8000])
+    shared = 0
+    for term in terms(title):
+        if term in lead_terms or (len(term) >= 5 and not term.isdigit() and any(
+                len(other) >= 5 and SequenceMatcher(None, term, other).ratio() >= 0.75
+                for other in lead_terms)):
+            shared += 1
+    return shared >= 2
 
 
 async def resolve_public_discovery(

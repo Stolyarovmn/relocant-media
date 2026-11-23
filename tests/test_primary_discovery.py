@@ -76,3 +76,18 @@ def test_russian_air_serbia_pointer_matches_dated_serbian_report_only():
     lead = "Air Serbia отменяет рейсы в китайский город Гуанчжоу с 27 ноября."
     assert _matches_article(lead, report)
     assert not _matches_article(lead.replace("Гуанчжоу", "Подгорицу"), report)
+
+
+@pytest.mark.parametrize("lead,title,expected", [
+    ("Wizz Air отменяет рейсы в Мальмё с 15 января.",
+     "Wizz Air ukida letove za Malme od 15. januara", True),
+    ("Lufthansa отменяет рейсы в Мюнхен с 15 января.",
+     "Wizz Air ukida letove za Minhen od 15. januara", False),
+    ("Авиакомпания отменяет рейсы в Мюнхен с 15 января.",
+     "Neka kompanija ukida letove za Minhen od 15. januara", False),
+    ("Wizz Air отменяет рейсы в Мюнхен.", "Wizz Air ukida letove za Pariz", False),
+])
+def test_aviation_pointer_rule_is_general_for_any_registered_carrier(lead, title, expected):
+    from relocant_media.services.primary_discovery import _same_carrier_report
+
+    assert _same_carrier_report(lead, title) is expected
