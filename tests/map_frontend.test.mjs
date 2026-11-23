@@ -14,7 +14,7 @@ import {
 import { agendaVisit, setupPlaces } from "../web/newsroom/map/places.js";
 import { agendaFavorites } from "../web/newsroom/map/favorites.js";
 import {
-  corridorCaps, heatCells, heatOverview, layerView, timelineBands, timelineInstant,
+  corridorCaps, heatCells, heatComposition, heatOverview, layerView, timelineBands, timelineInstant,
   timelineLabel, timelineSteps,
 } from "../web/newsroom/map/layer-views.js";
 import { loadSnapshot } from "../web/newsroom/map/snapshots.js";
@@ -143,6 +143,26 @@ test("плотность считает объявления в ячейке и 
     { x: 32, y: 32, incidents: [water, power] },
     { x: 96, y: 32, incidents: [water] },
   ]);
+});
+
+test("доли тепловой метки следуют порядку фильтров и учитывают уникальные объявления", () => {
+  const project = ([lat, lon]) => ({ x: lon, y: lat });
+  const point = (lon, id, kind) => ({ lat: 10, lon, incident: { id, kind } });
+  const [cell] = heatCells([
+    point(2, "r", "road"), point(3, "r", "road"),
+    point(8, "w1", "water"), point(12, "w2", "water"),
+    point(17, "p", "power"),
+  ], project, 64);
+  const order = ["water", "power", "road"];
+  assert.deepEqual(heatComposition(cell.incidents, order), [
+    { kind: "water", count: 2, start: 0, end: 50 },
+    { kind: "power", count: 1, start: 50, end: 75 },
+    { kind: "road", count: 1, start: 75, end: 100 },
+  ]);
+  assert.deepEqual(heatComposition([{ kind: "power" }], order), [
+    { kind: "power", count: 1, start: 0, end: 100 },
+  ]);
+  assert.deepEqual(heatComposition([], order), []);
 });
 
 test("концы участков берутся с исходной линии и скрываются, если знаки наложатся", () => {
