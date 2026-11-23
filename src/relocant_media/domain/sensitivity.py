@@ -95,10 +95,30 @@ _FOUND = re.compile(
 
 # Wording of a search still under way. A bare mention of a disappearance is not enough:
 # a later report about the same person repeats it.
+_MINOR_PERSON = (
+    r"подрост(?:ок|ка|ку|ком|ке)|мальчик(?:а|у|ом|е)?|девочк(?:а|и|у|ой|е)|"
+    r"реб[её]н(?:ок|ка|ку|ком|ке)|школьник(?:а|у|ом|е)?|школьниц(?:а|ы|у|ей|е)|"
+    r"несовершеннолетн(?:ий|яя|его|ей|ему|юю|им)|"
+    r"dečak(?:a|u|om)?|дечак(?:а|у|ом)?|devojčic(?:a|e|i|u|om)|девојчиц(?:а|е|и|у|ом)|"
+    r"maloletni(?:k|ka|ku|kom|ca|ce|ci|cu)|малолетни(?:к|ка|ку|ком|ца|це|ци|цу)"
+)
+_AGED_PERSON = (
+    r"юнош\w*|пар(?:ень|ня|ню|нем)|пассажир\w*|пациент\w*|ученик\w*|учениц\w*|"
+    r"пешеход\w*|спортсмен\w*|девушк\w*|человек\w*|"
+    r"mladić\w*|младић\w*|učenik\w*|ученик\w*|putnik\w*|путник\w*"
+)
+_AGE_ADJECTIVE = r"(?P<age>[0-9]{1,2})\s*[-–‑]?\s*(?:летн|godišnj|годишњ)\w*"
+_INDIVIDUAL_MINOR = re.compile(rf"(?<!\w)(?:{_MINOR_PERSON})\b", re.I)
+_PERSON_AGE = re.compile(
+    rf"(?<!\w){_AGE_ADJECTIVE}\s+(?:{_AGED_PERSON}|{_MINOR_PERSON})\b", re.I,
+)
 _ACTIVE_SEARCH = re.compile(
-    r"(?<![^\W\d_])(?:ищ(?:ет|ут)|разыскива|помогите\s+найти|просят\s+помочь|"
-    r"пока\s+не\s+(?:найден|нашли)|traga|трага|traži\s+se|тражи\s+се|"
-    r"pronađi\s+me|пронађи\s+ме|nije\s+pronađen|није\s+пронађен)",
+    r"(?<![^\W\d_])(?:"
+    r"(?:ищ(?:ет|ут)|разыскива(?:ет|ют)|помогите\s+найти|traga\s+za|трага\s+за|"
+    r"traži\s+se|тражи\s+се)\s+"
+    rf"(?:{_AGE_ADJECTIVE}\s+)?(?:{_MINOR_PERSON}|{_AGED_PERSON}|мужчин\w*|женщин\w*)\b|"
+    r"(?:поиск|розыск)\w*\s+продолжа\w*|potraga\s+traje|потрага\s+траје|"
+    r"pronađi\s+me|пронађи\s+ме)",
     re.IGNORECASE,
 )
 
@@ -112,6 +132,18 @@ _HEALTH_DETAIL = re.compile(
     r"posebn\w*\s+potreb|посебн\w*\s+потреб|ментальн|умственн)",
     re.IGNORECASE,
 )
+_INDIVIDUAL_CARE = re.compile(
+    r"(?<!\w)(?:назначил[аи]?|принимает|нуждается|болеет|страдает|"
+    r"диагностировал[аи]?|у\s+(?:него|не[её]|пострадавш(?:его|ей))|"
+    r"проходит\s+лечен\w*|болује\s+од|boluje\s+od)\b",
+    re.IGNORECASE,
+)
+
+
+def _specific_minor(texts: Iterable[str]) -> bool:
+    return any(_INDIVIDUAL_MINOR.search(text) or any(
+        int(match["age"]) < 18 for match in _PERSON_AGE.finditer(text)
+    ) for text in texts)
 
 
 def personal_detail_reason(source_texts: Iterable[str], title: str, body: str) -> str | None:
@@ -126,17 +158,19 @@ def personal_detail_reason(source_texts: Iterable[str], title: str, body: str) -
     sources = tuple(text for text in source_texts if text)
     draft_texts = tuple(text for text in (title, body) if text)
     texts = (*sources, *draft_texts)
+    if not any(_HEALTH_DETAIL.search(text) for text in draft_texts):
+        return None
     story = sensitive_signals(texts)
-    if not story & {"minor", "missing"}:
+    minor_in_draft = _specific_minor(draft_texts)
+    minor_in_source = _specific_minor(sources)
+    if not (minor_in_draft or minor_in_source or story & {"minor", "missing"}):
         return None
-    if any(_FOUND.search(text) for text in texts) and any(
-            _HEALTH_DETAIL.search(text) for text in draft_texts):
-        # The person is found: any health detail in the draft counts.
+    if any(_FOUND.search(text) for text in texts):
         return PERSONAL_DETAIL_REASON
-    if "missing" in story or any(_ACTIVE_SEARCH.search(text) for text in texts):
+    if any(_ACTIVE_SEARCH.search(text) for text in texts):
         return None
-    # Outside a search only a named diagnosis of a minor is held: child-health news
-    # such as a flu season in schools is not about one child.
-    if "health" in sensitive_signals(draft_texts):
+    care_in_draft = any(_INDIVIDUAL_CARE.search(text) for text in draft_texts)
+    if minor_in_draft or (minor_in_source and care_in_draft) or (
+            "minor" in story and "health" in sensitive_signals(draft_texts)):
         return PERSONAL_DETAIL_REASON
     return None

@@ -21,7 +21,9 @@ from relocant_media.ai.prompts import (
     DRAFT_SYSTEM,
     PROFILE_RANK_SYSTEM,
     RANK_EVERGREEN,
+    RANK_READER_REPORT,
     RANK_SYSTEM,
+    READER_REPORT_DRAFT,
     VERIFY_SYSTEM,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
@@ -177,6 +179,7 @@ class EditorialPipeline:
         city: str,
         documents: tuple[EvidenceDocument, ...],
         evergreen: bool = False,
+        reader_report: bool = False,
         recent_publications: list[dict[str, str]] | None = None,
         now: datetime | None = None,
         source_update: bool = False,
@@ -205,12 +208,14 @@ class EditorialPipeline:
         rank_payload = {"city": city, "evidence": evidence, **profile_payload,
                         **({"recent_publications": recent_publications}
                            if recent_publications is not None else {}),
-                        **({"content_type": "evergreen_guide"} if evergreen else {})}
+                        **({"content_type": "evergreen_guide"} if evergreen else {}),
+                        **({"content_type": "reader_report"} if reader_report else {})}
 
         def rank(correction: str | None = None) -> RankingResult:
             return _ask(
                 self._provider, task="rank",
-                system_instruction=rank_instruction + (RANK_EVERGREEN if evergreen else ""),
+                system_instruction=rank_instruction + (RANK_EVERGREEN if evergreen else "")
+                + (RANK_READER_REPORT if reader_report else ""),
                 payload={**rank_payload, **({"correction": correction} if correction else {})},
                 response_model=RankingResult,
             )
@@ -376,6 +381,9 @@ class EditorialPipeline:
             ],
         }
         style = writing_instruction(ranking.category, evergreen=evergreen)
+        if reader_report:
+            draft_payload["content_type"] = "reader_report"
+            style += READER_REPORT_DRAFT
         if source_road_windows:
             draft_payload["source_road_windows"] = source_road_windows
             style += ROAD_WORK_CONTEXT_INSTRUCTION

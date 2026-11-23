@@ -8,6 +8,8 @@ from datetime import datetime
 from importlib.resources import files
 from typing import Any
 
+from relocant_media.services.reader_forwarded_source import has_forwarded_parts, public_forward_urls
+
 POLICY: dict[str, Any] = json.loads(
     files("relocant_media.domain").joinpath("reader_publication_v1.json").read_text("utf-8"),
 )
@@ -143,10 +145,14 @@ def advance_publication(
 
 
 def material_fingerprint(payload: dict[str, Any]) -> str:
-    value = {"text": payload.get("text", ""), "attachments": [
+    value: dict[str, Any] = {"text": payload.get("text", ""), "attachments": [
         {"kind": a["kind"], "file_id": a["file_id"], "file_unique_id": a.get("file_unique_id")}
         for a in payload.get("attachments", [])
     ]}
+    if urls := public_forward_urls(payload):
+        value["public_forward_urls"] = urls
+    if has_forwarded_parts(payload):
+        value["forwarded"] = True
     return hashlib.sha256(json.dumps(
         value, ensure_ascii=False, separators=(",", ":"),
     ).encode()).hexdigest()
@@ -235,15 +241,22 @@ def reader_credit(payload: dict[str, Any], *, kind: str | None = None) -> str:
 def public_reader_material(
     payload: dict[str, Any], *, target_channel_id: int, owner_user_id: int | None,
 ) -> dict[str, Any]:
-    """The only reusable reader-material projection: never include private identity fields."""
-    reason = permission_reason(payload, target_channel_id) or human_review_reason(
-        payload, owner_user_id,
-    )
+    """The only reusable reader-material projection: never include private identity fields.
+
+    Files without the owner's exact content approval are left out (owner 23.11.2026):
+    they no longer block the reader's permitted text, and a file never ships unreviewed.
+    """
+    reason = permission_reason(payload, target_channel_id)
     if reason:
         raise ValueError(reason)
+    if not str(payload.get("text", "")).strip():
+        if reason := human_review_reason(payload, owner_user_id):
+            raise ValueError(reason)
+    attachments = ([] if human_review_reason(payload, owner_user_id)
+                   else payload.get("attachments", []))
     return {"text": payload["text"], "attachments": [
         {**attachment, "credit": reader_credit(payload, kind=attachment["kind"])}
-        for attachment in payload.get("attachments", [])
+        for attachment in attachments
     ], "credit": reader_credit(payload), "material_sha256": material_fingerprint(payload)}
 
 

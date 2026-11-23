@@ -6,7 +6,7 @@ import { buildCalendar, googleCalendarUrl } from "../web/newsroom/map/calendar.j
 import { addressWatch, watchedIncidents } from "../web/newsroom/map/address-watch.js";
 import {
   addressHits, addressWindowText, agendaDays, belgradeDate, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentInPeriod, incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
+  incidentInPeriod, incidentMatchesId, incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
   mapTheme, nextTransition, placeCategory, placeCountdown, placeOnDay, placeOptionLabel, placeStatus,
   pointsAtScale, readIncidents, readPlaces, searchAddresses, shareLink, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
@@ -34,6 +34,22 @@ test("возврат к карте обновляет давние данные 
   assert.equal(snapshotRefreshDue(savedNow, savedNow + 59_999), false);
   assert.equal(snapshotRefreshDue(savedNow, savedNow + 60_000), true);
   assert.equal(snapshotRefreshDue(savedNow, savedNow - 1), true);
+});
+
+test("повторная карточка воды не считается отдельной, а обе ссылки открывают общий объект", () => {
+  const savski = { municipality: "Savski venac", boundary: ["Fabrisova", "Oblakovska"], ...savedWindow };
+  const vozdovac = { municipality: "Voždovac", whole_streets: ["Katarine Ivanović"], ...savedWindow };
+  const narrow = watchIncident("a", { water_districts: [savski] });
+  const full = watchIncident("b", { water_districts: [savski, vozdovac] });
+  const unmerged = watchIncident("c", { water_districts: [vozdovac] });
+  const actual = readIncidents({ version: 1, incidents: [narrow, full, unmerged],
+    water_aliases: { [narrow.id]: full.id, [unmerged.id]: "event_doesnotexist" } });
+  assert.deepEqual(actual.map(({ id }) => id), [full.id, unmerged.id]);
+  const selected = actual.find((item) => incidentMatchesId(item, narrow.id));
+  assert.equal(selected.id, full.id);
+  assert(incidentMatchesId(selected, full.id));
+  assert.deepEqual(selected.waterDistricts.map(({ municipality }) => municipality),
+    ["Savski venac", "Voždovac"]);
 });
 
 test("сохранённый адрес учитывает своё время, границы поселения и только близкие дороги", () => {
@@ -102,6 +118,19 @@ test("метки изменений сохраняются до просмотр
   assert.equal(addressWatch(() => { throw new Error("Хранилище выключено"); }).save(savedAddress), false);
 });
 
+test("русский заголовок на карте не выглядит как смена графика сохранённого адреса", () => {
+  const record = watchIncident("a", { title: "Radovi na vodovodnoj mreži",
+    addresses: [{ ...savedAddress, ...savedWindow }] });
+  const rows = (incident) => watchedIncidents(savedAddress,
+    readIncidents({ version: 1, incidents: [incident] }), savedNow);
+  const [before] = rows(record);
+  const [after] = rows({ ...record, display_title: "Отключение воды · Вождовац" });
+
+  assert.equal(after.incident.title, "Отключение воды · Вождовац");
+  assert.equal(after.incident.id, before.incident.id);
+  assert.equal(after.signature, before.signature);
+});
+
 test("старый снимок не открывает архив старше 14 дней", () => {
   const start = "2026-11-01T08:00:00+01:00";
   const end = "2026-11-02T10:00:00+01:00";
@@ -150,6 +179,35 @@ test("плотность считает объявления в ячейке и 
     { x: 38, y: 38, incidents: [water, power] },
     { x: 114, y: 38, incidents: [water] },
   ]);
+});
+
+test("длинный участок считается в каждой пересечённой ячейке и только один раз в каждой", () => {
+  const project = ([lat, lon]) => ({ x: lon, y: lat });
+  const road = { id: "road", kind: "road" };
+  const water = { id: "water", kind: "water" };
+  const result = heatCells([
+    { lat: 15, lon: 84, incident: road },
+    { lat: 15, lon: 82, incident: water },
+  ], project, [
+    { incident: road, coordinates: [[15, 212], [15, 91], [15, 15], [15, 190]] },
+  ]).sort((a, b) => a.x - b.x);
+  assert.deepEqual(result, [
+    { x: 38, y: 38, incidents: [road] },
+    { x: 114, y: 38, incidents: [road, water] },
+    { x: 190, y: 38, incidents: [road] },
+  ]);
+});
+
+test("диагональ не затрагивает ячейки, которых касается только углом", () => {
+  const project = ([lat, lon]) => ({ x: lon, y: lat });
+  const road = { id: "road", kind: "road" };
+  const coordinates = [[-12, -12], [152, 152], [201, 201], [201, 201]];
+  for (const direction of [coordinates, coordinates.toReversed()]) {
+    const result = heatCells([], project, [{ incident: road, coordinates: direction }]);
+    assert.deepEqual(result.map(({ x, y }) => [x, y]).sort((a, b) => a[0] - b[0]), [
+      [-38, -38], [38, 38], [114, 114], [190, 190],
+    ]);
+  }
 });
 
 test("доли тепловой метки следуют порядку фильтров и учитывают уникальные объявления", () => {
@@ -792,6 +850,20 @@ test("участок тротуара в слое дорог сохраняет 
   assert.doesNotMatch(incidentTimes(road)[0], /00:00/);
   assert.equal(visibleMapLines(road, Date.parse("2027-05-01T21:59:59Z")).length, 1);
   assert.equal(visibleMapLines(road, Date.parse("2027-05-01T22:00:00Z")).length, 0);
+  assert.equal(incident({ ...fixture, kind: "water" }).lines[0].scope, null);
+});
+
+test("участок изменения движения сохраняет собственный тип в слое дорог", () => {
+  const fixture = {
+    kind: "road", id: roadId,
+    lines: [{
+      coordinates: [[44.7900295, 20.5063241], [44.7921326, 20.5087493]],
+      label: "Изменение движения · Др Велизара Косановића", scope: "traffic_change",
+    }],
+  };
+  const [line] = visibleMapLines(incident(fixture), Date.parse("2026-11-25T10:00:00Z"));
+  assert.equal(line.scope, "traffic_change");
+  assert.equal(line.label, fixture.lines[0].label);
   assert.equal(incident({ ...fixture, kind: "water" }).lines[0].scope, null);
 });
 

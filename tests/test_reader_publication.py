@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.bot.api import TelegramAPIError
 from relocant_media.services.private_intake import process_private_updates
+from relocant_media.services.reader_forwarded_source import public_forward_urls
 from relocant_media.services.reader_publication import (
     POLICY,
     TERMS_SHA256,
@@ -59,8 +60,17 @@ def test_policy_is_identical_in_cloud_and_packaged_runtime():
 def test_projection_needs_exact_human_review_and_never_exports_private_identity(mode):
     payload = material(mode=mode)
     payload.update(telegram_user_id=42, chat_id=42, first_name="Не публиковать")
+    # Unreviewed files never ship, but no longer block the permitted text (owner 23.11.2026).
+    text_only = public_reader_material(
+        payload, target_channel_id=POLICY["channel_id"], owner_user_id=OWNER)
+    assert text_only["attachments"] == []
+    assert text_only["text"] == payload["text"]
+    photo_only = {**payload, "text": ""}
+    photo_only["reader_publication"] = {**payload["reader_publication"],
+                                        "material_sha256": material_fingerprint(photo_only)}
     with pytest.raises(ValueError, match="ручной"):
-        public_reader_material(payload, target_channel_id=POLICY["channel_id"], owner_user_id=OWNER)
+        public_reader_material(photo_only, target_channel_id=POLICY["channel_id"],
+                               owner_user_id=OWNER)
     payload["reader_media_review"] = {"decision": "approved", "owner_user_id": OWNER,
                                      "at": datetime.now(UTC).isoformat(),
                                      "material_sha256": material_fingerprint(payload)}
@@ -101,7 +111,8 @@ def test_sender_with_author_permission_is_not_credited_as_photographer():
 
 
 @pytest.mark.asyncio
-async def test_real_js_dialogue_imports_with_identical_fingerprint_and_no_second_messages():
+@pytest.mark.parametrize("forwarded", [False, True])
+async def test_js_dialogue_import_keeps_fingerprint_and_sends_no_second_messages(forwarded):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Для проверки контракта приёмника нужен Node.js.")
@@ -110,17 +121,27 @@ import {fixture,message,seed} from './deploy/vercel-intake/test/helpers.js';
 import {PUBLICATION_POLICY as P} from './deploy/vercel-intake/lib/reader-publication.js';
 const f=await fixture({seed:seed({channel_id:P.channel_id})});
 let id=0;
-const send=text=>f.receive(message(++id,text,{from:{id:42,username:'reader_alias'}}));
-await send('/start'); await send('Тест, не публиковать');
-await send('Предложить новость'); await send('Мой материал');
-await send('Разрешить публикацию'); await send('Мой @username');
-await send('Публиковать эту подпись');
+const send=(text, extra={})=>f.receive(message(++id,text,{
+  from:{id:42,username:'reader_alias'}, ...extra,
+}));
+const forwarded=process.argv[1]==='forwarded';
+await send('/start');
+await send('Тест, не публиковать', forwarded ? {forward_origin:{
+  type:'channel', chat:{type:'channel',username:'Serbia'}, message_id:197
+}} : {});
+await send('Предложить новость');
+await send(forwarded ? 'Чужой источник' : 'Мой материал');
+if (!forwarded) {
+  await send('Разрешить публикацию'); await send('Мой @username');
+  await send('Публиковать эту подпись');
+}
 await send('Отправить №'+(await f.state()).cases[0].reference);
 await send('Разрешить публикацию');
 console.log(JSON.stringify((await f.ingress.transfer({operation:'peek'})).events));
 """
     result = subprocess.run(
-        [node, "--input-type=module", "-e", script], check=True,
+        [node, "--input-type=module", "-e", script, "forwarded" if forwarded else "own"],
+        check=True,
         capture_output=True, text=True, encoding="utf-8", timeout=30,
     )
     events = json.loads(result.stdout)
@@ -140,8 +161,14 @@ console.log(JSON.stringify((await f.ingress.transfer({operation:'peek'})).events
             row = session.scalar(select(Submission).where(Submission.kind == "news_tip"))
             assert row.status == "reader_review"
             assert 'public_source_review' not in row.payload
-            assert permission_reason(row.payload, POLICY["channel_id"]) is None
-            assert row.payload["reader_publication"]["signature"]["label"] == "@reader_alias"
+            receipt = row.payload["reader_publication"]
+            assert receipt["material_sha256"] == material_fingerprint(row.payload)
+            if forwarded:
+                assert public_forward_urls(row.payload) == ["https://t.me/serbia/197"]
+                assert receipt["permission"] == "private"
+            else:
+                assert permission_reason(row.payload, POLICY["channel_id"]) is None
+                assert receipt["signature"]["label"] == "@reader_alias"
             assert len(list(session.scalars(select(Submission)))) == 1
         assert bot.sent == []
     finally:

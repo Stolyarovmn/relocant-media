@@ -83,8 +83,11 @@ async def send(session, run, publisher, **kwargs):
 async def test_reader_files_cannot_be_published_without_human_moderation(reviewed):
     from test_reader_publication import material
 
+    from relocant_media.services.reader_publication import material_fingerprint
+
     session, run = reviewed
-    payload = material()
+    payload = {**material(), "text": ""}
+    payload["reader_publication"]["material_sha256"] = material_fingerprint(payload)
     payload["raw_item_ids"] = [run.raw_item_id]
     row = Submission(kind="news_tip", status="reader_review", payload=payload)
     session.add(row)
@@ -92,10 +95,29 @@ async def test_reader_files_cannot_be_published_without_human_moderation(reviewe
     run.outcome = {**run.outcome, "_reader_submission_id": row.id}
     session.commit()
     publisher = FakePublisher()
+    # A photo-only submission has nothing to publish until the owner reviews the file.
     with pytest.raises(DeliveryBlockedError, match="ручной"):
         await send(session, run, publisher)
     assert publisher.calls == []
     assert run.delivery_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_unreviewed_reader_files_do_not_block_the_permitted_text(reviewed):
+    from test_reader_publication import material
+
+    session, run = reviewed
+    payload = material(mode="anonymous")
+    payload["raw_item_ids"] = [run.raw_item_id]
+    row = Submission(kind="news_tip", status="reader_review", payload=payload)
+    session.add(row)
+    session.flush()
+    run.outcome = {**run.outcome, "_reader_submission_id": row.id}
+    session.commit()
+    publisher = FakePublisher()
+    result = await send(session, run, publisher)
+    # Only the reviewed text goes out; delivery never attaches the reader's file.
+    assert result.message_id == 42 and len(publisher.calls) == 1
 
 
 @pytest.mark.asyncio

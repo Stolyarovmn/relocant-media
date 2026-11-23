@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -31,10 +33,13 @@ from relocant_media.ops.belgrade_digests import (
     _evidence_sha,
     _incident_content,
     _link_to_published,
+    _morning_continuations,
     _road_text,
+    _routes,
     deliver,
     due_slot,
     morning_delivery,
+    public_digest_days,
     render,
 )
 from relocant_media.ops.map_export import (
@@ -46,7 +51,7 @@ from relocant_media.ops.map_export import (
     Window,
 )
 from relocant_media.sources.registry import load_source_file
-from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source
+from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source, SourceRevision
 
 _ZONE = ZoneInfo("Europe/Belgrade")
 
@@ -116,6 +121,8 @@ def test_digest_end_warning_uses_belgrade_time(month, utc_hour, monkeypatch):
     datetime(2026, 11, 22, 10, tzinfo=UTC),
     datetime(2027, 7, 1, 9, tzinfo=UTC),
 ])
+
+
 def test_morning_check_uses_the_end_of_the_same_local_slot(cutoff):
     from datetime import timedelta
 
@@ -131,6 +138,8 @@ def test_morning_check_uses_the_end_of_the_same_local_slot(cutoff):
     ({"state": "uncertain"}, "unconfirmed", "telegram_unconfirmed"),
     ({"state": "sending"}, "unconfirmed", "telegram_unconfirmed"),
 ])
+
+
 def test_morning_watch_checks_exact_receipt_for_that_day(receipt, status, reason):
     now = datetime(2026, 11, 22, 10, tzinfo=UTC)
     state = {"status": "busy", "digest_receipts": {
@@ -144,6 +153,21 @@ def test_morning_watch_checks_exact_receipt_for_that_day(receipt, status, reason
     del state["digest_receipts"]["belgrade:2026-11-22:morning"]
     assert morning_delivery(state, now).reason == "insufficient_items"
     assert morning_delivery(state, now.replace(day=23)).reason == "no_recorded_result"
+
+
+def test_daily_digest_observation_only_exposes_two_days_of_public_receipts():
+    now = datetime(2026, 11, 23, 16, tzinfo=UTC)
+    state = {"digest_receipts": {
+        "belgrade:2026-11-23:morning": {"state": "sent", "message_id": 163, "private": "SECRET"},
+        "belgrade:2026-11-22:evening": {"state": "sent", "message_id": True},
+        "belgrade:2026-11-21:evening": {"state": "sent", "message_id": 158},
+    }}
+    days = public_digest_days(state, now)
+    assert days == {
+        "2026-11-22": {"morning": {"status": "unconfirmed"}, "evening": {"status": "unconfirmed"}},
+        "2026-11-23": {"morning": {"status": "sent", "message_id": 163},
+                       "evening": {"status": "pending"}},
+    }
 
 
 def test_forecast_uses_dated_belgrade_column_and_skips_stale_html():
@@ -191,6 +215,8 @@ def test_weather_warning_has_to_overlap_the_belgrade_day():
      "<cap:expires>2026-11-14T16:00:00+00:00</cap:expires></entry><entry/>",
      "partial", True),
 ])
+
+
 async def test_weather_accounts_for_missing_and_malformed_alerts(feed, status, has_warning):
     now = datetime(2026, 11, 14, 6, 30, tzinfo=UTC)
 
@@ -566,6 +592,8 @@ def test_uncertain_send_is_recorded_and_never_repeated():
     (False, 5, 1, "reminder_source_unconfirmed"),
     (True, 31, 2, "sent"),
 ])
+
+
 @pytest.mark.asyncio
 async def test_optional_unconfirmed_reminder_does_not_delay_a_ready_evening_digest(
     tmp_path, monkeypatch, priority, offset, count, expected,
@@ -624,6 +652,86 @@ async def test_optional_unconfirmed_reminder_does_not_delay_a_ready_evening_dige
     else:
         bot.send_digest_message.assert_not_awaited()
         assert not state
+
+
+@pytest.mark.asyncio
+async def test_morning_transport_recalls_only_a_confirmed_full_revision():
+    first = due_slot(datetime(2026, 11, 22, 7, 30, tzinfo=_ZONE))
+    next_day = due_slot(datetime(2026, 11, 23, 7, 30, tzinfo=_ZONE))
+    next_week = due_slot(datetime(2026, 11, 29, 7, 30, tzinfo=_ZONE))
+    assert first and next_day and next_week
+    source = "https://www.bgprevoz.rs/linije/aktuelne-izmene/1090"
+    entry = Entry(
+        "🚋 Транспорт", "На Воеводинской открыто по полосе в каждую сторону.", source,
+        map_id=map_event_id(source), source_url=source, evidence_sha="a" * 64,
+        address_rows=("№604 и 605 — через Др Ивана Рибара, Виноградску.",),
+        continuation_text="Продолжаются изменения на линиях 604, 605 до 31 декабря.",
+    )
+    digest = render(first, [entry])
+    assert digest and digest.full_transport_revisions
+    assert "Виноградску" in digest.html
+    state = {}
+
+    def commit(current, sha, updates):
+        current.update(updates)
+        return current, "saved"
+
+    async def send():
+        assert _morning_continuations(next_day, [entry], state) == [entry]
+        return 152
+
+    receipt = await deliver(first, digest, state, "initial", commit, send)
+    assert receipt["state"] == "sent"
+    (continued,) = _morning_continuations(next_day, [entry], state)
+    shorter = render(next_day, [continued])
+    assert shorter and shorter.full_transport_revisions == ()
+    assert "Продолжаются изменения" in shorter.html and "Виноградску" not in shorter.html
+    assert "https://t.me/eduvbelgrad/152" in shorter.html and shorter.map_url == digest.map_url
+
+    linked = replace(entry, url="https://t.me/eduvbelgrad/149", link_text="Подробнее")
+    assert _morning_continuations(next_day, [linked], state)[0].url == linked.url
+    changed = replace(entry, evidence_sha="b" * 64)
+    assert _morning_continuations(next_day, [changed], state) == [changed]
+    assert _morning_continuations(next_week, [entry], state) == [entry]
+    receipt["state"] = "uncertain"
+    assert _morning_continuations(next_day, [entry], state) == [entry]
+    receipt["state"] = "sent"
+    receipt.pop("full_transport_revisions")
+    assert _morning_continuations(next_day, [entry], state) == [entry]
+
+
+def test_transport_digest_uses_the_latest_verified_official_revision():
+    now = datetime(2026, 11, 23, 7, 30, tzinfo=_ZONE)
+    source = load_source_file(Path("cities/belgrade/sources/bgprevoz_changes.yaml"))
+    url = "https://www.bgprevoz.rs/linije/aktuelne-izmene/1153"
+    period = "Период измене: 20.11.2026–30.11.2026."
+    item = CollectedItem(
+        source_id=source.id, url=url, external_id="1153", published_at=None,
+        title="Линија бр. 60", body=period + "\nПромена за линије 6р. 60. Кружна линија.",
+    )
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        capture_collected_batch(session, [item])
+        policy = belgrade_digests._policy()
+        (previous,) = _routes(session, now, policy)
+        revised = {
+            "source_id": source.id, "article_id": item.external_id, "url": url,
+            "title": item.title.replace("60", "61"),
+            "body": item.body.replace("30.11", "29.11").replace("60", "61"),
+        }
+        encoded = json.dumps(revised, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        session.add(SourceRevision(
+            raw_item_id=1, evidence=revised, observed_at=now - timedelta(hours=1),
+            snapshot_sha256=hashlib.sha256(encoded.encode()).hexdigest(),
+        ))
+        session.flush()
+        (current,) = _routes(session, now, policy)
+        assert current.evidence_sha != previous.evidence_sha
+        assert "61" in current.text and "29 ноября" in current.text
+        assert "6R" not in current.continuation_text
+    engine.dispose()
 
 
 def test_baraevo_near_date_keeps_the_published_scope():

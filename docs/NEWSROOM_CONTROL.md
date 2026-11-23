@@ -50,6 +50,11 @@ relocant-newsroom --database --city belgrade --limit 100
 - точную retry policy: `manual_reconciliation`, `fresh_review_required`,
   `scheduler_or_operator` или `none`.
 
+При группировке точные совпадения URL и хеша проверяются по всему архиву.
+Для сравнения похожих фактов за 48 часов индекс подбирает заголовки, которые
+могут пройти порог сходства. Переиздания из одного источника также проверяются
+по своим правилам. При совпадении с несколькими группами используется самая ранняя.
+
 ## Управляющие решения и stale snapshots
 
 Основной event inbox остаётся read-only. Отдельные секции `source_revision_control` и

@@ -129,6 +129,7 @@ def test_daily_report_reads_measured_latency_and_allowlists_aggregate_fields(mon
     flow = saved["cities"][0]["editorial_flow"]
     current = flow["days"][-1]
     current["private"] = "SECRET"
+    current["publication_cadence"]["private"] = "SECRET"
     current["expired_unreviewed"].append({
         "source_id": "PRIVATE_SOURCE", "reason": "event_expired", "count": 1,
     })
@@ -158,7 +159,44 @@ def test_daily_report_reads_measured_latency_and_allowlists_aggregate_fields(mon
     assert "27.0 | 2 | 1" in markdown(daily)
     assert "2026-11-22 (неполный)" in markdown(daily)
     assert "17.0 (2) | 6.0 (3) | 4.0 (3) | 10.0 (3)" in markdown(daily)
+    assert "| 2026-11-22 (неполный) | 4 | — | 4 (100 %) |" in markdown(daily)
     assert "| events | — | — | — | 90.0 (1) |" in markdown(daily)
+
+
+def test_publication_cadence_counts_receipts_and_includes_both_daytime_edges():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    today = datetime(2026, 11, 22, 12, tzinfo=ZONE)
+    previous = today - timedelta(days=1)
+    with Session(engine) as session:
+        session.add_all([source(OFFICIAL), source("reader", "reader")])
+        session.flush()
+        for number, at, status, source_id in (
+            (1, previous.replace(hour=9), "sent", OFFICIAL),
+            (2, previous.replace(hour=12), "sent", OFFICIAL),
+            (2, previous.replace(hour=18), "sent", OFFICIAL),
+            (3, previous.replace(hour=23), "sent", OFFICIAL),
+            (4, today.replace(hour=7), "sent", OFFICIAL),
+            (5, today.replace(hour=8, minute=30), "sent", "reader"),
+            (6, today.replace(hour=10), "sent", OFFICIAL),
+            (7, today.replace(hour=11), "sending", OFFICIAL),
+            (8, today.replace(hour=13), "sent", OFFICIAL),
+        ):
+            raw = item(session, source_id, at, at)
+            sent(session, raw, at, number, status=status)
+        session.commit()
+        report = editorial_flow(session, "belgrade", {OFFICIAL}, now=today, zone=ZONE)
+
+    empty, complete, current = report["days"][-3:]
+    assert empty["publication_cadence"] == {
+        "posts": 0, "quiet_hour_posts": 0, "max_daytime_gap_minutes": 780.0,
+    }
+    assert complete["publication_cadence"] == {
+        "posts": 3, "quiet_hour_posts": 1, "max_daytime_gap_minutes": 540.0,
+    }
+    assert current["publication_cadence"] == {
+        "posts": 3, "quiet_hour_posts": 1, "max_daytime_gap_minutes": 120.0,
+    }
 
 
 def test_night_hold_observed_on_belgrade_delivery_day():

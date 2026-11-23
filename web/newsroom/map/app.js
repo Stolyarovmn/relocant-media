@@ -1,6 +1,7 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentInPeriod, incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
+  incidentInPeriod, incidentMatchesId, incidentStatus, incidentTimes, kinds, launchDigestEvents,
+  launchMap, mapTheme, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
 } from "./core.js?v=__MAP_REVISION__";
 import { calendarLink } from "./calendar.js?v=__MAP_REVISION__";
@@ -171,8 +172,7 @@ function renderTimeline(realNow) {
   timelineInput.setAttribute("aria-valuetext", label);
   byId("timeline-label").textContent = label;
   byId("timeline-reset").hidden = !state.timelineStep;
-  const bands = timelineBands(state.incidents.filter((incident) =>
-    !state.digestIds.length || state.digestIds.includes(incident.id)), origin, end);
+  const bands = timelineBands(state.incidents.filter(inDigest), origin, end);
   const percent = (time) => `${(time - origin) / (end - origin) * 100}%`;
   const icons = [];
   const tracks = [];
@@ -293,9 +293,13 @@ function showMapNote() {
   note.hidden = !text;
 }
 
+function inDigest(incident) {
+  return !state.digestIds.length || state.digestIds.some((id) => incidentMatchesId(incident, id));
+}
+
 function visibleIncidents(now) {
   return state.incidents.filter((incident) => enabled.has(incident.kind)
-    && (!state.digestIds.length || state.digestIds.includes(incident.id))
+    && inDigest(incident)
     && (showsArchived(incident) || incidentStatus(incident, now) !== "closed"))
     .map((incident) => incidentInPeriod(incident, now, viewPeriod())).filter(Boolean);
 }
@@ -377,7 +381,7 @@ function eventCard(incident, now) {
     card.append(make("p", "event-scope", `${segment.street}${extent}${district}`));
   }
   for (const line of incident.lines) {
-    if (line.scope === "sidewalk") card.append(make("p", "event-scope", line.label));
+    if (line.scope) card.append(make("p", "event-scope", line.label));
   }
   for (const settlement of incident.settlements) {
     const scope = settlement.parent ? `${settlement.name} · часть ${settlement.parent}`
@@ -471,6 +475,8 @@ function roadOrientation(incident) {
   return incident.kind === "road" && !incident.lines.length && !incident.areas.length;
 }
 
+const roadGeometryNote = "Точный участок на карте не подтверждён. Подробности в объявлении.";
+
 function bindFeature(layer, group, incident, label, window, fromRegister) {
   const popup = make("div");
   popup.append(make("strong", "", incident.title));
@@ -481,7 +487,7 @@ function bindFeature(layer, group, incident, label, window, fromRegister) {
     popup.append(make("p", "", time));
   }
   if (roadOrientation(incident)) {
-    popup.append(make("p", "", "Ориентир. Точные границы перекрытия не подтверждены."));
+    popup.append(make("p", "", `Ориентир. ${roadGeometryNote}`));
   }
   popup.append(link(incident.source, "Источник ↗"));
   if (fromRegister) {
@@ -637,18 +643,23 @@ function renderPointClusters() {
   state.pointLayer.clearLayers();
   const markers = [];
   const density = [];
+  const densityLines = [];
   for (const item of state.mapItems) {
     const { incident, lines, areas, points, roadPaths, archived, now } = item;
     for (const path of roadPaths) {
       path.setStyle({ weight: roadLineWeight(zoom, incident.id === state.selected) });
     }
     if (state.layerView === "corridor" && zoom >= 15) drawCorridorCaps(item, project);
-    for (const point of pointsAtScale(points, lines, areas, zoom, project)) {
-      const target = overview && incident.id !== state.selected && !point.approximate ? density : markers;
+    const aggregate = overview && incident.id !== state.selected;
+    const exactLines = aggregate ? lines.filter((line) => !line.boundary) : [];
+    densityLines.push(...exactLines.map(({ coordinates }) => ({ coordinates, incident })));
+    const markerLines = aggregate ? lines.filter((line) => line.boundary) : lines;
+    for (const point of pointsAtScale(points, markerLines, areas, zoom, project)) {
+      const target = aggregate && !point.approximate ? density : markers;
       target.push({ ...point, incident, archived, now });
     }
   }
-  const cells = heatCells(density, project);
+  const cells = heatCells(density, project, densityLines);
   byId("heat-legend").hidden = !cells.length;
   for (const cell of cells) drawHeatCell(cell, zoom);
   for (const group of clusterMapPoints(markers, project, mobile.matches ? 49 : 43)) {
@@ -680,6 +691,8 @@ function renderVectors(overview, zoom) {
   state.vectorKey = key;
   const leaflet = globalThis.L;
   const corridor = state.layerView === "corridor";
+  const trafficChangeColor = document.documentElement.dataset.theme === "dark"
+    ? "#ffbf62" : "#946007";
   state.eventLayer.clearLayers();
   for (const item of state.mapItems) {
     const { incident, lines, areas, archived, now } = item;
@@ -696,7 +709,8 @@ function renderVectors(overview, zoom) {
         : { opacity: expired ? .48 : .94, weight: selected || corridor ? 8 : 5 };
       const className = sidewalk ? "outage-sidewalk" : road ? "outage-road" : "outage-line";
       const path = leaflet.polyline(coordinates, {
-        color, ...style, lineCap: "round", lineJoin: "round",
+        color: scope === "traffic_change" ? trafficChangeColor : color,
+        ...style, lineCap: "round", lineJoin: "round",
         ...(boundary ? { dashArray: "5 7", weight: selected ? 6 : 4 } : {}),
         ...(sidewalk ? { dashArray: "2 6", weight: selected ? 5 : 4, opacity: expired ? .45 : .95 } : {}),
         className,
@@ -778,7 +792,8 @@ function renderSavedAddress(now) {
     times: windows.filter(({ end }) => end > now).map(addressWindowText),
   }));
   const key = JSON.stringify([address, state.loaded, state.loadFailed,
-    rows.map(({ incident, signature, change, times }) => [incident.id, signature, change, times])]);
+    rows.map(({ incident, signature, change, times }) =>
+      [incident.id, incident.title, signature, change, times])]);
   if (watchRenderKey === key) return;
   watchRenderKey = key;
   byId("watched-address").textContent = `${addressLabel(address)} · ${address.municipality}`;
@@ -868,7 +883,7 @@ function focusIncident(item) {
       showMapNote();
       return true;
     }
-    state.focusNote = incident.kind === "road" ? "Точные границы перекрытия не подтверждены."
+    state.focusNote = incident.kind === "road" ? roadGeometryNote
       : incident.officialMap
       ? "Схема участка доступна по ссылке «Официальная карта»."
       : "Геометрия участка недоступна. Подробности в объявлении.";
@@ -876,9 +891,12 @@ function focusIncident(item) {
     return false;
   }
   state.focusNote = roadOrientation(incident)
-    ? "Показан ориентир. Точные границы перекрытия не подтверждены."
+    ? `Ориентир. ${roadGeometryNote}`
     : incident.lines.some((line) => line.scope === "sidewalk")
-      ? "Линия показывает отрезок улицы с ограничением на тротуаре." : "";
+      ? "Линия показывает отрезок улицы с ограничением на тротуаре."
+      : incident.lines.some((line) => line.scope === "traffic_change")
+        ? "Линия показывает участок, на котором меняется движение."
+        : "";
   showMapNote();
   return true;
 }
@@ -971,6 +989,10 @@ async function loadEvents({ keepView = false } = {}) {
     const { entries, generatedAt, timestamp, cached } = await loadSnapshot(
       "./incidents.json", (feed) => readIncidents(feed, Date.now()),
     );
+    for (const key of ["selected", "previewArchive", "refocusEvent"]) {
+      const canonical = entries.find((event) => incidentMatchesId(event, state[key]));
+      if (canonical) state[key] = canonical.id;
+    }
     state.incidents = entries;
     state.loaded = true;
     state.loadFailed = cached;
@@ -980,7 +1002,7 @@ async function loadEvents({ keepView = false } = {}) {
       updateCityCount(Date.now());
       return;
     }
-    const pending = state.incidents.find((event) => event.id === state.deepPending);
+    const pending = state.incidents.find((event) => incidentMatchesId(event, state.deepPending));
     if (pending) openEvent(pending);
     else {
       render();
@@ -1283,7 +1305,7 @@ function showMode(mode, id = "") {
     places.enter(id);
   } else {
     places.leave();
-    const pending = state.incidents.find((incident) => incident.id === state.deepPending);
+    const pending = state.incidents.find((incident) => incidentMatchesId(incident, state.deepPending));
     if (pending) openEvent(pending);
     else render();
     syncFeed(state);

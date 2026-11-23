@@ -60,7 +60,7 @@ export function watchedIncidents(address, incidents, now) {
       .map((window) => [`${window.start}:${window.end}`, window])).values()]
       .sort((a, b) => a.start - b.start || a.end - b.end);
     const nearby = !houses.length && !areas.length;
-    const signature = JSON.stringify([incident.title, incident.kind, nearby,
+    const signature = JSON.stringify([incident.watchTitle ?? incident.title, incident.kind, nearby,
       windows.map(({ start, end }) => [start, end])]);
     return [{ incident, nearby, windows, signature }];
   });

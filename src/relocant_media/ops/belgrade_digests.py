@@ -22,6 +22,7 @@ from relocant_media.ai.models import EvidenceDocument
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.bot.formatting import TELEGRAM_TEXT_LIMIT, formatted_text_units
 from relocant_media.collectors.beograd_article import BelgradeArticleCollector
+from relocant_media.collectors.bgprevoz_changes import transport_notice_suspended
 from relocant_media.collectors.factory import build_collector
 from relocant_media.collectors.rhmz_forecast import (
     FORECAST_URL,
@@ -43,6 +44,7 @@ from relocant_media.ops.map_export import (
     Segment,
     Settlement,
     _road,
+    _verified_transport_revision,
     _water,
     export_map,
 )
@@ -70,6 +72,7 @@ from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 _CITY = "belgrade"
 _CHANNEL = "https://t.me/eduvbelgrad"
 _HISTORY = "digest_receipts"
+_TRANSPORT_REPEAT_DAYS = 7
 MORNING_ATTEMPT = "last_morning_digest_attempt"
 EVENING_ATTEMPT = "last_evening_digest_attempt"
 DIGEST_ATTEMPT_KEYS = {"morning": MORNING_ATTEMPT, "evening": EVENING_ATTEMPT}
@@ -90,6 +93,9 @@ _EMOJI = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u200D\uFE0F\u20E3]+")
 _CIRCULAR_ROUTE = re.compile(r"\b(?:кружна линија|kružna linija)\b", re.I)
 _EXISTING_STOPS = re.compile(
     r"\b(?:сва постојећа стајалишта|sva postojeća stajališta)\b", re.I,
+)
+_MISPRINTED_ROUTE_NUMBER = re.compile(
+    r"\b((?:линиј[аеу]|linij[aeu])\s+)6[рp]\.(?=\s*\d)", re.I,
 )
 _MOVED_STOP = re.compile(
     r"(?:стајалиште|stajalište)\s+[„“\"]([^»“”\"]{2,70})[»“”\"]"
@@ -169,12 +175,14 @@ class Entry:
     scheduled_end: datetime | None = None
     address_rows: tuple[str, ...] = ()
     address_link: str = ""
+    continuation_text: str = ""
 
 
 @dataclass(frozen=True)
 class Digest:
     html: str
     map_url: str | None
+    full_transport_revisions: tuple[str, ...] = ()
 
 
 def _policy() -> Pilot:
@@ -260,6 +268,32 @@ def morning_delivery(state: dict[str, Any], now: datetime) -> DigestDelivery | N
     return digest_delivery(state, now, "morning")
 
 
+def public_digest_days(state: dict[str, Any], now: datetime) -> dict[str, dict[str, Any]]:
+    """Report scheduled editions and public receipts without exporting state details."""
+    local = _local_clock(now)
+    policy = _policy()
+    receipts = state.get(_HISTORY, {})
+    days: dict[str, dict[str, Any]] = {}
+    for offset in (1, 0):
+        day = local - timedelta(days=offset)
+        editions: dict[str, Any] = {}
+        for kind in ("morning", "evening"):
+            slot = _regular_slot(policy, day, kind)
+            status = "not_scheduled"
+            if slot is not None:
+                receipt = receipts.get(slot.key) if isinstance(receipts, dict) else None
+                if isinstance(receipt, dict) and receipt.get("state") == "sent":
+                    message_id = receipt.get("message_id")
+                    if type(message_id) is int and 0 < message_id < 2**63:
+                        editions[kind] = {"status": "sent", "message_id": message_id}
+                        continue
+                undelivered = isinstance(receipts, dict) and slot.key not in receipts
+                status = "pending" if undelivered and local < slot.expires else "unconfirmed"
+            editions[kind] = {"status": status}
+        days[day.date().isoformat()] = editions
+    return days
+
+
 def _clip_text(value: str, limit: int) -> str:
     text = " ".join(value.split())
     if len(text) <= limit:
@@ -298,6 +332,8 @@ def _incidents(session: Session, now: datetime, policy: Pilot) -> list[Entry]:
         (item.starts_at or tomorrow).astimezone(now.tzinfo).date() != now.date(),
         item.starts_at or tomorrow,
     )):
+        if notice.id in feed.water_aliases:
+            continue
         if notice.archived or notice.starts_at is None or notice.ends_at is None:
             continue
         if not any(window.starts_at < tomorrow and now < window.ends_at
@@ -329,17 +365,29 @@ def _incidents(session: Session, now: datetime, policy: Pilot) -> list[Entry]:
             raw_document = (EvidenceDocument.model_validate(raw, from_attributes=True)
                             if raw else None)
             if raw_document and notice.kind == "road":
+                if raw is not None and (revised := _verified_transport_revision(session, raw, now)):
+                    if raw.source_id == SOURCE_ID and revised.body != raw_document.body:
+                        # An older operator map cannot substantiate the changed road scope.
+                        continue
+                    raw_document = revised
                 brief = policy.transport_briefs.get(_evidence_sha(raw_document))
                 if brief is not None:
                     text, address_rows = brief.text, brief.details
             elif raw_document and notice.kind == "water" and notice.reported_scope:
                 if reported := reported_water_places(raw_document):
                     address_rows = (f"Посёлки: {', '.join(reported[1])}", f"Улицы: {reported[2]}")
+            continuation = ""
+            if (notice.kind == "road" and len(notice.windows) == len(notice.segments) == 1
+                    and notice.ends_on is not None and notice.ends_on > starts_on):
+                street = notice.segments[0].street
+                if not serbian_cyrillic_words(street):
+                    until = _day(notice.ends_on, year=now.year)
+                    continuation = f"Продолжаются работы на улице {street} до {until}."
             result.append(Entry(_LABELS[notice.kind], text, url, map_id=map_id,
                                 starts_on=starts_on, source_url=notice.source_url,
                                 source_id=raw_document.source_id if raw_document else "",
                                 evidence_sha=_evidence_sha(raw_document) if raw_document else "",
-                                address_rows=address_rows))
+                                address_rows=address_rows, continuation_text=continuation))
     return result
 
 
@@ -445,17 +493,19 @@ def _incident_content(
     return lead + ".", tuple(details)
 
 
-def _routes(session: Session, today: date, policy: Pilot) -> list[Entry]:
+def _routes(session: Session, now: datetime, policy: Pilot) -> list[Entry]:
+    today = now.date()
     result = []
     items = session.scalars(select(RawItem).join(Source).where(
         Source.id == SOURCE_ID, Source.city == _CITY, Source.enabled.is_(True),
         Source.ownership == "official",
     ).order_by(RawItem.ingested_at.desc(), RawItem.id.desc()).limit(70))
     for item in items:
-        doc = EvidenceDocument.model_validate(item, from_attributes=True)
-        if _notice_id(doc) is None:
+        doc = (_verified_transport_revision(session, item, now)
+               or EvidenceDocument.model_validate(item, from_attributes=True))
+        if _notice_id(doc) is None or transport_notice_suspended(doc.body):
             continue
-        period = _PERIOD.fullmatch(item.body.partition("\n")[0])
+        period = _PERIOD.fullmatch(doc.body.partition("\n")[0])
         if period is None:
             continue
         try:
@@ -464,7 +514,8 @@ def _routes(session: Session, today: date, policy: Pilot) -> list[Entry]:
             continue
         if not start <= today <= end:
             continue
-        _, routes, _, _ = _signature(item.title, item.body, today.year)
+        route_text = _MISPRINTED_ROUTE_NUMBER.sub(r"\1бр.", doc.body)
+        _, routes, _, _ = _signature(doc.title, route_text, today.year)
         if not routes:
             continue
         numbers = ", ".join(sorted(routes)[:8]).upper()
@@ -472,20 +523,23 @@ def _routes(session: Session, today: date, policy: Pilot) -> list[Entry]:
         brief = policy.transport_briefs.get(_evidence_sha(doc))
         if brief is not None:
             text, details = brief.text, brief.details
-        elif len(routes) == 1 and _CIRCULAR_ROUTE.search(item.body):
+        elif len(routes) == 1 and _CIRCULAR_ROUTE.search(doc.body):
             text = f"Линия {numbers} работает по кольцевому маршруту {period_text}."
             details = (("На изменённом участке сохраняются все остановки.",)
-                       if _EXISTING_STOPS.search(item.body) else ())
-        elif len(routes) == 1 and (moved := _MOVED_STOP.findall(" ".join(item.body.split()))):
+                       if _EXISTING_STOPS.search(doc.body) else ())
+        elif len(routes) == 1 and (moved := _MOVED_STOP.findall(" ".join(doc.body.split()))):
             moved = list(dict.fromkeys(moved))
             stops = ", ".join(f"«{stop.strip()}»" for stop in moved[:4])
             text = f"На маршруте {numbers} {period_text} изменены остановки: {stops}."
             details = ()
         else:
             continue
-        result.append(Entry(_LABELS["route"], text, item.url, starts_on=start,
+        route_label = "линии" if len(routes) == 1 else "линиях"
+        continuation = (f"Продолжаются изменения на {route_label} {numbers} {period_text}."
+                        if start < end else "")
+        result.append(Entry(_LABELS["route"], text, item.url, starts_on=start, source_url=item.url,
                             source_id=doc.source_id, evidence_sha=_evidence_sha(doc),
-                            address_rows=details))
+                            address_rows=details, continuation_text=continuation))
     return sorted(result, key=lambda entry: entry.starts_on != today)
 
 
@@ -494,9 +548,10 @@ def morning_entries(session: Session, now: datetime, forecast: Forecast | None,
     policy = _policy()
     notices = _incidents(session, now, policy)
     roads = [item for item in notices if item.label == _LABELS["road"]]
-    routes = _routes(session, now.date(), policy)
-    road_maps = {item.url: item.map_id for item in roads if item.map_id}
-    routes = [replace(item, map_id=road_maps.get(item.url, "")) for item in routes]
+    routes = _routes(session, now, policy)
+    road_maps = {(item.url, item.evidence_sha): item.map_id for item in roads if item.map_id}
+    routes = [replace(item, map_id=road_maps.get((item.url, item.evidence_sha), ""))
+              for item in routes]
     route_url = routes[0].url if routes else None
     roads = [item for item in roads if item.text and item.url != route_url]
     routes = [_link_to_published(session, entry, now) for entry in routes]
@@ -719,6 +774,44 @@ def reply_target(
     return None
 
 
+def _transport_revision(entry: Entry) -> str | None:
+    if not (entry.continuation_text and entry.source_url and entry.evidence_sha):
+        return None
+    content = json.dumps(
+        [entry.evidence_sha, entry.text, entry.address_rows, entry.map_id, entry.continuation_text],
+        ensure_ascii=False,
+    )
+    return _content_sha(entry.source_url, content)
+
+
+def _morning_continuations(
+    slot: Slot, entries: list[Entry], state: dict[str, Any],
+) -> list[Entry]:
+    originals: dict[str, int] = {}
+    history = state.get(_HISTORY, {})
+    for offset in range(1, _TRANSPORT_REPEAT_DAYS):
+        day = slot.scheduled.date() - timedelta(days=offset)
+        receipt = history.get(f"{_CITY}:{day}:morning", {})
+        if not isinstance(receipt, dict):
+            continue
+        message_id = receipt.get("message_id")
+        revisions = receipt.get("full_transport_revisions")
+        if (receipt.get("state") == "sent" and type(message_id) is int and message_id > 0
+                and isinstance(revisions, list)):
+            for revision in revisions[:4]:
+                if isinstance(revision, str):
+                    originals.setdefault(revision, message_id)
+    result = []
+    for entry in entries:
+        revision = _transport_revision(entry)
+        if revision is not None and (original := originals.get(revision)):
+            url = entry.url if entry.link_text == "Подробнее" else f"{_CHANNEL}/{original}"
+            entry = replace(entry, text=entry.continuation_text, url=url, link_text="Подробнее",
+                            address_rows=(), continuation_text="")
+        result.append(entry)
+    return result
+
+
 def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) -> Digest | None:
     if not entries or (len(entries) < 2 and slot.kind != "morning"
                        and not any(entry.reminder for entry in entries)):
@@ -764,6 +857,7 @@ def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) ->
     units = formatted_text_units("\n\n".join(lines))
     remaining_rows = sum(len(rows) for _, rows in details.values())
     remaining_units = TELEGRAM_TEXT_LIMIT - units
+    full_details = set()
     for index, (title, rows) in details.items():
         heading = f"<b>{title}</b>"
         overflow = "Полный список — по ссылке выше."
@@ -783,10 +877,17 @@ def render(slot: Slot, entries: list[Entry], telegram_app: str | None = None) ->
         if len(quote) > 1 and budget >= quote_units:
             lines[index] += quote_html
             remaining_units -= quote_units
+            if quote[-1] != overflow:
+                full_details.add(index)
+    revisions = tuple(dict.fromkeys(
+        revision for index, entry in enumerate(entries[:4], start=1)
+        if (not entry.address_rows or index in full_details)
+        and (revision := _transport_revision(entry))
+    )) if slot.kind == "morning" else ()
     return Digest("\n\n".join(lines), map_digest_url(
         tuple(dict.fromkeys(item.map_id for item in entries[:4] if item.map_id and not item.place)),
         telegram_app=telegram_app,
-    ))
+    ), revisions)
 
 
 def _cover(slot: Slot) -> tuple[Path, str] | None:
@@ -823,7 +924,7 @@ def _with_cover(
     photo, credit = cover
     suffix = "\n\n" + credit
     if formatted_text_units(digest.html + suffix) <= 1024:
-        return Digest(digest.html + suffix, digest.map_url), photo
+        return replace(digest, html=digest.html + suffix), photo
 
     compact = [
         replace(entry, text="" if entry.link_text == "Подробнее"
@@ -849,7 +950,7 @@ def _with_cover(
                                      address_link=address_link if address_link != entry.url else "")
         candidate = render(slot, compact, telegram_app)
         if candidate is not None and formatted_text_units(candidate.html + suffix) <= 1024:
-            return Digest(candidate.html + suffix, candidate.map_url), photo
+            return replace(candidate, html=candidate.html + suffix), photo
     return digest, None
 
 
@@ -873,6 +974,8 @@ async def deliver(slot: Slot, digest: Digest, state: dict[str, Any], sha: str, c
         receipt = {**intent, "state": "uncertain"}
     else:
         receipt = {**intent, "state": "sent", "message_id": message_id}
+        if digest.full_transport_revisions:
+            receipt["full_transport_revisions"] = list(digest.full_transport_revisions)
     commit(claimed, claimed_sha, {_HISTORY: {**receipts, slot.key: receipt}})
     return receipt
 
@@ -937,6 +1040,8 @@ async def run(database: Path, slot: Slot, state: dict[str, Any], sha: str, commi
                     confirmed[index] = replace(item, original=originals[item.url])
             entries = confirmed + entries[:max(0, 4 - len(confirmed))]
         telegram_app = environment.get("RELOCANT_MAP_TELEGRAM_APP")
+        if slot.kind == "morning":
+            entries = _morning_continuations(slot, entries, state)
         digest = render(slot, entries, telegram_app)
         if digest is None:
             return {"state": "insufficient_items", "items": len(entries), **weather_details}

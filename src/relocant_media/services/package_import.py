@@ -33,6 +33,7 @@ from relocant_media.services.policy_reassessment import (
     eligible_reader_category_hold,
     policy_hold_audit,
 )
+from relocant_media.services.reader_reports import is_reader_report_source, submission_id_for
 from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -181,6 +182,11 @@ def import_package(
             session.flush()
         saved_outcome = {**outcome.model_dump(mode="json"),
                          "_package": payload, "_package_sha256": fingerprint}
+        if is_reader_report_source(source):
+            submission_id = submission_id_for(item)
+            if submission_id is None:
+                raise PackageConflictError("reader report has no submission identity")
+            saved_outcome["_reader_submission_id"] = submission_id
         if replacing:
             assert existing is not None
             saved_outcome["_previous_policy_hold"] = policy_hold_audit(existing)

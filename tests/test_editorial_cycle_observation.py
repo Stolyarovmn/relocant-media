@@ -16,8 +16,20 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
             CREATE TABLE raw_item(id, source_id);
             CREATE TABLE editorial_run(post_id, raw_item_id, delivery_status, outcome, created_at);
             CREATE TABLE scheduler_run(id, task_key, status, details, started_at, city, task_type);
+            CREATE TABLE submission(id, kind, payload, status, created_at);
             INSERT INTO source VALUES ('a', 'belgrade');
         """)
+        reader = {"reader_intake": True, "text": "PRIVATE reader text",
+                  "reader_publication": {"ownership": "own", "permission": "allow"}}
+        for ident, payload, status in [
+            (1, reader, "reader_review"),
+            (2, reader, "reader_review"),
+            (3, {**reader, "reader_resolution": {"outcome": "published"}}, "closed"),
+            (4, {**reader, "test_only": True}, "reader_review"),
+            (5, {"text": "PRIVATE channel tip"}, "waiting_primary"),
+        ]:
+            db.execute("INSERT INTO submission VALUES (?, 'news_tip', ?, ?, ?)",
+                       (ident, json.dumps(payload), status, "2026-11-17T08:00:00+00:00"))
         # Полночь Белграда = 23:00 UTC накануне; вчерашний пост не входит.
         for number, published, category, outcome in [
             (125, "2026-11-16T22:59:00+00:00", "events", {}),
@@ -74,6 +86,12 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
         "materials": 1, "published_message_ids": [], "deadline_exceeded": 0,
     }
     assert "PRIVATE" not in json.dumps(report)
+    assert report["reader_submissions_30d"] == [
+        {"status": "reader_review", "ownership": "own", "permission": "allow",
+         "outcome": None, "count": 2},
+        {"status": "closed", "ownership": "own", "permission": "allow",
+         "outcome": "published", "count": 1},
+    ]
     assert {"status": "human_review", "reason": None, "count": 1} in report["decisions"]
     with pytest.raises(ValueError, match="timezone"):
         observe_day(snapshot, datetime(2026, 11, 17))

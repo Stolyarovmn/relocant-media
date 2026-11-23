@@ -34,6 +34,7 @@ def pending_source_discovery(
     has_article_link: Callable[[dict[str, Any]], bool],
 ) -> list[Submission]:
     checked = Submission.payload[DISCOVERY_FIELD]["checked_at"].as_string()
+    lookup_status = Submission.payload[DISCOVERY_FIELD]["status"].as_string()
     publication = Submission.payload["reader_publication"]
     rows = session.scalars(select(Submission).where(
         Submission.kind == "news_tip",
@@ -44,7 +45,8 @@ def pending_source_discovery(
         publication["ownership"].as_string() == "source",
         publication["permission"].as_string() == "private",
         publication["stage"].as_string() == "confirmed",
-        or_(checked.is_(None), checked <= (now - RECHECK_INTERVAL).isoformat()),
+        or_(checked.is_(None), checked <= (now - RECHECK_INTERVAL).isoformat(),
+            lookup_status == "forward_lookup_deferred"),
     ).order_by(checked.asc().nullsfirst(), Submission.id))
     eligible = []
     for row in rows:
@@ -77,11 +79,16 @@ def matches_reader_event(
     return not (left_location and right_location and left_location.isdisjoint(right_location))
 
 
-def record_discovery_check(row: Submission, *, now: datetime, status: str) -> None:
-    row.payload = {**row.payload, DISCOVERY_FIELD: {
+def record_discovery_check(
+    row: Submission, *, now: datetime, status: str, remaining_forwards: tuple[str, ...] = (),
+) -> None:
+    check: dict[str, Any] = {
         "checked_at": now.isoformat(), "status": status,
         "material_sha256": material_fingerprint(row.payload),
-    }, "updated_at": now.isoformat()}
+    }
+    if remaining_forwards:
+        check["remaining_forwards"] = list(remaining_forwards)
+    row.payload = {**row.payload, DISCOVERY_FIELD: check, "updated_at": now.isoformat()}
 
 
 def discovery_deadline_reached(row: Submission, now: datetime) -> bool:

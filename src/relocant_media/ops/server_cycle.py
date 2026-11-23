@@ -36,7 +36,7 @@ from relocant_media.ai.provider import StructuredAIProvider
 from relocant_media.ai.public_cache import PublicPreparationCache
 from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ai.review_repair import review_with_repairs
-from relocant_media.bot.api import TelegramBotAPI
+from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
 from relocant_media.bot.formatting import (
     TELEGRAM_TEXT_LIMIT,
     editorial_message_html,
@@ -69,6 +69,8 @@ from relocant_media.collectors.telegram_topics import (
     DEFAULT_CHANNELS as DEFAULT_CHANNELS,
 )
 from relocant_media.collectors.telegram_topics import (
+    TopicLead,
+    collect_forwarded_topic,
     collect_topics,
     messenger_sources_for_city,
     runtime_channels_for_city,
@@ -113,6 +115,7 @@ from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.audience_observation import observe_audience
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
+from relocant_media.services.channel_presentation import ensure_map_pin_on_top
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
     EditorialService,
@@ -153,7 +156,17 @@ from relocant_media.services.published_watch import (
     published_sources,
     recent_source_load,
 )
+from relocant_media.services.reader_forwarded_source import public_forward_urls, public_post_ref
+from relocant_media.services.reader_publication import material_fingerprint, reader_credit
+from relocant_media.services.reader_reports import (
+    READER_REPORT_FIELD,
+    is_reader_report_document,
+    materialize_reader_reports,
+    submission_id_for,
+    with_reader_credit,
+)
 from relocant_media.services.reader_source_discovery import (
+    DISCOVERY_FIELD,
     matches_reader_event,
     pending_source_discovery,
     record_discovery_check,
@@ -278,6 +291,7 @@ class _CachedOutcome(EditorialPipeline):
 
     def run(
         self, *, city: str, documents: tuple[EvidenceDocument, ...], evergreen: bool = False,
+        reader_report: bool = False,
         recent_publications: list[dict[str, str]] | None = None,
         now: datetime | None = None, source_update: bool = False,
     ) -> EditorialOutcome:
@@ -452,7 +466,7 @@ def _live_document(original: EvidenceDocument, item: CollectedRawItem) -> Eviden
 
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
-    documents = []
+    documents: list[EvidenceDocument] = []
     # Each source is re-read through the same parser used at intake.
     registered = {
         **venue_sources(), **review_only_venue_sources(), **media_sources(), **guide_sources(),
@@ -468,6 +482,11 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             return await fetch_public_article(source, url, venue_client)
     with httpx.Client(timeout=25, trust_env=False) as client:
         for document in package.event.documents:
+            if is_reader_report_document(document.source_id):
+                # No public page: delivery re-binds the document to the reader's material.
+                documents.append(EvidenceDocument.model_validate(
+                    document.model_dump(include=set(EvidenceDocument.model_fields))))
+                continue
             if document.source_id in registered:
                 with _note_source_unavailable(document.source_id):
                     item = _run_sync(fetch_venue(registered[document.source_id], document.url))
@@ -626,14 +645,28 @@ async def collect_sources(
                    for url in tip_urls(payload))
 
     with Session(engine) as session:
+        # Owner 23.11.2026: the reader's own permitted text becomes an attributed report.
+        reader_report_ids = materialize_reader_reports(session, city="belgrade", now=now)
+        session.commit()
+    with Session(engine) as session:
         rows = batch_submissions(session) if submissions_only else pending_submissions(session)
-        tips = [(row.id, row.payload) for row in rows]
-        reader_signals = {} if submissions_only else {
-            row.id: str(row.payload.get("text", ""))
-            for row in pending_source_discovery(
-                session, city="belgrade", now=now, has_article_link=has_article_link,
-            )
-        }
+        # A reader report already has its own document; link search must not reset it.
+        tips = [(row.id, row.payload) for row in rows if READER_REPORT_FIELD not in row.payload]
+        reader_pending = () if submissions_only else pending_source_discovery(
+            session, city="belgrade", now=now, has_article_link=has_article_link,
+        )
+        reader_signals = {row.id: str(row.payload.get("text", "")) for row in reader_pending}
+        forwarded_tips: dict[tuple[str, int], set[int]] = {}
+        for pending_tip in reader_pending:
+            check = pending_tip.payload.get(DISCOVERY_FIELD, {})
+            urls = public_forward_urls(pending_tip.payload)
+            if (isinstance(check, dict) and check.get("status") == "forward_lookup_deferred"
+                    and isinstance(check.get("remaining_forwards"), list)
+                    and check.get("material_sha256") == material_fingerprint(pending_tip.payload)):
+                urls = [url for url in urls if url in check["remaining_forwards"]]
+            for url in urls:
+                if ref := public_post_ref(url):
+                    forwarded_tips.setdefault(ref, set()).add(pending_tip.id)
         recent_official = []
         if reader_signals:
             recent_official = list(session.scalars(select(RawItem).where(
@@ -642,7 +675,8 @@ async def collect_sources(
             ).order_by(RawItem.published_at.desc(), RawItem.id.desc()).limit(150)))
         published = [] if submissions_only else published_sources(session, now=now)
     result["submission_ids"] = [sid for sid, _ in tips]
-    result["submission_raw_ids"] = []
+    result["submission_raw_ids"] = list(reader_report_ids)
+    result["reader_reports"] = len(reader_report_ids)
     aliases_path = SOURCES.parent / "event-aliases.json"
     aliases = json.loads(aliases_path.read_text(encoding="utf-8")) if aliases_path.is_file() else {}
     search_budget = PublicSearchBudget()
@@ -873,6 +907,7 @@ async def collect_sources(
             except Exception:
                 result["failures"] += 1
         runtime_channels = () if submissions_only else runtime_channels_for_city("belgrade")
+        allowed_channels = {channel.lower(): channel for channel in runtime_channels}
 
         async def fetch_channel(channel: str) -> tuple[list[Any], dict[str, Any]]:
             observation: dict[str, Any] = {"channel": channel, "status": "not_checked"}
@@ -893,15 +928,39 @@ async def collect_sources(
         # The private signal is compared locally to fetched posts. Only the separate,
         # publicly fetched post is passed to the existing source discovery service.
         channel_leads = []
+        seen_forwards: set[tuple[str, int]] = set()
+        forwarded_primary: dict[int, set[str]] = {}
         for channel, (leads, observation) in zip(runtime_channels, fetched_channels, strict=True):
             channel_coverage.append(observation)
             attention_leads.extend(leads)
             for lead in leads[:20]:
-                matches_reader = any(matches_reader_event(
+                ref = (channel.lower(), lead.message_id)
+                if ref in forwarded_tips:
+                    seen_forwards.add(ref)
+                matches_reader = ref in forwarded_tips or any(matches_reader_event(
                     text, lead.text.partition("\n")[0], lead.text,
                     year=now.year, source_year=lead.published_at.year,
                 ) for text in reader_signals.values())
                 channel_leads.append((matches_reader, channel, lead, observation))
+        missing = [
+            ref for ref in forwarded_tips if ref not in seen_forwards and ref[0] in allowed_channels
+        ]
+        remaining_forwards: dict[int, list[str]] = {}
+        for ref in missing[4:]:
+            for submission_id in forwarded_tips[ref]:
+                remaining_forwards.setdefault(submission_id, []).append(
+                    f"https://t.me/{ref[0]}/{ref[1]}",
+                )
+        forward_lookups = await asyncio.gather(*(
+            collect_forwarded_topic(allowed_channels[username], message_id, client, now=now)
+            for username, message_id in missing[:4]
+        ), return_exceptions=True)
+        unavailable_forwards: set[int] = set()
+        for ref, lead in zip(missing[:4], forward_lookups, strict=True):
+            if isinstance(lead, TopicLead):
+                channel_leads.append((True, allowed_channels[ref[0]], lead, {}))
+            elif isinstance(lead, BaseException):
+                unavailable_forwards.update(forwarded_tips[ref])
         for _, channel, lead, observation in sorted(channel_leads, key=lambda entry: not entry[0]):
             try:
                 result["channel_leads"] += 1
@@ -915,6 +974,13 @@ async def collect_sources(
                     register_official=register_official,
                     search_budget=search_budget,
                 )
+                if interested := forwarded_tips.get((channel.lower(), lead.message_id)):
+                    cited = set(lead.outbound_urls) & set(resolution.primary_urls)
+                    verified = {
+                        url for url in cited if fetched.get(url) == "primary_source_collected"
+                    }
+                    for submission_id in interested:
+                        forwarded_primary.setdefault(submission_id, set()).update(verified)
                 result["primary_searches"] += resolution.searches_performed
                 topics.append({"url": lead.url, "channel": channel,
                     "published_at": lead.published_at.isoformat(),
@@ -1023,7 +1089,7 @@ async def collect_sources(
             result["submission_raw_ids"].extend(ids)
         reader_checks: dict[str, int] = {"checked": 0, "linked": 0, "ambiguous": 0}
         for submission_id, text in reader_signals.items():
-            matched_urls = {
+            matched_urls = forwarded_primary.get(submission_id, set()) | {
                 item.url for item in articles if item.source_id in official_source_ids
                 and item.published_at is not None
                 and matches_reader_event(text, item.title, item.body, year=now.year,
@@ -1032,8 +1098,16 @@ async def collect_sources(
             row = session.get(Submission, submission_id)
             assert row is not None
             ids = list(session.scalars(select(RawItem.id).where(RawItem.url.in_(matched_urls))))
-            status = "linked" if len(ids) == 1 else "ambiguous" if ids else "no_match"
-            record_discovery_check(row, now=now, status=status)
+            remaining = tuple(remaining_forwards.get(submission_id, ())) if not ids else ()
+            if ids:
+                status = "linked" if len(ids) == 1 else "ambiguous"
+            elif remaining:
+                status = "forward_lookup_deferred"
+            elif submission_id in unavailable_forwards:
+                status = "forward_source_unavailable"
+            else:
+                status = "no_match"
+            record_discovery_check(row, now=now, status=status, remaining_forwards=remaining)
             reader_checks["checked"] += 1
             if status == "linked":
                 resolve_submission(row, ids, now=now)
@@ -1176,7 +1250,8 @@ def _prepare_reviewed(
             recent_publications=[{"id": str(row["id"]), "title": row["title"],
                                   "body": row["body"][:1200], "status": row["status"]}
                                  for row in recent[:20]], source_update=revision is not None,
-            evergreen=source.source_type == GUIDE_SOURCE_TYPE)
+            evergreen=source.source_type == GUIDE_SOURCE_TYPE,
+            reader_report=is_reader_report_document(source.id))
     if (draft_text := outcome.draft) is not None:
         duplicate = find_repeated_publication(
             draft_text.title, draft_text.body,
@@ -1219,6 +1294,11 @@ def _prepare_reviewed(
             source_url=next((item.url for item, policy in members
                              if policy.ownership.strip().casefold() == "official"), raw.url))
     draft = present_draft(draft, presentation, category=outcome.ranking.category)
+    if is_reader_report_document(source.id):
+        with Session(engine) as session:
+            submission = session.get(Submission, submission_id_for(raw) or 0)
+            credit = reader_credit(submission.payload) if submission is not None else ""
+        draft = draft.model_copy(update={"body": with_reader_credit(draft.body, credit)})
     from relocant_media.services.native_map import bind_native_map_draft
 
     presentation = bind_native_map_draft(presentation, draft)
@@ -1342,8 +1422,16 @@ async def cleanup_news_pins(engine: Engine) -> dict[str, Any]:
                 Post.city == "belgrade", EditorialRun.delivery_status == "sent",
                 Post.telegram_message_id.is_not(None))))
     async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
-        return await maintain_pins(TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client),
-                                   policy, news_message_ids={i for i in news_ids if i is not None})
+        bot = TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client)
+        result = await maintain_pins(
+            bot, policy, news_message_ids={i for i in news_ids if i is not None},
+        )
+        try:
+            # Только сверка: пост карты отправляет лишь ручной workflow.
+            result["map_pin"] = await ensure_map_pin_on_top(bot, policy, apply=False)
+        except (httpx.HTTPError, TelegramAPIError, ValueError) as error:
+            result["map_pin"] = {"map_pin": "unknown", "error_type": type(error).__name__}
+        return result
 
 
 async def audience_observation() -> dict[str, Any]:

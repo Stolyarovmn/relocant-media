@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import policy from "./reader-publication-policy.json" with { type: "json" };
+import { hasForwardedParts, publicForwardUrls } from "./reader-forwarded-source.js";
 
 export { policy as PUBLICATION_POLICY };
 const digest = value => createHash("sha256").update(value).digest("hex");
@@ -10,9 +11,15 @@ const controls = new Set(Object.values(L));
 export const isPublicationControl = text => controls.has(text);
 
 export function materialFingerprint(payload) {
-  return digest(JSON.stringify({ text: payload.text ?? "", attachments:
-    (payload.attachments ?? []).map(a => ({ kind: a.kind, file_id: a.file_id,
-      file_unique_id: a.file_unique_id ?? null })) }));
+  const urls = publicForwardUrls(payload);
+  return digest(JSON.stringify({
+    text: payload.text ?? "",
+    attachments: (payload.attachments ?? []).map(a => ({
+      kind: a.kind, file_id: a.file_id, file_unique_id: a.file_unique_id ?? null,
+    })),
+    ...(urls.length && { public_forward_urls: urls }),
+    ...(hasForwardedParts(payload) && { forwarded: true }),
+  }));
 }
 
 export function publicationEnabled(form) {
