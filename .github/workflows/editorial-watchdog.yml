@@ -2,6 +2,7 @@ name: Editorial Watchdog
 run-name: >-
   ${{ inputs.morning_date && !inputs.dry_run &&
     !inputs.test_intake_notification && format('Утренняя сводка · {0}', inputs.morning_date)
+    || inputs.editorial_only && !inputs.dry_run && 'Editorial Watchdog · редакция'
     || 'Editorial Watchdog' }}
 on:
   schedule:
@@ -18,6 +19,10 @@ on:
         default: true
       test_intake_notification:
         description: Send one clearly labelled test notification to the private owner
+        type: boolean
+        default: false
+      editorial_only:
+        description: Check editorial state and digests without checking reader intake
         type: boolean
         default: false
       morning_date:
@@ -39,6 +44,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       github.event_name != 'workflow_run' &&
       !inputs.morning_date &&
+      !inputs.editorial_only &&
       vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
       vars.ACTIONS_CUTOVER_CONFIRMED == 'true'
     runs-on: ubuntu-latest

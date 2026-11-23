@@ -413,6 +413,46 @@ jobs:
               '-f', f"source_sha={os.environ['CYCLE_SHA']}",
               '-f', f"source_run_id={os.environ['CYCLE_RUN_ID']}",
           ], check=True)
+      - name: Запустить монитор при пропуске расписания
+        id: watchdog-backup
+        if: >-
+          always() && vars.EDITORIAL_STORAGE_BACKEND == 'ssh' &&
+          vars.ACTIONS_CUTOVER_CONFIRMED == 'true'
+        continue-on-error: true
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          import json
+          import os
+          import subprocess
+          from datetime import UTC, datetime, timedelta
+
+          repo = os.environ['GH_REPO']
+          workflow = 'editorial-watchdog.yml'
+          cutoff = datetime.now(UTC) - timedelta(minutes=20)
+          recent = json.loads(subprocess.check_output([
+              'gh', 'run', 'list', '-R', repo, '--workflow', workflow, '--branch', 'main',
+              '--limit', '20', '--json', 'displayTitle,status,conclusion,event,createdAt,updatedAt',
+          ], text=True, encoding='utf-8', timeout=30))
+
+          def has_recent_check(run):
+              if run['status'] != 'completed':
+                  return datetime.fromisoformat(run['createdAt']) >= cutoff
+              scheduled = run['event'] in ('schedule', 'workflow_run')
+              backup = run['displayTitle'] == 'Editorial Watchdog · редакция'
+              return ((scheduled or backup)
+                      and run['conclusion'] == 'success'
+                      and datetime.fromisoformat(run['updatedAt']) >= cutoff)
+
+          if any(map(has_recent_check, recent)):
+              print('Монитор недавно проверил редакцию или уже выполняется.')
+          else:
+              subprocess.run([
+                  'gh', 'workflow', 'run', workflow, '-R', repo, '--ref', 'main',
+                  '-f', 'dry_run=false', '-f', 'editorial_only=true',
+              ], check=True, timeout=30)
       - name: Проверить пропущенную утреннюю сводку
         if: always() && needs.cycle.outputs.morning_watch_date != ''
         continue-on-error: true
