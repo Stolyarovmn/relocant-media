@@ -104,10 +104,33 @@ def test_runtime_logs_only_allowlisted_obsolete_response_counts(tmp_path, capsys
         },
         "draft": "PRIVATE",
     }), encoding="utf-8")
-    runtime._report_obsolete_fallback_responses(tmp_path)
+    runtime._report_fallback_result(tmp_path)
     assert json.loads(capsys.readouterr().out) == {
         "gpt_fallback_obsolete": {"request_expired": 2, "attempt_in_progress": 1},
     }
+
+
+def test_runtime_logs_partial_fallback_without_private_content(tmp_path, capsys):
+    (tmp_path / "server-report.json").write_text(json.dumps({
+        "mode": "subscription_gpt_fallback",
+        "status": "PRIMARY_PARTIAL",
+        "imported": 0, "declined": 1, "rejected": 1, "unresolved": 2,
+        "awaiting_owner": True, "sent_count": 0, "delivery_blocked": 99,
+        "processing_errors": [
+            {"stage": "validate", "error_type": "FallbackValidationError",
+             "reason": "material_closed", "message": "PRIVATE"},
+        ],
+        "draft": "PRIVATE", "raw_item_id": 987654,
+    }), encoding="utf-8")
+    runtime._report_fallback_result(tmp_path)
+    assert json.loads(capsys.readouterr().out) == {"gpt_fallback_result": {
+        "status": "PRIMARY_PARTIAL",
+        "imported": 0, "declined": 1, "rejected": 1, "unresolved": 2, "sent_count": 0,
+        "processing_errors": [
+            {"stage": "validate", "error_type": "FallbackValidationError",
+             "reason": "material_closed"},
+        ],
+    }}
 
 
 @pytest.mark.parametrize("closed", [False, True])
