@@ -108,10 +108,16 @@ _SIDEWALK_STRETCH = re.compile(
     rf"од\s+(?:ул(?:ице)?\.?\s+)?(?P<start>{_PLACE})"
     rf"\s+до\s+(?:ул(?:ице)?\.?\s+)?(?P<end>{_PLACE})\s*,"
 )
-_SIDEWALK_PERIOD = re.compile(
+_MUNICIPAL_PERIOD = re.compile(
     rf"\bна територији (?:градске )?општине (?P<municipality>{_PLACE})\s*,\s*"
     rf"у\s+(?:временском\s+)?периоду\s+(?:од\s+)?(?P<first>{_PRINTED_DATE})"
     rf"(?:\s+године)?\s+до\s+(?P<last>{_PRINTED_DATE})(?:\s+године)?\s*[.]?\Z"
+)
+_TRAFFIC_CHANGE_STRETCH = re.compile(
+    rf"\b(?:биће|је)\s+измењен\s+режим\s+саобраћаја\s+"
+    rf"у\s+(?:улици|ул\.)\s+(?P<street>{_PLACE})\s*,\s*"
+    rf"од\s+(?:ул(?:ице)?\.?\s+)?(?P<start>{_PLACE})"
+    rf"\s+до\s+(?:ул(?:ице)?\.?\s+)?(?P<end>{_PLACE})\s*,\s*\Z",
 )
 _CALENDAR_DATE = re.compile(_PRINTED_DATE)
 _TIMED_OR_PHASED = re.compile(
@@ -148,7 +154,8 @@ def _cross_name(value: str, roads: dict[str, list[list[Any]]]) -> str | None:
 
 
 def _resolve(
-    names: dict[str, str], index: StreetIndex, municipalities: set[str],
+    names: dict[str, str], index: StreetIndex, municipalities: set[str], *,
+    allow_disconnected_crossings: bool = False,
 ) -> dict[str, Any] | None:
     resolved = []
     for municipality in sorted(municipalities):
@@ -165,7 +172,9 @@ def _resolve(
             "start": roads[start][0][1],
             "end": roads[end][0][1],
         }
-        if geometry := local_street_line(segment, index):
+        if geometry := local_street_line(
+            segment, index, allow_disconnected_crossings=allow_disconnected_crossings,
+        ):
             resolved.append(geometry)
     return resolved[0] if len(resolved) == 1 else None
 
@@ -240,7 +249,7 @@ def _secretariat_sidewalk(body: str, index: StreetIndex) -> list[tuple[date, dat
         return []
     for line in body.splitlines():
         paragraph = _name(line)
-        period = _SIDEWALK_PERIOD.search(paragraph)
+        period = _MUNICIPAL_PERIOD.search(paragraph)
         if period is None:
             continue
         municipality = period["municipality"]
@@ -265,6 +274,35 @@ def _secretariat_sidewalk(body: str, index: StreetIndex) -> list[tuple[date, dat
     return []
 
 
+def _secretariat_traffic_change(
+    body: str, index: StreetIndex,
+) -> list[tuple[date, date, dict[str, Any]]]:
+    normalized = _name(body)
+    if len(_CALENDAR_DATE.findall(normalized)) != 2 or _TIMED_OR_PHASED.search(normalized):
+        return []
+    for line in body.splitlines():
+        paragraph = _name(line)
+        period = _MUNICIPAL_PERIOD.search(paragraph)
+        if period is None or period["municipality"] not in _MUNICIPALITIES:
+            continue
+        stretch = _TRAFFIC_CHANGE_STRETCH.search(paragraph, 0, period.start())
+        if stretch is None:
+            continue
+        try:
+            first, last = _printed_date(period["first"]), _printed_date(period["last"])
+        except ValueError:
+            return []
+        if first > last:
+            return []
+        # A same-name branch is irrelevant only when it cannot connect the named crossings.
+        geometry = _resolve(stretch.groupdict(), index, {period["municipality"]},
+                            allow_disconnected_crossings=True)
+        if geometry is None:
+            return []
+        return [(first, last, {**geometry, "scope": "traffic_change"})]
+    return []
+
+
 def resolve_secretariat_stretches(
     document: EvidenceDocument, index: StreetIndex,
 ) -> list[tuple[date, date, dict[str, Any]]]:
@@ -276,6 +314,8 @@ def resolve_secretariat_stretches(
         return listed
     if sidewalk := _secretariat_sidewalk(document.body, index):
         return sidewalk
+    if traffic_change := _secretariat_traffic_change(document.body, index):
+        return traffic_change
     body = _name(document.body)
     road = _DATED_ROAD.search(body)
     if road is None or not _SECRETARIAT_RESTRICTION.search(body[:road.start()]):
