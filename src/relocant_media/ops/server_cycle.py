@@ -16,7 +16,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-import yaml
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
@@ -114,7 +113,7 @@ from relocant_media.ops.sqlite_backup_cli import create_snapshot
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.audience_observation import observe_audience
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID, deliver_reviewed
-from relocant_media.services.channel_presentation import ensure_service_pin_map_button
+from relocant_media.services.channel_presentation import ensure_map_pin_on_top
 from relocant_media.services.editorial import (
     DeliveryBlockedError,
     EditorialService,
@@ -1348,23 +1347,11 @@ async def cleanup_news_pins(engine: Engine) -> dict[str, Any]:
         result = await maintain_pins(
             bot, policy, news_message_ids={i for i in news_ids if i is not None},
         )
-        if any(
-            pin["chat_id"] == policy["channel_id"]
-            and pin["message_id"] in policy["service_channel_messages"]
-            for pin in result["preserved"]
-        ):
-            try:
-                config_file = SOURCES.parent / "channel-presentation.yaml"
-                presentation = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-                result["presentation"] = await ensure_service_pin_map_button(
-                    bot, policy, presentation, apply=True,
-                )
-            except (httpx.HTTPError, TelegramAPIError, ValueError, OSError, KeyError,
-                    yaml.YAMLError) as error:
-                result["presentation"] = {
-                    "owner_action_required": True, "error_type": type(error).__name__,
-                }
-            result["owner_action_required"] |= result["presentation"]["owner_action_required"]
+        try:
+            # Только сверка: пост карты отправляет лишь ручной workflow.
+            result["map_pin"] = await ensure_map_pin_on_top(bot, policy, apply=False)
+        except (httpx.HTTPError, TelegramAPIError, ValueError) as error:
+            result["map_pin"] = {"map_pin": "unknown", "error_type": type(error).__name__}
         return result
 
 
