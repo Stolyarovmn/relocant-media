@@ -1,0 +1,46 @@
+name: Описание и карта канала
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Применить описание и кнопку карты к рабочему каналу
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: belgrade-channel-presentation
+  cancel-in-progress: false
+
+jobs:
+  check-presentation:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
+      vars.ACTIONS_CUTOVER_CONFIRMED == 'true' &&
+      (!inputs.apply || vars.ACTIONS_SEND_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-python
+      - name: Сверить успешный CI точного коммита main
+        if: inputs.apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_MODE: channel-presentation
+        run: python src/relocant_media/ops/editorial_start.py gate
+      - name: Сверить описание канала и кнопку карты
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          APPLY_CHANNEL_PRESENTATION: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$APPLY_CHANNEL_PRESENTATION" = true ]; then args+=(--apply); fi
+          python -m relocant_media.ops.channel_presentation "${args[@]}"

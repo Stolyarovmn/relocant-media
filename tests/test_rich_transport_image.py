@@ -27,7 +27,9 @@ SOURCE_URL = "https://transport.example/notice"
 TITLE, BODY = "Изменение маршрута", "Проверьте остановки перед поездкой."
 EVENT_ID = "event_" + hashlib.sha256(SOURCE_URL.encode()).hexdigest()[:20]
 MAP_URL = f"https://stolyarovmn.github.io/relocant-media/map/?event={EVENT_ID}"
-MAP_MARKUP = {"inline_keyboard": [[{"text": "Посмотреть на карте", "url": MAP_URL}]]}
+MAP_MARKUP = {"inline_keyboard": [[
+    {"text": "Посмотреть на карте", "url": MAP_URL, "style": "success"},
+]]}
 
 
 def multipart(request):
@@ -160,7 +162,7 @@ async def test_rich_utility_map_uses_registered_telegram_app_and_preserves_html(
         assert json.loads(request.content) == {
             "chat_id": -1001, "rich_message": {"html": native["message_html"]},
             "reply_markup": {"inline_keyboard": [[
-                {"text": "Посмотреть на карте", "url": target_url},
+                {"text": "Посмотреть на карте", "url": target_url, "style": "success"},
             ]]},
         }
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 18}})
