@@ -129,7 +129,8 @@ def test_projection_timeout_commits_verified_snapshot_without_publishing_partial
     records = [json.loads(line) for line in output.err.splitlines()]
     assert {"projection_error_type": "TimeoutExpired"} in records
     expected = [
-        "worker_started", "worker_completed", "snapshot_started", "snapshot_verified",
+        "worker_started", "worker_completed", "snapshot_started", "snapshot_local_verified",
+        "snapshot_verified",
         *(["recovery_checkpoint_started"] if storage == "ssh" else []),
         "projection_started", "projection_failed", "state_commit_started", "state_committed",
     ]
