@@ -1,5 +1,6 @@
 import gzip
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -604,3 +605,43 @@ def test_pages_assembly_preserves_the_verified_incident_feed(tmp_path):
         site / "map/addresses.json"
     ).read_bytes()
     assert json.loads(incident.read_bytes())["version"] == 1
+
+
+def test_pages_version_changes_with_a_map_module_but_not_with_new_notices(tmp_path):
+    source = tmp_path / "web/newsroom/map"
+    source.mkdir(parents=True)
+    (source / "index.html").write_bytes(b'<script src="app.js?v=__MAP_REVISION__"></script>')
+    (source / "app.js").write_bytes(b'import "./layer-views.js?v=__MAP_REVISION__";')
+    (source / "offline-worker.js").write_bytes(
+        b'const shell = ["./app.js?v=__MAP_REVISION__", "./layer-views.js?v=__MAP_REVISION__"];'
+    )
+    layer = source / "layer-views.js"
+    layer.write_bytes(b"export const cellSize = 68;")
+    city = tmp_path / "cities/belgrade/map"
+    city.mkdir(parents=True)
+    (city / "addresses.json.gz").write_bytes(gzip.compress(b"{}"))
+    site = tmp_path / "site"
+
+    def build() -> bytes:
+        copy_assets(tmp_path, site)
+        destination = site / "map"
+        html = (destination / "index.html").read_bytes()
+        version = re.search(rb"app\.js\?v=([a-f0-9]{16})", html)
+        assert version is not None
+        suffix = b"?v=" + version[1]
+        app = (destination / "app.js").read_bytes()
+        worker = (destination / "offline-worker.js").read_bytes()
+        assert b"./layer-views.js" + suffix in app
+        assert b"./app.js" + suffix in worker
+        assert b"./layer-views.js" + suffix in worker
+        assert b"__MAP_REVISION__" not in html + app + worker
+        return suffix
+
+    before = build()
+    feed = site / "map/incidents.json"
+    feed.write_bytes(b'{"version":1,"incidents":[]}')
+    assert build() == before
+    layer.write_bytes(b"export const cellSize = 76;")
+    assert build() != before
+    assert feed.read_bytes() == b'{"version":1,"incidents":[]}'
+    assert b"?v=__MAP_REVISION__" in (source / "index.html").read_bytes()

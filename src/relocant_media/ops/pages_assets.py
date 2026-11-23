@@ -2,12 +2,32 @@
 
 import argparse
 import gzip
+import hashlib
 import shutil
 from pathlib import Path
 
+_MAP_REVISION = b"?v=__MAP_REVISION__"
+
+
+def _version_map_shell(source: Path, destination: Path) -> None:
+    assets = {
+        path: path.read_bytes()
+        for path in sorted(source.iterdir())
+        if path.is_file() and path.suffix in {".html", ".js", ".css"}
+    }
+    digest = hashlib.sha256()
+    for path, content in assets.items():
+        digest.update(path.name.encode() + b"\0" + hashlib.sha256(content).digest())
+    version = b"?v=" + digest.hexdigest()[:16].encode()
+    for path, content in assets.items():
+        if _MAP_REVISION in content:
+            (destination / path.name).write_bytes(content.replace(_MAP_REVISION, version))
+
 
 def copy_assets(root: Path, site: Path) -> None:
-    shutil.copytree(root / "web/newsroom", site, dirs_exist_ok=True)
+    web = root / "web/newsroom"
+    shutil.copytree(web, site, dirs_exist_ok=True)
+    _version_map_shell(web / "map", site / "map")
     compressed = root / "cities/belgrade/map/addresses.json.gz"
     shutil.copyfile(compressed, site / "map/addresses.json.gz")
     destination = site / "map/addresses.json"

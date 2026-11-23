@@ -2,15 +2,15 @@ import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
-} from "./core.js?v=19";
-import { calendarLink } from "./calendar.js?v=5";
+} from "./core.js?v=__MAP_REVISION__";
+import { calendarLink } from "./calendar.js?v=__MAP_REVISION__";
 import {
   corridorCaps, heatCells, heatComposition, heatOverview, layerView, timelineBands, timelineInstant,
   timelineLabel, timelineSteps,
-} from "./layer-views.js?v=3";
-import { setupPlaces } from "./places.js?v=20";
-import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=1";
-import { addressWatch, watchedIncidents } from "./address-watch.js?v=2";
+} from "./layer-views.js?v=__MAP_REVISION__";
+import { setupPlaces } from "./places.js?v=__MAP_REVISION__";
+import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=__MAP_REVISION__";
+import { addressWatch, watchedIncidents } from "./address-watch.js?v=__MAP_REVISION__";
 
 const byId = (id) => document.getElementById(id);
 const input = byId("address-query");

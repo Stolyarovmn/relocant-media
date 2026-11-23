@@ -1,16 +1,16 @@
 const scope = new URL(self.registration.scope);
-// CI checks the versions against the HTML entry and its module imports.
+// The Pages build gives the HTML, imports and cache the same revision.
 const paths = [
   "./",
-  "./style.css?v=18",
-  "./app.js?v=26",
-  "./core.js?v=19",
-  "./calendar.js?v=5",
-  "./places.js?v=20",
-  "./favorites.js?v=1",
-  "./layer-views.js?v=3",
-  "./snapshots.js?v=1",
-  "./address-watch.js?v=2",
+  "./style.css?v=__MAP_REVISION__",
+  "./app.js?v=__MAP_REVISION__",
+  "./core.js?v=__MAP_REVISION__",
+  "./calendar.js?v=__MAP_REVISION__",
+  "./places.js?v=__MAP_REVISION__",
+  "./favorites.js?v=__MAP_REVISION__",
+  "./layer-views.js?v=__MAP_REVISION__",
+  "./snapshots.js?v=__MAP_REVISION__",
+  "./address-watch.js?v=__MAP_REVISION__",
 ];
 const shell = paths.map((path) => new URL(path, scope).href);
 const libraries = new Map([
