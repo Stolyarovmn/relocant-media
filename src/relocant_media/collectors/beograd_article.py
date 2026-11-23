@@ -8,6 +8,7 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from relocant_media.collectors.base import RawItem
+from relocant_media.domain.water_bulletin import is_city_water_bulletin, is_shared_tanker_heading
 from relocant_media.sources.registry import SourceConfig
 
 UTILITY_SECTIONS = ("vodovod-i-kanalizacija", "elektricna-energija")
@@ -70,9 +71,12 @@ def _article_root(h1: Tag, soup: BeautifulSoup) -> Tag | BeautifulSoup:
 
 def _paragraphs_after_heading(
     root: Tag | BeautifulSoup, h1: Tag, *, include_lists: bool = False,
+    stop_at_shared_tankers: bool = False,
 ) -> list[str]:
     paragraphs: list[str] = []
     tags = ["p", "li"] if include_lists else ["p"]
+    if stop_at_shared_tankers:
+        tags.extend(["h2", "h3", "h4"])
     following = {id(paragraph) for paragraph in h1.find_all_next(tags)}
     for paragraph in root.find_all(tags):
         if not isinstance(paragraph, Tag):
@@ -86,6 +90,8 @@ def _paragraphs_after_heading(
         if include_lists and paragraph.find_parent("li") is not None:
             continue
         text = " ".join(paragraph.stripped_strings)
+        if stop_at_shared_tankers and is_shared_tanker_heading(text):
+            break
         if text:
             paragraphs.append(text)
     return paragraphs
@@ -108,7 +114,10 @@ def parse_beograd_article(html: str, source: SourceConfig, url: str) -> RawItem:
     root = _article_root(h1, soup)
     include_lists = any(f"/servisne-informacije/{section}/" in urlsplit(url).path
                         for section in UTILITY_SECTIONS)
-    body_parts = _paragraphs_after_heading(root, h1, include_lists=include_lists)
+    body_parts = _paragraphs_after_heading(
+        root, h1, include_lists=include_lists,
+        stop_at_shared_tankers=is_city_water_bulletin(url, title),
+    )
     if not body_parts:
         raise ArticleExtractionError("article body paragraphs not found")
 

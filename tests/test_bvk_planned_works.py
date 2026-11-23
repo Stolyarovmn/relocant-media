@@ -33,6 +33,20 @@ def test_parser_splits_shared_page_into_independent_notices() -> None:
     assert "Сервисни центар" not in items[-1].body
 
 
+def test_shared_tanker_schedule_is_never_added_to_previous_planned_notice() -> None:
+    source = load_source_file(SOURCE_PATH)
+    html = FIXTURE.read_text(encoding="utf-8").replace(
+        "<h2>01.10.2026.",
+        "<h3>Распоред аутоцистерни:</h3><p>Неовисно насеље</p><h2>01.10.2026.",
+    )
+    items = parse_bvk_planned_works(html, source)
+
+    assert len(items) == 3
+    assert "обезбеђена је ауто-цистерна" in items[0].body
+    assert "Неовисно насеље" not in items[1].body
+    assert "Степојевац" in items[2].body
+
+
 def test_body_change_keeps_stable_notice_identity_for_revision_detection() -> None:
     source = load_source_file(SOURCE_PATH)
     html = FIXTURE.read_text(encoding="utf-8")

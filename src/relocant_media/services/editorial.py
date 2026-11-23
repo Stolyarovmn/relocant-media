@@ -571,11 +571,16 @@ class EditorialService:
             raise DeliveryBlockedError("post draft changed after verification")
         from relocant_media.domain.draft_language import draft_language_reason
         from relocant_media.domain.freshness import draft_date_reason
+        from relocant_media.domain.water_bulletin import draft_water_tanker_reason
 
         if draft_language_reason(outcome.draft.title, outcome.draft.body) is not None:
             raise DeliveryBlockedError("draft requires Russian translation")
-        if draft_date_reason(outcome.draft.title,outcome.draft.body) is not None:
+        if draft_date_reason(outcome.draft.title, outcome.draft.body) is not None:
             raise DeliveryBlockedError("draft requires an absolute event date")
+        if draft_water_tanker_reason(
+            item.url, item.title, outcome.draft.title, outcome.draft.body,
+        ) is not None:
+            raise DeliveryBlockedError("draft tanker location is not tied to the outage")
         if any(run.evidence.get(key) != value for key, value in {
             "source_id": item.source_id, "url": item.url,
             "title": item.title, "body": item.body,

@@ -68,6 +68,82 @@ _RELATIVE = re.compile(
     r"danas|данас|сегодня)\b",
     re.IGNORECASE,
 )
+_DRAFT_SCHEDULE = re.compile(
+    r"^(?:когда|время(?:\s+(?:работ|отключения|перекрытия|начала|окончания))?)\s*:\s*(.*)",
+    re.IGNORECASE,
+)
+_DRAFT_CLOCK = re.compile(
+    r"(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)"
+    r"|(?<![\d.])(?:[01]?\d|2[0-3])\.[0-5]\d(?!\d|\.\s*\d)"
+    r"|\b(?:в|до|к|с)\s+(?:[01]?\d|2[0-3])\s*час(?:а|ов)?\b",
+    re.IGNORECASE,
+)
+_DRAFT_DATE_ISO = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})\b")
+_DRAFT_EVENT = re.compile(
+    r"\b(?:отключат|отключится|отключения?|перекроют|перекрытия?|закроют|"
+    r"перенесут|возобновят|восстановят|останутся\s+без|будет\s+без|"
+    r"пройд[её]т|пройдут|состоится|состоятся|начн[её]тся|начнутся|"
+    r"заверш[аи]тся|завершатся|запланирован\w*|выступит|прочитает)\b",
+    re.IGNORECASE,
+)
+
+
+def _draft_date_parts(text: str) -> list[tuple[int, int, int | None]]:
+    text = re.sub(r"\b(\d{1,2})-го(?=\s)", r"\1", text, flags=re.IGNORECASE)
+    parts = [
+        (int(match["day"] or match["numday"]),
+         _MONTH_LOOKUP[match["month"].lower()] if match["month"] else int(match["nummonth"]),
+         int(year) if (year := match["year"] or match["numyear"]) else None)
+        for match in _DATE.finditer(text)
+    ]
+    for match in _DRAFT_DATE_ISO.finditer(text):
+        year, month, day = map(int, match.groups())
+        parts.append((day, month, year))
+    return parts
+
+
+def _valid_draft_day(parts: tuple[int, int, int | None]) -> bool:
+    day, month, year = parts
+    try:
+        date(year or 2000, month, day)
+    except ValueError:
+        return False
+    return True
+
+
+def _clock_fields_have_dates(title: str, body: str) -> bool:
+    # Inline Telegram formatting and a line break after the heading are common in drafts.
+    plain = re.sub(r"</?b>|\*|__|`", "", body, flags=re.IGNORECASE)
+    lines = [line.strip(" \t•-") for line in plain.splitlines() if line.strip()]
+    fields = []
+    for index, line in enumerate(lines):
+        if match := _DRAFT_SCHEDULE.match(line):
+            field = match[1].strip()
+            if not field and index + 1 < len(lines):
+                next_line = lines[index + 1]
+                if not re.match(r"^[А-Яа-яЁё ]+:", next_line):
+                    field = next_line
+            if _DRAFT_CLOCK.search(field):
+                fields.append(field)
+    if not fields:
+        return True
+
+    # A dated previous incident elsewhere in the body is not the date of this schedule.
+    lead = lines[0] if lines and not _DRAFT_SCHEDULE.match(lines[0]) else ""
+    lead = re.split(r"[!?;]|(?<=[А-Яа-яЁё])\.\s+", lead, maxsplit=1)[0]
+    context = _draft_date_parts(title)
+    if _DRAFT_EVENT.search(lead):
+        context += _draft_date_parts(lead)
+    dated = [_draft_date_parts(field) for field in fields]
+    if any(not all(map(_valid_draft_day, parts)) for parts in dated):
+        return False
+    if all(dated):
+        return True
+    if not context or not all(map(_valid_draft_day, context)):
+        return False
+    all_days = [*context, *(part for parts in dated for part in parts)]
+    return (len({(day, month) for day, month, _ in all_days}) == 1
+            and len({year for _, _, year in all_days if year is not None}) <= 1)
 
 
 def _relative_deadlines(text: str, published: datetime,
@@ -121,7 +197,8 @@ def publication_date_context(
 
 
 def draft_date_reason(title: str, body: str) -> str | None:
-    if re.search(r"\b(?:завтра|послезавтра|сегодня)\b", title + "\n" + body, re.IGNORECASE):
+    if (re.search(r"\b(?:завтра|послезавтра|сегодня)\b", title + "\n" + body, re.IGNORECASE)
+            or not _clock_fields_have_dates(title, body)):
         return "draft_requires_absolute_event_date"
     return None
 

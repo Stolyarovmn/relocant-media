@@ -232,6 +232,7 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     from relocant_media.ai.models import PublicationStatus
     from relocant_media.domain.draft_language import draft_language_reason
     from relocant_media.domain.freshness import draft_date_reason
+    from relocant_media.domain.water_bulletin import draft_water_tanker_reason
 
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
@@ -319,9 +320,16 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     if detail_reason is not None and status in {
             PublicationStatus.READY, PublicationStatus.HUMAN_REVIEW}:
         status, reason = PublicationStatus.HUMAN_REVIEW, detail_reason
-    date_reason=draft_date_reason(draft.title,draft.body)
+    tanker_reason = draft_water_tanker_reason(
+        package.evidence.url, package.evidence.title, draft.title, draft.body,
+    )
+    if tanker_reason is not None and status in {
+        PublicationStatus.READY, PublicationStatus.HUMAN_REVIEW,
+    }:
+        status, reason = PublicationStatus.HUMAN_REVIEW, tanker_reason
+    date_reason = draft_date_reason(draft.title, draft.body)
     if date_reason is not None:
-        status,reason=PublicationStatus.HUMAN_REVIEW,date_reason
+        status, reason = PublicationStatus.HUMAN_REVIEW, date_reason
     from relocant_media.domain.event_map_policy import event_map_review_reason
 
     map_reason = event_map_review_reason(

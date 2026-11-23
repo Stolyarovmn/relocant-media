@@ -11,6 +11,7 @@ import httpx
 from relocant_media.collectors.base import ArticleBatchError, RawItem, article_failure
 from relocant_media.collectors.page_snapshot import normalize_visible_text
 from relocant_media.domain.dedup import normalize_text
+from relocant_media.domain.water_bulletin import is_shared_tanker_heading
 from relocant_media.sources.registry import SourceConfig
 
 _ENTRY = re.compile(r"^(?P<date>\d{2}\.\d{2}\.\d{4}\.)\s+(?P<title>\S.+)$")
@@ -55,6 +56,11 @@ def parse_bvk_planned_works(
         if line in _STOP_LINES:
             break
         if line in _SKIP_LINES:
+            continue
+        if is_shared_tanker_heading(line):
+            if current is not None:
+                records.append(current)
+            current = None
             continue
         match = _ENTRY.match(line)
         if match:
