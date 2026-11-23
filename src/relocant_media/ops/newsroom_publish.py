@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 
 from relocant_media.ops.events_export import EventsFeed, read_events_feed, write_events_feed
-from relocant_media.ops.map_export import MapFeed, read_map_feed, write_map_feed
+from relocant_media.ops.map_export import MapFeed, encode_map_feed, read_map_feed, write_map_feed
 from relocant_media.ops.newsroom_export import snapshot
 from relocant_media.ops.newsroom_merge import merge
 
@@ -59,7 +59,7 @@ def _publish_map(client: httpx.Client, path: Path) -> None:
         write_map_feed(path, read_map_feed(response.content))
         return
     feed = read_map_feed(path.read_bytes())
-    content = feed.model_dump_json(exclude_none=True).encode("utf-8")
+    content = encode_map_feed(feed)
     payload = {"message": "Update public Belgrade map", "branch": BRANCH,
                "content": base64.b64encode(content).decode("ascii")}
     if current.status_code == 200:

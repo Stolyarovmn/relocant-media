@@ -71,6 +71,18 @@ _PUBLIC_HOSTS = {"beograd.rs", "www.beograd.rs", "bvk.rs", "www.bvk.rs",
 _ROAD_PERIOD = re.compile(
     r"Период измене: (\d{2}\.\d{2}\.\d{4})[–-](\d{2}\.\d{2}\.\d{4})\.",
 )
+_TRANSPORT_TITLE = re.compile(
+    r"Информација о (?:промени|измени) режима рада линиј[ае] [јj][аa]вног превоза\s+",
+    re.I,
+)
+_TRANSPORT_WORK = re.compile(r"током извођења радова (?:у улици|на)\s+", re.I)
+_TRANSPORT_STOP = re.compile(r"Информација о привременом измештању стајалишта\s+", re.I)
+_TRANSPORT_ROUTE = re.compile(r"бр\.?\s*(\d{1,4}[A-ZА-Я]?)", re.I)
+_TRANSPORT_WORK_LOCATIONS = (
+    ("продужењу улице ", "Продление улицы"),
+    ("реконструкцији друмског моста у насељу ", "Ремонт моста"),
+    ("уређењу окретнице ", "Работы на разворотной площадке"),
+)
 _MAX_INCIDENTS = 1500
 _MAX_FEED_BYTES = 4_000_000
 _MAX_HOUSES = 1200
@@ -80,6 +92,7 @@ Latitude = Annotated[float, Field(ge=44.2, le=45.2, allow_inf_nan=False)]
 Longitude = Annotated[float, Field(ge=19.8, le=21.1, allow_inf_nan=False)]
 Coordinate = tuple[Latitude, Longitude]
 Kind = Literal["water", "power", "road"]
+EventId = Annotated[str, Field(pattern=r"^event_[a-f0-9]{20}$")]
 
 
 class PublicModel(BaseModel):
@@ -166,13 +179,16 @@ class Area(Window):
         return self
 
 
+RoadLineScope = Literal["sidewalk", "traffic_change"]
+
+
 class Line(PublicModel):
     coordinates: Annotated[tuple[Coordinate, ...], Field(min_length=2, max_length=1000)]
     label: Label
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     boundary: bool = False
-    scope: Literal["sidewalk"] | None = None
+    scope: RoadLineScope | None = None
 
     @model_validator(mode="after")
     def ordered_if_timed(self) -> Line:
@@ -184,9 +200,10 @@ class Line(PublicModel):
 
 
 class Incident(PublicModel):
-    id: Annotated[str, Field(pattern=r"^event_[a-f0-9]{20}$")]
+    id: EventId
     kind: Kind
     title: Label
+    display_title: Label | None = None
     source_url: str
     source_map_url: str | None = None
     starts_at: datetime | None = None
@@ -227,8 +244,8 @@ class Incident(PublicModel):
             Window(starts_at=self.starts_at, ends_at=self.ends_at)
         if self.published_at is not None and self.published_at.tzinfo is None:
             raise ValueError("map publication date requires a timezone")
-        if self.kind != "road" and any(line.scope == "sidewalk" for line in self.lines):
-            raise ValueError("sidewalks belong to the road layer")
+        if self.kind != "road" and any(line.scope is not None for line in self.lines):
+            raise ValueError("road line scopes belong to the road layer")
         return self
 
 
@@ -236,6 +253,17 @@ class MapFeed(PublicModel):
     version: Literal[1] = 1
     generated_at: datetime | None = None
     incidents: Annotated[tuple[Incident, ...], Field(max_length=_MAX_INCIDENTS)] = ()
+    water_aliases: dict[EventId, EventId] = Field(default_factory=dict, max_length=_MAX_INCIDENTS)
+
+    @model_validator(mode="after")
+    def validate_water_aliases(self) -> MapFeed:
+        waters = {event.id for event in self.incidents if event.kind == "water"}
+        for alias, target in self.water_aliases.items():
+            if alias == target or alias not in waters or target not in waters:
+                raise ValueError("water alias must point to a distinct water announcement")
+            if target in self.water_aliases:
+                raise ValueError("water alias chains are not supported")
+        return self
 
 
 def read_map_feed(content: bytes) -> MapFeed:
@@ -244,10 +272,17 @@ def read_map_feed(content: bytes) -> MapFeed:
     return MapFeed.model_validate_json(content)
 
 
-def write_map_feed(path: Path, feed: MapFeed) -> None:
-    content = feed.model_dump_json(exclude_none=True).encode()
+def encode_map_feed(feed: MapFeed) -> bytes:
+    content = feed.model_dump_json(
+        exclude_none=True, exclude=None if feed.water_aliases else {"water_aliases"},
+    ).encode()
     if len(content) > _MAX_FEED_BYTES:
         raise ValueError("map feed too large")
+    return content
+
+
+def write_map_feed(path: Path, feed: MapFeed) -> None:
+    content = encode_map_feed(feed)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_bytes(content)
@@ -265,7 +300,7 @@ def _coords(latitude: object, longitude: object) -> Coordinate | None:
 
 
 def _line(values: list[list[str]], label: str, window: Window | None = None, *,
-          boundary: bool = False, scope: Literal["sidewalk"] | None = None) -> Line | None:
+          boundary: bool = False, scope: RoadLineScope | None = None) -> Line | None:
     coords = [_coords(*value) if isinstance(value, list) and len(value) == 2 else None
               for value in values]
     if None in coords or len(set(coords)) < 2:
@@ -276,11 +311,14 @@ def _line(values: list[list[str]], label: str, window: Window | None = None, *,
 
 
 def _incident(
-    document: EvidenceDocument, kind: Kind, title: str, windows: tuple[Window, ...], **extra: Any,
+    document: EvidenceDocument, kind: Kind, title: str, windows: tuple[Window, ...], *,
+    display_title: str | None = None, **extra: Any,
 ) -> Incident:
     return Incident(
         id=map_event_id(document.url), kind=kind, source_url=document.url,
         title=" ".join(title.split())[:260], published_at=document.published_at,
+        display_title=(" ".join(display_title.split())[:260]
+                       if display_title and display_title != title else None),
         starts_at=min((w.starts_at for w in windows), default=None),
         ends_at=max((w.ends_at for w in windows), default=None), windows=windows, **extra,
     )
@@ -507,13 +545,45 @@ def _water(
                     pins.append(Pin(lat=position[0], lon=position[1], label=name, approximate=True))
     fallback_title = (f"Отключение воды · {reported[0]}" if reported else
                       f"Отключение воды · {segments[0].street}" if segments else document.title)
+    places = tuple(dict.fromkeys(scope.municipality for scope in scopes))
+    broader_scope = any(
+        scope.boundary or scope.whole_streets or scope.addresses or scope.ranges
+        or scope.settlements
+        for scope in scopes
+    )
+    display_title = None
+    if not title and not reported and places and (
+        len(segments) != 1 or len(places) > 1 or broader_scope
+    ):
+        display_title = (f"Отключение воды · {', '.join(places)}"
+                         if len(places) <= 2 else "Отключение воды в нескольких районах")
     return _incident(
         document, "water", title or fallback_title, windows, segments=segments,
+        display_title=display_title,
         lines=tuple(lines[:16]), source_map_url=point["official_map_url"] if point else None,
         addresses=tuple(houses), points=tuple(pins[:_MAX_HOUSES]), areas=tuple(areas[:_MAX_AREAS]),
         ranges=tuple(ranges[:_MAX_HOUSES]), water_districts=tuple(districts[:120]),
         settlements=tuple(settlements[:120]), reported_scope=reported_scope,
     )
+
+
+def _transport_card_title(original: str) -> str:
+    text = " ".join(original.split())
+    if (stop := _TRANSPORT_STOP.match(text)) is not None:
+        return f"Перенос остановки · {text[stop.end():]}"
+    heading = _TRANSPORT_TITLE.match(text)
+    if heading is None:
+        return original
+    subject = text[heading.end():]
+    if (route := _TRANSPORT_ROUTE.fullmatch(subject)) is not None:
+        return f"Изменения на маршруте №{route[1]}"
+    if (work := _TRANSPORT_WORK.match(subject)) is None:
+        return original
+    place = subject[work.end():]
+    for prefix, label in _TRANSPORT_WORK_LOCATIONS:
+        if place.casefold().startswith(prefix):
+            return f"{label} · {place[len(prefix):]}"
+    return f"Дорожные работы · {place}" if place[:1].isupper() else original
 
 
 def _road(
@@ -542,6 +612,7 @@ def _road(
                 segments.append(segment)
     return _incident(
         document, "road", title or notice.title, (window,), starts_on=start, ends_on=end,
+        display_title=_transport_card_title(notice.title) if title is None else None,
         source_map_url=notice.url, lines=tuple(lines[:3]), segments=tuple(segments[:3]),
     )
 
@@ -560,16 +631,21 @@ def _secretariat_road(
     windows = []
     street = ""
     dates: dict[str, date] = {}
+    fallback = "Дорожные работы"
     for start, end, geometry in resolve_secretariat_stretches(document, streets):
         window = Window(starts_at=datetime.combine(start, time.min, tzinfo=_ZONE),
                         ends_at=datetime.combine(end + timedelta(days=1), time.min, tzinfo=_ZONE))
         segment = Segment.model_validate(geometry["segment"])
         street = segment.street
-        scope: Literal["sidewalk"] | None = None
+        scope: RoadLineScope | None = geometry.get("scope")
         label = f"{street}: {segment.start} — {segment.end}"
-        if geometry.get("scope") == "sidewalk":
-            scope = "sidewalk"
+        if scope == "sidewalk":
+            fallback = "Работы на тротуаре"
             label = f"Тротуар · {label}"
+        elif scope == "traffic_change":
+            fallback = "Изменение движения"
+            label = f"Изменение движения · {label}"
+        if scope is not None:
             dates = {"starts_on": start, "ends_on": end}
         line = _line(geometry["coordinates"], label, window, scope=scope)
         if line is None:
@@ -578,9 +654,41 @@ def _secretariat_road(
         windows.append(window)
     if not lines:
         return None
-    fallback = "Работы на тротуаре" if dates else "Дорожные работы"
     return _incident(document, "road", title or f"{fallback} · {street}", tuple(windows),
-                     source_map_url=document.url, lines=tuple(lines), **dates)
+                     source_map_url=document.url, lines=tuple(lines),
+                     starts_on=dates.get("starts_on"), ends_on=dates.get("ends_on"))
+
+
+def _covered_water_scope(narrow: Incident, full: Incident) -> bool:
+    narrow_districts, full_districts = set(narrow.water_districts), set(full.water_districts)
+    if (not narrow_districts <= full_districts
+            or narrow.archived != full.archived
+            or narrow.reported_scope and narrow.reported_scope != full.reported_scope
+            or narrow.source_map_url and narrow.source_map_url != full.source_map_url):
+        return False
+    fields = ("windows", "segments", "ranges", "addresses", "points", "lines", "areas",
+              "settlements")
+    if narrow_districts == full_districts:
+        return all(set(getattr(narrow, field)) == set(getattr(full, field)) for field in fields)
+    return all(set(getattr(narrow, field)) <= set(getattr(full, field)) for field in fields)
+
+
+def _water_aliases(
+    incidents: tuple[Incident, ...], published: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    waters = [event for event in incidents if event.kind == "water" and event.water_districts]
+    waters.sort(key=lambda event: (-len(event.water_districts), not event.source_map_url,
+                                   not event.reported_scope, event.id not in published,
+                                   event.source_url))
+    canonical: list[Incident] = []
+    aliases = {}
+    for event in waters:
+        covered_by = [full.id for full in canonical if _covered_water_scope(event, full)]
+        if len(covered_by) == 1:
+            aliases[event.id] = covered_by[0]
+        else:
+            canonical.append(event)
+    return aliases
 
 
 def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
@@ -593,7 +701,7 @@ def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
 
 def _verified_transport_revision(
     session: Session, item: RawItem, observed_at: datetime,
-) -> str | None:
+) -> EvidenceDocument | None:
     revision = session.scalar(select(SourceRevision).where(
         SourceRevision.raw_item_id == item.id, SourceRevision.observed_at <= observed_at,
     ).order_by(SourceRevision.observed_at.desc(), SourceRevision.id.desc()).limit(1))
@@ -601,20 +709,24 @@ def _verified_transport_revision(
         return None
     evidence = revision.evidence
     encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    body = evidence.get("body")
+    title, body = evidence.get("title"), evidence.get("body")
     if (hashlib.sha256(encoded.encode()).hexdigest() != revision.snapshot_sha256
             or evidence.get("source_id") != item.source_id
             or evidence.get("article_id") != item.external_id or evidence.get("url") != item.url
+            or not isinstance(title, str) or not title.strip()
             or not isinstance(body, str) or not body.strip()):
         return None
-    return body
+    return EvidenceDocument.model_validate(item, from_attributes=True).model_copy(
+        update={"title": title, "body": body},
+    )
 
 
 def _transport_suspended(session: Session, item: RawItem, observed_at: datetime) -> bool:
     """Скрыть приостановленные работы, сохранив неизменным опубликованный снимок."""
-    return transport_notice_suspended(item.body) or transport_notice_suspended(
-        _verified_transport_revision(session, item, observed_at) or "",
-    )
+    if transport_notice_suspended(item.body):
+        return True
+    revised = _verified_transport_revision(session, item, observed_at)
+    return revised is not None and transport_notice_suspended(revised.body)
 
 
 def _published_road(
@@ -678,6 +790,7 @@ def export_map(
     )
     incidents: dict[str, Incident] = {}
     road_aliases: set[str] = set()
+    published_water: set[str] = set()
     for item, run, post in rows:
         document = EvidenceDocument.model_validate(item, from_attributes=True)
         sent = run is not None and run.delivery_status == "sent" and post is not None
@@ -690,7 +803,7 @@ def export_map(
         elif item.source_id == SECRETARIAT_SOURCE_ID:
             revised = _verified_transport_revision(session, item, observed_at)
             if revised is not None:
-                document = document.model_copy(update={"body": revised})
+                document = revised
                 title = None
             incident = (_secretariat_road(document, title, streets or {})
                         if not transport_notice_suspended(document.body) else None)
@@ -721,12 +834,17 @@ def export_map(
                 and incident.source_map_url != incident.source_url):
             assert incident.source_map_url is not None
             road_aliases.add(incident.source_map_url)
+        if incident.kind == "water" and title is not None:
+            published_water.add(incident.id)
         incidents.setdefault(incident.id, incident)
         if len(incidents) >= _MAX_INCIDENTS:
             break
-    return MapFeed(generated_at=observed_at.astimezone(UTC), incidents=tuple(
+    visible = tuple(
         value for value in incidents.values() if value.source_url not in road_aliases
-    ))
+    )
+    # Keep both official source IDs so already sent buttons can still be resolved.
+    return MapFeed(generated_at=observed_at.astimezone(UTC), incidents=visible,
+                   water_aliases=_water_aliases(visible, frozenset(published_water)))
 
 
 def export_map_snapshot(

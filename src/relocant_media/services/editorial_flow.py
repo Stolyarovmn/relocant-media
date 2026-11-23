@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from itertools import pairwise
 from statistics import median
 from typing import Annotated, Any, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -14,6 +15,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from relocant_media.domain.freshness import evidence_freshness
+from relocant_media.domain.quiet_hours import QUIET_END, QUIET_START
 from relocant_media.domain.topic_tags import TOPIC_CATEGORIES
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
@@ -32,6 +34,7 @@ _EXPIRY_REASONS: tuple[ExpiryReason, ...] = (
     "disruption_already_resolved",
 )
 Count = Annotated[int, Field(strict=True, ge=0)]
+_REPORT_DAY_END = time(21)
 
 
 class Expiry(BaseModel):
@@ -65,10 +68,17 @@ class Latency(Timing):
         return value
 
 
+class PublicationCadence(BaseModel):
+    posts: Count
+    quiet_hour_posts: Count
+    max_daytime_gap_minutes: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None
+
+
 class Day(BaseModel):
     local_date: date
     expired_unreviewed: list[Expiry]
     delivery_latency: list[Latency]
+    publication_cadence: PublicationCadence | None = None
 
 
 class EditorialFlow(BaseModel):
@@ -107,6 +117,25 @@ def _timing(samples: list[float]) -> Timing:
 def _record_interval(samples: list[float], start: datetime | None, end: datetime) -> None:
     if start is not None and start <= end:
         samples.append((end - start).total_seconds() / 60)
+
+
+def _publication_cadence(
+    day: date, delivered_at: list[datetime], now: datetime, zone: ZoneInfo,
+) -> PublicationCadence:
+    opening = datetime.combine(day, QUIET_END, zone)
+    closing = min(datetime.combine(day, _REPORT_DAY_END, zone), now)
+    gap = None
+    if closing > opening:
+        marks = [opening, *sorted(sent for sent in delivered_at if opening < sent < closing),
+                 closing]
+        gap = round(max((right - left).total_seconds() / 60 for left, right in pairwise(marks)), 1)
+    return PublicationCadence(
+        posts=len(delivered_at),
+        quiet_hour_posts=sum(
+            sent.time() < QUIET_END or sent.time() >= QUIET_START for sent in delivered_at
+        ),
+        max_daytime_gap_minutes=gap,
+    )
 
 
 @dataclass
@@ -218,6 +247,25 @@ def editorial_flow(
     for (observed, category), times in sorted(measured.items()):
         latency_by_day[observed].append(times.summary(category))
 
+    delivered_by_day: dict[date, list[datetime]] = defaultdict(list)
+    receipts = session.execute(
+        select(Post.telegram_message_id, Post.published_at)
+        .where(
+            Post.city == city, Post.telegram_message_id > 0, Post.published_at.between(start, now),
+            select(EditorialRun.raw_item_id).where(
+                EditorialRun.post_id == Post.id, EditorialRun.delivery_status == "sent",
+            ).exists(),
+        )
+        .order_by(Post.published_at, Post.id)
+    )
+    seen_messages: set[int] = set()
+    for message_id, sent_at in receipts:
+        if message_id is None or sent_at is None or message_id in seen_messages:
+            continue
+        seen_messages.add(message_id)
+        local = sent_at.astimezone(zone)
+        delivered_by_day[local.date()].append(local)
+
     days = []
     for offset in range(_DAYS):
         day = first_day + timedelta(days=offset)
@@ -229,5 +277,6 @@ def editorial_flow(
                 if observed == day
             ],
             delivery_latency=latency_by_day[day],
+            publication_cadence=_publication_cadence(day, delivered_by_day[day], now, zone),
         ))
     return EditorialFlow(observed_at=now, timezone=zone.key, days=days).model_dump(mode="json")

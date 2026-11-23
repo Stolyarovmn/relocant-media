@@ -376,7 +376,34 @@ def _path(
     return None
 
 
-def _segment_line(segment: dict[str, str], elements: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _connected_crossings(
+    graph: dict[int, set[int]], starts: set[int], ends: set[int],
+) -> tuple[int, int] | None:
+    remaining = set(starts)
+    pair = None
+    while remaining:
+        root = remaining.pop()
+        component = {root}
+        pending = [root]
+        while pending:
+            neighbours = graph.get(pending.pop(), set()) - component
+            component.update(neighbours)
+            pending.extend(neighbours)
+        remaining.difference_update(component)
+        component_ends = ends & component
+        if not component_ends:
+            continue
+        component_starts = starts & component
+        if pair is not None or len(component_starts) != 1 or len(component_ends) != 1:
+            return None
+        pair = next(iter(component_starts)), next(iter(component_ends))
+    return pair
+
+
+def _segment_line(
+    segment: dict[str, str], elements: list[dict[str, Any]], *,
+    allow_disconnected_crossings: bool = False,
+) -> dict[str, Any] | None:
     available = {
         _name(_tags(element).get("name", ""))
         for element in elements
@@ -434,9 +461,16 @@ def _segment_line(segment: dict[str, str], elements: list[dict[str, Any]]) -> di
         return None
     start = memberships[names["street"]] & memberships[names["start"]]
     end = memberships[names["street"]] & memberships[names["end"]]
-    if len(start) != 1 or len(end) != 1 or start == end:
+    pair: tuple[int, int] | None
+    if len(start) == len(end) == 1:
+        pair = next(iter(start)), next(iter(end))
+    elif allow_disconnected_crossings:
+        pair = _connected_crossings(graph, start, end)
+    else:
         return None
-    start_node, end_node = next(iter(start)), next(iter(end))
+    if pair is None or pair[0] == pair[1]:
+        return None
+    start_node, end_node = pair
     path = _path(graph, start_node, end_node)
     if path is None or not 2 <= len(path) <= 1000:
         return None

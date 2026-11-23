@@ -70,6 +70,8 @@ def test_independent_prompts_fetches_and_computed_rubric():
         assert "[тестовый запуск] — обязательная редакционная пометка владельца" in (
             call["system_instruction"])
         assert "Остальной заголовок проверяй по фактам" in call["system_instruction"]
+        assert "полное имя, школа, домашний адрес" in call["system_instruction"]
+        assert "действующего официального объявления о розыске" in call["system_instruction"]
     assert "utility" not in provider.calls[0]["system_instruction"]
     assert "Один пост — один повод" in provider.calls[1]["system_instruction"]
     assert "Диапазон слов ориентировочный" in provider.calls[1]["system_instruction"]

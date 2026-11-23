@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.orm import Session
 from test_reader_publication import POLICY, material
-from test_reader_resolution import READER_ID, Bot, submission
+from test_reader_resolution import OWNER_ID, READER_ID, Bot, callback, submission
 from test_reader_resolution import engine as reader_engine
 from test_venue_runtime import NOW, URL
 from test_venue_runtime import runtime as venue_runtime
@@ -12,12 +12,17 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.collectors.telegram_topics import TopicLead
 from relocant_media.ops import server_cycle
 from relocant_media.services.reader_publication import material_fingerprint, permission_reason
-from relocant_media.services.reader_resolution import process_reader_resolutions
+from relocant_media.services.reader_resolution import (
+    process_reader_resolutions,
+    record_reader_resolution_callback,
+)
 from relocant_media.services.reader_source_discovery import (
     DISCOVERY_FIELD,
     matches_reader_event,
     pending_source_discovery,
     record_discovery_check,
+    review_candidates,
+    undated_reader_match,
 )
 from relocant_media.services.submission_queue import priority_raw_ids
 from relocant_media.storage.models import RawItem, Submission
@@ -178,3 +183,77 @@ def test_match_uses_event_date_before_ticket_sale_date():
     body = "Представа је 30. новембра.\n\nКарте могу се преузети од 15. новембра."
     assert matches_reader_event(f"{title} 30 ноября", title, body, year=2026, source_year=2026)
     assert not matches_reader_event(f"{title} 15 ноября", title, body, year=2026, source_year=2026)
+
+
+_TITLE = 'Program festivala „Mango Night Market“'
+_OPENING = 'Festival se održava 25. oktobra 2026.\nLokacija: Muzej Savremene Umetnosti'
+_SIGNAL = 'Фестиваль «Mango Night Market».\nПлощадка: Muzej Savremene Umetnosti'
+
+
+def test_undated_match_checks_the_window_named_venue_and_event():
+    timing = {"submitted_at": NOW, "published_at": NOW - timedelta(hours=12)}
+    assert undated_reader_match(_SIGNAL, _TITLE, _OPENING, **timing) == "anchored"
+    assert undated_reader_match(_SIGNAL + "\nЗавтра", _TITLE, _OPENING, **timing) == "review"
+    assert undated_reader_match(
+        _SIGNAL + "\nЦена 500", _TITLE, _OPENING + "\nCena 800", **timing,
+    ) is None
+    assert undated_reader_match(
+        _SIGNAL.replace("Muzej Savremene Umetnosti", "Muzej Istorije Srbije"), _TITLE,
+        _OPENING, **timing,
+    ) is None
+    timing["published_at"] = NOW - timedelta(hours=49)
+    assert undated_reader_match(_SIGNAL, _TITLE, _OPENING, **timing) is None
+
+
+@pytest.mark.asyncio
+async def test_undated_media_signal_shows_source_only_to_editor(runtime, monkeypatch):
+    engine, venue, _, contents, requests = runtime
+    media = venue.model_copy(update={"source_type": "news_media", "ownership": "media"})
+    monkeypatch.setattr(server_cycle, "venue_sources", dict)
+    monkeypatch.setattr(server_cycle, "media_sources", lambda: {media.id: media})
+    contents.update(title=_TITLE, body=_OPENING + "\n" + (
+        "Mango Night Market je program festivala savremene umetnosti u muzeju." * 5
+    ))
+    matched = submission(engine, status="reader_review", accepted_at=NOW.isoformat(),
+                         **source_signal(_SIGNAL))
+    review = submission(engine, status="reader_review", accepted_at=NOW.isoformat(),
+                        **source_signal('Mango Night Market festivala savremene.\nprivate-765'))
+
+    result = await server_cycle.collect_sources(engine)
+    assert result["reader_source_discovery"] == {"checked": 2, "linked": 1, "ambiguous": 0}
+    owner = {"owner_user_id": OWNER_ID, "owner_chat_id": OWNER_ID}
+    bot = Bot()
+    await process_reader_resolutions(engine, bot, enabled=True, **owner)
+    assert not any("private-765" in url for url in requests)
+    assert not any("private-765" in call["text"] for _, call in bot.sent
+                   if call["chat_id"] != OWNER_ID)
+    with Session(engine) as session:
+        linked = session.get(Submission, matched)
+        row = session.get(Submission, review)
+        candidate, = review_candidates(row)
+        assert row.status == "reader_review"
+        assert linked.payload["raw_item_ids"] == [candidate["id"]]
+        assert permission_reason(row.payload, POLICY["channel_id"])
+        card_count, card = next((index, call)
+                                for index, (_, call) in enumerate(bot.sent, start=1)
+                                if "private-765" in call["text"])
+        assert card["protect_content"]
+        assert candidate["url"] in card["text"]
+        button = card["reply_markup"]["inline_keyboard"][0][0]
+        assert button["text"] == "Проверить источник 1"
+
+        action = callback(review, "candidate", message_id=50 + card_count)
+        action["data"] = button["callback_data"]
+        assert record_reader_resolution_callback(
+            session, {**action, "from": {"id": READER_ID}}, **owner,
+        ) is None
+        outdated = {**action, "data": action["data"].rsplit(":", 1)[0] + ":0000000000"}
+        assert not record_reader_resolution_callback(session, outdated, **owner).accepted
+        original = row.payload
+        row.payload = {**row.payload, "text": "Изменилась версия сообщения"}
+        assert not record_reader_resolution_callback(session, action, **owner).accepted
+        row.payload = original
+        assert record_reader_resolution_callback(session, action, **owner).accepted
+        assert row.status == "source_linked"
+        assert row.payload["raw_item_ids"] == [candidate["id"]]
+        assert permission_reason(row.payload, POLICY["channel_id"])

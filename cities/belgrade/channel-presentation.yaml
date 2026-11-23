@@ -2,7 +2,7 @@ version: 1
 channel: eduvbelgrad
 description: |-
   Белград по-русски. Транспорт, отключения, события и сводки.
-  🗺 Карта: https://t.me/relocant_media_belgrade_bot?startapp
+  Посмотреть на карте: https://t.me/relocant_media_belgrade_bot?startapp
   Предложить новость или исправление: @relocant_media_belgrade_bot
 navigation:
   message_id: 4
@@ -25,10 +25,6 @@ navigation:
     Уважаем собеседников. Спам, травлю и раскрытие чужих данных удаляем.
 
     Предложить новость или обсудить сотрудничество — <a href="https://t.me/eduvbelgrad/6">в соседнем закрепе</a>.
-  map_button:
-    text: 🗺 Открыть карту
-    url: https://t.me/relocant_media_belgrade_bot?startapp
-    style: success
 submissions:
   message_id: 6
   # Закреп «Предложка и сотрудничество». Применяется на месте вместе с «Правилами».

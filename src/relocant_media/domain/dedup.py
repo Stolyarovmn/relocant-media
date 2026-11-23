@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -202,6 +202,7 @@ class EventCandidate:
     # dataclasses.replace создаёт чистый кэш при исправлении текста или даты.
     _canonical_cache: str | None = field(default=None, init=False, repr=False, compare=False)
     _content_cache: str | None = field(default=None, init=False, repr=False, compare=False)
+    _revision_url_cache: bool | None = field(default=None, init=False, repr=False, compare=False)
     _title_tokens_cache: frozenset[str] | None = field(
         default=None,
         init=False,
@@ -241,6 +242,15 @@ class EventCandidate:
         assert self._content_cache is not None
         return self._content_cache
 
+    @property
+    def _is_source_revision(self) -> bool:
+        if self._revision_url_cache is None:
+            query = urlsplit(self.resolved_canonical_url).query
+            object.__setattr__(self, "_revision_url_cache",
+                               "__source_revision" in dict(parse_qsl(query)))
+        assert self._revision_url_cache is not None
+        return self._revision_url_cache
+
     def _facts(self, *, include_title: bool) -> _EventFacts:
         cache_name = "_document_facts_cache" if include_title else "_body_facts_cache"
         cached = self._document_facts_cache if include_title else self._body_facts_cache
@@ -254,16 +264,17 @@ class EventCandidate:
             object.__setattr__(self, cache_name, cached)
         return cached
 
+    @property
+    def _title_tokens(self) -> frozenset[str]:
+        if self._title_tokens_cache is None:
+            object.__setattr__(
+                self, "_title_tokens_cache", frozenset(normalize_text(self.title).split()),
+            )
+        assert self._title_tokens_cache is not None
+        return self._title_tokens_cache
+
     def _title_similarity(self, other: EventCandidate) -> float:
-        for candidate in (self, other):
-            if candidate._title_tokens_cache is None:
-                object.__setattr__(
-                    candidate,
-                    "_title_tokens_cache",
-                    frozenset(normalize_text(candidate.title).split()),
-                )
-        left, right = self._title_tokens_cache, other._title_tokens_cache
-        assert left is not None and right is not None
+        left, right = self._title_tokens, other._title_tokens
         return len(left & right) / len(left | right) if left and right else 0.0
 
 
@@ -467,10 +478,7 @@ def same_event(
 
     # Материализованная правка первоисточника уже назначена на новое ревью.
     # Не превращаем её обратно в прочитанный исходный материал через fuzzy.
-    if any(
-        "__source_revision" in dict(parse_qsl(urlsplit(item.resolved_canonical_url).query))
-        for item in (left, right)
-    ):
+    if left._is_source_revision or right._is_source_revision:
         return False
 
     if left.source_id == right.source_id:
@@ -534,6 +542,17 @@ def _publication_content(value: str) -> str:
     return content.rstrip() if separator and is_topic_footer(footer) else plain
 
 
+def _update_active_cluster(
+    index: defaultdict[str, Counter[int]], key: str, cluster: int, increment: int,
+) -> None:
+    counts = index[key]
+    counts[cluster] += increment
+    if not counts[cluster]:
+        del counts[cluster]
+    if not counts:
+        del index[key]
+
+
 def cluster_events(candidates: list[EventCandidate]) -> list[list[EventCandidate]]:
     """Cluster candidates deterministically, preserving the earliest representative."""
     ordered = sorted(
@@ -546,19 +565,32 @@ def cluster_events(candidates: list[EventCandidate]) -> list[list[EventCandidate
     clusters: list[list[EventCandidate]] = []
     by_url: dict[str, set[int]] = defaultdict(set)
     by_content: dict[str, set[int]] = defaultdict(set)
-    active: deque[tuple[datetime, int]] = deque()
-    active_counts: dict[int, int] = {}
+    active: deque[tuple[datetime, EventCandidate, int]] = deque()
+    by_source: defaultdict[str, Counter[int]] = defaultdict(Counter)
+    by_title_token: defaultdict[str, Counter[int]] = defaultdict(Counter)
     for candidate in ordered:
         url, fingerprint = candidate.resolved_canonical_url, candidate.resolved_content_sha256
         possible = by_url[url] | by_content[fingerprint]
         if candidate.published_at is not None:
             lower = candidate.published_at - DEFAULT_EVENT_WINDOW
             while active and active[0][0] < lower:
-                _, expired = active.popleft()
-                active_counts[expired] -= 1
-                if active_counts[expired] == 0:
-                    del active_counts[expired]
-            possible.update(active_counts)
+                _, expired, expired_cluster = active.popleft()
+                _update_active_cluster(by_source, expired.source_id, expired_cluster, -1)
+                for token in expired._title_tokens:
+                    _update_active_cluster(by_title_token, token, expired_cluster, -1)
+            # Same-source transport reprints can have different titles.
+            possible.update(by_source.get(candidate.source_id, ()))
+            tokens = candidate._title_tokens
+            if tokens:
+                # Jaccard similarity cannot exceed intersection size / left title size.
+                # Any qualifying title shares a token in every subset of this size.
+                minimum_overlap = max(1, int(DEFAULT_TITLE_SIMILARITY * len(tokens)))
+                probe_size = len(tokens) - minimum_overlap + 1
+                rare_tokens = sorted(
+                    tokens, key=lambda key: (len(by_title_token.get(key, ())), key),
+                )
+                for token in rare_tokens[:probe_size]:
+                    possible.update(by_title_token.get(token, ()))
         # Сохраняем прежнее правило: присоединение к самой ранней подходящей
         # группе, без слияния остальных групп даже при транзитивном совпадении.
         for cluster_index in sorted(possible):
@@ -572,8 +604,10 @@ def cluster_events(candidates: list[EventCandidate]) -> list[list[EventCandidate
         by_url[url].add(cluster_index)
         by_content[fingerprint].add(cluster_index)
         if candidate.published_at is not None:
-            active.append((candidate.published_at, cluster_index))
-            active_counts[cluster_index] = active_counts.get(cluster_index, 0) + 1
+            active.append((candidate.published_at, candidate, cluster_index))
+            _update_active_cluster(by_source, candidate.source_id, cluster_index, 1)
+            for token in candidate._title_tokens:
+                _update_active_cluster(by_title_token, token, cluster_index, 1)
     return clusters
 
 

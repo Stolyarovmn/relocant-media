@@ -1,4 +1,4 @@
-"""Проверяет описание канала и верхний служебный закреп Белграда."""
+"""Обновляет описание канала Белграда или проверяет закреп карты."""
 import argparse
 import asyncio
 import json
@@ -11,8 +11,8 @@ import yaml
 from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
 from relocant_media.services.channel_presentation import (
     apply_pin_texts,
+    ensure_channel_description,
     ensure_map_pin_on_top,
-    ensure_service_pin_map_button,
 )
 
 BELGRADE = Path("cities/belgrade")
@@ -20,20 +20,20 @@ BELGRADE = Path("cities/belgrade")
 
 async def run(*, apply: bool, pin_map: bool = False,
               pin_existing: int | None = None, texts: bool = False) -> dict[str, object]:
+    if pin_map and texts:
+        raise ValueError("select one channel presentation operation")
     policy = json.loads((BELGRADE / "pin-policy.json").read_text(encoding="utf-8"))
-    config_file = BELGRADE / "channel-presentation.yaml"
-    presentation = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
         bot = TelegramBotAPI(os.environ["TELEGRAM_BOT_TOKEN"], client)
-        if texts:
-            return await apply_pin_texts(bot, policy, presentation, apply=apply)
         if pin_map:
             # Отдельный ручной режим: единственный путь, который отправляет пост карты.
             return await ensure_map_pin_on_top(bot, policy, apply=apply,
                                                pin_existing=pin_existing)
-        return await ensure_service_pin_map_button(
-            bot, policy, presentation, apply=apply, update_description=True,
-        )
+        config_file = BELGRADE / "channel-presentation.yaml"
+        presentation = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        if texts:
+            return await apply_pin_texts(bot, policy, presentation, apply=apply)
+        return await ensure_channel_description(bot, policy, presentation, apply=apply)
 
 
 def main() -> int:

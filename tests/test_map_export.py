@@ -20,11 +20,14 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
+from relocant_media.ops.belgrade_digests import morning_entries
 from relocant_media.ops.map_backfill import parse_targets, plan
 from relocant_media.ops.map_export import (
     Area,
     _power,
     _water,
+    _water_aliases,
+    encode_map_feed,
     export_map,
     export_map_snapshot,
     read_map_feed,
@@ -87,6 +90,14 @@ _SIDEWALK_BODY = (
     "на територији Градске општине Стари град, у временском периоду "
     "14. 11. 2026. до 1. 5. 2027. године.\n\nМапа заузећа"
 )
+_TRAFFIC_CHANGE_URL = (
+    "https://www.bgsaobracaj.rs/vest/5438/izmena-rezima-saobraca%D1%98a-u-ul-dr-velizara-kosanovica"
+)
+_TRAFFIC_CHANGE_BODY = (
+    "Биће измењен режим саобраћаја у ул. Др Велизара Косановића, од ул. Паје Јовановића "
+    "до ул. Живка Давидовића, на територији Градске општине Звездара, "
+    "у временском периоду од 23. 11. 2026. до 21. 12. 2026. године.\n\nМапа заузећа"
+)
 
 
 def _listed_document(body: str = _LISTED_ROAD) -> EvidenceDocument:
@@ -94,6 +105,67 @@ def _listed_document(body: str = _LISTED_ROAD) -> EvidenceDocument:
         source_id="bgsaobracaj_notices", url=_LISTED_URL, title="Промена саобраћаја у Устаничкој",
         body=body, published_at=datetime(2026, 11, 19, tzinfo=UTC), published_at_precision="day",
     )
+
+
+def test_traffic_change_connects_named_crossings_and_binds_the_post_button(monkeypatch):
+    document = EvidenceDocument(
+        source_id="bgsaobracaj_notices", url=_TRAFFIC_CHANGE_URL,
+        title="Измена режима саобраћаја у ул. Др Велизара Косановића", body=_TRAFFIC_CHANGE_BODY,
+    )
+    streets = load_street_index(Path("cities/belgrade/map/roads.json.gz"))
+    source = load_source_file(Path("cities/belgrade/sources/bgsaobracaj_notices.yaml"))
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        capture_collected_batch(session, [
+            CollectedItem(**document.model_dump(), external_id="5438", source_html="<article/>"),
+        ])
+        session.commit()
+        observed_at = datetime(2026, 11, 23, 18, tzinfo=UTC)
+        (incident,) = export_map(session, observed_at=observed_at, streets=streets).incidents
+        (line,) = incident.lines
+        assert line.scope == "traffic_change"
+        assert line.starts_at == datetime(2026, 11, 22, 23, tzinfo=UTC)
+        assert line.ends_at == datetime(2026, 12, 21, 23, tzinfo=UTC)
+        assert line.coordinates[0] == (44.7900295, 20.5063241)
+        assert line.coordinates[-1] == (44.7921326, 20.5087493)
+
+        profile = load_city_profile("belgrade")
+        presentation = build_presentation(session, 1, (document,), document_ids=[1],
+                                          profile=profile, rubric_id="city_changes")
+        draft = present_draft(
+            RussianDraft(title="На Др Велизара Косановича меняют движение",
+                         body="Участок от Пае Йовановича до Живка Давидовича.",
+                         claim_ids=("street",)),
+            presentation, category="transport",
+        )
+        presentation = bind_native_map_draft(presentation, draft)
+        native = presentation.native_map
+        assert native is not None
+        assert native["point"]["road_phases"][0]["scope"] == line.scope
+        verify_stored_presentation(session, 1, (document,), document_ids=[1],
+                                   presentation=presentation)
+        monkeypatch.setenv("RELOCANT_MAP_TELEGRAM_APP", "https://t.me/relocant_media_belgrade_bot")
+        package = SimpleNamespace(presentation=presentation, outcome=SimpleNamespace(draft=draft))
+        publisher = SimpleNamespace(bot=SimpleNamespace(send_notice_message=lambda *args: None))
+        _, prepared = prepare_native_transport(
+            package, publisher, None,
+            editorial_text=f"{draft.title}\n\n{draft.body}\n\nИсточник: {document.url}",
+        )
+        assert prepared.map_url == f"https://t.me/relocant_media_belgrade_bot?startapp={incident.id}"
+    engine.dispose()
+
+    timed = document.model_copy(update={
+        "body": _TRAFFIC_CHANGE_BODY + " Сваког дана од 8 до 17 часова.",
+    })
+    assert not resolve_secretariat_stretches(timed, streets)
+    # Add another crossing on the connected street. A reachable alternative is ambiguous.
+    streets["звездара"]["живка давидовића"].append([
+        9999999999, "Живка Давидовића",
+        [[9998193542, 44.7920019, 20.508649], [9999999999, 44.7920000, 20.508660]],
+    ])
+    assert not resolve_secretariat_stretches(document, streets)
 
 
 def test_listed_road_phases_use_the_same_source_for_map_and_delivery(monkeypatch):
@@ -482,6 +554,73 @@ def test_public_map_schema_rejects_unexpected_private_fields():
         read_map_feed(b'{"version":1,"incidents":[],"bot_token":"test"}')
 
 
+@pytest.mark.parametrize("bulleted", [False, True])
+def test_water_copy_remains_a_valid_link_and_does_not_duplicate_the_morning_block(bulleted):
+    base = "https://www.beograd.rs/lat/"
+    narrow_url = (base + "servisne-informacije/vodovod-i-kanalizacija/"
+                  "a116752/Planirani-radovi-na-vodovodnoj-mrezi.html")
+    full_url = base + "beoinfo-vesti/a116747/Radovi-na-vodovodnoj-mrezi-u-utorak.html"
+    savski = (
+        "Zbog planiranih radova na vodovodnoj mreži u opštini Savski venac, "
+        "u utorak, 24. novembra, u periodu od 8 do 15 sati, "
+        "bez vode će ostati potrošači u bloku oivičenom Fabrisovom, Zvečanskom, "
+        "Dr Milutina Ivkovića i Oblakovskom ulicom."
+    )
+    vozdovac = (
+        "U opštini Voždovac, u utorak, 24. novembra, u periodu od 8 do 16 sati, "
+        "bez vode će ostati potrošači u ulicama Katarine Ivanović i Rastka Petrovića."
+    )
+    service = savski
+    if bulleted:
+        service = (
+            f"{savski}\n\nVOŽDOVAC\n\n"
+            "U opštini Voždovac, u utorak, 24. novembra, u periodu od 8 do 16 sati, "
+            "bez vode će ostati potrošači u sledećim ulicama:\n\n"
+            "Katarine Ivanović\n\nRastka Petrovića"
+        )
+    now = datetime.fromisoformat("2026-11-24T07:30:00+01:00")
+    source = load_source_file(Path("cities/belgrade/sources/city_beograd_news.yaml"))
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        items = [
+            CollectedItem(
+                source_id=source.id, url=url, external_id=external_id,
+                title="Planirani radovi na vodovodnoj mreži", body=body,
+                published_at=datetime(2026, 11, 22, 7, tzinfo=UTC),
+                published_at_precision="day",
+            ) for url, external_id, body in (
+                (narrow_url, "a116752", service), (full_url, "a116747", f"{savski}\n\n{vozdovac}"),
+            )
+        ]
+        capture_collected_batch(session, items)
+        session.commit()
+        feed = read_map_feed(encode_map_feed(export_map(session, observed_at=now)))
+        narrow_id, full_id = map_event_id(narrow_url), map_event_id(full_url)
+        assert feed.water_aliases == {narrow_id: full_id}
+        assert {notice.id for notice in feed.incidents} == {narrow_id, full_id}
+        narrow, full = (next(notice for notice in feed.incidents if notice.id == event_id)
+                        for event_id in (narrow_id, full_id))
+        municipalities = {scope.municipality for scope in full.water_districts}
+        assert municipalities == {"Voždovac", "Savski venac"}
+        if bulleted:
+            assert set(narrow.water_districts) == set(full.water_districts)
+            assert _water_aliases((narrow, full), frozenset({narrow_id})) == {full_id: narrow_id}
+            distinct_map = narrow.model_copy(update={"source_map_url": narrow_url})
+            distinct_full = full.model_copy(update={"source_map_url": full_url})
+            assert not _water_aliases((distinct_map, distinct_full))
+        changed = narrow.water_districts[0].model_copy(
+            update={"ends_at": narrow.water_districts[0].ends_at + timedelta(minutes=30)},
+        )
+        assert not _water_aliases((narrow.model_copy(update={"water_districts": (changed,)}), full))
+        (entry,) = morning_entries(session, now, None)
+        assert entry.map_id == full_id
+        assert any("08:00–15:00" in row for row in entry.address_rows)
+        assert any("08:00–16:00" in row for row in entry.address_rows)
+    engine.dispose()
+
+
 def test_power_uses_building_shapes_and_resolves_only_existing_numbers_on_the_same_side():
     evidence = power_document("Vračar 9.00 - 11.00 PRVA ULICA: 2–6, 11,")
     polygon = AreaPolygon(
@@ -645,3 +784,52 @@ def test_pages_version_changes_with_a_map_module_but_not_with_new_notices(tmp_pa
     assert build() != before
     assert feed.read_bytes() == b'{"version":1,"incidents":[]}'
     assert b"?v=__MAP_REVISION__" in (source / "index.html").read_bytes()
+
+
+@pytest.mark.parametrize(("subject", "title"), [
+    ("током извођења радова у улици Јурија Гагарина", "Дорожные работы · Јурија Гагарина"),
+    ("током извођења радова на уређењу окретнице „Сремчица“",
+     "Работы на разворотной площадке · „Сремчица“"),
+    ("бр. 76", "Изменения на маршруте №76"),
+])
+def test_unpublished_road_cards_put_the_reason_and_place_in_the_heading(subject, title):
+    notice = _notice().model_copy(update={
+        "title": f"Информација о промени режима рада линија јавног превоза {subject}",
+    })
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", load_source_file(
+            Path("cities/belgrade/sources/bgprevoz_changes.yaml"),
+        ))
+        capture_collected_batch(session, [
+            CollectedItem(**notice.model_dump(), external_id="bgprevoz-1151"),
+        ])
+        (incident,) = export_map(session, observed_at=NOW).incidents
+        assert incident.title == notice.title
+        assert incident.display_title == title
+        assert incident.id == map_event_id(notice.url)
+        assert incident.source_url == notice.url
+        assert incident.ends_on.isoformat() == "2026-12-05"
+        assert not incident.lines
+    engine.dispose()
+
+
+def test_water_map_title_covers_both_parsed_districts_and_keeps_published_title():
+    notice = water_document(body=(
+        "U opštini Savski venac, u petak, 13. novembra 2026. godine, od 8 do 15 sati, "
+        "bez vode će ostati potrošači u ulicama Zvečanska i Oblakovska.\n\n"
+        "U opštini Voždovac, u petak, 13. novembra 2026. godine, od 8 do 16 sati, "
+        "bez vode će ostati potrošači u ulicama Rastka Petrovića i Katarine Ivanović."
+    ))
+    scopes = extract_water_outage_scopes(notice)
+
+    fallback = _water(notice, None, None, {}, None, scopes)
+    published = _water(notice, None, "Плановые отключения воды в двух районах", {}, None, scopes)
+
+    assert fallback.title == notice.title
+    assert fallback.display_title == "Отключение воды · Savski venac, Voždovac"
+    assert published.title == "Плановые отключения воды в двух районах"
+    assert published.display_title is None
+    assert fallback.id == published.id == map_event_id(notice.url)
+    assert [window.ends_at.hour for window in fallback.windows] == [15, 16]

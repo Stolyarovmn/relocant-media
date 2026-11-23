@@ -54,6 +54,27 @@ _STATE_PRIORITY = {
     NewsroomState.EXPIRED: 10,
     NewsroomState.SENT: 11,
 }
+_DELIVERY_CHECKS = ("sending", "uncertain_send", "sent_without_receipt", "receipt_conflict")
+
+
+def public_delivery_checks(value: object) -> dict[str, int] | None:
+    """Read a complete aggregate without substituting zero for missing older fields."""
+    if not isinstance(value, dict) or any(
+        type(value.get(key)) is not int or value[key] < 0 for key in _DELIVERY_CHECKS
+    ):
+        return None
+    return {key: value[key] for key in _DELIVERY_CHECKS}
+
+
+def _delivery_checks(items: list[dict[str, Any]]) -> dict[str, int]:
+    queue = dict.fromkeys(_DELIVERY_CHECKS, 0)
+    uncertain_kinds = {"uncertain": "uncertain_send", "sent": "sent_without_receipt"}
+    for item in items:
+        if item["state"] == NewsroomState.SENDING:
+            queue["sending"] += 1
+        elif item["state"] == NewsroomState.UNCERTAIN:
+            queue[uncertain_kinds.get(item["delivery_status"], "receipt_conflict")] += 1
+    return queue
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -250,6 +271,7 @@ def build_newsroom_inbox(
             "city": city,
             "generated_at": datetime.now(UTC).isoformat(),
             "counts": {},
+            "delivery_checks": _delivery_checks([]),
             "total_events": 0,
             "returned_events": 0,
             "items": [],
@@ -310,7 +332,7 @@ def build_newsroom_inbox(
         return _delivery_state(candidate_run, candidate_post)
 
     transport_priority: dict[NewsroomState | None, int] = {
-        NewsroomState.UNCERTAIN: 0, NewsroomState.SENDING: 1, NewsroomState.SENT: 2,
+        NewsroomState.SENDING: 1, NewsroomState.UNCERTAIN: 2, NewsroomState.SENT: 3,
     }
     control_items: list[dict[str, Any]] = []
     for cluster in clusters:
@@ -319,8 +341,10 @@ def build_newsroom_inbox(
                              if delivery_for(candidate) is not None]
         active_members = [candidate for candidate in cluster
                           if candidate.raw_item_id not in closed_materials]
-        transport_members.sort(key=lambda candidate: transport_priority.get(
-            delivery_for(candidate), 3))
+        transport_members.sort(key=lambda candidate: (
+            0 if runs[candidate.raw_item_id].delivery_status == "uncertain"
+            else transport_priority.get(delivery_for(candidate), 4)
+        ))
         candidates = transport_members or active_members or cluster
         reviewed_member = next(
             (candidate for candidate in candidates if candidate.raw_item_id in runs),
@@ -460,6 +484,7 @@ def build_newsroom_inbox(
         "city": city,
         "generated_at": datetime.now(UTC).isoformat(),
         "counts": dict(sorted(counts.items())),
+        "delivery_checks": _delivery_checks(control_items),
         "total_events": len(control_items),
         "returned_events": len(visible),
         "items": visible,

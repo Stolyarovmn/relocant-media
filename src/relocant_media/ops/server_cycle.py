@@ -166,10 +166,14 @@ from relocant_media.services.reader_reports import (
     with_reader_credit,
 )
 from relocant_media.services.reader_source_discovery import (
+    CHECK_WINDOW,
     DISCOVERY_FIELD,
+    confirmed_source_signal,
     matches_reader_event,
     pending_source_discovery,
     record_discovery_check,
+    submission_time,
+    undated_reader_match,
 )
 from relocant_media.services.source_enrichment import build_media_preparation_packet
 from relocant_media.services.source_recovery import recover_primary_source
@@ -639,6 +643,23 @@ async def collect_sources(
     watch: dict[str, Any] = {"checked": 0, "changed": [], "queued": [], "failures": []}
     watched_changes: list[tuple[int, Any]] = []
     official_source_ids = {key for key, config in sources.items() if config.ownership == "official"}
+    reader_candidate_sources = official_source_ids | media.keys()
+
+    def reader_match(
+        text: str, received: datetime, item: RawItem | CollectedRawItem,
+    ) -> str | None:
+        published_at = item.published_at
+        if published_at is None:
+            return None
+        if item.source_id in official_source_ids and matches_reader_event(
+            text, item.title, item.body, year=now.year, source_year=published_at.year,
+        ):
+            return "anchored"
+        if item.source_id in reader_candidate_sources:
+            return undated_reader_match(
+                text, item.title, item.body, submitted_at=received, published_at=published_at,
+            )
+        return None
 
     def has_article_link(payload: dict[str, Any]) -> bool:
         return any(source_for_url(url, sources) or match_srbija_gov_article_url(url)
@@ -655,7 +676,10 @@ async def collect_sources(
         reader_pending = () if submissions_only else pending_source_discovery(
             session, city="belgrade", now=now, has_article_link=has_article_link,
         )
-        reader_signals = {row.id: str(row.payload.get("text", "")) for row in reader_pending}
+        reader_signals = {
+            row.id: (str(row.payload.get("text", "")), submission_time(row),
+                     material_fingerprint(row.payload)) for row in reader_pending
+        }
         forwarded_tips: dict[tuple[str, int], set[int]] = {}
         for pending_tip in reader_pending:
             check = pending_tip.payload.get(DISCOVERY_FIELD, {})
@@ -667,12 +691,16 @@ async def collect_sources(
             for url in urls:
                 if ref := public_post_ref(url):
                     forwarded_tips.setdefault(ref, set()).add(pending_tip.id)
-        recent_official = []
+        recent_reader_articles = []
         if reader_signals:
-            recent_official = list(session.scalars(select(RawItem).where(
+            recent_reader_articles = list(session.scalars(select(RawItem).where(
                 RawItem.source_id.in_(official_source_ids), RawItem.published_at <= now,
                 RawItem.published_at >= now - timedelta(days=7),
             ).order_by(RawItem.published_at.desc(), RawItem.id.desc()).limit(150)))
+            recent_reader_articles.extend(session.scalars(select(RawItem).where(
+                RawItem.source_id.in_(media.keys()), RawItem.published_at <= now,
+                RawItem.published_at >= now - CHECK_WINDOW,
+            ).order_by(RawItem.published_at.desc(), RawItem.id.desc()).limit(100)))
         published = [] if submissions_only else published_sources(session, now=now)
     result["submission_ids"] = [sid for sid, _ in tips]
     result["submission_raw_ids"] = list(reader_report_ids)
@@ -940,7 +968,7 @@ async def collect_sources(
                 matches_reader = ref in forwarded_tips or any(matches_reader_event(
                     text, lead.text.partition("\n")[0], lead.text,
                     year=now.year, source_year=lead.published_at.year,
-                ) for text in reader_signals.values())
+                ) for text, _, _ in reader_signals.values())
                 channel_leads.append((matches_reader, channel, lead, observation))
         missing = [
             ref for ref in forwarded_tips if ref not in seen_forwards and ref[0] in allowed_channels
@@ -1027,12 +1055,15 @@ async def collect_sources(
                 news_errors.append({"source_id": feed.source_id,
                                     "error_type": type(error).__name__})
         # A recent article can move off the feed. Confirm its saved public URL live again.
-        previous_urls = [item.url for item in recent_official if item.url not in fetched
-                         and item.published_at is not None and any(matches_reader_event(
-                             text, item.title, item.body, year=now.year,
-                             source_year=item.published_at.year,
-                         ) for text in reader_signals.values())]
-        for url in list(dict.fromkeys(previous_urls))[:4]:
+        previous_urls: dict[str, bool] = {}
+        for saved_article in recent_reader_articles:
+            if saved_article.url in fetched or saved_article.url in previous_urls:
+                continue
+            strengths = {reader_match(text, received, saved_article)
+                         for text, received, _ in reader_signals.values()} - {None}
+            if strengths:
+                previous_urls[saved_article.url] = "anchored" in strengths
+        for url in sorted(previous_urls, key=previous_urls.__getitem__, reverse=True)[:4]:
             await resolve_link(url)
         result["utility_map_requests"] = await _enrich_utility_maps(engine, client, articles)
     transport_source = None
@@ -1088,33 +1119,57 @@ async def collect_sources(
             result["priority_submissions"] += bool(ids)
             result["submission_raw_ids"].extend(ids)
         reader_checks: dict[str, int] = {"checked": 0, "linked": 0, "ambiguous": 0}
-        for submission_id, text in reader_signals.items():
-            matched_urls = forwarded_primary.get(submission_id, set()) | {
-                item.url for item in articles if item.source_id in official_source_ids
-                and item.published_at is not None
-                and matches_reader_event(text, item.title, item.body, year=now.year,
-                                         source_year=item.published_at.year)
+        for submission_id, (text, received, fingerprint) in reader_signals.items():
+            row = session.get(Submission, submission_id, with_for_update=True)
+            if (
+                row is None or row.status != "reader_review"
+                or not confirmed_source_signal(row.payload)
+                or material_fingerprint(row.payload) != fingerprint
+            ):
+                continue
+            exact_forwards = forwarded_primary.get(submission_id, set())
+            matched_articles = {
+                article.url: (article, strength) for article in articles
+                if (strength := ("anchored" if article.url in exact_forwards else
+                                 reader_match(text, received, article)))
             }
-            row = session.get(Submission, submission_id)
-            assert row is not None
-            ids = list(session.scalars(select(RawItem.id).where(RawItem.url.in_(matched_urls))))
-            remaining = tuple(remaining_forwards.get(submission_id, ())) if not ids else ()
-            if ids:
-                status = "linked" if len(ids) == 1 else "ambiguous"
-            elif remaining:
+            candidates: dict[str, RawItem] = {}
+            for saved_candidate in session.scalars(select(RawItem).where(
+                RawItem.url.in_(matched_articles), RawItem.source_id.in_(reader_candidate_sources),
+            ).order_by(RawItem.id.desc())):
+                fresh_article, _ = matched_articles[saved_candidate.url]
+                if (saved_candidate.source_id == fresh_article.source_id
+                        and not evidence_changed(saved_candidate, fresh_article)):
+                    candidates.setdefault(saved_candidate.url, saved_candidate)
+            ordered = sorted(
+                candidates.values(),
+                key=lambda candidate: matched_articles[candidate.url][1] == "anchored",
+                reverse=True,
+            )
+            unique_link = len(ordered) == 1 and matched_articles[ordered[0].url][1] == "anchored"
+            remaining = tuple(remaining_forwards.get(submission_id, ())) if not unique_link else ()
+            if remaining:
                 status = "forward_lookup_deferred"
+            elif unique_link:
+                status = "linked"
+            elif candidates:
+                status = "candidate_review"
             elif submission_id in unavailable_forwards:
                 status = "forward_source_unavailable"
             else:
                 status = "no_match"
-            record_discovery_check(row, now=now, status=status, remaining_forwards=remaining)
+            record_discovery_check(
+                row, now=now, status=status, remaining_forwards=remaining,
+                candidates=tuple(ordered) if status == "candidate_review" else (),
+            )
             reader_checks["checked"] += 1
-            if status == "linked":
+            if unique_link:
+                ids = [ordered[0].id]
                 resolve_submission(row, ids, now=now)
                 reader_checks["linked"] += 1
                 result["priority_submissions"] += 1
                 result["submission_raw_ids"].extend(ids)
-            reader_checks["ambiguous"] += int(status == "ambiguous")
+            reader_checks["ambiguous"] += int(len(candidates) > 1)
         result["reader_source_discovery"] = reader_checks
         session.commit()
     result["raw_items_written"] = written

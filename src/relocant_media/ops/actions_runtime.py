@@ -36,6 +36,7 @@ from relocant_media.ops.belgrade_digests import (
     MORNING_ATTEMPT,
     MORNING_SKIP_REASONS,
     morning_delivery,
+    public_digest_days,
 )
 from relocant_media.ops.belgrade_digests import due_slot as due_digest_slot
 from relocant_media.ops.belgrade_digests import run as run_digest
@@ -1247,6 +1248,10 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             city = projection["cities"][0]
             if "last_cycle" not in city and isinstance(last_cycle, dict):
                 city["last_cycle"] = last_cycle
+            if brief := city.get("daily_brief"):
+                editions = public_digest_days(ready, datetime.fromisoformat(manifest["created_at"]))
+                for day in brief["days"]:
+                    day.update(editions.get(day["local_date"], {}))
             projection = merge(projection, projection)
             last_cycle = projection["cities"][0].get("last_cycle")
             provisional.write_text(json.dumps(projection, ensure_ascii=False), encoding="utf-8")

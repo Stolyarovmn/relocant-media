@@ -18,6 +18,7 @@ from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.ops.newsroom_merge import safe_ai_phase
 from relocant_media.ops.public_observations import public_coverage
 from relocant_media.scheduler.models import SchedulerRun
+from relocant_media.services.daily_brief import collect_daily_brief
 from relocant_media.services.editorial_flow import editorial_flow
 from relocant_media.services.kpi import compute_kpi
 from relocant_media.services.newsroom_control import build_newsroom_inbox
@@ -137,16 +138,19 @@ def city_snapshot(
         public_items.append(public)
     observed = observed_at or datetime.now(UTC)
     result.update(runtime_status="available", observed_at=observed.isoformat(),
-                  counts=inbox["counts"], total_events=inbox["total_events"],
+                  counts=inbox["counts"], delivery_checks=inbox["delivery_checks"],
+                  total_events=inbox["total_events"],
                   returned_events=inbox["returned_events"], items=public_items,
                   kpi=compute_kpi(session, city, now=observed))
     cities_root = root / "cities"
     if (cities_root / city / "editorial.yaml").is_file():
         profile = load_city_profile(city, cities_root=cities_root)
+        zone = ZoneInfo(profile.timezone)
         result["editorial_flow"] = editorial_flow(
             session, city, {row["id"] for row in result["sources"]},
-            now=observed, zone=ZoneInfo(profile.timezone),
+            now=observed, zone=zone,
         )
+        result["daily_brief"] = collect_daily_brief(session, city, now=observed, zone=zone)
     result["runs"] = [
         {"id": run.id, "status": run.status, "started_at": iso(run.started_at),
          "finished_at": iso(run.finished_at), "error_type": run.error_type}

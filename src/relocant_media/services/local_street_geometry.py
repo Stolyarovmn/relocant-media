@@ -36,7 +36,7 @@ def load_street_index(path: Path) -> StreetIndex:
 
 
 def local_street_line(
-    segment: dict[str, str], index: StreetIndex,
+    segment: dict[str, str], index: StreetIndex, *, allow_disconnected_crossings: bool = False,
 ) -> dict[str, Any] | None:
     if _valid_input(segment, segment=True) is None:
         return None
@@ -56,7 +56,9 @@ def local_street_line(
                 "geometry": [{"lat": lat, "lon": lon} for _, lat, lon in coordinates],
             })
     elements.extend({"type": "node", "id": node} for node in nodes)
-    return _segment_line(segment, elements)
+    return _segment_line(
+        segment, elements, allow_disconnected_crossings=allow_disconnected_crossings,
+    )
 
 
 def local_street_name(name: str, municipality: str, index: StreetIndex) -> str:
