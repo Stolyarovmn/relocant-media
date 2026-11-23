@@ -158,54 +158,71 @@ def _matches_article(text: str, article: RawItem) -> bool:
     return _same_carrier_report(text, article.title)
 
 
-# Даты не различают направления: одинаковый месяц или число не делают новость той же.
-_MONTH_PREFIXES = ("janu", "janv", "febr", "fevr", "mart", "apri", "aprel", "maj", "maja",
-                   "jun", "juna", "ijun", "jul", "jula", "ijul", "avgu", "sept", "sent",
-                   "okto", "oktj", "nove", "noja", "dece", "deka")
-
-
-def _is_date_term(term: str) -> bool:
-    return term.isdigit() or term.startswith(_MONTH_PREFIXES)
-
-
 def _carriers_in(value: str, carriers: Mapping[str, re.Pattern[str]]) -> set[str]:
     return {carrier for carrier, pattern in carriers.items() if pattern.search(value)}
 
 
+# Направление — названия с заглавной буквы после предлога маршрута (сербский/русский);
+# до трёх строчных слов между ними допускаются: «в китайский город Гуанчжоу».
+_ROUTE = re.compile(
+    r"(?<!\w)(?:za|do|iz|u|ka|između|izmedju|в|во|из|до|между|на)\s+"
+    r"(?:[a-zа-яёčćžšđјљњћџ]+\s+){0,3}?"
+    r"((?:[A-ZА-ЯЁČĆŽŠĐЈЉЊЋЏ][\w'-]+)(?:\s+[A-ZА-ЯЁČĆŽŠĐЈЉЊЋЏ][\w'-]+)?)")
+# Действие перевозчика: разные распознанные действия — разные новости.
+_ACTIONS = {
+    "stop": re.compile(r"(?<!\w)(?:ukid\w*|ukinu\w*|obustav\w*|otkaz\w*|prekid\w*|povlač\w*|"
+                       r"povuk\w*|отмен\w*|приостан\w*|прекра\w*|закрыва\w*|cancel\w*|"
+                       r"suspend\w*)", re.I),
+    "start": re.compile(r"(?<!\w)(?:obnavlj\w*|obnov\w*|vraća\w*|uvod\w*|uvede\w*|pokreć\w*|"
+                        r"pokrenu\w*|возобнов\w*|запуска\w*|запуст\w*|откр\w*|вводит\w*|"
+                        r"resum\w*|launch\w*)", re.I),
+}
+
+
+def _same_name(left: str, right: str) -> bool:
+    a, b = folded(left), folded(right)
+    return a == b or (min(len(a), len(b)) >= 4 and SequenceMatcher(None, a, b).ratio() >= 0.75)
+
+
+def _destinations(text: str, home: tuple[str, ...]) -> list[tuple[str, ...]]:
+    result = []
+    for match in _ROUTE.finditer(text):
+        words = tuple(match[1].split())
+        if not any(_same_name(words[0], alias) for alias in home):
+            result.append(words)
+    return result
+
+
+def _actions(text: str) -> set[str]:
+    return {name for name, pattern in _ACTIONS.items() if pattern.search(text)}
+
+
 def _same_carrier_report(lead: str, title: str, *, city: str = "belgrade") -> bool:
-    """Один перевозчик из реестра города, общее направление и ещё один общий признак.
+    """Тот же перевозчик из реестра города, то же направление и не противоположное действие.
 
     Названия в разных алфавитах сравниваются по сходству транслитерации, без списков замен.
-    Дата и общие слова об отмене без совпадающего направления недостаточны.
+    Уточняющий аэропорт («London Luton») учитывается, когда указан с обеих сторон.
+    Если направление не извлечено, совпадения нет: тему ищет независимый поиск.
     """
+    from relocant_media.domain.city_profile import load_city_profile
+
     carriers = city_carriers(city)
     found = [_carriers_in(value, carriers) for value in (lead[:8000], title)]
     if len(found[0]) != 1 or found[0] != found[1]:
         return False
     pattern = carriers[next(iter(found[0]))]
-
-    def terms(value: str) -> set[str]:
-        return {w for w in re.findall(r"[a-z]{4,}|\d{1,4}", folded(pattern.sub(" ", value)))
-                if w not in _STOP}
-
-    lead_terms = terms(lead[:8000])
-    shared: list[str] = []
-    for term in terms(title):
-        if term in lead_terms or (len(term) >= 5 and not term.isdigit() and any(
-                len(other) >= 5 and SequenceMatcher(None, term, other).ratio() >= 0.75
-                for other in lead_terms)):
-            shared.append(term)
-    names = [term for term in shared if not _is_date_term(term)]
-    # Направление: общее название из одного алфавита в другой или из того же,
-    # но не служебное слово об отмене, которое есть почти в каждой авиановости.
-    return len(shared) >= 2 and any(term not in _AVIATION_WORDS for term in names)
-
-
-_AVIATION_WORDS = frozenset({
-    "letove", "letova", "letovi", "ukida", "ukinut", "obustavlja", "otkazuje", "otkazan",
-    "rejsy", "rejsov", "otmenjaet", "otmenila", "otmenil", "aviakompanija", "flights",
-    "kompanija", "linija", "liniju", "beograd", "beograda", "belgrade", "belgrada",
-})
+    lead, title = pattern.sub(" ", lead[:8000]), pattern.sub(" ", title)
+    actions = _actions(lead), _actions(title)
+    if all(len(a) == 1 for a in actions) and actions[0] != actions[1]:
+        return False
+    home = load_city_profile(city).geography.city_aliases
+    left, right = _destinations(lead, home), _destinations(title, home)
+    if not left or not right:
+        return False
+    return any(
+        _same_name(a[0], b[0]) and (len(a) < 2 or len(b) < 2 or _same_name(a[1], b[1]))
+        for a in left for b in right
+    )
 
 
 async def resolve_public_discovery(
