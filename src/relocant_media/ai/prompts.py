@@ -35,6 +35,25 @@ official notice; never classify banking, legal, immigration, tax or medical guid
 events or transport just to make it auto-publishable. Never invent missing procedural details.
 """
 
+RANK_READER_REPORT = """
+The evidence is a message a reader sent to the channel's suggestion box. It is unverified and
+will only be published as an attributed reader report. Judge local public interest for the
+audience. Reject advertising, self-promotion, sales, politics, personal conflicts, complaints
+about named private persons and messages without a concrete local substance. Choose the actual
+risk category; never relabel an incident, transport disruption or high-risk topic as city,
+culture, events or sport.
+"""
+
+READER_REPORT_DRAFT = """
+Сведения прислал читатель через предложку; редакция их не подтверждала. Подай материал как
+сообщение читателя: в первом абзаце явно укажи источник словами «Как рассказал наш читатель»,
+«Читатель сообщает» или похожими. Не выдавай сказанное за установленный факт, не добавляй
+деталей, причин и оценок, которых нет в сообщении, не называй частных лиц и не приводи
+контакты. Если в evidence есть строка «Подпись, выбранная автором для публикации: …», закончи
+текст отдельной строкой ровно с этой подписью после двоеточия (например «Материал: Анна»).
+Без такой строки подпись не добавляй.
+"""
+
 CLAIMS_SYSTEM = COMMON_GROUNDING_RULES + """
 Extract atomic factual claims that could appear in a news post. Mark a claim material when changing
 or removing it could change a reader's decision or understanding. Every claim must cite at least one

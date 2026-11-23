@@ -157,7 +157,14 @@ from relocant_media.services.published_watch import (
     recent_source_load,
 )
 from relocant_media.services.reader_forwarded_source import public_forward_urls, public_post_ref
-from relocant_media.services.reader_publication import material_fingerprint
+from relocant_media.services.reader_publication import material_fingerprint, reader_credit
+from relocant_media.services.reader_reports import (
+    READER_REPORT_FIELD,
+    is_reader_report_document,
+    materialize_reader_reports,
+    submission_id_for,
+    with_reader_credit,
+)
 from relocant_media.services.reader_source_discovery import (
     DISCOVERY_FIELD,
     matches_reader_event,
@@ -284,6 +291,7 @@ class _CachedOutcome(EditorialPipeline):
 
     def run(
         self, *, city: str, documents: tuple[EvidenceDocument, ...], evergreen: bool = False,
+        reader_report: bool = False,
         recent_publications: list[dict[str, str]] | None = None,
         now: datetime | None = None, source_update: bool = False,
     ) -> EditorialOutcome:
@@ -458,7 +466,7 @@ def _live_document(original: EvidenceDocument, item: CollectedRawItem) -> Eviden
 
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
-    documents = []
+    documents: list[EvidenceDocument] = []
     # Each source is re-read through the same parser used at intake.
     registered = {
         **venue_sources(), **review_only_venue_sources(), **media_sources(), **guide_sources(),
@@ -474,6 +482,11 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
             return await fetch_public_article(source, url, venue_client)
     with httpx.Client(timeout=25, trust_env=False) as client:
         for document in package.event.documents:
+            if is_reader_report_document(document.source_id):
+                # No public page: delivery re-binds the document to the reader's material.
+                documents.append(EvidenceDocument.model_validate(
+                    document.model_dump(include=set(EvidenceDocument.model_fields))))
+                continue
             if document.source_id in registered:
                 with _note_source_unavailable(document.source_id):
                     item = _run_sync(fetch_venue(registered[document.source_id], document.url))
@@ -632,8 +645,13 @@ async def collect_sources(
                    for url in tip_urls(payload))
 
     with Session(engine) as session:
+        # Owner 23.11.2026: the reader's own permitted text becomes an attributed report.
+        reader_report_ids = materialize_reader_reports(session, city="belgrade", now=now)
+        session.commit()
+    with Session(engine) as session:
         rows = batch_submissions(session) if submissions_only else pending_submissions(session)
-        tips = [(row.id, row.payload) for row in rows]
+        # A reader report already has its own document; link search must not reset it.
+        tips = [(row.id, row.payload) for row in rows if READER_REPORT_FIELD not in row.payload]
         reader_pending = () if submissions_only else pending_source_discovery(
             session, city="belgrade", now=now, has_article_link=has_article_link,
         )
@@ -657,7 +675,8 @@ async def collect_sources(
             ).order_by(RawItem.published_at.desc(), RawItem.id.desc()).limit(150)))
         published = [] if submissions_only else published_sources(session, now=now)
     result["submission_ids"] = [sid for sid, _ in tips]
-    result["submission_raw_ids"] = []
+    result["submission_raw_ids"] = list(reader_report_ids)
+    result["reader_reports"] = len(reader_report_ids)
     aliases_path = SOURCES.parent / "event-aliases.json"
     aliases = json.loads(aliases_path.read_text(encoding="utf-8")) if aliases_path.is_file() else {}
     search_budget = PublicSearchBudget()
@@ -1231,7 +1250,8 @@ def _prepare_reviewed(
             recent_publications=[{"id": str(row["id"]), "title": row["title"],
                                   "body": row["body"][:1200], "status": row["status"]}
                                  for row in recent[:20]], source_update=revision is not None,
-            evergreen=source.source_type == GUIDE_SOURCE_TYPE)
+            evergreen=source.source_type == GUIDE_SOURCE_TYPE,
+            reader_report=is_reader_report_document(source.id))
     if (draft_text := outcome.draft) is not None:
         duplicate = find_repeated_publication(
             draft_text.title, draft_text.body,
@@ -1274,6 +1294,11 @@ def _prepare_reviewed(
             source_url=next((item.url for item, policy in members
                              if policy.ownership.strip().casefold() == "official"), raw.url))
     draft = present_draft(draft, presentation, category=outcome.ranking.category)
+    if is_reader_report_document(source.id):
+        with Session(engine) as session:
+            submission = session.get(Submission, submission_id_for(raw) or 0)
+            credit = reader_credit(submission.payload) if submission is not None else ""
+        draft = draft.model_copy(update={"body": with_reader_credit(draft.body, credit)})
     from relocant_media.services.native_map import bind_native_map_draft
 
     presentation = bind_native_map_draft(presentation, draft)

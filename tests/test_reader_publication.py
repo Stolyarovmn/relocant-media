@@ -60,8 +60,17 @@ def test_policy_is_identical_in_cloud_and_packaged_runtime():
 def test_projection_needs_exact_human_review_and_never_exports_private_identity(mode):
     payload = material(mode=mode)
     payload.update(telegram_user_id=42, chat_id=42, first_name="Не публиковать")
+    # Unreviewed files never ship, but no longer block the permitted text (owner 23.11.2026).
+    text_only = public_reader_material(
+        payload, target_channel_id=POLICY["channel_id"], owner_user_id=OWNER)
+    assert text_only["attachments"] == []
+    assert text_only["text"] == payload["text"]
+    photo_only = {**payload, "text": ""}
+    photo_only["reader_publication"] = {**payload["reader_publication"],
+                                        "material_sha256": material_fingerprint(photo_only)}
     with pytest.raises(ValueError, match="ручной"):
-        public_reader_material(payload, target_channel_id=POLICY["channel_id"], owner_user_id=OWNER)
+        public_reader_material(photo_only, target_channel_id=POLICY["channel_id"],
+                               owner_user_id=OWNER)
     payload["reader_media_review"] = {"decision": "approved", "owner_user_id": OWNER,
                                      "at": datetime.now(UTC).isoformat(),
                                      "material_sha256": material_fingerprint(payload)}

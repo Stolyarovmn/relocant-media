@@ -241,15 +241,22 @@ def reader_credit(payload: dict[str, Any], *, kind: str | None = None) -> str:
 def public_reader_material(
     payload: dict[str, Any], *, target_channel_id: int, owner_user_id: int | None,
 ) -> dict[str, Any]:
-    """The only reusable reader-material projection: never include private identity fields."""
-    reason = permission_reason(payload, target_channel_id) or human_review_reason(
-        payload, owner_user_id,
-    )
+    """The only reusable reader-material projection: never include private identity fields.
+
+    Files without the owner's exact content approval are left out (owner 23.11.2026):
+    they no longer block the reader's permitted text, and a file never ships unreviewed.
+    """
+    reason = permission_reason(payload, target_channel_id)
     if reason:
         raise ValueError(reason)
+    if not str(payload.get("text", "")).strip():
+        if reason := human_review_reason(payload, owner_user_id):
+            raise ValueError(reason)
+    attachments = ([] if human_review_reason(payload, owner_user_id)
+                   else payload.get("attachments", []))
     return {"text": payload["text"], "attachments": [
         {**attachment, "credit": reader_credit(payload, kind=attachment["kind"])}
-        for attachment in payload.get("attachments", [])
+        for attachment in attachments
     ], "credit": reader_credit(payload), "material_sha256": material_fingerprint(payload)}
 
 
