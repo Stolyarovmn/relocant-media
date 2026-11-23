@@ -103,6 +103,27 @@ def test_confirmed_outcome_in_source_wins_over_russian_draft_wording():
     ) == PERSONAL_DETAIL_REASON
 
 
+@pytest.mark.parametrize(("sources", "title", "body"), [
+    ([], "Подростка доставили в больницу", "У подростка эпилепсия."),
+    ([], "15-летний пассажир пострадал", "Ему назначили лекарства."),
+    ([], "Полиция ищет свидетелей ДТП", "У школьника эпилепсия."),
+    (["Povređen 15-godišnji putnik"], "В автобусе пострадал пассажир",
+     "Пострадавшему назначили лекарства."),
+    ([], "Объявлен розыск свидетелей ДТП", "У школьника эпилепсия."),
+])
+def test_individual_minor_health_without_diagnosis_label_is_held(sources, title, body):
+    assert personal_detail_reason(sources, title, body) == PERSONAL_DETAIL_REASON
+
+
+@pytest.mark.parametrize(("title", "body"), [
+    ("Школьники изучают первую помощь", "На лекции рассказали об эпилепсии и лекарствах."),
+    ("Клуб отмечает 15-летний юбилей", "В клубе собирают лекарства для больниц."),
+    ("18-летний пассажир пострадал", "Ему назначили лекарства."),
+])
+def test_age_and_general_health_mentions_do_not_imply_a_specific_minor(title, body):
+    assert personal_detail_reason([], title, body) is None
+
+
 def test_old_search_notice_with_fresher_found_message_is_held():
     assert personal_detail_reason(
         [OLD_NOTICE, FOUND_NOTICE], "Пропавший на Врачаре подросток",

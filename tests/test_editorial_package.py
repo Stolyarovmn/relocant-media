@@ -346,3 +346,14 @@ def test_serbian_source_signal_holds_even_with_neutral_draft() -> None:
     result = evaluate_package(parse(payload), now=NOW)
     assert result.status == "human_review"
     assert result.reason == "sensitive_topic_requires_human_review"
+
+
+def test_approved_package_cannot_deliver_implicit_health_details_of_a_minor() -> None:
+    payload = package_payload()
+    payload["outcome"]["ranking"]["category"] = "city"
+    payload["outcome"]["draft"]["title"] = "15-летний пассажир пострадал"
+    payload["outcome"]["draft"]["body"] = "Ему назначили лекарства."
+    _rebind_draft(payload)
+    result = evaluate_package(parse(payload), now=NOW)
+    assert result.status == "human_review"
+    assert result.reason == "sensitive_personal_detail_in_draft"
