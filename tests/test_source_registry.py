@@ -5,7 +5,7 @@ from relocant_media.sources.registry import load_source_registry
 
 def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    assert len(sources) == 36
+    assert len(sources) == 37
     assert len({source.id for source in sources}) == len(sources)
 
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")
@@ -18,6 +18,12 @@ def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     news = next(source for source in sources if source.id == "city_beograd_news")
     assert news.extraction.strategy == "beograd_news_list"
     assert str(news.url) == "https://www.beograd.rs/lat/vesti"
+
+    traffic = next(source for source in sources if source.id == "bgsaobracaj_notices")
+    assert traffic.ownership == "official"
+    assert traffic.categories == ("transport",)
+    assert traffic.extraction.status == "active"
+    assert traffic.extraction.strategy == "bgsaobracaj_notices"
 
     government = next(source for source in sources if source.id == "srbija_gov_news")
     assert government.ownership == "official"
