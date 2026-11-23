@@ -19,9 +19,10 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.ai.road_work_context import road_work_context
+from relocant_media.collectors.beograd_article import BELGRADE_TZ, parse_beograd_article
 from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as SECRETARIAT_SOURCE_ID
 from relocant_media.collectors.bgsaobracaj_notices import match_bgsaobracaj_notice
-from relocant_media.domain.city_profile import load_city_profile
+from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, load_city_profile
 from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.domain.freshness import FreshnessDecision, evidence_freshness
 from relocant_media.domain.policy import (
@@ -30,8 +31,11 @@ from relocant_media.domain.policy import (
     OWNER_DECISION_REASONS,
     SOURCE_REPLACED_REASON,
 )
+from relocant_media.domain.water_bulletin import is_city_water_bulletin
 from relocant_media.scheduler.models import SchedulerRun
+from relocant_media.sources.registry import load_source_file
 from relocant_media.storage.locks import lock_editorial_city
+from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import (
     EditorialRun,
     Post,
@@ -108,8 +112,8 @@ def _objects(
     return raw, source, run, post
 
 
-def _fingerprint(raw: RawItem) -> str:
-    payload = [raw.source_id, raw.url, raw.title, raw.body,
+def _fingerprint(raw: RawItem, *, body: str | None = None) -> str:
+    payload = [raw.source_id, raw.url, raw.title, raw.body if body is None else body,
                raw.published_at.isoformat() if raw.published_at else None,
                raw.published_at_precision]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
@@ -515,6 +519,75 @@ def _reissue_unattempted_event_fallback(
     record.finished_at = None
 
 
+def _adopt_visible_water_date(session: Session, record: SchedulerRun, *, now: datetime) -> bool:
+    """Сохранить прежний бюджет, если в непроверенном источнике появилась только его дата."""
+    data = record.details
+    raw_id = data.get("raw_item_id")
+    if (type(raw_id) is not int or data.get("lifecycle_root_raw_id")
+            or data.get("replacement_raw_item_id")):
+        return False
+    action = data.get("next_action")
+    if data.get("state") == "blocked" and data.get("reason") == "source_or_evidence_changed":
+        history = data.get("history")
+        previous = history[-2] if isinstance(history, list) and len(history) >= 2 else None
+        if not isinstance(previous, dict) or previous.get("state") != "waiting":
+            return False
+        action = previous.get("next_action")
+    elif data.get("state") != "waiting":
+        return False
+    if (action not in {"prepare", "retry_prepare"}
+            or not _validate({**data, "state": "waiting", "next_action": action,
+                              "next_attempt_at": now.isoformat()})
+            or data["attempts"] >= PRIMARY_ATTEMPTS or data["fallback_attempts"]
+            or data["delivery_attempts"] or now >= _stamp(data["deadline_at"])):
+        return False
+    try:
+        raw, source, run, post = _objects(session, raw_id)
+        if (run is not None or post is not None or source.city != "belgrade"
+                or source.id != "city_beograd_news" or source.ownership != "official"
+                or not source.enabled or not source.auto_publish or source.high_risk
+                or not is_city_water_bulletin(raw.url, raw.title)
+                or raw.published_at is None or raw.published_at_precision != "day"):
+            return False
+        date_text, separator, previous_body = raw.body.partition("\n\n")
+        old = data.get("fingerprints", {}).get(str(raw_id))
+        if (not separator or not previous_body or old != _fingerprint(raw, body=previous_body)
+                or date_text != _now(raw.published_at).astimezone(BELGRADE_TZ).strftime("%d.%m.%Y.")
+                or _fresh(raw, source, now).action != "keep"):
+            return False
+        snapshot = session.get(RawItemMediaSnapshot, raw_id)
+        if snapshot is None or snapshot.source_page != raw.url or not snapshot.source_html:
+            return False
+        encoded = snapshot.source_html.encode()
+        if (len(encoded) != snapshot.source_html_bytes
+                or hashlib.sha256(encoded).hexdigest() != snapshot.source_html_sha256):
+            return False
+        config = load_source_file(DEFAULT_CITIES_ROOT / "belgrade/sources/city_beograd_news.yaml")
+        live = parse_beograd_article(snapshot.source_html, config, raw.url)
+        if (live.external_id, live.title, live.body, live.published_at) != (
+            raw.external_id, raw.title, raw.body, raw.published_at,
+        ):
+            return False
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+    if session.scalar(select(Submission.id).where(
+        Submission.kind == "owner_editorial_review",
+        Submission.payload["raw_item_id"].as_integer() == raw_id,
+    ).limit(1)) is not None or session.scalar(select(SourceRevision.id).where(
+        SourceRevision.raw_item_id == raw_id,
+    ).limit(1)) is not None:
+        return False
+    next_at = _stamp(data["next_attempt_at"]) if data.get("state") == "waiting" else now
+    history = list(data.get("evidence_refreshes", []))
+    history.append({"at": now.isoformat(), "raw_item_id": raw_id, "previous_sha256": old})
+    _set(record, now=now, state="waiting", action=action, next_at=next_at,
+         reason="visible_publication_date_verified",
+         fingerprints={**data["fingerprints"], str(raw_id): _fingerprint(raw)},
+         evidence_refreshes=history[-MAX_HISTORY:])
+    record.finished_at = None
+    return True
+
+
 def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
     raw, source, run, post = _objects(session, raw_id)
     record = _record(session, raw, source, now)
@@ -536,8 +609,8 @@ def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
             return _refresh(session, target_id, now)
         _block(session, record, run, post, now=now, reason="invalid_source_replacement")
         return record
-    if (not source.enabled
-            or record.details.get("fingerprints", {}).get(str(raw_id)) != _fingerprint(raw)):
+    changed = record.details.get("fingerprints", {}).get(str(raw_id)) != _fingerprint(raw)
+    if not source.enabled or (changed and not _adopt_visible_water_date(session, record, now=now)):
         _block(session, record, run, post, now=now, reason="source_or_evidence_changed")
         return record
     try:
@@ -1264,6 +1337,8 @@ def sweep_materials(session: Session, *, city: str, now: datetime,
             _restore_unqueued_utility(session, record, now=now)
         elif record.details.get("reason") == "draft_coverage_ungrounded":
             _reopen_unexpired_road_work(session, record, now=now)
+        elif record.details.get("reason") == "source_or_evidence_changed":
+            _adopt_visible_water_date(session, record, now=now)
         elif (reissue_event_fallback
                 and record.details.get("reason") == "fallback_deadline_exceeded"):
             _reissue_unattempted_event_fallback(session, record, now=now)

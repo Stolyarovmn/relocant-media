@@ -1,6 +1,8 @@
 import copy
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from facts_check_helpers import reviewed_package_for
@@ -9,8 +11,10 @@ from sqlalchemy.orm import Session
 from test_bgsaobracaj_notices import ARTICLE, PUBLISHED, SCHEDULE
 
 from relocant_media.ai.package import canonical_json
+from relocant_media.collectors.beograd_article import parse_beograd_article
 from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID
 from relocant_media.domain.policy import SOURCE_REPLACED_REASON
+from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.material_lifecycle import (
     MATERIAL_TTL,
@@ -32,6 +36,8 @@ from relocant_media.services.material_lifecycle import (
     rejection_reviewed,
     sweep_materials,
 )
+from relocant_media.sources.registry import load_source_file
+from relocant_media.storage.media_models import RawItemMediaSnapshot
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source, Submission
 
 NOW = datetime(2026, 11, 19, 12, tzinfo=UTC)
@@ -581,6 +587,55 @@ def test_source_change_and_staleness_do_not_reopen_review(session):
     session.get(RawItem, 1).body = "Изменённые исходные сведения"
     assert not before_attempt(session, 1, now=NOW)
     assert lifecycle_state(session, 1, now=NOW)["reason"] == "source_or_evidence_changed"
+
+
+@pytest.mark.parametrize(
+    "change", ["date", "already_blocked", "different_contents", "expired", "bad_snapshot"],
+)
+def test_visible_water_date_preserves_retry_only_if_the_other_evidence_matches(session, change):
+    source = load_source_file(Path("cities/belgrade/sources/city_beograd_news.yaml"))
+    sync_source(session, "belgrade", source)
+    url = ("https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/"
+           "a116756/Kvarovi-na-vodovodnoj-mrezi-bice-otklonjeni-tokom-dana.html")
+    html = (
+        "<article><h1>Kvarovi na vodovodnoj mreži biće otklonjeni tokom dana</h1>"
+        '<time class="story__time">19.11.2026.</time><p>Do 15.00</p>'
+        "<p>Stari grad: Venizelosova 15</p></article>"
+    )
+    updated = replace(parse_beograd_article(html, source, url), source_html=html)
+    old = replace(updated, body=updated.body.split("\n\n", 1)[1], source_html=None)
+    assert capture_collected_batch(session, [old]) == (1, 0)
+    item = session.scalar(select(RawItem).where(RawItem.url == url))
+    assert item is not None
+    raw_id = item.id
+    assert before_attempt(session, raw_id, now=NOW)
+    original = copy.deepcopy(after_error(session, raw_id, "StructuredOutputError", now=NOW).details)
+    now = NOW + (MATERIAL_TTL if change == "expired" else timedelta(minutes=6))
+    if change == "already_blocked":
+        item.body = updated.body
+        assert lifecycle_state(session, raw_id, now=now)["reason"] == "source_or_evidence_changed"
+    if change == "different_contents":
+        html = html.replace("Do 15.00", "Do 17.00")
+        updated = replace(parse_beograd_article(html, source, url), source_html=html)
+    assert capture_collected_batch(session, [updated]) == (1, 0)
+    session.expire(item)
+    if change == "bad_snapshot":
+        snapshot = session.get(RawItemMediaSnapshot, raw_id)
+        assert snapshot is not None
+        snapshot.source_html_sha256 = "f" * 64
+    sweep = sweep_materials(session, city="belgrade", now=now, raw_ids={raw_id})
+    state = lifecycle_state(session, raw_id, now=now)
+    assert state["deadline_at"] == original["deadline_at"]
+    assert state["attempts"] == original["attempts"] == 1
+    assert state["fallback_attempts"] == state["delivery_attempts"] == 0
+    if change in {"date", "already_blocked"}:
+        assert sweep.due_ids == (raw_id,)
+        assert state["reason"] == "visible_publication_date_verified"
+        assert state["fingerprints"][str(raw_id)] != original["fingerprints"][str(raw_id)]
+    else:
+        assert sweep.due_ids == ()
+        assert state["state"] == "blocked"
+    assert session.get(EditorialRun, raw_id) is None
 
 
 def test_sweep_bulk_loads_5000_synthetic_items_without_n_plus_one(session):
