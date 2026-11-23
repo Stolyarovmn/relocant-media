@@ -65,7 +65,9 @@ async def maintain_pins(bot: TelegramBotAPI, policy: dict[str, Any], *,
                           and origin.get("type") == "channel"
                           and origin.get("chat", {}).get("id") == CHANNEL)
                 original_id = message_id if chat == CHANNEL else origin.get("message_id")
-                if message_id in service or original_id in active:
+                channel_service = set(policy["service_channel_messages"])
+                if (message_id in service or original_id in active
+                        or (linked and original_id in channel_service)):
                     result["preserved"].append({"chat_id": chat, "message_id": message_id})
                     break
                 # Telegram сам закрепляет в обсуждении каждую автопересылку поста канала,

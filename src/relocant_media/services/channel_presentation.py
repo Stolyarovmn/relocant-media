@@ -78,8 +78,8 @@ async def ensure_service_pin_map_button(
 
 MAP_PIN_TEXT = ("🗺 Посмотреть на карте\n"
                 "Перекрытия, отключения воды и света и события Белграда на одной карте.")
-MAP_PIN_MARKUP = {"inline_keyboard": [[
-    {"text": "🗺 Открыть карту", "url": MAP_HOME_URL, "style": "success"}]]}
+MAP_PIN_BUTTON = {"text": "Посмотреть на карте", "url": MAP_HOME_URL, "style": "success"}
+MAP_PIN_MARKUP = {"inline_keyboard": [[MAP_PIN_BUTTON]]}
 
 
 def _active_ad_ids(policy: dict[str, Any], now: datetime) -> set[int]:
@@ -87,42 +87,95 @@ def _active_ad_ids(policy: dict[str, Any], now: datetime) -> set[int]:
             if isinstance(ad, dict) and _ad_active(ad, now)}
 
 
+def _without_map_buttons(markup: object) -> dict[str, Any] | None:
+    """Клавиатура без кнопок главной карты; None, если менять нечего или формат неизвестен."""
+    rows = markup.get("inline_keyboard") if isinstance(markup, dict) else None
+    if not isinstance(rows, list) or not all(
+            isinstance(row, list) and all(isinstance(item, dict) for item in row)
+            for row in rows):
+        return None
+    kept = [[item for item in row if item.get("url") != MAP_HOME_URL] for row in rows]
+    kept = [row for row in kept if row]
+    return None if kept == rows else {"inline_keyboard": kept}
+
+
+async def _pin(bot: TelegramBotAPI, message_id: int) -> None:
+    if await bot._call("pinChatMessage", {"chat_id": CHANNEL, "message_id": message_id,
+                                          "disable_notification": True}) is not True:
+        raise TelegramAPIError("pinChatMessage not confirmed")
+
+
 async def ensure_map_pin_on_top(
     bot: TelegramBotAPI, policy: dict[str, Any], *, apply: bool,
-    now: datetime | None = None,
+    now: datetime | None = None, pin_existing: int | None = None,
 ) -> dict[str, Any]:
-    """Верхний закреп канала — пост карты, а во время оплаченной рекламы — реклама.
+    """Закрепов три: правила, предложка с сотрудничеством и пост карты сверху.
 
-    Telegram показывает в полосе закрепа самый новый по дате закреплённый пост,
-    поэтому старый пост поднять нельзя. При ``apply`` бот один раз тихо отправляет
-    новый пост карты и закрепляет его без звука; прежний пост карты лишь
-    открепляется. Новый ID нужно внести в ``pin-policy.json``.
+    Во время оплаченной рекламы сверху реклама, и пост карты не отправляется.
+    Telegram показывает в полосе закрепа самый новый закреплённый пост, поэтому
+    старый пост поднять нельзя: при ``apply`` бот один раз тихо отправляет новый
+    пост карты и закрепляет его без звука. Кнопка карты есть только у этого поста:
+    с верхнего служебного поста она снимается. Отправка не повторяется
+    автоматически: ID из результата закрепляется через ``pin_existing`` и вносится
+    в ``pin-policy.json``.
     """
     if policy.get("channel_id") != CHANNEL:
         raise ValueError("pin policy targets are not approved")
     now = now or datetime.now(UTC)
     current = policy.get("map_channel_message")
+    service = set(policy.get("service_channel_messages", ()))
     info = await bot._call("getChat", {"chat_id": CHANNEL})
     if not isinstance(info, dict) or info.get("id") != CHANNEL:
         raise TelegramAPIError("channel target mismatch")
     pin = info.get("pinned_message")
     top = pin.get("message_id") if isinstance(pin, dict) else None
     result: dict[str, Any] = {"top_message_id": top, "owner_action_required": False}
+    ads = _active_ad_ids(policy, now)
+    if ads:
+        # Реклама должна быть сверху; публикация карты заблокирована на время размещения.
+        on_top = top in ads
+        result.update(map_pin="active_ad_on_top" if on_top else "active_ad_not_on_top",
+                      owner_action_required=not on_top)
+        return result
     if type(current) is int and top == current:
         result["map_pin"] = "on_top"
         return result
-    if top in _active_ad_ids(policy, now):
-        result["map_pin"] = "active_ad_on_top"
-        return result
-    result["map_pin"] = "would_send"
+    if isinstance(pin, dict) and type(top) is int and top in service and top != current:
+        cleaned = _without_map_buttons(pin.get("reply_markup", {"inline_keyboard": []}))
+        if cleaned is not None:
+            result["service_button"] = "would_remove"
+            if apply:
+                if cleaned["inline_keyboard"]:
+                    await bot.edit_inline_keyboard(CHANNEL, top, cleaned)
+                else:
+                    # Пустая клавиатура: Telegram возвращает пост без reply_markup.
+                    edited = await bot._call("editMessageReplyMarkup", {
+                        "chat_id": CHANNEL, "message_id": top, "reply_markup": cleaned})
+                    if (not isinstance(edited, dict) or edited.get("message_id") != top
+                            or (edited.get("reply_markup") or {}).get("inline_keyboard")):
+                        raise TelegramAPIError("service keyboard removal not confirmed")
+                result["service_button"] = "removed"
+    result["map_pin"] = "would_send" if pin_existing is None else "would_pin"
+    result["owner_action_required"] = True
     if not apply:
-        result["owner_action_required"] = True
         return result
-    message_id = await bot.send_map_pin_message(CHANNEL, MAP_PIN_TEXT, MAP_PIN_MARKUP)
-    result.update(map_pin="sent", map_channel_message=message_id)
-    if await bot._call("pinChatMessage", {"chat_id": CHANNEL, "message_id": message_id,
-                                          "disable_notification": True}) is not True:
-        raise TelegramAPIError("pinChatMessage not confirmed")
+    if pin_existing is None:
+        try:
+            message_id = await bot.send_map_pin_message(CHANNEL, MAP_PIN_TEXT, MAP_PIN_MARKUP)
+        except Exception as error:
+            # Неизвестный результат: не повторять, сначала проверить канал.
+            result.update(map_pin="send_uncertain", error_type=type(error).__name__)
+            return result
+        result.update(map_pin="sent", map_channel_message=message_id)
+    else:
+        message_id = pin_existing
+        result["map_channel_message"] = message_id
+    try:
+        await _pin(bot, message_id)
+    except Exception as error:
+        result.update(map_pin="sent_not_pinned" if pin_existing is None else "pin_failed",
+                      error_type=type(error).__name__)
+        return result
     result["map_pin"] = "pinned"
     if type(current) is int and current != message_id:
         try:
@@ -132,5 +185,4 @@ async def ensure_map_pin_on_top(
         except (httpx.HTTPError, TelegramAPIError):
             result["previous_unpinned"] = False
     # Новый ID ещё не записан в pin-policy.json: без этого цикл не узнает пост.
-    result["owner_action_required"] = True
     return result
