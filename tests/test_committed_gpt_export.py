@@ -41,7 +41,8 @@ def request():
                                            "auto_publish": True}]}]}
 
 
-def configure(context, monkeypatch, *, built=None, worker_code=0, export_error=None):
+def configure(context, monkeypatch, *, built=None, worker_code=0, export_error=None,
+              worker_run_id=None):
     store, old = context
     storage = PrivateStore(old.files)
     operations = []
@@ -65,14 +66,15 @@ def configure(context, monkeypatch, *, built=None, worker_code=0, export_error=N
         assert hashlib.sha256(database.read_bytes()).hexdigest() == (
             store.state["snapshot"]["sha256"])
         operations.append("build_after_commit")
-        return built
+        return built(kwargs.get("scheduler_run_id")) if callable(built) else built
 
     def child(command, env):
         assert store.state["status"] == "busy"
         directory = Path(command[-1])
         directory.mkdir()
         (directory / "server-report.json").write_text(json.dumps({
-            "status": "PRIMARY_PARTIAL", "processing_errors": [{"error_type": "GeminiWorkerError"}],
+            "status": "PRIMARY_PARTIAL", "run_id": worker_run_id,
+            "processing_errors": [{"error_type": "GeminiWorkerError"}],
         }), encoding="utf-8")
         if "relocant_media.ops.backlog_drain" in command:
             (directory / "drain-report.json").write_text(json.dumps({
@@ -119,6 +121,37 @@ def test_no_candidate_does_not_upload_or_emit_success(context, tmp_path, monkeyp
     logs = capsys.readouterr().out
     assert EXPORT_KIND not in logs and "no_pending_candidates" in logs
     assert operations == ["build_after_commit"] and store.state["status"] == "ready"
+
+
+@pytest.mark.parametrize("eligible", [True, False])
+def test_automatic_export_prefers_its_saved_cycle_then_backlog(
+    context, tmp_path, monkeypatch, capsys, eligible,
+):
+    current = {**request(), "scheduler_run_id": 21}
+    old = request()
+    considered = []
+
+    def build(scheduler_run_id):
+        considered.append(scheduler_run_id)
+        if scheduler_run_id == current["scheduler_run_id"]:
+            return current if eligible else None
+        assert scheduler_run_id is None
+        return old
+
+    store, storage, _ = configure(
+        context, monkeypatch, built=build, worker_run_id=current["scheduler_run_id"],
+    )
+    assert runtime.execute(store, storage, work=tmp_path / "work", output=tmp_path / "data.json",
+        folder="ssh_blobs", mode="auto", environment=hosted_environment()) == 0
+    expected_order = [21] if eligible else [21, None]
+    assert considered == expected_order
+    marker = next(json.loads(line) for line in capsys.readouterr().out.splitlines()
+                  if json.loads(line).get("gpt_fallback_export") == EXPORT_KIND)
+    expected = current if eligible else old
+    assert marker["scheduler_run_id"] == expected["scheduler_run_id"]
+    assert storage.download(marker["gpt_fallback_request_sha256"]) == canonical_json(
+        expected,
+    ).encode()
 
 
 @pytest.mark.parametrize("error", ["failure", "digest"])
