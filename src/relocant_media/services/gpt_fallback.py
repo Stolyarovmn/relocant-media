@@ -374,9 +374,21 @@ def build_request(
     with session.no_autoflush:
         profile = load_city_profile("belgrade")
         registry = _registry()
-        windows = [(run, list(dict.fromkeys(refresh_target(session, run, raw_id)
-                    for raw_id in _failed_ids(run, now)))) for run in _recent_runs(session, now)
-                   if scheduler_run_id is None or run.id == scheduler_run_id]
+        windows: list[tuple[SchedulerRun, list[int]]] = []
+        assigned: set[int] = set()
+        # _recent_runs идёт от новых к старым. Повторный сбой оставляем рядом
+        # с другими ошибками своего последнего цикла, пока старые отдельные задачи ждут.
+        for run in _recent_runs(session, now):
+            if scheduler_run_id is not None and run.id != scheduler_run_id:
+                continue
+            failed = []
+            for raw_id in _failed_ids(run, now):
+                target = refresh_target(session, run, raw_id)
+                if target not in assigned:
+                    assigned.add(target)
+                    failed.append(target)
+            if failed:
+                windows.append((run, failed))
         pending = pending_gpt_ids(session, now=now)
         pending_items = session.execute(
             select(RawItem, Source).join(Source).where(RawItem.id.in_(pending)),

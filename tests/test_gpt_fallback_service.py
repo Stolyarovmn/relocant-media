@@ -730,7 +730,10 @@ def test_build_request_caps_five_unique_unresolved_candidates(fallback_session):
     assert [row["raw_item_id"] for row in request["candidates"]] == ids[:5]
 
 
-def test_newer_failure_does_not_displace_older_failure_of_same_priority(fallback_session):
+@pytest.mark.parametrize("repeat_old", [False, True])
+def test_fallback_keeps_oldest_distinct_work_and_groups_repeated_failures(
+    fallback_session, repeat_old,
+):
     session, first, run = fallback_session
     second = RawItem(
         source_id=first.source_id, external_id="fallback-newer",
@@ -742,22 +745,29 @@ def test_newer_failure_does_not_displace_older_failure_of_same_priority(fallback
     )
     session.add(second)
     session.flush()
+    failed_ids = [first.id, second.id] if repeat_old else [second.id]
     later = SchedulerRun(
         task_key=run.task_key, task_type=run.task_type, city=run.city, status="partial",
         scheduled_for=NOW - timedelta(minutes=4), started_at=NOW - timedelta(minutes=4),
         finished_at=NOW - timedelta(minutes=3),
         details={"processing_errors": [
-            {"raw_item_id": second.id, "error_type": "GeminiWorkerError"},
+            {"raw_item_id": raw_id, "error_type": "GeminiWorkerError"} for raw_id in failed_ids
         ]},
     )
     session.add(later)
     session.commit()
 
     request = gpt_fallback.build_request(session, now=NOW)
-    assert request["scheduler_run_id"] == run.id
-    assert [candidate["raw_item_id"] for candidate in request["candidates"]] == [first.id]
+    assert request["scheduler_run_id"] == (later.id if repeat_old else run.id)
+    assert [candidate["raw_item_id"] for candidate in request["candidates"]] == (
+        failed_ids if repeat_old else [first.id]
+    )
     explicit = gpt_fallback.build_request(session, now=NOW, scheduler_run_id=later.id)
     assert explicit["scheduler_run_id"] == later.id
+    assert [candidate["raw_item_id"] for candidate in explicit["candidates"]] == failed_ids
+    old = gpt_fallback.build_request(session, now=NOW, scheduler_run_id=run.id)
+    assert old["scheduler_run_id"] == run.id
+    assert [candidate["raw_item_id"] for candidate in old["candidates"]] == [first.id]
 
 
 def test_fresh_utility_notice_precedes_an_older_gemini_failure(fallback_session):
