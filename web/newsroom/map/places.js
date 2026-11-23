@@ -4,7 +4,7 @@ import {
 } from "./core.js?v=__MAP_REVISION__";
 import { calendarLink, googleCalendarUrl } from "./calendar.js?v=__MAP_REVISION__";
 import { agendaFavorites } from "./favorites.js?v=__MAP_REVISION__";
-import { snapshotNotice } from "./snapshots.js?v=__MAP_REVISION__";
+import { snapshotNotice, snapshotRefreshDue } from "./snapshots.js?v=__MAP_REVISION__";
 
 const kilometers = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 const agendaDate = new Intl.DateTimeFormat("ru", { timeZone: "UTC", day: "numeric", month: "long" });
@@ -116,6 +116,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   let clock;
   let retry;
   let attempts = 0;
+  let lastCheck = 0;
 
   function visiblePlaces(now, day = state.day) {
     return state.entries.filter((place) => !state.favoritesOnly || state.favorites.has(place.id))
@@ -488,6 +489,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
     if (state.loading) return;
     clearTimeout(retry);
     state.loading = true;
+    lastCheck = Date.now();
     if (state.enabled) onSync(state);
     try {
       const { entries, generatedAt, cached } = await loadSnapshot(
@@ -578,10 +580,6 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
   });
   map?.on("zoomend", renderMarkers);
   mobile.addEventListener("change", () => showList(!mobile.matches));
-  document.addEventListener("visibilitychange", () => {
-    if (state.enabled && !document.hidden) render();
-    scheduleClock();
-  });
   showList(!mobile.matches);
   return {
     enter(id = "") {
@@ -595,7 +593,7 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
         state.favoritesOnly = false;
       }
       show();
-      if (!state.loaded || state.pending) void load();
+      if (!state.loaded || state.pending || snapshotRefreshDue(lastCheck)) void load();
       if (!state.favoritesLoaded) void loadFavorites();
     },
     leave() {
@@ -604,6 +602,13 @@ export function setupPlaces({ map, mobile, animate, telegram, byId, make, link, 
       clearTimeout(retry);
       layer?.clearLayers();
       courseLayer?.clearLayers();
+    },
+    resume() {
+      if (state.enabled && !document.hidden) {
+        if (snapshotRefreshDue(lastCheck)) void load();
+        else render();
+      }
+      scheduleClock();
     },
     refresh() {
       attempts = 0;

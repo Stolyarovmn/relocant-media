@@ -1,5 +1,9 @@
 const cacheName = "relocant-map-public-feeds-v1";
 
+export function snapshotRefreshDue(lastCheck, now = Date.now()) {
+  return !lastCheck || now < lastCheck || now - lastCheck >= 60_000;
+}
+
 async function openCache(storage) {
   try {
     return await (storage ?? globalThis.caches)?.open(cacheName);

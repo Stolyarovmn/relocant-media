@@ -9,7 +9,7 @@ import {
   timelineLabel, timelineSteps,
 } from "./layer-views.js?v=__MAP_REVISION__";
 import { setupPlaces } from "./places.js?v=__MAP_REVISION__";
-import { loadSnapshot, snapshotNotice } from "./snapshots.js?v=__MAP_REVISION__";
+import { loadSnapshot, snapshotNotice, snapshotRefreshDue } from "./snapshots.js?v=__MAP_REVISION__";
 import { addressWatch, watchedIncidents } from "./address-watch.js?v=__MAP_REVISION__";
 
 const byId = (id) => document.getElementById(id);
@@ -961,7 +961,7 @@ function scheduleClock() {
   }, Math.min(nextMinute, boundary - now + 10));
 }
 
-async function loadEvents() {
+async function loadEvents({ keepView = false } = {}) {
   if (state.loading) return;
   clearTimeout(refreshTimer);
   state.loading = true;
@@ -984,7 +984,7 @@ async function loadEvents() {
     if (pending) openEvent(pending);
     else {
       render();
-      if (state.digestIds.length) focusDigest();
+      if (state.digestIds.length && !keepView) focusDigest();
       if (state.deepPending && !cached && deepAttempts < 2) {
         deepAttempts += 1;
         refreshTimer = setTimeout(loadEvents, deepAttempts === 1 ? 7000 : 18000);
@@ -1220,14 +1220,6 @@ byId("timeline-reset").addEventListener("click", () => {
   selectTimelineStep(0);
   timelineInput.focus({ preventScroll: true });
 });
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) clearTimeout(clockTimer);
-  else if (state.mode === "incidents") {
-    render();
-    scheduleClock();
-    if (watch.address && Date.now() - lastEventCheck >= 60_000) void loadEvents();
-  }
-});
 announcementToggle.addEventListener("click", () => showAnnouncements(announcementBody.hidden, true));
 selectedPreview.addEventListener("click", () => {
   showAnnouncements(true, true);
@@ -1296,9 +1288,8 @@ function showMode(mode, id = "") {
     else render();
     syncFeed(state);
     scheduleClock();
-    if (!state.loaded || state.deepPending || (watch.address && Date.now() - lastEventCheck >= 60_000)) {
-      void loadEvents();
-    }
+    if (!state.loaded || state.deepPending) void loadEvents();
+    else if (snapshotRefreshDue(lastEventCheck)) void loadEvents({ keepView: true });
     void loadAddressIndex();
   }
 }
@@ -1317,6 +1308,22 @@ telegram?.ready?.();
 showMode(initialRoute.mode, initialRoute.id);
 if (initialRoute.mode === "places") void loadEvents();
 else places.refresh();
+
+function resumeMap() {
+  places.resume();
+  if (document.hidden) {
+    clearTimeout(clockTimer);
+    return;
+  }
+  if (state.mode !== "incidents") return;
+  render();
+  scheduleClock();
+  if (snapshotRefreshDue(lastEventCheck)) void loadEvents({ keepView: true });
+}
+
+document.addEventListener("visibilitychange", resumeMap);
+window.addEventListener("pageshow", resumeMap);
+telegram?.onEvent?.("activated", resumeMap);
 window.addEventListener("online", () => {
   void loadEvents();
   places.refresh();
