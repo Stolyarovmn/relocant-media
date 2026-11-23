@@ -1,6 +1,7 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentInPeriod, incidentStatus, incidentTimes, kinds, launchDigestEvents, launchMap, mapTheme, nextTransition, readIncidents, shareLink,
+  incidentInPeriod, incidentMatchesId, incidentStatus, incidentTimes, kinds, launchDigestEvents,
+  launchMap, mapTheme, nextTransition, readIncidents, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
 } from "./core.js?v=__MAP_REVISION__";
 import { calendarLink } from "./calendar.js?v=__MAP_REVISION__";
@@ -171,8 +172,7 @@ function renderTimeline(realNow) {
   timelineInput.setAttribute("aria-valuetext", label);
   byId("timeline-label").textContent = label;
   byId("timeline-reset").hidden = !state.timelineStep;
-  const bands = timelineBands(state.incidents.filter((incident) =>
-    !state.digestIds.length || state.digestIds.includes(incident.id)), origin, end);
+  const bands = timelineBands(state.incidents.filter(inDigest), origin, end);
   const percent = (time) => `${(time - origin) / (end - origin) * 100}%`;
   const icons = [];
   const tracks = [];
@@ -293,9 +293,13 @@ function showMapNote() {
   note.hidden = !text;
 }
 
+function inDigest(incident) {
+  return !state.digestIds.length || state.digestIds.some((id) => incidentMatchesId(incident, id));
+}
+
 function visibleIncidents(now) {
   return state.incidents.filter((incident) => enabled.has(incident.kind)
-    && (!state.digestIds.length || state.digestIds.includes(incident.id))
+    && inDigest(incident)
     && (showsArchived(incident) || incidentStatus(incident, now) !== "closed"))
     .map((incident) => incidentInPeriod(incident, now, viewPeriod())).filter(Boolean);
 }
@@ -977,6 +981,10 @@ async function loadEvents({ keepView = false } = {}) {
     const { entries, generatedAt, timestamp, cached } = await loadSnapshot(
       "./incidents.json", (feed) => readIncidents(feed, Date.now()),
     );
+    for (const key of ["selected", "previewArchive", "refocusEvent"]) {
+      const canonical = entries.find((event) => incidentMatchesId(event, state[key]));
+      if (canonical) state[key] = canonical.id;
+    }
     state.incidents = entries;
     state.loaded = true;
     state.loadFailed = cached;
@@ -986,7 +994,7 @@ async function loadEvents({ keepView = false } = {}) {
       updateCityCount(Date.now());
       return;
     }
-    const pending = state.incidents.find((event) => event.id === state.deepPending);
+    const pending = state.incidents.find((event) => incidentMatchesId(event, state.deepPending));
     if (pending) openEvent(pending);
     else {
       render();
@@ -1289,7 +1297,7 @@ function showMode(mode, id = "") {
     places.enter(id);
   } else {
     places.leave();
-    const pending = state.incidents.find((incident) => incident.id === state.deepPending);
+    const pending = state.incidents.find((incident) => incidentMatchesId(incident, state.deepPending));
     if (pending) openEvent(pending);
     else render();
     syncFeed(state);

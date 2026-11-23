@@ -6,7 +6,7 @@ import { buildCalendar, googleCalendarUrl } from "../web/newsroom/map/calendar.j
 import { addressWatch, watchedIncidents } from "../web/newsroom/map/address-watch.js";
 import {
   addressHits, addressWindowText, agendaDays, belgradeDate, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
-  incidentInPeriod, incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
+  incidentInPeriod, incidentMatchesId, incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
   mapTheme, nextTransition, placeCategory, placeCountdown, placeOnDay, placeOptionLabel, placeStatus,
   pointsAtScale, readIncidents, readPlaces, searchAddresses, shareLink, straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
@@ -34,6 +34,22 @@ test("возврат к карте обновляет давние данные 
   assert.equal(snapshotRefreshDue(savedNow, savedNow + 59_999), false);
   assert.equal(snapshotRefreshDue(savedNow, savedNow + 60_000), true);
   assert.equal(snapshotRefreshDue(savedNow, savedNow - 1), true);
+});
+
+test("повторная карточка воды не считается отдельной, а обе ссылки открывают общий объект", () => {
+  const savski = { municipality: "Savski venac", boundary: ["Fabrisova", "Oblakovska"], ...savedWindow };
+  const vozdovac = { municipality: "Voždovac", whole_streets: ["Katarine Ivanović"], ...savedWindow };
+  const narrow = watchIncident("a", { water_districts: [savski] });
+  const full = watchIncident("b", { water_districts: [savski, vozdovac] });
+  const unmerged = watchIncident("c", { water_districts: [vozdovac] });
+  const actual = readIncidents({ version: 1, incidents: [narrow, full, unmerged],
+    water_aliases: { [narrow.id]: full.id, [unmerged.id]: "event_doesnotexist" } });
+  assert.deepEqual(actual.map(({ id }) => id), [full.id, unmerged.id]);
+  const selected = actual.find((item) => incidentMatchesId(item, narrow.id));
+  assert.equal(selected.id, full.id);
+  assert(incidentMatchesId(selected, full.id));
+  assert.deepEqual(selected.waterDistricts.map(({ municipality }) => municipality),
+    ["Savski venac", "Voždovac"]);
 });
 
 test("сохранённый адрес учитывает своё время, границы поселения и только близкие дороги", () => {

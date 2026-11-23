@@ -74,11 +74,11 @@ _BOUNDED_BLOCK = re.compile(
     rf"{_OUTAGE}\s+(?:u bloku oivičenom|у блоку оивиченом)\s+"
     r"(?P<streets>[^.;:()]{5,450}?)\s+(?:ulicom|ulicama|улицом|улицама)\b", re.I,
 )
+_STREET_LIST_INTRO = rf"{_OUTAGE}\s+(?:u (?:sledećim )?ulicama|у (?:следећим )?улицама)"
 _STREET_LIST = re.compile(
-    rf"{_OUTAGE}\s+(?:u (?:sledećim )?ulicama|у (?:следећим )?улицама)"
-    r"(?:\s*:\s*|\s+)(?P<streets>[^.;:]{5,800})",
-    re.I,
+    rf"{_STREET_LIST_INTRO}(?:\s*:\s*|\s+)(?P<streets>[^.;:]{{5,800}})", re.I,
 )
+_STREET_LIST_HEADING = re.compile(rf"{_STREET_LIST_INTRO}\s*:\s*$", re.I)
 _STREET_PART = re.compile(rf"(?P<street>{_NAME})(?:\s*\((?P<extent>[^()]+)\))?", re.I)
 _HOUSE_RANGE = re.compile(
     r"(?:od broja|од броја)\s+([1-9]\d{0,4})\s+(?:do broja|до броја)\s+([1-9]\d{0,4})",
@@ -322,6 +322,18 @@ def _list_names(lines: list[str], headings: set[str]) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _street_list_rows(lines: list[str], headings: set[str]) -> tuple[str, ...]:
+    rows: list[str] = []
+    for line in lines:
+        if _AREA_EXCEPTION.search(line):
+            return ()
+        if (line.casefold() in headings or line.isupper() or not line[0].isupper()
+                or _STREET_PART.fullmatch(line) is None):
+            break
+        rows.append(line)
+    return tuple(rows)
+
+
 def _area_names(text: str, list_items: tuple[str, ...]) -> tuple[str, ...]:
     if _AREA_EXCEPTION.search(text):
         return ()
@@ -348,7 +360,7 @@ def _house_addresses(
 
 def _water_scope(
     municipality: str, period: tuple[datetime, datetime], text: str,
-    names: tuple[str, ...],
+    names: tuple[str, ...], street_rows: tuple[str, ...] = (),
 ) -> WaterScope:
     segments = _segments(text, municipality)
     boundary: tuple[str, ...] = ()
@@ -362,23 +374,24 @@ def _water_scope(
                 boundary = tuple(names_in_block)
         street_list = _STREET_LIST.search(text)
         if street_list is not None:
-            for part in re.split(r"\s*,(?![^()]*\))\s*|\s+(?:i|и)\s+(?![^()]*\))",
-                                 street_list["streets"].strip()):
-                entry = _STREET_PART.fullmatch(part)
-                if entry is None or (street := _street_name(entry["street"])) is None:
-                    continue
-                extent = entry["extent"]
-                if extent is None:
-                    whole_streets.append(street)
-                elif (house_range := _HOUSE_RANGE.fullmatch(extent)) is not None:
-                    first, last = map(int, house_range.groups())
-                    if first <= last:
-                        ranges.append(WaterHouseRange(street, first, last))
-                elif (junctions := _JUNCTIONS.fullmatch(extent)) is not None:
-                    start, end = (_street_name(value) for value in junctions.groups())
-                    if start and end and start.casefold() != end.casefold():
-                        segments.append({"municipality": municipality, "street": street,
-                                         "start": start, "end": end})
+            street_rows = tuple(re.split(r"\s*,(?![^()]*\))\s*|\s+(?:i|и)\s+(?![^()]*\))",
+                                         street_list["streets"].strip()))
+        for part in street_rows:
+            entry = _STREET_PART.fullmatch(part)
+            if entry is None or (street := _street_name(entry["street"])) is None:
+                continue
+            extent = entry["extent"]
+            if extent is None:
+                whole_streets.append(street)
+            elif (house_range := _HOUSE_RANGE.fullmatch(extent)) is not None:
+                first, last = map(int, house_range.groups())
+                if first <= last:
+                    ranges.append(WaterHouseRange(street, first, last))
+            elif (junctions := _JUNCTIONS.fullmatch(extent)) is not None:
+                start, end = (_street_name(value) for value in junctions.groups())
+                if start and end and start.casefold() != end.casefold():
+                    segments.append({"municipality": municipality, "street": street,
+                                     "start": start, "end": end})
     if names:
         for pattern in _ENTIRE_AREAS:
             for match in pattern.finditer(text):
@@ -418,13 +431,15 @@ def extract_water_outage_scopes(document: EvidenceDocument) -> tuple[WaterScope,
             continue
         municipality = next(iter(municipalities))
         list_items = _list_names(lines[index + 1:], headings) if _AREA_LIST.search(line) else ()
+        street_rows = (_street_list_rows(lines[index + 1:], headings)
+                       if _STREET_LIST_HEADING.search(line) else ())
         following = lines[index + 1] if index + 1 < len(lines) else ""
         names = () if _AREA_EXCEPTION.match(following) else _area_names(line, list_items)
-        scope = _water_scope(municipality, period, line, names)
+        scope = _water_scope(municipality, period, line, names, street_rows)
         if (scope.settlements or scope.segments or scope.addresses or scope.boundary
                 or scope.whole_streets or scope.ranges):
             scopes.append(scope)
-    if scopes:
+    if scopes or any(_STREET_LIST_HEADING.search(line) for line in lines):
         return tuple(scopes)
     text = _normalized(document.body)
     municipalities = {_normalized(match[1]) for match in _MUNICIPALITY.finditer(text)}

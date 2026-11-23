@@ -20,11 +20,14 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.map_links import map_event_id, map_event_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
+from relocant_media.ops.belgrade_digests import morning_entries
 from relocant_media.ops.map_backfill import parse_targets, plan
 from relocant_media.ops.map_export import (
     Area,
     _power,
     _water,
+    _water_aliases,
+    encode_map_feed,
     export_map,
     export_map_snapshot,
     read_map_feed,
@@ -549,6 +552,73 @@ def test_map_exports_three_layers_and_archived_button_target(tmp_path):
 def test_public_map_schema_rejects_unexpected_private_fields():
     with pytest.raises(ValidationError, match="Extra inputs"):
         read_map_feed(b'{"version":1,"incidents":[],"bot_token":"test"}')
+
+
+@pytest.mark.parametrize("bulleted", [False, True])
+def test_water_copy_remains_a_valid_link_and_does_not_duplicate_the_morning_block(bulleted):
+    base = "https://www.beograd.rs/lat/"
+    narrow_url = (base + "servisne-informacije/vodovod-i-kanalizacija/"
+                  "a116752/Planirani-radovi-na-vodovodnoj-mrezi.html")
+    full_url = base + "beoinfo-vesti/a116747/Radovi-na-vodovodnoj-mrezi-u-utorak.html"
+    savski = (
+        "Zbog planiranih radova na vodovodnoj mreži u opštini Savski venac, "
+        "u utorak, 24. novembra, u periodu od 8 do 15 sati, "
+        "bez vode će ostati potrošači u bloku oivičenom Fabrisovom, Zvečanskom, "
+        "Dr Milutina Ivkovića i Oblakovskom ulicom."
+    )
+    vozdovac = (
+        "U opštini Voždovac, u utorak, 24. novembra, u periodu od 8 do 16 sati, "
+        "bez vode će ostati potrošači u ulicama Katarine Ivanović i Rastka Petrovića."
+    )
+    service = savski
+    if bulleted:
+        service = (
+            f"{savski}\n\nVOŽDOVAC\n\n"
+            "U opštini Voždovac, u utorak, 24. novembra, u periodu od 8 do 16 sati, "
+            "bez vode će ostati potrošači u sledećim ulicama:\n\n"
+            "Katarine Ivanović\n\nRastka Petrovića"
+        )
+    now = datetime.fromisoformat("2026-11-24T07:30:00+01:00")
+    source = load_source_file(Path("cities/belgrade/sources/city_beograd_news.yaml"))
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        items = [
+            CollectedItem(
+                source_id=source.id, url=url, external_id=external_id,
+                title="Planirani radovi na vodovodnoj mreži", body=body,
+                published_at=datetime(2026, 11, 22, 7, tzinfo=UTC),
+                published_at_precision="day",
+            ) for url, external_id, body in (
+                (narrow_url, "a116752", service), (full_url, "a116747", f"{savski}\n\n{vozdovac}"),
+            )
+        ]
+        capture_collected_batch(session, items)
+        session.commit()
+        feed = read_map_feed(encode_map_feed(export_map(session, observed_at=now)))
+        narrow_id, full_id = map_event_id(narrow_url), map_event_id(full_url)
+        assert feed.water_aliases == {narrow_id: full_id}
+        assert {notice.id for notice in feed.incidents} == {narrow_id, full_id}
+        narrow, full = (next(notice for notice in feed.incidents if notice.id == event_id)
+                        for event_id in (narrow_id, full_id))
+        municipalities = {scope.municipality for scope in full.water_districts}
+        assert municipalities == {"Voždovac", "Savski venac"}
+        if bulleted:
+            assert set(narrow.water_districts) == set(full.water_districts)
+            assert _water_aliases((narrow, full), frozenset({narrow_id})) == {full_id: narrow_id}
+            distinct_map = narrow.model_copy(update={"source_map_url": narrow_url})
+            distinct_full = full.model_copy(update={"source_map_url": full_url})
+            assert not _water_aliases((distinct_map, distinct_full))
+        changed = narrow.water_districts[0].model_copy(
+            update={"ends_at": narrow.water_districts[0].ends_at + timedelta(minutes=30)},
+        )
+        assert not _water_aliases((narrow.model_copy(update={"water_districts": (changed,)}), full))
+        (entry,) = morning_entries(session, now, None)
+        assert entry.map_id == full_id
+        assert any("08:00–15:00" in row for row in entry.address_rows)
+        assert any("08:00–16:00" in row for row in entry.address_rows)
+    engine.dispose()
 
 
 def test_power_uses_building_shapes_and_resolves_only_existing_numbers_on_the_same_side():
