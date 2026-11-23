@@ -297,7 +297,7 @@ def freshness_decision(
     if age >= RESOLVED_DISRUPTION_AGE and resolved_disruption(title, body):
         return FreshnessDecision("discard", "disruption_already_resolved")
     local_published = published_at.astimezone(ZoneInfo(timezone_name))
-    timed_ends = []
+    timed_ends: list[datetime] = []
     other_clauses = []
     for clause in re.split(r"[\n;!?]|(?<=[а-яa-z])\.\s+", text, flags=re.IGNORECASE):
         if windows := overnight_road_windows(clause, local_published):
