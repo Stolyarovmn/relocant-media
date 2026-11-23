@@ -19,6 +19,8 @@ from relocant_media.ai.package import (
     package_facts_scope,
 )
 from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
+from relocant_media.ai.road_work_context import ROAD_WORK_CONTEXT_INSTRUCTION, road_work_context
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.draft_language import draft_language_reason
 from relocant_media.domain.freshness import draft_date_reason
 from relocant_media.domain.presentation import title_instruction, valid_title_presentation
@@ -82,6 +84,10 @@ def review_with_repairs(
             return current
         if attempt == max_repairs:
             return current
+        profile = load_city_profile(current.city) if current.outcome.ranking.selection else None
+        source_road_windows = road_work_context(
+            current.event.documents, current.reviews[0].reviewed_at, profile,
+        ) if current.event is not None else []
         raw = provider.generate_json(
             task="repair_draft",
             system_instruction=(
@@ -93,6 +99,7 @@ def review_with_repairs(
                 + CHANNEL_DRAFT_STYLE
                 + writing_instruction(current.outcome.ranking.category,
                                       evergreen=current.evidence.published_at is None)
+                + (ROAD_WORK_CONTEXT_INSTRUCTION if source_road_windows else "")
                 + "Верни только RussianDraft; claim_ids должны ссылаться только на исходные "
                 "подтверждённые утверждения. Нельзя менять подтверждения, оценки и решения "
                 "проверок. После исправления текст снова независимо проверят обе роли."
@@ -101,6 +108,7 @@ def review_with_repairs(
                 "package": current.model_dump(mode="json", exclude={"reviews"}),
                 "review_comments": comments,
                 "allowed_claim_ids": sorted(supported),
+                **({"source_road_windows": source_road_windows} if source_road_windows else {}),
             }),
             response_schema=RussianDraft.model_json_schema(),
         )

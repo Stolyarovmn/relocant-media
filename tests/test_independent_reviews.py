@@ -1,8 +1,9 @@
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from facts_check_helpers import facts_check_for
+from test_bgsaobracaj_notices import PUBLISHED, SCHEDULE, ZONE
 from test_editorial_package import NOW, event_payload, parse
 
 from relocant_media.ai.independent_reviews import reviewed_package
@@ -65,12 +66,46 @@ def test_independent_prompts_fetches_and_computed_rubric():
         assert payload["context_sha256"] == context_sha256(original)
         assert "verdict" not in call["prompt"]
         assert "now_utc" in payload
+        assert "source_road_windows" not in payload
         assert "[тестовый запуск] — обязательная редакционная пометка владельца" in (
             call["system_instruction"])
         assert "Остальной заголовок проверяй по фактам" in call["system_instruction"]
     assert "utility" not in provider.calls[0]["system_instruction"]
     assert "Один пост — один повод" in provider.calls[1]["system_instruction"]
     assert "Диапазон слов ориентировочный" in provider.calls[1]["system_instruction"]
+
+
+@pytest.mark.parametrize(("at", "expected"), [
+    ((23, 5, 19), ["ended", "ended", "active", "upcoming"]),
+    ((23, 6, 0), ["ended", "ended", "ended", "upcoming"]),
+    ((24, 6, 0), ["ended", "ended", "ended", "ended"]),
+])
+def test_explicit_overnight_windows_reach_both_reviewers(at, expected):
+    original = package()
+    live_document = original.event.documents[0]
+    source = live_document.model_copy(update={
+        "body": live_document.body + "\n" + SCHEDULE,
+        "published_at": PUBLISHED,
+    })
+    original = original.model_copy(update={
+        "event": original.event.model_copy(update={"documents": (source,)}),
+    })
+    provider = Provider()
+    now = datetime(2026, 11, *at, tzinfo=ZONE)
+    reviewed_package(original, provider, lambda: documents(original), now=now)
+    contexts = [json.loads(call["prompt"])["source_road_windows"] for call in provider.calls]
+    assert len(contexts[0]) == 1 and contexts[1] == contexts[0]
+    clause = contexts[0][0]
+    assert (clause["source_id"], clause["url"], clause["quote"]) == (
+        source.source_id, source.url, SCHEDULE,
+    )
+    assert [window["status"] for window in clause["windows"]] == expected
+    assert clause["windows"][-1] == {
+        "source_dates": "23./24.11.2026",
+        "starts_at": "2026-11-23T22:00:00+01:00",
+        "ends_at": "2026-11-24T06:00:00+01:00",
+        "status": expected[-1],
+    }
 
 
 @pytest.mark.parametrize("changed_fetch", [1, 2])

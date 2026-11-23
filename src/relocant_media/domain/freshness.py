@@ -11,7 +11,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from relocant_media.domain.publication_time import publication_interval
-from relocant_media.domain.road_work_time import overnight_road_windows
+from relocant_media.domain.road_work_time import overnight_road_windows, road_work_clauses
 
 
 @dataclass(frozen=True)
@@ -299,7 +299,7 @@ def freshness_decision(
     local_published = published_at.astimezone(ZoneInfo(timezone_name))
     timed_ends: list[datetime] = []
     other_clauses = []
-    for clause in re.split(r"[\n;!?]|(?<=[а-яa-z])\.\s+", text, flags=re.IGNORECASE):
+    for clause in road_work_clauses(text):
         if windows := overnight_road_windows(clause, local_published):
             timed_ends.extend(end for _, end in windows)
         else:
