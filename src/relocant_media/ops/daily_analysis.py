@@ -224,6 +224,25 @@ def markdown(report: dict[str, Any]) -> str:
                 )
         if not any(day["delivery_latency"] for day in flow["days"]):
             lines.append("| — | — | — | — | — |")
+        stage_names = ("collection", "before_post_record", "after_post_record", "since_ingestion")
+        stage_rows = [
+            (day["local_date"], latency["category"], latency["stages"])
+            for day in flow["days"] for latency in day["delivery_latency"] if latency.get("stages")
+        ]
+        if stage_rows:
+            lines.extend([
+                "", "Медианы по этапам в минутах. В скобках число замеров.",
+                "", "| День | Рубрика | Источник → сбор | Сбор → запись поста | "
+                "Запись поста → публикация | Сбор → публикация |",
+                "| --- | --- | ---: | ---: | ---: | ---: |",
+            ])
+            for day, category, stages in stage_rows:
+                values = [
+                    "—" if stages[key]["median_minutes"] is None
+                    else f"{stages[key]['median_minutes']} ({stages[key]['samples']})"
+                    for key in stage_names
+                ]
+                lines.append(f"| {day} | {category} | " + " | ".join(values) + " |")
     lines.extend(["", "Следующие действия:", ""])
     lines.extend(f"{index}. {action}" for index, action in enumerate(report["next_actions"], 1))
     lines.extend(["", "Ограничения:", ""])
