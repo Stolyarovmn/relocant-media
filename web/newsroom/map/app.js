@@ -471,6 +471,8 @@ function roadOrientation(incident) {
   return incident.kind === "road" && !incident.lines.length && !incident.areas.length;
 }
 
+const roadGeometryNote = "Точный участок на карте не подтверждён. Подробности в объявлении.";
+
 function bindFeature(layer, group, incident, label, window, fromRegister) {
   const popup = make("div");
   popup.append(make("strong", "", incident.title));
@@ -481,7 +483,7 @@ function bindFeature(layer, group, incident, label, window, fromRegister) {
     popup.append(make("p", "", time));
   }
   if (roadOrientation(incident)) {
-    popup.append(make("p", "", "Ориентир. Точные границы перекрытия не подтверждены."));
+    popup.append(make("p", "", `Ориентир. ${roadGeometryNote}`));
   }
   popup.append(link(incident.source, "Источник ↗"));
   if (fromRegister) {
@@ -778,7 +780,8 @@ function renderSavedAddress(now) {
     times: windows.filter(({ end }) => end > now).map(addressWindowText),
   }));
   const key = JSON.stringify([address, state.loaded, state.loadFailed,
-    rows.map(({ incident, signature, change, times }) => [incident.id, signature, change, times])]);
+    rows.map(({ incident, signature, change, times }) =>
+      [incident.id, incident.title, signature, change, times])]);
   if (watchRenderKey === key) return;
   watchRenderKey = key;
   byId("watched-address").textContent = `${addressLabel(address)} · ${address.municipality}`;
@@ -868,7 +871,7 @@ function focusIncident(item) {
       showMapNote();
       return true;
     }
-    state.focusNote = incident.kind === "road" ? "Точные границы перекрытия не подтверждены."
+    state.focusNote = incident.kind === "road" ? roadGeometryNote
       : incident.officialMap
       ? "Схема участка доступна по ссылке «Официальная карта»."
       : "Геометрия участка недоступна. Подробности в объявлении.";
@@ -876,7 +879,7 @@ function focusIncident(item) {
     return false;
   }
   state.focusNote = roadOrientation(incident)
-    ? "Показан ориентир. Точные границы перекрытия не подтверждены."
+    ? `Ориентир. ${roadGeometryNote}`
     : incident.lines.some((line) => line.scope === "sidewalk")
       ? "Линия показывает отрезок улицы с ограничением на тротуаре." : "";
   showMapNote();

@@ -71,6 +71,18 @@ _PUBLIC_HOSTS = {"beograd.rs", "www.beograd.rs", "bvk.rs", "www.bvk.rs",
 _ROAD_PERIOD = re.compile(
     r"Период измене: (\d{2}\.\d{2}\.\d{4})[–-](\d{2}\.\d{2}\.\d{4})\.",
 )
+_TRANSPORT_TITLE = re.compile(
+    r"Информација о (?:промени|измени) режима рада линиј[ае] [јj][аa]вног превоза\s+",
+    re.I,
+)
+_TRANSPORT_WORK = re.compile(r"током извођења радова (?:у улици|на)\s+", re.I)
+_TRANSPORT_STOP = re.compile(r"Информација о привременом измештању стајалишта\s+", re.I)
+_TRANSPORT_ROUTE = re.compile(r"бр\.?\s*(\d{1,4}[A-ZА-Я]?)", re.I)
+_TRANSPORT_WORK_LOCATIONS = (
+    ("продужењу улице ", "Продление улицы"),
+    ("реконструкцији друмског моста у насељу ", "Ремонт моста"),
+    ("уређењу окретнице ", "Работы на разворотной площадке"),
+)
 _MAX_INCIDENTS = 1500
 _MAX_FEED_BYTES = 4_000_000
 _MAX_HOUSES = 1200
@@ -187,6 +199,7 @@ class Incident(PublicModel):
     id: Annotated[str, Field(pattern=r"^event_[a-f0-9]{20}$")]
     kind: Kind
     title: Label
+    display_title: Label | None = None
     source_url: str
     source_map_url: str | None = None
     starts_at: datetime | None = None
@@ -276,11 +289,14 @@ def _line(values: list[list[str]], label: str, window: Window | None = None, *,
 
 
 def _incident(
-    document: EvidenceDocument, kind: Kind, title: str, windows: tuple[Window, ...], **extra: Any,
+    document: EvidenceDocument, kind: Kind, title: str, windows: tuple[Window, ...], *,
+    display_title: str | None = None, **extra: Any,
 ) -> Incident:
     return Incident(
         id=map_event_id(document.url), kind=kind, source_url=document.url,
         title=" ".join(title.split())[:260], published_at=document.published_at,
+        display_title=(" ".join(display_title.split())[:260]
+                       if display_title and display_title != title else None),
         starts_at=min((w.starts_at for w in windows), default=None),
         ends_at=max((w.ends_at for w in windows), default=None), windows=windows, **extra,
     )
@@ -507,13 +523,45 @@ def _water(
                     pins.append(Pin(lat=position[0], lon=position[1], label=name, approximate=True))
     fallback_title = (f"Отключение воды · {reported[0]}" if reported else
                       f"Отключение воды · {segments[0].street}" if segments else document.title)
+    places = tuple(dict.fromkeys(scope.municipality for scope in scopes))
+    broader_scope = any(
+        scope.boundary or scope.whole_streets or scope.addresses or scope.ranges
+        or scope.settlements
+        for scope in scopes
+    )
+    display_title = None
+    if not title and not reported and places and (
+        len(segments) != 1 or len(places) > 1 or broader_scope
+    ):
+        display_title = (f"Отключение воды · {', '.join(places)}"
+                         if len(places) <= 2 else "Отключение воды в нескольких районах")
     return _incident(
         document, "water", title or fallback_title, windows, segments=segments,
+        display_title=display_title,
         lines=tuple(lines[:16]), source_map_url=point["official_map_url"] if point else None,
         addresses=tuple(houses), points=tuple(pins[:_MAX_HOUSES]), areas=tuple(areas[:_MAX_AREAS]),
         ranges=tuple(ranges[:_MAX_HOUSES]), water_districts=tuple(districts[:120]),
         settlements=tuple(settlements[:120]), reported_scope=reported_scope,
     )
+
+
+def _transport_card_title(original: str) -> str:
+    text = " ".join(original.split())
+    if (stop := _TRANSPORT_STOP.match(text)) is not None:
+        return f"Перенос остановки · {text[stop.end():]}"
+    heading = _TRANSPORT_TITLE.match(text)
+    if heading is None:
+        return original
+    subject = text[heading.end():]
+    if (route := _TRANSPORT_ROUTE.fullmatch(subject)) is not None:
+        return f"Изменения на маршруте №{route[1]}"
+    if (work := _TRANSPORT_WORK.match(subject)) is None:
+        return original
+    place = subject[work.end():]
+    for prefix, label in _TRANSPORT_WORK_LOCATIONS:
+        if place.casefold().startswith(prefix):
+            return f"{label} · {place[len(prefix):]}"
+    return f"Дорожные работы · {place}" if place[:1].isupper() else original
 
 
 def _road(
@@ -542,6 +590,7 @@ def _road(
                 segments.append(segment)
     return _incident(
         document, "road", title or notice.title, (window,), starts_on=start, ends_on=end,
+        display_title=_transport_card_title(notice.title) if title is None else None,
         source_map_url=notice.url, lines=tuple(lines[:3]), segments=tuple(segments[:3]),
     )
 

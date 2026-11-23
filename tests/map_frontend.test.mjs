@@ -102,6 +102,19 @@ test("метки изменений сохраняются до просмотр
   assert.equal(addressWatch(() => { throw new Error("Хранилище выключено"); }).save(savedAddress), false);
 });
 
+test("русский заголовок на карте не выглядит как смена графика сохранённого адреса", () => {
+  const record = watchIncident("a", { title: "Radovi na vodovodnoj mreži",
+    addresses: [{ ...savedAddress, ...savedWindow }] });
+  const rows = (incident) => watchedIncidents(savedAddress,
+    readIncidents({ version: 1, incidents: [incident] }), savedNow);
+  const [before] = rows(record);
+  const [after] = rows({ ...record, display_title: "Отключение воды · Вождовац" });
+
+  assert.equal(after.incident.title, "Отключение воды · Вождовац");
+  assert.equal(after.incident.id, before.incident.id);
+  assert.equal(after.signature, before.signature);
+});
+
 test("старый снимок не открывает архив старше 14 дней", () => {
   const start = "2026-11-01T08:00:00+01:00";
   const end = "2026-11-02T10:00:00+01:00";
