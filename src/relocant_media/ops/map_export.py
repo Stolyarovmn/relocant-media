@@ -683,7 +683,8 @@ def export_map(
             revised = _verified_transport_revision(session, item, observed_at)
             if revised is not None:
                 document = document.model_copy(update={"body": revised})
-            incident = (_secretariat_road(document, title if revised is None else None, streets or {})
+                title = None
+            incident = (_secretariat_road(document, title, streets or {})
                         if not transport_notice_suspended(document.body) else None)
         else:
             html, geography = _source_html(session, item)
