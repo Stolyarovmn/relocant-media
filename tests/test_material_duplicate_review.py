@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy.orm import Session
+from test_dedup import single_route_detour_reprint
 from test_editorial_package import bind_context, package_payload
 from test_material_lifecycle_runtime import BODY, NOW
 from test_material_lifecycle_runtime import engine as _engine
@@ -106,6 +107,44 @@ def test_short_cross_source_reprint_keeps_strong_body_proof(engine):
         session.get(RawItem, 1).body = "Deo Zvezdare ce biti bez vode od 08 do 18 casova."
         session.commit()
         assert proof(session).kind == "reviewed"
+
+
+@pytest.mark.parametrize(("case", "expected"), [
+    ("confirmed", "published"),
+    ("uncertain", "delivery_reconciliation"),
+    ("changed_date", None),
+    ("unknown_host", None),
+])
+def test_official_detour_proof_respects_the_receipt_and_material_changes(engine, case, expected):
+    seed_duplicate(engine)
+    original, reprint = single_route_detour_reprint()
+    with Session(engine) as session:
+        source = Source(id=original.source_id, city="belgrade", name="Город Белград",
+            url="https://www.beograd.rs", source_type="official_news", trust=1,
+            ownership="official", enabled=True, auto_publish=True, high_risk=False)
+        session.add(source)
+        session.flush()
+        anchor, target = session.get(RawItem, 1), session.get(RawItem, 2)
+        for item, notice in ((anchor, reprint), (target, original)):
+            item.source_id, item.url, item.title = source.id, notice.url, notice.title
+            item.body, item.published_at = notice.body, notice.published_at
+            item.published_at_precision = "day"
+        if case == "changed_date":
+            anchor.body = anchor.body.replace("11. decembra", "12. decembra")
+        if case == "unknown_host":
+            anchor.url = anchor.url.replace("www.beograd.rs", "example.com")
+        run = session.get(EditorialRun, target.id)
+        snapshot = _snapshot_member(target, source)
+        run.evidence = {**snapshot, "city": source.city, "documents": [snapshot]}
+        if case == "uncertain":
+            run.delivery_status = "uncertain"
+        else:
+            run.delivery_status = "sent"
+            session.get(Post, run.post_id).telegram_message_id = 124
+        session.commit()
+
+        match = proof(session)
+        assert (match.kind if match is not None else None) == expected
 
 
 @pytest.mark.parametrize("transport", [False, True])

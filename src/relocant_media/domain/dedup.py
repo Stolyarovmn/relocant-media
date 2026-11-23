@@ -285,16 +285,8 @@ def _same_source_transport_reprint(
     if left_host is None or left_host != right_host:
         return False
 
-    if left.source_id == "city_beograd_news":
-        left_detour = _single_route_detour(left)
-        if (
-            left_detour is not None
-            and left_detour == _single_route_detour(right)
-            and _body_token_similarity(
-                _serbian_inflection_key(left.body), _serbian_inflection_key(right.body),
-            ) >= _SAME_SOURCE_BODY_TOKEN_SIMILARITY
-        ):
-            return True
+    if left.source_id == "city_beograd_news" and _matching_single_route_detour(left, right):
+        return True
 
     if (
         left._facts(include_title=False).numbers != right._facts(include_title=False).numbers
@@ -392,6 +384,30 @@ def _single_route_detour(candidate: EventCandidate) -> tuple[object, ...] | None
         normalize_text(direction), ordered_streets,
         normalize_text(stop[2]),
     )
+
+
+def _matching_single_route_detour(left: EventCandidate, right: EventCandidate) -> bool:
+    detour = _single_route_detour(left)
+    return bool(
+        detour is not None and detour == _single_route_detour(right)
+        and _body_token_similarity(
+            _serbian_inflection_key(left.body), _serbian_inflection_key(right.body),
+        ) >= _SAME_SOURCE_BODY_TOKEN_SIMILARITY
+    )
+
+
+def same_verified_route_detour(left: EventCandidate, right: EventCandidate) -> bool:
+    """Строгое совпадение двух снимков официального объявления об объезде."""
+    if (left.source_id != "city_beograd_news" or right.source_id != left.source_id
+            or left.published_at is None or right.published_at is None
+            or abs(left.published_at - right.published_at) > DEFAULT_EVENT_WINDOW):
+        return False
+    for candidate in (left, right):
+        url = urlsplit(candidate.url)
+        if (url.scheme != "https" or url.netloc.casefold() not in {"beograd.rs", "www.beograd.rs"}
+                or "__source_revision" in dict(parse_qsl(url.query, keep_blank_values=True))):
+            return False
+    return _matching_single_route_detour(left, right)
 
 
 def _anchored_transport_reprint(left: EventCandidate, right: EventCandidate) -> bool:
