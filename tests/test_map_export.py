@@ -33,6 +33,7 @@ from relocant_media.services.local_outage_geometry import (
     AreaPolygon,
     address_key,
 )
+from relocant_media.services.local_street_geometry import load_street_index
 from relocant_media.services.transport_map import build_transport_map
 from relocant_media.services.utility_scope import extract_power_scopes
 from relocant_media.services.water_outage_scope import extract_water_outage_scopes
@@ -47,6 +48,66 @@ from relocant_media.storage.models import (
 )
 
 NOW = datetime(2026, 11, 12, 7, tzinfo=UTC)
+
+
+def test_official_road_phases_have_separate_lines_and_follow_valid_revisions():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    source = load_source_file(Path("cities/belgrade/sources/bgsaobracaj_notices.yaml"))
+    streets = load_street_index(Path("cities/belgrade/map/roads.json.gz"))
+    today = datetime(2026, 11, 23, 7, tzinfo=UTC)
+    url = "https://www.bgsaobracaj.rs/vest/5423/vojvode-sime-popovica"
+    body = (
+        "Биће обустављен саобраћај у улици Војводе Симе Поповића, "
+        "од ул. Новице Церовића до ул. Милана Грола, фаза 2, "
+        "у периоду од 14. 11. 2026. до 28. 11. 2026. године и "
+        "од ул. Милана Грола до ул. Бана Иваниша, фаза 3. "
+        "у периоду од 29. 11. 2026. до 13. 12. 2026. године."
+    )
+    original = CollectedItem(source.id, "5423", url, "Обустава саобраћаја", body,
+                             today - timedelta(days=10), published_at_precision="day")
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        capture_collected_batch(session, [original])
+        item = session.scalar(select(RawItem))
+        assert item is not None
+        session.add(EditorialRun(raw_item_id=item.id, outcome={}, evidence={},
+                                 delivery_status="pending"))
+        session.commit()
+        (incident,) = export_map(session, observed_at=today, streets=streets).incidents
+        assert incident.id == map_event_id(url)
+        assert len(incident.lines) == 2
+        first, second = incident.lines
+        assert first.coordinates[-1] == second.coordinates[0]
+        assert first.coordinates != second.coordinates
+        assert first.ends_at == second.starts_at == datetime(2026, 11, 28, 23, tzinfo=UTC)
+        assert second.ends_at == datetime(2026, 12, 13, 23, tzinfo=UTC)
+        assert export_map(session, observed_at=today, streets={}).incidents == ()
+
+        for revised_body, expected in (
+            (
+                body.replace("13. 12. 2026.", "11. 12. 2026."),
+                datetime(2026, 12, 11, 23, tzinfo=UTC),
+            ),
+            (body.replace("до ул. Бана Иваниша", "до завршетка радова"), None),
+        ):
+            revision_time = today + timedelta(minutes=1 if expected else 2)
+            revised = CollectedItem(source.id, "5423", url, original.title,
+                                    revised_body, original.published_at,
+                                    published_at_precision="day")
+            assert capture_collected_batch(session, [revised]) == (0, 1)
+            revision = session.scalar(select(SourceRevision).order_by(SourceRevision.id.desc()))
+            assert revision is not None
+            revision.observed_at = revision_time
+            session.commit()
+            assert item.body == body
+            updated = export_map(session, observed_at=revision_time, streets=streets).incidents
+            if expected is None:
+                assert updated == ()
+            else:
+                assert updated[0].id == incident.id
+                assert updated[0].lines[-1].ends_at == expected
+    engine.dispose()
 
 
 def test_backfill_accepts_only_the_exact_owner_receipt_for_a_water_post():

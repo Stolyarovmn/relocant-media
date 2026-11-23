@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 
 from relocant_media.ai.models import EvidenceDocument
+from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID, match_bgsaobracaj_notice
 from relocant_media.services.local_street_geometry import StreetIndex, local_street_line
 from relocant_media.services.transport_map_source import _notice_id
 from relocant_media.services.utility_geography import _MUNICIPALITIES, _name
@@ -68,6 +70,19 @@ _CROSS_ENDINGS = (
     ("ске", "ска"), ("чке", "чка"), ("ове", "ова"), ("еве", "ева"),
     ("ској", "ска"), ("чкој", "чка"), ("овој", "ова"), ("евој", "ева"),
 )
+_DATED_ROAD = re.compile(rf"\bу (?:улици|ул\.)\s+(?P<street>{_PLACE}),\s*")
+_PRINTED_DATE = r"\d{1,2}\.\s*\d{1,2}\.\s*20\d{2}\.?"
+_DATED_STRETCH = re.compile(
+    rf"од\s+(?:ул(?:ице)?\.?\s+)?(?P<start>{_PLACE})"
+    rf"\s+до\s+(?:ул(?:ице)?\.?\s+)?(?P<end>{_PLACE})\s*,\s*"
+    r"(?:фаза\s+(?P<phase>\d+)\s*[,.]?\s*)?"
+    rf"у периоду од\s+(?P<first>{_PRINTED_DATE})\s*(?:године\s+)?"
+    rf"до\s+(?P<last>{_PRINTED_DATE})(?:\s+године)?(?!\d)",
+)
+_NEXT_STRETCH = re.compile(r"\s*[,;]?\s*и\s+(?=од\s)")
+_SECRETARIAT_RESTRICTION = re.compile(
+    r"\b(?:обустављен\w*|ограничен\w*)\s+саобраћај\b[^.!?;]{0,180}\Z"
+)
 
 
 def _sentences(document: EvidenceDocument) -> list[str]:
@@ -116,6 +131,60 @@ def _resolve(
         if geometry := local_street_line(segment, index):
             resolved.append(geometry)
     return resolved[0] if len(resolved) == 1 else None
+
+
+def _printed_date(value: str) -> date:
+    day, month, year = map(int, value.strip(".").split("."))
+    return date(year, month, day)
+
+
+def resolve_secretariat_stretches(
+    document: EvidenceDocument, index: StreetIndex,
+) -> list[tuple[date, date, dict[str, Any]]]:
+    """Resolve only complete, explicitly dated stretches in an official street notice."""
+    if (document.source_id != SOURCE_ID or not match_bgsaobracaj_notice(document.url)
+            or len(document.body.encode()) > _MAX_NOTICE_BYTES):
+        return []
+    body = _name(document.body)
+    road = _DATED_ROAD.search(body)
+    if road is None or not _SECRETARIAT_RESTRICTION.search(body[:road.start()]):
+        return []
+    # Require one named road and the complete sequence of phases before joining streets.
+    if _DATED_ROAD.search(body, road.end()) is not None:
+        return []
+    municipality = set(_MUNICIPALITY.findall(body)) & _MUNICIPALITIES
+    if len(municipality) > 1:
+        return []
+    stretches: list[tuple[date, date, dict[str, Any]]] = []
+    phases: list[str | None] = []
+    offset = road.end()
+    while True:
+        match = _DATED_STRETCH.match(body, offset)
+        if match is None or len(stretches) == _MAX_SEGMENTS:
+            return []
+        try:
+            first, last = _printed_date(match["first"]), _printed_date(match["last"])
+        except ValueError:
+            return []
+        if first > last:
+            return []
+        geometry = _resolve(
+            {"street": road["street"], "start": match["start"], "end": match["end"]},
+            index, municipality or set(index),
+        )
+        if geometry is None:
+            return []
+        stretches.append((first, last, geometry))
+        phases.append(match["phase"])
+        next_stretch = _NEXT_STRETCH.match(body, match.end())
+        if next_stretch is None:
+            break
+        offset = next_stretch.end()
+    printed_phases = _PHASE.findall(body)
+    if ([phase for phase in phases if phase is not None] != printed_phases
+            or len(stretches) > 1 and (None in phases or len(set(phases)) != len(phases))):
+        return []
+    return stretches
 
 
 def _scope_candidates(document: EvidenceDocument) -> list[tuple[dict[str, str], set[str]]]:

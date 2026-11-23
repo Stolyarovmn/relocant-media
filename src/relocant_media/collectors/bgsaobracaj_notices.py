@@ -135,7 +135,8 @@ class TrafficSecretariatCollector:
         response.raise_for_status()
         entries = parse_notice_index(response.text, self._source)
         today = datetime.now(_ZONE).date()
-        cutoff = today - timedelta(days=7)
+        # Map phases can still be active after the separate editorial deadline.
+        cutoff = today - timedelta(days=14)
         recent = [entry for entry in entries
                   if entry.published_at and cutoff <= entry.published_at.date() <= today]
         earliest = datetime.combine(cutoff, time.min, tzinfo=_ZONE)

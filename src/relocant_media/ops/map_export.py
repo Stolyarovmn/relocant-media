@@ -17,6 +17,8 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.collectors.bgprevoz_changes import transport_notice_suspended
+from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as SECRETARIAT_SOURCE_ID
+from relocant_media.collectors.bgsaobracaj_notices import match_bgsaobracaj_notice
 from relocant_media.domain.map_links import MAP_ARCHIVE_AGE, map_event_id
 from relocant_media.services.local_outage_geometry import (
     AreaIndex,
@@ -32,7 +34,11 @@ from relocant_media.services.local_street_geometry import (
     local_street_name,
 )
 from relocant_media.services.media_review_packet import _valid_snapshot
-from relocant_media.services.road_scope import is_road_restriction, resolve_road_segments
+from relocant_media.services.road_scope import (
+    is_road_restriction,
+    resolve_road_segments,
+    resolve_secretariat_stretches,
+)
 from relocant_media.services.transport_map import MAP_MODE, SOURCE_ID, matches_transport_notice
 from relocant_media.services.transport_map_source import extract_transport_map
 from relocant_media.services.utility_geography import _name as geography_name
@@ -205,7 +211,8 @@ class Incident(PublicModel):
         if value is None:
             return value
         parts = urlsplit(value)
-        if (parts.scheme != "https" or parts.netloc not in _PUBLIC_HOSTS
+        if (parts.scheme != "https"
+                or (parts.netloc not in _PUBLIC_HOSTS and not match_bgsaobracaj_notice(value))
                 or len(value) > 750 or parts.query or parts.fragment
                 or any(ord(character) <= 32 for character in value)):
             raise ValueError("map must link to an official source")
@@ -543,6 +550,31 @@ def _road_lines(geometry: dict[str, Any] | None) -> list[Line]:
     return [line] if line is not None else []
 
 
+def _secretariat_road(
+    document: EvidenceDocument, title: str | None, streets: StreetIndex,
+) -> Incident | None:
+    lines = []
+    windows = []
+    street = ""
+    for start, end, geometry in resolve_secretariat_stretches(document, streets):
+        window = Window(starts_at=datetime.combine(start, time.min, tzinfo=_ZONE),
+                        ends_at=datetime.combine(end + timedelta(days=1), time.min, tzinfo=_ZONE))
+        segment = Segment.model_validate(geometry["segment"])
+        street = segment.street
+        line = _line(geometry["coordinates"], f"{segment.street}: {segment.start} — {segment.end}",
+                     window)
+        if line is None:
+            return None
+        lines.append(line)
+        windows.append(window)
+    if not lines:
+        return None
+    return _incident(
+        document, "road", title or f"Дорожные работы · {street}",
+        tuple(windows), source_map_url=document.url, lines=tuple(lines),
+    )
+
+
 def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
     snapshot = session.get(RawItemMediaSnapshot, item.id)
     if (snapshot is None or snapshot.source_page != item.url or snapshot.source_html is None
@@ -551,28 +583,29 @@ def _source_html(session: Session, item: RawItem) -> tuple[str, Any]:
     return snapshot.source_html, snapshot.manifest.get("utility_geography")
 
 
-def _transport_suspended(session: Session, item: RawItem, observed_at: datetime) -> bool:
-    """Скрыть приостановленные работы, сохранив неизменным опубликованный снимок.
-
-    Новая версия собирается официальным адаптером и остаётся в очереди ревью.
-    Она может убрать устаревшее ограничение, но не создать новую активную геометрию.
-    """
-    if transport_notice_suspended(item.body):
-        return True
+def _verified_transport_revision(
+    session: Session, item: RawItem, observed_at: datetime,
+) -> str | None:
     revision = session.scalar(select(SourceRevision).where(
         SourceRevision.raw_item_id == item.id, SourceRevision.observed_at <= observed_at,
     ).order_by(SourceRevision.observed_at.desc(), SourceRevision.id.desc()).limit(1))
     if revision is None:
-        return False
+        return None
     evidence = revision.evidence
     encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return (
-        hashlib.sha256(encoded.encode()).hexdigest() == revision.snapshot_sha256
-        and evidence.get("source_id") == item.source_id
-        and evidence.get("article_id") == item.external_id
-        and evidence.get("url") == item.url
-        and isinstance(evidence.get("body"), str)
-        and transport_notice_suspended(evidence["body"])
+    body = evidence.get("body")
+    if (hashlib.sha256(encoded.encode()).hexdigest() != revision.snapshot_sha256
+            or evidence.get("source_id") != item.source_id
+            or evidence.get("article_id") != item.external_id or evidence.get("url") != item.url
+            or not isinstance(body, str) or not body.strip()):
+        return None
+    return body
+
+
+def _transport_suspended(session: Session, item: RawItem, observed_at: datetime) -> bool:
+    """Скрыть приостановленные работы, сохранив неизменным опубликованный снимок."""
+    return transport_notice_suspended(item.body) or transport_notice_suspended(
+        _verified_transport_revision(session, item, observed_at) or "",
     )
 
 
@@ -615,7 +648,7 @@ def export_map(
     cutoff = observed_at - timedelta(days=21)
     archive_cutoff = observed_at.astimezone(UTC) - MAP_ARCHIVE_AGE
     recent = Source.enabled.is_(True) & or_(
-        RawItem.ingested_at >= cutoff, RawItem.source_id == SOURCE_ID,
+        RawItem.ingested_at >= cutoff, RawItem.source_id.in_((SOURCE_ID, SECRETARIAT_SOURCE_ID)),
     )
     rows = session.execute(
         select(RawItem, EditorialRun, Post)
@@ -623,7 +656,7 @@ def export_map(
         .outerjoin(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
         .outerjoin(Post, Post.id == EditorialRun.post_id)
         .where(Source.city == "belgrade", Source.ownership == "official",
-               or_(RawItem.source_id.in_((BVK_NEWS_SOURCE, SOURCE_ID)),
+               or_(RawItem.source_id.in_((BVK_NEWS_SOURCE, SOURCE_ID, SECRETARIAT_SOURCE_ID)),
                    (RawItem.source_id == _CITY_SOURCE) &
                    or_(RawItem.url.contains("/vodovod-i-kanalizacija/"),
                        RawItem.url.contains("/elektricna-energija/"),
@@ -646,6 +679,13 @@ def export_map(
                 continue
             geometry = extract_transport_map(document, _source_html(session, item)[0])
             incident = _road(document, document, geometry, None, streets or {})
+        elif item.source_id == SECRETARIAT_SOURCE_ID:
+            revised = _verified_transport_revision(session, item, observed_at)
+            if revised is not None:
+                document = document.model_copy(update={"body": revised})
+                title = None
+            incident = (_secretariat_road(document, title, streets or {})
+                        if not transport_notice_suspended(document.body) else None)
         else:
             html, geography = _source_html(session, item)
             point = build_utility_point(document, html, geography)

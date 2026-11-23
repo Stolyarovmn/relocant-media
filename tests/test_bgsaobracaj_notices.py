@@ -78,15 +78,19 @@ async def test_source_uses_dated_cards_skips_pinned_archive_and_keeps_one_workin
     def route(request: httpx.Request) -> httpx.Response:
         seen.append(request.url.path)
         if request.url.path == "/vesti":
-            return httpx.Response(200, text=card(5018, "2026-04-21") + card(5437) + card(5438))
+            return httpx.Response(200, text=(
+                card(5018, "2026-04-21") + card(5437) + card(5438) + card(5423, "2026-11-13")
+            ))
         if request.url.path == "/vest/5438/test":
             return httpx.Response(404)
+        if request.url.path == "/vest/5423/test":
+            return httpx.Response(200, text=article_html().replace("20/11/2026", "13/11/2026"))
         return httpx.Response(200, text=article_html())
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(route), follow_redirects=True) as c:
         collector = build_collector(SOURCE, c)
         items = await collector.collect()
-    assert [item.external_id for item in items] == ["5437"]
+    assert [item.external_id for item in items] == ["5437", "5423"]
     assert "/vest/5018/test" not in seen
     assert [error["error_type"] for error in collector.item_failures] == ["HTTPStatusError"]
 

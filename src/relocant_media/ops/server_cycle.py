@@ -607,6 +607,7 @@ async def collect_sources(
     news_feed_observations: list[dict[str, Any]] = []
     venue_errors: list[dict[str, str]] = []
     articles = []
+    traffic_map_notices: list[CollectedRawItem] = []
     metadata_holds = []
     review_holds = []
     review_hold_urls: set[str] = set()
@@ -819,6 +820,10 @@ async def collect_sources(
                         )
                         if fresh.action == "keep":
                             register_official(item)
+                        elif fresh.reason != "publication_date_future":
+                            # The map uses official closure dates. Keep this evidence out of
+                            # article discovery while retaining amendments to older notices.
+                            traffic_map_notices.append(item)
                         else:
                             result["discarded_before_persistence"] += 1
             except (TimeoutError, ValueError, httpx.HTTPError) as error:
@@ -987,12 +992,14 @@ async def collect_sources(
             transport_notices = []
             result["transport_map_source_error"] = type(error).__name__
     result["transport_map_notices"] = len(transport_notices)
+    result["traffic_secretariat_map_only"] = len(traffic_map_notices)
     with Session(engine) as session:
         if transport_notices:
             assert transport_source is not None
             sync_source(session, "belgrade", transport_source)
         written, changes = capture_collected_batch(
-            session, [*articles, *review_holds, *metadata_holds, *transport_notices])
+            session, [*articles, *review_holds, *metadata_holds,
+                      *transport_notices, *traffic_map_notices])
         for original_id, live in watched_changes:
             parent = session.get(RawItem, original_id)
             if parent is not None and (new_id := queue_watched_change(session, parent, live)):

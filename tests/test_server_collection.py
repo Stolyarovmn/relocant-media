@@ -130,17 +130,24 @@ async def test_traffic_secretariat_notice_is_ingested_with_nights_and_stable_ide
 
     monkeypatch.setattr(server_cycle, "datetime", Clock)
     notice = parse_notice_article(article_html(), SOURCE, ARTICLE)
+    archived_article_url = ARTICLE.replace("/5437/", "/5423/")
+    older_notice = parse_notice_article(
+        article_html().replace("20/11/2026", "13/11/2026"), SOURCE, archived_article_url,
+    )
 
     class Collector:
         async def collect(self):
-            return [notice]
+            return [notice, older_notice]
 
     build = server_cycle.build_collector
     monkeypatch.setattr(server_cycle, "build_collector", lambda source, client:
                         Collector() if source.id == SOURCE.id else build(source, client))
     result = await server_cycle.collect_sources(engine)
-    assert result["traffic_secretariat_items"] == 1
+    assert result["traffic_secretariat_items"] == 2
+    assert result["traffic_secretariat_map_only"] == 1
     with Session(engine) as session:
+        saved = session.scalar(select(RawItem).where(RawItem.url == archived_article_url))
+        assert saved is not None
         manifest = select_candidates(session, city="belgrade", since=now - timedelta(days=5),
                                      until=now, limit=10)
         assert [item["article_id"] for item in manifest["candidates"]] == ["5437"]
