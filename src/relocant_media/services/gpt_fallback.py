@@ -37,6 +37,10 @@ from relocant_media.domain.policy import SOURCE_REPLACED_REASON
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.editorial import (
+    MAX_CANDIDATE_TEXT,
+    MAX_DOCUMENT_BODY,
+    MAX_DOCUMENT_TITLE,
+    MAX_DOCUMENTS,
     _candidate,
     _event_items,
     _reviewed_event_item,
@@ -47,6 +51,7 @@ from relocant_media.services.editorial_products import (
     recent_publications,
     verify_stored_presentation,
 )
+from relocant_media.services.event_eligibility import event_content_reason
 from relocant_media.services.flight_review import flight_review_marker, flight_review_reference
 from relocant_media.services.material_lifecycle import (
     FALLBACK_WAIT,
@@ -61,15 +66,13 @@ from relocant_media.services.material_lifecycle import (
 )
 from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.services.policy_reassessment import eligible_policy_reassessment
+from relocant_media.services.venue_event_evidence import is_undated_venue_source
 from relocant_media.sources.registry import SourceConfig, load_source_registry
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
 REQUEST_TTL = timedelta(hours=4)
 MAX_REQUEST_BYTES = 512 * 1024
 MAX_CANDIDATES = 5
-MAX_DOCUMENTS = 8
-MAX_DOCUMENT_BODY = 20_000
-MAX_CANDIDATE_TEXT = 80_000
 GEMINI_FAILURES = frozenset({
     "GeminiWorkerError", "GeminiCallTimeout", "GeminiQuotaCooldown", "StructuredOutputError",
 })
@@ -298,21 +301,28 @@ def _candidate_request(
     total = 0
     for member, policy in members:
         total += len(member.title) + len(member.body)
+        config = registry.get(policy.id)
+        fresh = evidence_freshness(
+            member.title, member.body, member.published_at, now,
+            precision=member.published_at_precision, source_type=policy.source_type,
+            verified_at=member.ingested_at, timezone_name=profile.timezone,
+        )
+        undated_supplement = (
+            member.id != item.id
+            and member.published_at is None
+            and fresh.reason == "publication_date_unknown"
+            and config is not None
+            and is_undated_venue_source(config)
+            and event_content_reason(
+                member.title, member.body, now=now, timezone_name=profile.timezone,
+            ) is None
+        )
         if (
-            not _registered_public(member, policy, registry.get(policy.id))
-            or not 1 <= len(member.title) <= 1000
+            not _registered_public(member, policy, config)
+            or not 1 <= len(member.title) <= MAX_DOCUMENT_TITLE
             or not 1 <= len(member.body) <= MAX_DOCUMENT_BODY
             or total > MAX_CANDIDATE_TEXT
-            or (evidence_freshness(
-                member.title,
-                member.body,
-                member.published_at,
-                now,
-                precision=member.published_at_precision,
-                source_type=policy.source_type,
-                verified_at=member.ingested_at,
-                timezone_name=profile.timezone,
-            ).action != "keep")
+            or (fresh.action != "keep" and not undated_supplement)
         ):
             raise FallbackValidationError("Источник закрыт, устарел или превышает лимит")
     snapshots = [_snapshot_member(member, policy) for member, policy in members]

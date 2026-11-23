@@ -265,13 +265,7 @@ class BitefArtCafeEventsCollector:
         items: list[RawItem] = []
         for link in links:
             try:
-                items.append(
-                    parse_bitefartcafe_event(
-                        await self._fetch(link, detail=True),
-                        link,
-                        self._source,
-                    )
-                )
+                items.append(await self.collect_url(link))
             except (ValueError, httpx.HTTPError) as error:
                 self.item_failures.append(
                     {
@@ -287,3 +281,6 @@ class BitefArtCafeEventsCollector:
                 f"{first['error_type']}: {first['error_message']}"
             )
         return items
+
+    async def collect_url(self, url: str) -> RawItem:
+        return parse_bitefartcafe_event(await self._fetch(url, detail=True), url, self._source)

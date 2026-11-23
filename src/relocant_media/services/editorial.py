@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 from sqlalchemy import and_, or_, select, update
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.publisher import Publisher
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import (
     DEFAULT_EVENT_WINDOW,
     EventCandidate,
@@ -32,8 +34,14 @@ from relocant_media.domain.policy import (
     SOURCE_REPLACED_REASON,
     primary_evidence_kind,
 )
+from relocant_media.services.venue_event_evidence import matches_venue_evidence, named_venue_sources
 from relocant_media.storage.locks import lock_editorial_city as _lock_editorial_city
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
+
+MAX_DOCUMENTS = 8
+MAX_DOCUMENT_TITLE = 1000
+MAX_DOCUMENT_BODY = 20_000
+MAX_CANDIDATE_TEXT = 80_000
 
 
 class DeliveryBlockedError(ValueError):
@@ -364,6 +372,38 @@ def _event_items(
             continue
         members.append((item, source))
         seen_sources.add(item.source_id)
+    if len(members) < MAX_DOCUMENTS and (registered := named_venue_sources(anchor, anchor_source)):
+        timezone = ZoneInfo(load_city_profile(anchor_source.city).timezone)
+        published = anchor.published_at.astimezone(timezone).date()
+        possible = session.execute(
+            select(RawItem, Source)
+            .join(Source, Source.id == RawItem.source_id)
+            .where(
+                Source.id.in_(registered.keys() - seen_sources),
+                Source.city == anchor_source.city,
+                Source.enabled.is_(True),
+                Source.source_type == "official_venue_events",
+                Source.ownership == "official",
+                Source.auto_publish.is_(False),
+                Source.high_risk.is_(False),
+                RawItem.published_at.is_(None),
+                RawItem.ingested_at >= anchor.published_at - timedelta(days=60),
+            )
+            .order_by(RawItem.ingested_at.desc(), RawItem.id.desc()).limit(61)
+            .execution_options(populate_existing=True)
+        ).all()
+        if len(possible) <= 60:
+            matches = [
+                (item, policy) for item, policy in possible
+                if matches_venue_evidence(anchor, item, registered[policy.id], published=published)
+            ]
+            if len(matches) == 1:
+                item, policy = matches[0]
+                total = sum(len(raw.title) + len(raw.body) for raw, _ in (*members, matches[0]))
+                if (1 <= len(item.title) <= MAX_DOCUMENT_TITLE
+                        and 1 <= len(item.body) <= MAX_DOCUMENT_BODY
+                        and total <= MAX_CANDIDATE_TEXT):
+                    members.append((item, policy))
     return members
 
 

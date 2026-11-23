@@ -181,6 +181,7 @@ from relocant_media.services.transport_map import (
 from relocant_media.services.transport_map_source import extract_transport_map
 from relocant_media.services.utility_geography import resolve_power_points, resolve_utility_geometry
 from relocant_media.services.utility_map import BVK_NEWS_SOURCE, utility_scope
+from relocant_media.services.venue_event_evidence import is_undated_venue_source
 from relocant_media.services.watched_updates import queue_watched_change
 from relocant_media.services.water_outage_scope import extract_official_water_map
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
@@ -193,10 +194,6 @@ _SERVER_VENUE_STRATEGIES = frozenset({
     "venue_feed",
     "musicology_blog",
     "natural_history_news",
-})
-_REVIEW_ONLY_VENUE_STRATEGIES = frozenset({
-    "bitefartcafe_events",
-    "yugoslavia_programs",
 })
 
 
@@ -310,10 +307,7 @@ def review_only_venue_sources() -> dict[str, SourceConfig]:
     return {
         source.id: source
         for source in load_source_registry(SOURCES)
-        if source.extraction.strategy in _REVIEW_ONLY_VENUE_STRATEGIES
-        and source.extraction.status == "active"
-        and source.source_type == "official_venue_events"
-        and not source.policy.auto_publish
+        if is_undated_venue_source(source)
     }
 
 
@@ -460,7 +454,9 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     documents = []
     # Each source is re-read through the same parser used at intake.
-    registered = {**venue_sources(), **media_sources(), **guide_sources()}
+    registered = {
+        **venue_sources(), **review_only_venue_sources(), **media_sources(), **guide_sources(),
+    }
     registered.update({
         key: load_source_file(SOURCES / f"{key}.yaml")
         for key in (BVK_NEWS_SOURCE, TRAFFIC_SECRETARIAT_SOURCE)
