@@ -795,6 +795,20 @@ test("участок тротуара в слое дорог сохраняет 
   assert.equal(incident({ ...fixture, kind: "water" }).lines[0].scope, null);
 });
 
+test("участок изменения движения сохраняет собственный тип в слое дорог", () => {
+  const fixture = {
+    kind: "road", id: roadId,
+    lines: [{
+      coordinates: [[44.7900295, 20.5063241], [44.7921326, 20.5087493]],
+      label: "Изменение движения · Др Велизара Косановића", scope: "traffic_change",
+    }],
+  };
+  const [line] = visibleMapLines(incident(fixture), Date.parse("2026-11-25T10:00:00Z"));
+  assert.equal(line.scope, "traffic_change");
+  assert.equal(line.label, fixture.lines[0].label);
+  assert.equal(incident({ ...fixture, kind: "water" }).lines[0].scope, null);
+});
+
 test("водный участок с собственным окном исчезает отдельно от остального объявления", () => {
   const geometry = { coordinates: [[44.81, 20.4], [44.81, 20.41]] };
   const event = incident({

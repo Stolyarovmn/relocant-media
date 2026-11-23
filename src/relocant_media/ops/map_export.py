@@ -166,13 +166,16 @@ class Area(Window):
         return self
 
 
+RoadLineScope = Literal["sidewalk", "traffic_change"]
+
+
 class Line(PublicModel):
     coordinates: Annotated[tuple[Coordinate, ...], Field(min_length=2, max_length=1000)]
     label: Label
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     boundary: bool = False
-    scope: Literal["sidewalk"] | None = None
+    scope: RoadLineScope | None = None
 
     @model_validator(mode="after")
     def ordered_if_timed(self) -> Line:
@@ -227,8 +230,8 @@ class Incident(PublicModel):
             Window(starts_at=self.starts_at, ends_at=self.ends_at)
         if self.published_at is not None and self.published_at.tzinfo is None:
             raise ValueError("map publication date requires a timezone")
-        if self.kind != "road" and any(line.scope == "sidewalk" for line in self.lines):
-            raise ValueError("sidewalks belong to the road layer")
+        if self.kind != "road" and any(line.scope is not None for line in self.lines):
+            raise ValueError("road line scopes belong to the road layer")
         return self
 
 
@@ -265,7 +268,7 @@ def _coords(latitude: object, longitude: object) -> Coordinate | None:
 
 
 def _line(values: list[list[str]], label: str, window: Window | None = None, *,
-          boundary: bool = False, scope: Literal["sidewalk"] | None = None) -> Line | None:
+          boundary: bool = False, scope: RoadLineScope | None = None) -> Line | None:
     coords = [_coords(*value) if isinstance(value, list) and len(value) == 2 else None
               for value in values]
     if None in coords or len(set(coords)) < 2:
@@ -560,16 +563,21 @@ def _secretariat_road(
     windows = []
     street = ""
     dates: dict[str, date] = {}
+    fallback = "Дорожные работы"
     for start, end, geometry in resolve_secretariat_stretches(document, streets):
         window = Window(starts_at=datetime.combine(start, time.min, tzinfo=_ZONE),
                         ends_at=datetime.combine(end + timedelta(days=1), time.min, tzinfo=_ZONE))
         segment = Segment.model_validate(geometry["segment"])
         street = segment.street
-        scope: Literal["sidewalk"] | None = None
+        scope: RoadLineScope | None = geometry.get("scope")
         label = f"{street}: {segment.start} — {segment.end}"
-        if geometry.get("scope") == "sidewalk":
-            scope = "sidewalk"
+        if scope == "sidewalk":
+            fallback = "Работы на тротуаре"
             label = f"Тротуар · {label}"
+        elif scope == "traffic_change":
+            fallback = "Изменение движения"
+            label = f"Изменение движения · {label}"
+        if scope is not None:
             dates = {"starts_on": start, "ends_on": end}
         line = _line(geometry["coordinates"], label, window, scope=scope)
         if line is None:
@@ -578,7 +586,6 @@ def _secretariat_road(
         windows.append(window)
     if not lines:
         return None
-    fallback = "Работы на тротуаре" if dates else "Дорожные работы"
     return _incident(document, "road", title or f"{fallback} · {street}", tuple(windows),
                      source_map_url=document.url, lines=tuple(lines), **dates)
 

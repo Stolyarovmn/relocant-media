@@ -87,6 +87,14 @@ _SIDEWALK_BODY = (
     "на територији Градске општине Стари град, у временском периоду "
     "14. 11. 2026. до 1. 5. 2027. године.\n\nМапа заузећа"
 )
+_TRAFFIC_CHANGE_URL = (
+    "https://www.bgsaobracaj.rs/vest/5438/izmena-rezima-saobraca%D1%98a-u-ul-dr-velizara-kosanovica"
+)
+_TRAFFIC_CHANGE_BODY = (
+    "Биће измењен режим саобраћаја у ул. Др Велизара Косановића, од ул. Паје Јовановића "
+    "до ул. Живка Давидовића, на територији Градске општине Звездара, "
+    "у временском периоду од 23. 11. 2026. до 21. 12. 2026. године.\n\nМапа заузећа"
+)
 
 
 def _listed_document(body: str = _LISTED_ROAD) -> EvidenceDocument:
@@ -94,6 +102,67 @@ def _listed_document(body: str = _LISTED_ROAD) -> EvidenceDocument:
         source_id="bgsaobracaj_notices", url=_LISTED_URL, title="Промена саобраћаја у Устаничкој",
         body=body, published_at=datetime(2026, 11, 19, tzinfo=UTC), published_at_precision="day",
     )
+
+
+def test_traffic_change_connects_named_crossings_and_binds_the_post_button(monkeypatch):
+    document = EvidenceDocument(
+        source_id="bgsaobracaj_notices", url=_TRAFFIC_CHANGE_URL,
+        title="Измена режима саобраћаја у ул. Др Велизара Косановића", body=_TRAFFIC_CHANGE_BODY,
+    )
+    streets = load_street_index(Path("cities/belgrade/map/roads.json.gz"))
+    source = load_source_file(Path("cities/belgrade/sources/bgsaobracaj_notices.yaml"))
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        capture_collected_batch(session, [
+            CollectedItem(**document.model_dump(), external_id="5438", source_html="<article/>"),
+        ])
+        session.commit()
+        observed_at = datetime(2026, 11, 23, 18, tzinfo=UTC)
+        (incident,) = export_map(session, observed_at=observed_at, streets=streets).incidents
+        (line,) = incident.lines
+        assert line.scope == "traffic_change"
+        assert line.starts_at == datetime(2026, 11, 22, 23, tzinfo=UTC)
+        assert line.ends_at == datetime(2026, 12, 21, 23, tzinfo=UTC)
+        assert line.coordinates[0] == (44.7900295, 20.5063241)
+        assert line.coordinates[-1] == (44.7921326, 20.5087493)
+
+        profile = load_city_profile("belgrade")
+        presentation = build_presentation(session, 1, (document,), document_ids=[1],
+                                          profile=profile, rubric_id="city_changes")
+        draft = present_draft(
+            RussianDraft(title="На Др Велизара Косановича меняют движение",
+                         body="Участок от Пае Йовановича до Живка Давидовича.",
+                         claim_ids=("street",)),
+            presentation, category="transport",
+        )
+        presentation = bind_native_map_draft(presentation, draft)
+        native = presentation.native_map
+        assert native is not None
+        assert native["point"]["road_phases"][0]["scope"] == line.scope
+        verify_stored_presentation(session, 1, (document,), document_ids=[1],
+                                   presentation=presentation)
+        monkeypatch.setenv("RELOCANT_MAP_TELEGRAM_APP", "https://t.me/relocant_media_belgrade_bot")
+        package = SimpleNamespace(presentation=presentation, outcome=SimpleNamespace(draft=draft))
+        publisher = SimpleNamespace(bot=SimpleNamespace(send_notice_message=lambda *args: None))
+        _, prepared = prepare_native_transport(
+            package, publisher, None,
+            editorial_text=f"{draft.title}\n\n{draft.body}\n\nИсточник: {document.url}",
+        )
+        assert prepared.map_url == f"https://t.me/relocant_media_belgrade_bot?startapp={incident.id}"
+    engine.dispose()
+
+    timed = document.model_copy(update={
+        "body": _TRAFFIC_CHANGE_BODY + " Сваког дана од 8 до 17 часова.",
+    })
+    assert not resolve_secretariat_stretches(timed, streets)
+    # Add another crossing on the connected street. A reachable alternative is ambiguous.
+    streets["звездара"]["живка давидовића"].append([
+        9999999999, "Живка Давидовића",
+        [[9998193542, 44.7920019, 20.508649], [9999999999, 44.7920000, 20.508660]],
+    ])
+    assert not resolve_secretariat_stretches(document, streets)
 
 
 def test_listed_road_phases_use_the_same_source_for_map_and_delivery(monkeypatch):

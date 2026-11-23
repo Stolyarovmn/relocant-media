@@ -323,7 +323,8 @@ export function readIncidents(document, now = null) {
         && line.coordinates.every((pair) => Array.isArray(pair) && coords(pair[0], pair[1]))
         ? [{ coordinates: line.coordinates.map(([lat, lon]) => [lat, lon]),
           label: textValue(line.label), window: readWindow(line), boundary: line.boundary === true,
-          scope: record.kind === "road" && line.scope === "sidewalk" ? "sidewalk" : null }] : []),
+          scope: record.kind === "road" && ["sidewalk", "traffic_change"].includes(line.scope)
+            ? line.scope : null }] : []),
       areas: array(record.areas).map((area) => readArea(area, record.kind)).filter(Boolean),
       addresses: array(record.addresses).map(readAddress).filter(Boolean),
       ranges: array(record.ranges).map(readAddress).filter(Boolean),

@@ -377,7 +377,7 @@ function eventCard(incident, now) {
     card.append(make("p", "event-scope", `${segment.street}${extent}${district}`));
   }
   for (const line of incident.lines) {
-    if (line.scope === "sidewalk") card.append(make("p", "event-scope", line.label));
+    if (line.scope) card.append(make("p", "event-scope", line.label));
   }
   for (const settlement of incident.settlements) {
     const scope = settlement.parent ? `${settlement.name} · часть ${settlement.parent}`
@@ -680,6 +680,8 @@ function renderVectors(overview, zoom) {
   state.vectorKey = key;
   const leaflet = globalThis.L;
   const corridor = state.layerView === "corridor";
+  const trafficChangeColor = document.documentElement.dataset.theme === "dark"
+    ? "#ffbf62" : "#946007";
   state.eventLayer.clearLayers();
   for (const item of state.mapItems) {
     const { incident, lines, areas, archived, now } = item;
@@ -696,7 +698,8 @@ function renderVectors(overview, zoom) {
         : { opacity: expired ? .48 : .94, weight: selected || corridor ? 8 : 5 };
       const className = sidewalk ? "outage-sidewalk" : road ? "outage-road" : "outage-line";
       const path = leaflet.polyline(coordinates, {
-        color, ...style, lineCap: "round", lineJoin: "round",
+        color: scope === "traffic_change" ? trafficChangeColor : color,
+        ...style, lineCap: "round", lineJoin: "round",
         ...(boundary ? { dashArray: "5 7", weight: selected ? 6 : 4 } : {}),
         ...(sidewalk ? { dashArray: "2 6", weight: selected ? 5 : 4, opacity: expired ? .45 : .95 } : {}),
         className,
@@ -878,7 +881,10 @@ function focusIncident(item) {
   state.focusNote = roadOrientation(incident)
     ? "Показан ориентир. Точные границы перекрытия не подтверждены."
     : incident.lines.some((line) => line.scope === "sidewalk")
-      ? "Линия показывает отрезок улицы с ограничением на тротуаре." : "";
+      ? "Линия показывает отрезок улицы с ограничением на тротуаре."
+      : incident.lines.some((line) => line.scope === "traffic_change")
+        ? "Линия показывает участок, на котором меняется движение."
+        : "";
   showMapNote();
   return true;
 }
