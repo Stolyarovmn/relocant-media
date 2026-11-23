@@ -188,13 +188,17 @@ def _write_digest_watch(
         print(json.dumps({"digest_watch_error": type(error).__name__}), file=sys.stderr)
 
 
-def _sweep_material_lifecycle(database: Path, *, now: datetime | None = None) -> None:
+def _sweep_material_lifecycle(database: Path, *, now: datetime | None = None) -> bool:
     """Только канонический писатель, после CAS; без моделей и сетевых действий."""
     engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
     try:
         with Session(engine) as session:
             sweep_materials(session, city="belgrade", now=now or datetime.now(UTC))
+            # This engine is fresh and used only for this sweep.
+            result = session.connection().exec_driver_sql("SELECT total_changes()")
+            changes = int(result.scalar_one())
             session.commit()
+            return changes > 0
     finally:
         engine.dispose()
 
@@ -952,9 +956,11 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             raise ValueError("GPT exchange requires a manual SSH-backed Actions run")
         if gpt_input or mode == "fallback":
             _gpt_digest(gpt_input)
+    _runtime_phase("state_read_started")
     state, sha = store.read()
     validate_ready(state)
     ingress_config(state.get("intake_state", {}))
+    _runtime_phase("state_read_verified")
     if mode == "auto":
         mode = "editorial" if editorial_due(state, datetime.now(UTC)) else "intake"
     slot = (due_digest_slot(datetime.now(UTC)) if mode in {"digest", "editorial", "intake"}
@@ -965,7 +971,9 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if mode == "digest" and slot is None:
         return 0
     work.mkdir(parents=True, exist_ok=False, mode=0o700)
+    _runtime_phase("restore_started")
     database = restored(drive, state["snapshot"], work)
+    _runtime_phase("restore_verified")
     if mode == "digest-preview":
         if environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
             raise ValueError("digest preview requires a manual request")
@@ -1067,9 +1075,13 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     require_snapshot_capacity(database)
     busy = _busy_state(state, environment)
     attempt = busy["attempt"]
+    _runtime_phase("state_claim_started")
     busy_sha = store.write(busy, sha)
+    _runtime_phase("state_claimed")
     if mode != "drain-close":
-        _sweep_material_lifecycle(database)
+        _runtime_phase("lifecycle_before_started")
+        changed = _sweep_material_lifecycle(database)
+        _runtime_phase("lifecycle_before_changed" if changed else "lifecycle_before_unchanged")
     directory = database.parent
     intake_state = directory / "intake-batch-state.json"
     intake_state.write_text(json.dumps(state.get("intake_state", {})), encoding="utf-8")
@@ -1165,13 +1177,18 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if code < 0:
         raise RuntimeError("runtime terminated; reconcile busy generation")
     if mode != "drain-close":
-        _sweep_material_lifecycle(database)
+        _runtime_phase("lifecycle_after_started")
+        changed = _sweep_material_lifecycle(database)
+        _runtime_phase("lifecycle_after_changed" if changed else "lifecycle_after_unchanged")
     _runtime_phase("snapshot_started")
     manifest = create_snapshot(database, work / "saved")
     _runtime_phase("snapshot_local_verified")
-    manifest["drive_file_id"] = (state["snapshot"]["drive_file_id"]
-        if manifest["sha256"] == state["snapshot"]["sha256"]
-        else drive.upload(work / "saved" / "editorial.sqlite3", folder))
+    if manifest["sha256"] == state["snapshot"]["sha256"]:
+        manifest["drive_file_id"] = state["snapshot"]["drive_file_id"]
+        _runtime_phase("snapshot_storage_reused")
+    else:
+        manifest["drive_file_id"] = drive.upload(work / "saved" / "editorial.sqlite3", folder)
+        _runtime_phase("snapshot_storage_written")
     _runtime_phase("snapshot_verified")
     saved_intake = json.loads(intake_state.read_text())
     # Preserve retry and ingress state. The verified snapshot satisfies any local backup request.
@@ -1240,6 +1257,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if isinstance(drive, SSHStateClient):
         _runtime_phase("recovery_checkpoint_started")
         checkpoint_id = drive.checkpoint(ready, busy_sha, work / "checkpoint.json")
+        _runtime_phase("recovery_checkpoint_verified")
         print(json.dumps({"recovery_checkpoint_sha256": checkpoint_id}),
               file=sys.stderr, flush=True)
     # Preserve the prepared fix from fix/pages-failed-runtime-observation: an

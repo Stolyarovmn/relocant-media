@@ -128,10 +128,14 @@ def test_projection_timeout_commits_verified_snapshot_without_publishing_partial
     assert "UNPUBLISHABLE" not in output.out + output.err
     records = [json.loads(line) for line in output.err.splitlines()]
     assert {"projection_error_type": "TimeoutExpired"} in records
+    checkpoint_phases = ["recovery_checkpoint_started", "recovery_checkpoint_verified"]
     expected = [
-        "worker_started", "worker_completed", "snapshot_started", "snapshot_local_verified",
-        "snapshot_verified",
-        *(["recovery_checkpoint_started"] if storage == "ssh" else []),
+        "state_read_started", "state_read_verified", "restore_started", "restore_verified",
+        "state_claim_started", "state_claimed", "lifecycle_before_started",
+        "lifecycle_before_unchanged", "worker_started", "worker_completed",
+        "lifecycle_after_started", "lifecycle_after_unchanged",
+        "snapshot_started", "snapshot_local_verified", "snapshot_storage_reused",
+        "snapshot_verified", *(checkpoint_phases if storage == "ssh" else []),
         "projection_started", "projection_failed", "state_commit_started", "state_committed",
     ]
     assert [record["runtime_phase"] for record in records if "runtime_phase" in record] == expected
