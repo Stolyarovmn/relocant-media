@@ -83,6 +83,25 @@ _NEXT_STRETCH = re.compile(r"\s*[,;]?\s*и\s+(?=од\s)")
 _SECRETARIAT_RESTRICTION = re.compile(
     r"\b(?:обустављен\w*|ограничен\w*)\s+саобраћај\b[^.!?;]{0,180}\Z"
 )
+_LIST_DATE = r"\d{1,2}\.\s*\d{1,2}\.(?:\s*20\d{2}\.?)?"
+_LIST_PERIOD = (
+    rf"у\s+(?:временском\s+)?периоду\s+од\s+(?P<first>{_LIST_DATE})"
+    rf"\s+до\s+(?P<last>{_LIST_DATE})(?:\s+године)?"
+)
+_LIST_INTRO = re.compile(
+    rf"\b(?:заузећ\w*|затварањ\w*|сужавањ\w*)\s+(?:дела\s+)?коловоза\s+"
+    rf"у\s+(?:улици|ул\.)\s+(?P<street>{_PLACE})\s*,\s*"
+    rf"(?:на територији (?:градске )?општине (?P<municipality>{_PLACE})\s*,\s*)?"
+    rf"{_LIST_PERIOD}\s*,?\s+по фазама:\s*\Z"
+)
+_LIST_PHASE = re.compile(
+    rf"фаза\s+(?P<phase>\d+)\s*:\s*заузеће\s+"
+    rf"(?:(?:десне|леве|крајње десне|крајње леве)\s+)?"
+    rf"(?:коловозне|саобраћајне)\s+траке\s+"
+    rf"од\s+(?:ул(?:ице)?\.?\s+)?(?P<start>{_PLACE})"
+    rf"\s+до\s+(?:ул(?:ице)?\.?\s+)?(?P<end>{_PLACE})\s*,?\s+"
+    rf"{_LIST_PERIOD}\s*[.:;]?\s*\Z"
+)
 
 
 def _sentences(document: EvidenceDocument) -> list[str]:
@@ -117,10 +136,11 @@ def _resolve(
     resolved = []
     for municipality in sorted(municipalities):
         roads = index.get(municipality, {})
-        street = names["street"]
+        name = names["street"]
+        street = name if name in roads else _cross_name(name, roads)
         start = _cross_name(names["start"], roads)
         end = _cross_name(names["end"], roads)
-        if street not in roads or start is None or end is None:
+        if street is None or start is None or end is None:
             continue
         segment = {
             "municipality": municipality,
@@ -138,6 +158,64 @@ def _printed_date(value: str) -> date:
     return date(year, month, day)
 
 
+def _listed_period(
+    first: str, last: str, *, year: int | None = None,
+) -> tuple[date, date] | None:
+    start_parts = [int(part) for part in first.strip(".").split(".")]
+    end_parts = [int(part) for part in last.strip(".").split(".")]
+    if len(end_parts) == 3:
+        year = end_parts[2]
+    if year is None:
+        return None
+    start_year = start_parts[2] if len(start_parts) == 3 else year
+    try:
+        start = date(start_year, start_parts[1], start_parts[0])
+        end = date(year, end_parts[1], end_parts[0])
+    except ValueError:
+        return None
+    return (start, end) if start <= end else None
+
+
+def _listed_secretariat_stretches(
+    body: str, index: StreetIndex,
+) -> list[tuple[date, date, dict[str, Any]]]:
+    # Сборщик сохраняет каждый пункт списка отдельным абзацем.
+    blocks = [block for line in body.splitlines() if (block := _name(line.strip("\u200b")))]
+    intros = [(position, match) for position, block in enumerate(blocks)
+              if (match := _LIST_INTRO.search(block))]
+    if len(intros) != 1:
+        return []
+    position, intro = intros[0]
+    period = _listed_period(intro["first"], intro["last"])
+    if period is None:
+        return []
+    municipality = intro["municipality"]
+    if municipality is not None and municipality not in _MUNICIPALITIES:
+        return []
+    first, last = period
+    common_year = first.year if first.year == last.year else None
+    stretches: list[tuple[date, date, dict[str, Any]]] = []
+    phases = []
+    for block in blocks[position + 1:]:
+        match = _LIST_PHASE.fullmatch(block)
+        if match is None:
+            break
+        if len(stretches) == _MAX_SEGMENTS or match["phase"] in phases:
+            return []
+        dates = _listed_period(match["first"], match["last"], year=common_year)
+        if dates is None or not first <= dates[0] <= dates[1] <= last:
+            return []
+        geometry = _resolve(
+            {"street": intro["street"].strip(), "start": match["start"], "end": match["end"]},
+            index, {municipality} if municipality else set(index),
+        )
+        if geometry is None:
+            return []
+        stretches.append((*dates, geometry))
+        phases.append(match["phase"])
+    return stretches if phases == _PHASE.findall(_name(body)) else []
+
+
 def resolve_secretariat_stretches(
     document: EvidenceDocument, index: StreetIndex,
 ) -> list[tuple[date, date, dict[str, Any]]]:
@@ -145,6 +223,8 @@ def resolve_secretariat_stretches(
     if (document.source_id != SOURCE_ID or not match_bgsaobracaj_notice(document.url)
             or len(document.body.encode()) > _MAX_NOTICE_BYTES):
         return []
+    if listed := _listed_secretariat_stretches(document.body, index):
+        return listed
     body = _name(document.body)
     road = _DATED_ROAD.search(body)
     if road is None or not _SECRETARIAT_RESTRICTION.search(body[:road.start()]):
