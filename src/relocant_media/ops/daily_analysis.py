@@ -179,11 +179,18 @@ def _kpi_lines(kpi: dict[str, Any] | None) -> list[str]:
 def markdown(report: dict[str, Any]) -> str:
     observed = _time(report["snapshot"]["observed_at"])
     stamp = observed.astimezone(ZONE).strftime("%d.%m.%Y %H:%M МСК") if observed else "неизвестно"
+    flow = report.get("editorial_flow")
+    cadence_rows = [
+        (day["local_date"], day["publication_cadence"])
+        for day in (flow["days"] if flow else []) if day.get("publication_cadence")
+    ]
     lines = [f"# Ежедневный статус · {report['report_date']} · {report['city']}", "",
              f"Состояние снимка: {report['snapshot']['status']}. Наблюдение БД: {stamp}.", "",
-             *_kpi_lines(report.get("rolling_kpi")),
-             "Публикации за календарные сутки: неизвестно. Продвижение: недоступно.",
-             "Сигналы комментариев и входящих обращений: недоступны.", ""]
+             *_kpi_lines(report.get("rolling_kpi"))]
+    if not cadence_rows:
+        lines.append("Публикации за календарные сутки: неизвестно.")
+    lines.extend(["Продвижение: недоступно.",
+                  "Сигналы комментариев и входящих обращений: недоступны.", ""])
     counts = report["snapshot"]["queue_counts"]
     if counts is not None:
         lines.extend(["Состояния очереди в снимке (не суточные результаты):", "",
@@ -193,7 +200,6 @@ def markdown(report: dict[str, Any]) -> str:
     lines.extend(["Причины, повторяющиеся в показанной выборке:", ""])
     lines.extend([f"- {row['reason_code']}: {row['occurrences']}" for row in repeated]
                  or ["Недостаточно наблюдений; временной тренд не установлен."])
-    flow = report.get("editorial_flow")
     lines.extend(["", "## Очередь и скорость выпуска", ""])
     if flow is None:
         lines.append("Для этого снимка агрегаты редакции недоступны.")
@@ -243,6 +249,22 @@ def markdown(report: dict[str, Any]) -> str:
                     for key in stage_names
                 ]
                 lines.append(f"| {day} | {category} | " + " | ".join(values) + " |")
+        if cadence_rows:
+            lines.extend([
+                "", "## Ритм выпуска", "",
+                "Отдельные редакционные посты по подтверждённым квитанциям Telegram.",
+                "Пауза считается в окне 08:00–21:00, для текущего дня — до времени среза.",
+                "", "| День | Посты | Наибольшая пауза, мин | В тихие часы (23:00–08:00) |",
+                "| --- | ---: | ---: | ---: |",
+            ])
+            for day, counts in cadence_rows:
+                label = f"{day} (неполный)" if day == measured_at.date().isoformat() else day
+                gap = counts["max_daytime_gap_minutes"]
+                gap_label = "—" if gap is None else f"{gap:g}"
+                posts_count = counts["posts"]
+                quiet = counts["quiet_hour_posts"]
+                share = f"{quiet} ({100 * quiet / posts_count:.0f} %)" if posts_count else "—"
+                lines.append(f"| {label} | {posts_count} | {gap_label} | {share} |")
     lines.extend(["", "Следующие действия:", ""])
     lines.extend(f"{index}. {action}" for index, action in enumerate(report["next_actions"], 1))
     lines.extend(["", "Ограничения:", ""])
