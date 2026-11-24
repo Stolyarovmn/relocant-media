@@ -73,3 +73,27 @@ def test_away_match_broadcast_does_not_need_a_local_map(delivery):
 def test_broadcast_does_not_remove_map_check_for_local_or_unconfirmed_events(title, body):
     assert event_map_review_reason(presentation(), "sport", title, body, city="belgrade") == (
         "event_place_requires_verification")
+
+
+@pytest.mark.parametrize("delivery", [False, True])
+def test_notice_explicitly_for_online_participants_needs_no_physical_place(delivery):
+    assert event_map_review_reason(
+        presentation(), "events", "В четверг можно подключиться к ярмарке практик",
+        "Ярмарка начнётся в 10:00. Подключиться можно онлайн.\n\n"
+        "На виртуальном стенде расскажут об условиях практики.",
+        current_delivery=delivery,
+    ) is None
+
+
+@pytest.mark.parametrize("title,body", [
+    ("Билеты на концерт продаются онлайн", "Концерт пройдёт 28 ноября. Купите билеты онлайн."),
+    ("В четверг пройдёт ярмарка", "Ярмарка начнётся в 10:00. Подключиться можно онлайн."),
+    ("Как подключиться к ярмарке", "Подключиться можно онлайн.\n\nПриходите в городской зал."),
+    ("Как подключиться к ярмарке", "Подключиться можно онлайн или прийти лично."),
+    ("Как подключиться к показу", "Подключиться можно онлайн.\n\nПлощадка: Дом молодёжи."),
+    ("Как подключиться к показу", "Показ пройдёт в субботу.\n\nПодключиться можно онлайн."),
+    ("Как подключиться к ярмарке", "Подключиться можно онлайн.\n\nОчная встреча начнётся в 12:00."),
+])
+def test_remote_option_does_not_remove_the_map_for_in_person_announcements(title, body):
+    assert event_map_review_reason(presentation(), "events", title, body) == (
+        "event_place_requires_verification")

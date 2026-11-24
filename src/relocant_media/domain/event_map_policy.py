@@ -10,6 +10,14 @@ _PLACE = re.compile(
     r"\b(?:концерт\w*|выставк\w*|спектакл\w*|фестивал\w*|кинопоказ\w*|экскурси\w*)\b",
 )
 _REMOTE = re.compile(r"(?im)^формат:[ \t]*(?:полностью|только) онлайн[.! \t]*$")
+_REMOTE_TITLE = re.compile(
+    r"\b(?:подключиться к|участвовать онлайн|онлайн[- ]"
+    r"(?:ярмарк\w*|лекци\w*|встреч\w*|показ\w*|выставк\w*|конференци\w*))\b", re.I,
+)
+_REMOTE_LEAD = re.compile(
+    r"(?:^|[.!?]\s+)(?:подключиться|участвовать|принять участие) можно онлайн"
+    r"(?:[.!?](?=\s|$)|$)", re.I,
+)
 _ATTENDANCE = re.compile(
     r"(?im)^(?:площадка|где|адрес|когда|билеты):|"
     r"\b(?:посетител\w*|посетить|состоится|пройд[её]т|начн[её]тся|билет\w*)\b",
@@ -26,6 +34,17 @@ _IN_PERSON = re.compile(
     r"в\s+(?:баре|кафе)|фан[- ]?зон\w*|билет\w*|"
     r"вход\s+(?:свободный|бесплатный|по)|посетить)\b",
 )
+_ON_SITE = re.compile(
+    r"\b(?:очн\w*|лично|оф+лайн|вживую|прийти|приходите|приходить|приехать|"
+    r"в\s+(?:зале|кинотеатре|галерее|кассе))\b", re.I,
+)
+
+
+def _remote_participation(title: str, body: str) -> bool:
+    lead = body.partition("\n\n")[0]
+    text = title + "\n" + body
+    return bool(_REMOTE_TITLE.search(title) and _REMOTE_LEAD.search(lead)
+                and not (_IN_PERSON.search(text) or _ON_SITE.search(text)))
 
 
 def _away_broadcast(city: str, title: str, body: str) -> bool:
@@ -56,6 +75,8 @@ def event_map_review_reason(
         and (not _RECAP_TITLE.search(title) or attendance)
     ) or (category == "sport" and (attendance or in_person))
     if not physical or _REMOTE.search(body):
+        return None
+    if category in {"events", "culture"} and _remote_participation(title, body):
         return None
     if presentation is not None and (
         presentation.event_place is not None or presentation.native_map is not None
