@@ -34,7 +34,7 @@ _EXPIRY_REASONS: tuple[ExpiryReason, ...] = (
     "disruption_already_resolved",
 )
 Count = Annotated[int, Field(strict=True, ge=0)]
-_REPORT_DAY_END = time(21)
+PUBLICATION_DAY_END = time(21)
 
 
 class Expiry(BaseModel):
@@ -123,7 +123,7 @@ def _publication_cadence(
     day: date, delivered_at: list[datetime], now: datetime, zone: ZoneInfo,
 ) -> PublicationCadence:
     opening = datetime.combine(day, QUIET_END, zone)
-    closing = min(datetime.combine(day, _REPORT_DAY_END, zone), now)
+    closing = min(datetime.combine(day, PUBLICATION_DAY_END, zone), now)
     gap = None
     if closing > opening:
         marks = [opening, *sorted(sent for sent in delivered_at if opening < sent < closing),

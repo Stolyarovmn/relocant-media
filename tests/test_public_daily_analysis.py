@@ -47,6 +47,37 @@ def test_old_or_future_observation_stays_stale(observed):
     assert "устарели" in report["next_actions"][0]
 
 
+@pytest.mark.parametrize(("observed_hour", "posts", "stale", "expected"), [
+    (19, 4, False, False),  # До 21:00 в Белграде.
+    (20, 0, False, True),
+    (20, 4, False, True),
+    (20, 6, False, False),
+    (20, None, False, False),
+    (20, 4, True, False),
+    (23, 4, False, False),  # Срез редакционного потока из будущего.
+])
+def test_low_release_volume_uses_confirmed_count_after_daytime_window(
+    observed_hour, posts, stale, expected,
+):
+    value = snapshot()
+    city = value["cities"][0]
+    if stale:
+        city["observed_at"] = (NOW - timedelta(hours=7)).isoformat()
+    day = NOW.date()
+    city["editorial_flow"] = {
+        "observed_at": NOW.replace(hour=observed_hour).isoformat(),
+        "timezone": "Europe/Belgrade",
+        "days": [{"local_date": day.isoformat(), "expired_unreviewed": [],
+                  "delivery_latency": [], "publication_cadence": None if posts is None else {
+                      "posts": posts, "quiet_hour_posts": 0, "max_daytime_gap_minutes": 780,
+                  }}],
+    }
+    report = build_status(value, city="belgrade", now=NOW, day=day)
+    signal = f"Низкий выпуск за {day} — {posts} подтверждённых постов при ориентире 6"
+    assert (signal in markdown(report)) is expected
+    assert "Низкий выпуск" not in owner_markdown(report)
+
+
 @pytest.mark.parametrize("value", [None, snapshot()])
 def test_city_without_observation_has_unknown_counts_and_signals(value):
     report = build_status(value, city="novi_sad", now=NOW)
