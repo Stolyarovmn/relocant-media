@@ -16,7 +16,7 @@ from relocant_media.bot.formatting import (
     rich_editorial_html,
 )
 from relocant_media.bot.publisher import Publisher
-from relocant_media.domain.map_links import map_event_url
+from relocant_media.domain.map_links import map_event_url, map_repair_url
 from relocant_media.services.native_map import (
     LEGACY_NOTICE_LAYOUT,
     NOTICE_COVER,
@@ -49,6 +49,16 @@ class PreparedNativeMessage:
     map_url: str | None = None
     source_preview_url: str | None = None
     reviewed_html_sha256: str | None = None
+
+
+def _native_map_url(point: dict[str, Any]) -> str:
+    source_url = point["source_url"]
+    app = os.environ.get("RELOCANT_MAP_TELEGRAM_APP")
+    repairs = point.get("repair_sites", {}).get("points", [])
+    if len(repairs) == 1:
+        target = repairs[0]
+        return map_repair_url(source_url, target["lat"], target["lon"], telegram_app=app)
+    return map_event_url(source_url, telegram_app=app)
 
 
 def prepare_native_transport(
@@ -84,9 +94,7 @@ def prepare_native_transport(
         raise ValueError("production publisher does not support reviewed native map")
     if notice_layout:
         reviewed_html_sha256 = None
-        notice_url = map_event_url(
-            point["source_url"], telegram_app=os.environ.get("RELOCANT_MAP_TELEGRAM_APP"),
-        )
+        notice_url = _native_map_url(point)
         if layout == NOTICE_LAYOUT:
             if NOTICE_COVER in html or "<tg-map" in html:
                 raise ValueError("notice has unsupported content")
@@ -136,9 +144,7 @@ def prepare_native_transport(
         raise ValueError("map image and reviewed HTML do not match")
     map_url = None
     if point.get("mode") in (MAP_MODE, UTILITY_MAP_MODE):
-        map_url = map_event_url(
-            point["source_url"], telegram_app=os.environ.get("RELOCANT_MAP_TELEGRAM_APP"),
-        )
+        map_url = _native_map_url(point)
     return cast(RichMessageBot, bot), PreparedNativeMessage(html, photo, image_sha256, map_url)
 
 
