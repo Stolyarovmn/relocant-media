@@ -371,6 +371,8 @@ def test_reports_never_change_the_editorial_cycle_result_or_hold_its_state_lock(
     assert reports
     for step in reports:
         assert step.get("continue-on-error") == "true", step["name"]
+        # Шаг идёт под canonical-editorial-state: медленный отчёт не держит очередь.
+        assert int(step.get("timeout-minutes", "0")) == 1, step["name"]
     for name in _REPORT_WORKFLOWS:
         text = WORKFLOW.with_name(name).read_text(encoding="utf-8")
         assert "canonical-editorial-state" not in text, name
