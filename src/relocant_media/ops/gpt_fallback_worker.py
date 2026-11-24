@@ -9,6 +9,7 @@ import json
 import os
 import re
 from collections import Counter
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
 from relocant_media.ops import server_cycle, server_runtime
 from relocant_media.ops.gpt_export_receipt import require_public_documents
+from relocant_media.ops.gpt_submission import GPTSubmission
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.editorial import EditorialService
 from relocant_media.services.flight_review import flight_review_marker
@@ -52,6 +54,7 @@ from relocant_media.services.material_lifecycle import (
     PUBLISHED_TRANSPORT_DUPLICATE,
     LifecycleBlockedError,
     _read_record,
+    admit_queued_fallback,
 )
 from relocant_media.services.package_import import import_package
 from relocant_media.services.policy_reassessment import (
@@ -186,17 +189,40 @@ def save_batch_rank(
     }
 
 
+def _queued_admission(
+    session: Session, request: dict[str, Any], raw_id: int, *, now: datetime,
+    submission: GPTSubmission | None,
+) -> AbstractContextManager[bool]:
+    if submission is None:
+        return nullcontext(False)
+    return admit_queued_fallback(
+        session, raw_id, issued=request.get("created_at"),
+        received=submission.received_at, now=now,
+    )
+
+
 def _save_rejection(
     engine: Engine, request: dict[str, Any], rejection: FallbackRejection,
-    attempt: _FallbackAttempt, *, now: datetime,
+    attempt: _FallbackAttempt, *, now: datetime, submission: GPTSubmission | None = None,
 ) -> None:
     with Session(engine) as session:
         lock_editorial_city(session, "belgrade")
         raw_id = rejection.raw_item_id
-        _, profile, candidate, _ = validate_fallback_candidate(session, request, raw_id, now=now)
-        parent = candidate.flight_review_parent
-        if rejection.duplicate_of_message_id != (parent.message_id if parent else None):
-            raise ValueError("Решение о повторе должно ссылаться на исходную авиановость")
+        with _queued_admission(session, request, raw_id, now=now, submission=submission) as queued:
+            _, profile, candidate, _ = validate_fallback_candidate(
+                session, request, raw_id, now=now,
+            )
+            parent = candidate.flight_review_parent
+            if rejection.duplicate_of_message_id != (parent.message_id if parent else None):
+                raise ValueError("Решение о повторе должно ссылаться на исходную авиановость")
+            if parent is None:
+                if rejection.category not in {category for rubric in profile.rubrics
+                                              for category in rubric.categories}:
+                    raise ValueError("Неизвестная категория отказа GPT")
+                attempt.stage = "reject_claim"
+                attempt.lease = _claim_fallback(
+                    session, raw_id, now=now, submission=submission if queued else None,
+                )
         if parent is not None:
             from relocant_media.services.material_lifecycle import confirm_flight_duplicate
 
@@ -223,11 +249,6 @@ def _save_rejection(
             confirm_flight_duplicate(session, raw_id, now=now)
             session.commit()
             return
-        if rejection.category not in {category for rubric in profile.rubrics
-                                      for category in rubric.categories}:
-            raise ValueError("Неизвестная категория отказа GPT")
-        attempt.stage = "reject_claim"
-        attempt.lease = _claim_fallback(session, raw_id, now=now)
         if attempt.lease is None:
             raise FallbackClaimError("receipt_exists")
         attempt.stage = "reject_persist"
@@ -301,7 +322,9 @@ def _record_deferral(
         return None
 
 
-def _claim_fallback(session: Session, raw_id: int, *, now: datetime) -> str | None:
+def _claim_fallback(
+    session: Session, raw_id: int, *, now: datetime, submission: GPTSubmission | None = None,
+) -> str | None:
     """Вызывать только после полной проверки привязки к неуспешному циклу."""
     from relocant_media.services.material_lifecycle import (
         adopt_fallback_request,
@@ -334,6 +357,8 @@ def _claim_fallback(session: Session, raw_id: int, *, now: datetime) -> str | No
     assert record is not None
     lease = uuid4().hex
     record.details = {**record.details, "fallback_reply_lease": lease}
+    if submission is not None:
+        record.details["queued_fallback_reply"] = submission.audit()
     session.commit()
     return lease
 
@@ -444,7 +469,7 @@ async def _publish_imported(
 
 def run_worker(
     engine: Engine, payload: FallbackInput, *, send_enabled: bool = False,
-    now: datetime | None = None,
+    now: datetime | None = None, submission: GPTSubmission | None = None,
 ) -> dict[str, Any]:
     """Каждый импорт отдельно проходит актуальные проверки; ошибки не раскрывают пакет."""
     if now is not None and now.tzinfo is None:
@@ -462,6 +487,7 @@ def run_worker(
         try:
             _save_rejection(
                 engine, payload.request, rejection, attempt, now=now or datetime.now(UTC),
+                submission=submission,
             )
             declined += 1
         except Exception as error:
@@ -483,11 +509,20 @@ def run_worker(
         try:
             with Session(engine) as session:
                 lock_editorial_city(session, "belgrade")
-                package = validate_fallback_package(
-                    session, payload.request, package, now=now or datetime.now(UTC),
+                checked_at = now or datetime.now(UTC)
+                admission = _queued_admission(
+                    session, payload.request, package.raw_item_id, now=checked_at,
+                    submission=submission,
                 )
-                phase = "claim"
-                lease = _claim_fallback(session, package.raw_item_id, now=now or datetime.now(UTC))
+                with admission as queued:
+                    package = validate_fallback_package(
+                        session, payload.request, package, now=checked_at,
+                    )
+                    phase = "claim"
+                    lease = _claim_fallback(
+                        session, package.raw_item_id, now=checked_at,
+                        submission=submission if queued else None,
+                    )
                 if lease is None:
                     obsolete[package.raw_item_id] = "already_resolved"
                     continue
@@ -602,6 +637,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--submission", type=Path)
     args = parser.parse_args()
     engine = None
     output_created = False
@@ -650,9 +686,16 @@ def main() -> None:
             )
         else:
             stage = "import"
-            report = run_worker(
-                engine, payload, send_enabled=os.environ.get("EDITORIAL_SEND_ENABLED") == "true",
-            )
+            delivery = os.environ.get("EDITORIAL_SEND_ENABLED") == "true"
+            if args.submission is None:
+                report = run_worker(engine, payload, send_enabled=delivery)
+            else:
+                submission = GPTSubmission.read(args.submission)
+                if hashlib.sha256(canonical_json(result).encode()).hexdigest() != (
+                    submission.result_sha256
+                ):
+                    raise ValueError("fallback submission does not match the result")
+                report = run_worker(engine, payload, send_enabled=delivery, submission=submission)
             if report["flight_review_pending"]:
                 with Session(engine) as session:
                     continuation = build_request(

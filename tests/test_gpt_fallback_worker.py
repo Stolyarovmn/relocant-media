@@ -20,12 +20,19 @@ from relocant_media.domain.dedup import event_key
 from relocant_media.domain.presentation import presentation_title
 from relocant_media.ops import actions_runtime
 from relocant_media.ops import gpt_fallback_worker as worker
+from relocant_media.ops.gpt_submission import GPTSubmission
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import gpt_fallback
 from relocant_media.services.editorial import _candidate, _snapshot_member
 from relocant_media.services.editorial_products import build_presentation, present_draft
 from relocant_media.services.gpt_batch_fallback import build_batch_request, build_ranked_request
-from relocant_media.services.material_lifecycle import can_retry_snapshot, lifecycle_state
+from relocant_media.services.material_lifecycle import (
+    after_error,
+    before_attempt,
+    can_retry_snapshot,
+    lifecycle_state,
+    response_deadline,
+)
 from relocant_media.services.native_map import bind_native_map_draft
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Source
 
@@ -376,6 +383,64 @@ def test_replaying_an_editorial_rejection_uses_the_saved_decision(fallback_sessi
     assert second["obsolete_responses"] == {"already_resolved": 1}
     assert second["declined"] == second["rejected"] == 0
     assert lifecycle_state(session, raw.id, now=NOW)["fallback_attempts"] == 1
+
+
+@pytest.mark.parametrize("state", [
+    "waiting", "swept", "late", "hard_limit", "tampered", "event_started",
+])
+def test_timely_reply_survives_queue_and_keeps_the_original_deadlines(
+    fallback_session, monkeypatch, state,
+):
+    session, raw, _ = fallback_session
+    raw_id = raw.id
+    assert before_attempt(session, raw_id, now=NOW)
+    after_error(session, raw_id, "GeminiWorkerError", now=NOW)
+    second = NOW + timedelta(minutes=5)
+    assert before_attempt(session, raw_id, now=second)
+    after_error(session, raw_id, "GeminiWorkerError", now=second)
+    request = gpt_fallback.build_request(session, now=second)
+    short = response_deadline(session, raw_id)
+    assert short is not None and request is not None
+    hard = lifecycle_state(session, raw_id, now=second)["deadline_at"]
+    package = package_for_request(request)
+    late = short + timedelta(seconds=3)
+    received = short - timedelta(minutes=4)
+    if state == "swept":
+        assert lifecycle_state(session, raw_id, now=late)["reason"] == "fallback_deadline_exceeded"
+    if state == "late":
+        received = short
+    if state == "hard_limit":
+        late = datetime.fromisoformat(hard)
+    if state == "tampered":
+        raw.body += "\nНовая редакция источника."
+    if state == "event_started":
+        ledger = session.scalar(select(SchedulerRun).where(
+            SchedulerRun.task_type == "material_lifecycle"))
+        ledger.details = {**ledger.details, "fallback_event_starts_at": short.isoformat()}
+    session.commit()
+    reads = []
+    monkeypatch.setattr(worker, "_check_live_evidence",
+                        lambda value: reads.append(value.raw_item_id))
+    value = _input(package, request)
+    digest = hashlib.sha256(canonical_json(value["result"]).encode()).hexdigest()
+    receipt = GPTSubmission(42, digest, received)
+    result = worker.run_worker(session.get_bind(), _parse(value), now=late, submission=receipt)
+    session.expire_all()
+    if state in {"waiting", "swept"}:
+        assert reads == [raw_id]
+        assert result["imported"] == 1
+        saved = lifecycle_state(session, raw_id, now=late)
+        assert saved["queued_fallback_reply"] == receipt.audit()
+        assert saved["fallback_attempts"] == 1
+        assert saved["fallback_deadline_at"] == short.isoformat()
+        assert saved["deadline_at"] == hard
+        replay = worker.run_worker(session.get_bind(), _parse(value), now=late, submission=receipt)
+        assert replay["imported"] == replay["sent_count"] == 0
+        assert reads == [raw_id]
+    else:
+        assert reads == []
+        assert result["imported"] == result["sent_count"] == 0
+        assert lifecycle_state(session, raw_id, now=late)["fallback_attempts"] == 0
 
 
 @pytest.mark.parametrize("trusted_scope", [False, True])

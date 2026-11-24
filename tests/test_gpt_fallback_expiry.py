@@ -16,12 +16,18 @@ from test_material_lifecycle_boundaries import close_material
 from relocant_media.ai.package import canonical_json
 from relocant_media.ops import actions_runtime as runtime
 from relocant_media.ops.gpt_fallback_worker import _error_entry
+from relocant_media.ops.gpt_submission import GPTSubmission
 from relocant_media.services.gpt_fallback import (
     FallbackValidationError,
     build_request,
     validate_fallback_candidate,
 )
-from relocant_media.services.material_lifecycle import LifecycleBlockedError, response_deadline
+from relocant_media.services.material_lifecycle import (
+    LifecycleBlockedError,
+    after_error,
+    before_attempt,
+    response_deadline,
+)
 from relocant_media.storage.models import Base
 
 context = _context
@@ -152,6 +158,27 @@ def test_expired_result_is_detected_read_only(file_database, tmp_path, closed):
 def test_unknown_material_is_left_to_the_worker(file_database, tmp_path):
     path, _, _, request = file_database
     assert runtime._gpt_result_expired(path, _exchange(tmp_path, request, 999_999), NOW) is False
+
+
+def test_read_only_expiry_preflight_allows_verified_queued_rejection(file_database, tmp_path):
+    path, engine, raw_id, _ = file_database
+    with Session(engine) as session:
+        assert before_attempt(session, raw_id, now=NOW)
+        after_error(session, raw_id, "GeminiWorkerError", now=NOW)
+        second = NOW + timedelta(minutes=5)
+        assert before_attempt(session, raw_id, now=second)
+        after_error(session, raw_id, "GeminiWorkerError", now=second)
+        request = build_request(session, now=second)
+        deadline = response_deadline(session, raw_id)
+        assert deadline is not None and request is not None
+        session.commit()
+    exchange = _exchange(tmp_path, request, raw_id)
+    before = path.read_bytes()
+    late = deadline + timedelta(seconds=2)
+    assert runtime._gpt_result_expired(path, exchange, late)
+    receipt = GPTSubmission(42, "a" * 64, deadline - timedelta(minutes=3))
+    assert not runtime._gpt_result_expired(path, exchange, late, receipt)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("expired", [False, True])

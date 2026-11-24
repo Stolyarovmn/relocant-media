@@ -10,6 +10,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -61,6 +63,7 @@ DELIVERY_ATTEMPTS = 2
 MAX_HISTORY = 20
 TERMINAL_STATES = frozenset({"published", "blocked"})
 PUBLISHED_TRANSPORT_DUPLICATE = "lifecycle_published_transport_duplicate"
+_QUEUED_FALLBACK_SCOPE = "queued_fallback_reply_raw_id"
 
 
 class LifecycleBlockedError(ValueError):
@@ -587,6 +590,7 @@ def _reissue_unattempted_event_fallback(
     _set(record, now=now, state="waiting_fallback", action="fallback", next_at=now,
          reason="verified_event_fallback_reissued", fallback_deadline_at=deadline.isoformat(),
          fallback_reissued_at=now.isoformat(),
+         fallback_event_starts_at=start.isoformat(),
          attempt_records=archive,
          previous_fallback_deadline_at=previous_deadline.isoformat())
     record.finished_at = None
@@ -705,6 +709,7 @@ def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
             return after_error(session, raw_id, "AttemptInterrupted", now=now)
         return record
     if (record.details["state"] == "waiting_fallback"
+            and session.info.get(_QUEUED_FALLBACK_SCOPE) != raw_id
             and now >= _stamp(record.details["fallback_deadline_at"])):
         _block(session, record, run, post, now=now, reason="fallback_deadline_exceeded")
         return record
@@ -1317,6 +1322,94 @@ def _read_record(session: Session, raw_id: int) -> SchedulerRun | None:
     return record
 
 
+def can_admit_queued_fallback(
+    session: Session, raw_id: int, *, issued: object, received: datetime, now: datetime,
+) -> bool:
+    """Только ответ, принятый до короткого срока, отложенный общей очередью."""
+    record = _read_record(session, raw_id)
+    if record is None:
+        return False
+    data = record.details
+    closed_by_timer = record.status == data.get("state") == "blocked" and (
+        data.get("reason") == "fallback_deadline_exceeded"
+    )
+    if not closed_by_timer and (
+        record.status != "waiting_fallback" or data.get("state") != "waiting_fallback"
+    ):
+        return False
+    if (data.get("fallback_attempts") != 0 or data.get("delivery_attempts") != 0
+            or data.get("flight_review_attempts", 0) != 0
+            or data.get("reason") == FLIGHT_REVIEW_REASON):
+        return False
+    try:
+        short_deadline = _stamp(data["fallback_deadline_at"])
+        hard_deadline = _stamp(data["deadline_at"])
+        if not _stamp(issued) <= _now(received) < short_deadline <= now < hard_deadline:
+            return False
+        if (event_start := data.get("fallback_event_starts_at")) is not None:
+            if now >= _stamp(event_start):
+                return False
+        elif (reissued_at := data.get("fallback_reissued_at")) is not None:
+            # В старых записях время начала было сохранено лишь как более ранний дедлайн.
+            if short_deadline < _stamp(reissued_at) + FALLBACK_WAIT:
+                return False
+        if not _validate({**data, "state": "waiting_fallback", "next_action": "fallback",
+                          "next_attempt_at": now.isoformat()}):
+            return False
+        raw, source, run, post = _objects(session, raw_id)
+        if (not source.enabled or not source.auto_publish or source.high_risk
+                or source.ownership not in {"official", "media"} or _unsafe_delivery(run, post)
+                or data.get("fingerprints", {}).get(str(raw_id)) != _fingerprint(raw)
+                or _fresh(raw, source, now).action != "keep"):
+            return False
+        if closed_by_timer and run is not None:
+            block = run.outcome.get("_lifecycle_block")
+            if (post is not None or not isinstance(block, dict)
+                    or run.delivery_status != "pending"
+                    or run.outcome.get("reason") != "lifecycle_fallback_deadline_exceeded"
+                    or block.get("policy_version") != POLICY_VERSION
+                    or block.get("previous_status") not in {"skipped", "blocked"}
+                    or not isinstance(block.get("previous_reason"), str)
+                    or not (data.get("unconfirmed_rejection_fallback") is True
+                            or data.get("rejection_justified") is False)):
+                return False
+    except (ValueError, KeyError, TypeError):
+        return False
+    return session.scalar(select(Submission.id).where(
+        Submission.kind == "owner_editorial_review",
+        Submission.payload["raw_item_id"].as_integer().in_(
+            {raw_id, data.get("raw_item_id", raw_id)},
+        ),
+    ).limit(1)) is None
+
+
+@contextmanager
+def admit_queued_fallback(
+    session: Session, raw_id: int, *, issued: object, received: datetime, now: datetime,
+) -> Iterator[bool]:
+    """Временный допуск внутри той же транзакции, которая проверяет и заявляет попытку."""
+    if not can_admit_queued_fallback(session, raw_id, issued=issued, received=received, now=now):
+        yield False
+        return
+    record = _read_record(session, raw_id)
+    assert record is not None
+    if record.status == "blocked":
+        _, _, run, _ = _objects(session, raw_id)
+        if run is not None:
+            outcome = dict(run.outcome)
+            closure = outcome.pop("_lifecycle_block")
+            run.outcome = {**outcome, "status": closure["previous_status"],
+                           "reason": closure["previous_reason"]}
+        _set(record, now=now, state="waiting_fallback", action="fallback", next_at=now,
+             reason="queued_fallback_reply")
+        record.finished_at = None
+    session.info[_QUEUED_FALLBACK_SCOPE] = raw_id
+    try:
+        yield True
+    finally:
+        session.info.pop(_QUEUED_FALLBACK_SCOPE, None)
+
+
 def is_terminal_blocked(session: Session, raw_id: int, *, now: datetime | None = None) -> bool:
     """Проверить закрытие без записи, в том числе в read-only preview."""
     if session.get(RawItem, raw_id) is None:
@@ -1334,6 +1427,7 @@ def is_terminal_blocked(session: Session, raw_id: int, *, now: datetime | None =
         if current >= _stamp(data["deadline_at"]):
             return True
         if (data.get("state") == "waiting_fallback"
+                and session.info.get(_QUEUED_FALLBACK_SCOPE) != raw_id
                 and current >= _stamp(data["fallback_deadline_at"])):
             return True
     return False

@@ -30,7 +30,7 @@ from google.auth.transport.requests import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from relocant_media.ai.package import canonical_json
+from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.ai.quota_diagnostics import safe_quota
 from relocant_media.ops.belgrade_digests import (
     DIGEST_ATTEMPT_KEYS,
@@ -49,6 +49,7 @@ from relocant_media.ops.gpt_export_receipt import (
     require_public_documents,
     validate_export_marker,
 )
+from relocant_media.ops.gpt_submission import GPTSubmission, verified_submission
 from relocant_media.ops.map_backfill import apply as apply_map_buttons
 from relocant_media.ops.map_backfill import parse_targets as parse_map_button_targets
 from relocant_media.ops.map_export import export_map_snapshot
@@ -64,7 +65,7 @@ from relocant_media.ops.sqlite_restore import restore
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient, _state_digest
 from relocant_media.ops.vercel_inbox import acknowledge_inbox, ingress_config, sequence_cursor
 from relocant_media.services.cloud_discovery import batch_receipt, ingest_batch, parse_batch
-from relocant_media.services.material_lifecycle import sweep_materials
+from relocant_media.services.material_lifecycle import can_admit_queued_fallback, sweep_materials
 
 REPO = "Stolyarovmn/relocant-media"
 STATE_BRANCH = "editorial-state"
@@ -343,7 +344,9 @@ def _request_deadlines(session: Session, request: dict[str, Any]) -> list[dateti
     return deadlines
 
 
-def _gpt_result_expired(database: Path, exchange_file: Path, now: datetime) -> bool:
+def _gpt_result_expired(
+    database: Path, exchange_file: Path, now: datetime, submission: GPTSubmission | None = None,
+) -> bool:
     """Определить подлинную просрочку ответа до получения права записи."""
     from relocant_media.ops.gpt_fallback_worker import FallbackInput
     from relocant_media.services.gpt_fallback import obsolete_fallback_response
@@ -352,23 +355,28 @@ def _gpt_result_expired(database: Path, exchange_file: Path, now: datetime) -> b
         payload = FallbackInput.model_validate_json(exchange_file.read_bytes())
     except ValueError:
         return False
-    non_package_ids = [item.raw_item_id for item in payload.result.rejected]
-    non_package_ids.extend(item.raw_item_id for item in payload.result.deferred)
     engine = create_engine(f"sqlite:///{database.resolve().as_posix()}")
     try:
         with Session(engine) as session, session.no_autoflush:
             session.connection().exec_driver_sql("PRAGMA query_only=ON")
-            return all(
-                obsolete_fallback_response(
-                    session, payload.request, package.raw_item_id, now=now, package=package,
-                ) == "material_expired"
-                for package in payload.result.packages
-            ) and all(
-                obsolete_fallback_response(
-                    session, payload.request, raw_id, now=now,
-                ) == "material_expired"
-                for raw_id in non_package_ids
-            )
+
+            def expired(raw_id: int, package: EditorialPackage | None = None,
+                        *, final: bool) -> bool:
+                return (obsolete_fallback_response(
+                    session, payload.request, raw_id, now=now, package=package,
+                ) == "material_expired" and (
+                    not final or submission is None or not can_admit_queued_fallback(
+                        session, raw_id, issued=payload.request.get("created_at"),
+                        received=submission.received_at, now=now,
+                    )
+                ))
+
+            return (all(expired(pkg.raw_item_id, pkg, final=True)
+                        for pkg in payload.result.packages)
+                    and all(expired(item.raw_item_id, final=True)
+                            for item in payload.result.rejected)
+                    and all(expired(item.raw_item_id, final=False)
+                            for item in payload.result.deferred))
     finally:
         engine.dispose()
 
@@ -1062,14 +1070,23 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     if mode == "digest":
         return 0
     fallback_file = work / "gpt-fallback-input.json"
+    fallback_submission: Path | None = None
     without_gpt_delivery = False
     if mode == "fallback":
         without_gpt_delivery = _prepare_gpt_input(drive, gpt_input, fallback_file)
-        if _gpt_result_expired(database, fallback_file, datetime.now(UTC)):
+        result = json.loads(fallback_file.read_text(encoding="utf-8"))["result"]
+        submission = (
+            verified_submission(environment, gpt_input)
+            if result.get("packages") or result.get("rejected") else None
+        )
+        if _gpt_result_expired(database, fallback_file, datetime.now(UTC), submission):
             # До захвата блокировки: состояние не меняется, повтор ничего не даст.
             print(json.dumps({"gpt_fallback": "result_expired",
                               "reason": "material_closed"}), flush=True)
             return 0
+        if submission is not None:
+            fallback_submission = work / "gpt-submission.json"
+            fallback_submission.write_text(canonical_json(submission.audit()), encoding="utf-8")
     # Readback/restore and all validation precede the claim; all side effects follow it.
     identifier(folder)
     require_snapshot_capacity(database)
@@ -1094,6 +1111,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             "GH_STATE_TOKEN", "GH_STATE_REPOSITORY", "DRIVE_CREDENTIALS_JSON",
             "DRIVE_STATE_FOLDER_ID", "DRIVE_PREVIEW_MANIFEST_ID", "GOOGLE_APPLICATION_CREDENTIALS",
             "CLOUD_DISCOVERY_BATCH",
+            "GH_TOKEN",
             "GPT_FALLBACK_BLOB_SHA256",
             "GPT_FALLBACK_CYCLE_ID",
         }:
@@ -1121,6 +1139,8 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
                 env.pop(name)
         command = [sys.executable, "-m", "relocant_media.ops.gpt_fallback_worker",
                    "--input", str(fallback_file), "--output", str(run_dir)]
+        if fallback_submission is not None:
+            command.extend(["--submission", str(fallback_submission)])
     elif mode == "intake":
         env["EDITORIAL_INTAKE_MODE"] = "batch"
         command = [sys.executable, "-m", "relocant_media.ops.intake_batch"]
