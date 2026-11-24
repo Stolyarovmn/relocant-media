@@ -28,9 +28,7 @@ class PartialResponse:
     def generate_json(self, **kwargs):
         rows = json.loads(kwargs["prompt"])["candidates"]
         assert kwargs["response_schema"]["properties"]["ranking"]["minItems"] == len(rows)
-        return json.dumps({"ranking": [{"raw_item_id": row["raw_item_id"],
-                                        "reason": "Неполный тестовый порядок"}
-                                       for row in rows[:1]]})
+        return json.dumps({"ranking": [rows[0]["candidate_number"]]})
 
 
 def precise(engine):

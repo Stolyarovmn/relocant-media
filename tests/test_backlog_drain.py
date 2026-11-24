@@ -27,9 +27,7 @@ class Provider:
         assert kwargs["task"] == "batch_preselect"
         payload = json.loads(kwargs["prompt"])
         assert len(payload["candidates"]) <= 30
-        return json.dumps({"ranking": [{"raw_item_id": row["raw_item_id"],
-                                       "reason": "Проверить исходные факты."}
-                                      for row in payload["candidates"]]})
+        return json.dumps({"ranking": [row["candidate_number"] for row in payload["candidates"]]})
 
 
 @pytest.fixture

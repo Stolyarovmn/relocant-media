@@ -39,9 +39,7 @@ class Provider:
         if self.response is not None:
             return self.response
         rows = json.loads(kwargs["prompt"])["candidates"]
-        return json.dumps({"ranking": [{"raw_item_id": row["raw_item_id"],
-                                        "reason": "Содержательный интерес для жителей"}
-                                       for row in reversed(rows)]})
+        return json.dumps({"ranking": [row["candidate_number"] for row in reversed(rows)]})
 
 
 def choose(rows, provider, limit=5, **kwargs):
@@ -50,31 +48,41 @@ def choose(rows, provider, limit=5, **kwargs):
 
 def test_one_batch_orders_thirty_and_sends_five_unchanged_objects_to_full_review():
     rows = candidates()
+    for row in rows:
+        row["raw_item_id"] = 50_000 + row["raw_item_id"] * 17
     before = copy.deepcopy(rows)
     provider = Provider()
     selected, audit = choose(rows, provider)
-    assert [row["raw_item_id"] for row in selected] == [30, 29, 28, 27, 26]
+    assert selected == rows[::-1][:5]
     assert selected[0] is rows[-1]
     assert rows == before
     assert len(provider.calls) == 1
     assert provider.calls[0]["task"] == "batch_preselect"
     schema = provider.calls[0]["response_schema"]["properties"]["ranking"]
     assert schema["minItems"] == schema["maxItems"] == 30
+    assert schema["items"] == {"type": "integer", "minimum": 1, "maximum": 30}
+    sent = json.loads(provider.calls[0]["prompt"])["candidates"]
+    assert [row["candidate_number"] for row in sent] == list(range(1, 31))
+    assert all("raw_item_id" not in row for row in sent)
     assert audit["status"] == "ranked" and audit["scanned_count"] == 30
+    assert audit["selected_ids"] == [row["raw_item_id"] for row in selected]
     assert audit["submitted_count"] == 30 and len(audit["deferred_ids"]) == 25
     assert "approve" not in audit and "ranking" not in selected[0]
 
 
-@pytest.mark.parametrize("response", [
-    "not-json", "{}", '{"ranking":[]}',
-    '{"ranking":[{"raw_item_id":999,"reason":"Несуществующий"}]}',
-    '{"ranking":[{"raw_item_id":true,"reason":"Логическое значение"}]}',
-    '{"ranking":[{"raw_item_id":1,"reason":"Первый"},{"raw_item_id":1,"reason":"Дубль"}]}',
-    '{"ranking":[{"raw_item_id":1.0,"reason":"Неверный тип"}]}',
-    '{"ranking":[],"ranking":[]}',
-    '{"ranking":[{"raw_item_id":1,"reason":"Тема","publish":true}]}',
+@pytest.mark.parametrize(("response", "error_detail"), [
+    ("not-json", "invalid_json"),
+    ("{}", "invalid_schema"),
+    ('{"ranking":[]}', "invalid_schema"),
+    ('{"ranking":[999]}', "invalid_permutation"),
+    ('{"ranking":[true]}', "invalid_schema"),
+    ('{"ranking":[1,1]}', "invalid_permutation"),
+    ('{"ranking":[1.0]}', "invalid_schema"),
+    ('{"ranking":[],"ranking":[]}', "invalid_json"),
+    ('{"ranking":[1],"publish":true}', "invalid_schema"),
+    pytest.param("x" * 100_001, "invalid_size", id="oversized"),
 ])
-def test_malformed_or_foreign_ids_fall_back_without_decisions(response):
+def test_malformed_or_foreign_ids_fall_back_without_decisions(response, error_detail):
     provider = Provider(response=response)
     rows = candidates(6)
     before = copy.deepcopy(rows)
@@ -83,6 +91,7 @@ def test_malformed_or_foreign_ids_fall_back_without_decisions(response):
     assert audit["status"] == "fallback"
     assert audit["error_type"] in {"ValueError", "ValidationError", "JSONDecodeError"}
     assert audit["error_stage"] == "response"
+    assert audit["error_detail"] == error_detail
     assert rows == before
 
 
@@ -107,8 +116,7 @@ def test_partial_ranking_remains_invalid_but_keeps_safe_full_review_candidates()
     from relocant_media.ai.batch_preselection import provider_handoff
 
     rows = candidates(30)
-    provider = Provider(response=json.dumps({"ranking": [
-        {"raw_item_id": i, "reason": "Частичный список"} for i in range(1, 6)]}))
+    provider = Provider(response=json.dumps({"ranking": list(range(1, 6))}))
     selected, audit = choose(rows, provider)
     assert selected == rows[:5]
     assert audit["status"] == "fallback" and audit["error_stage"] == "response"
@@ -116,9 +124,8 @@ def test_partial_ranking_remains_invalid_but_keeps_safe_full_review_candidates()
 
 
 @pytest.mark.parametrize("ids", [[1, 2, 3, 4, 5, 5], [1, 2, 3, 4, 5, 999]])
-def test_full_length_response_still_requires_every_exact_input_id(ids):
-    response = json.dumps({"ranking": [{"raw_item_id": i, "reason": "Предложенная тема"}
-                                       for i in ids]})
+def test_full_length_response_still_requires_every_exact_input_number(ids):
+    response = json.dumps({"ranking": ids})
     selected, audit = choose(candidates(6), Provider(response=response))
     assert audit["status"] == "fallback"
     assert [row["raw_item_id"] for row in selected] == [1, 2, 3, 4, 5]
@@ -138,7 +145,7 @@ def test_unfresh_news_neither_take_slots_nor_reach_model(kind):
     provider = Provider()
     selected, audit = choose(rows, provider)
     sent = json.loads(provider.calls[0]["prompt"])["candidates"]
-    assert 8 not in {row["raw_item_id"] for row in sent}
+    assert rows[-1]["evidence"]["url"] not in {row["evidence"]["url"] for row in sent}
     assert 8 not in {row["raw_item_id"] for row in selected}
     assert len(selected) == 5 and audit["excluded"][0]["raw_item_id"] == 8
 
