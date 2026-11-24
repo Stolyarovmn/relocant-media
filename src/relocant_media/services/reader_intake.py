@@ -16,6 +16,11 @@ from relocant_media.services.reader_forwarded_source import (
     is_forwarded_message,
     public_forward_urls,
 )
+from relocant_media.services.reader_message_parts import (
+    NEW_CASE_LABEL,
+    combine_reader_parts,
+    is_start_text,
+)
 from relocant_media.services.reader_publication import (
     advance_publication,
     begin_publication,
@@ -68,28 +73,12 @@ ROUTE_LABELS = {
     "Реклама": "ad_request",
     **{label: kind for kind, (label, _) in ROUTES.items()},
 }
-NEW_CASE_LABEL = "Новое обращение"
 WELCOME_MENU = (
     "Напишите, о чем хотите сообщить. "
     "Можно отправить несколько сообщений и приложить фото или видео."
     "\n\nПерепроверьте детали, при необходимости дополните или исправьте сообщения, "
     "затем выберите действие ниже. Весь текст и вложения отправятся одним обращением."
 )
-GREETING = re.compile(
-    r"(?:здравствуйте|здравствуй|привет|приветствую|доброе утро|добрый день|добрый вечер)"
-    r"[\s.!?,…👋]*",
-    re.IGNORECASE,
-)
-PRESENCE_CHECK = re.compile(
-    r"(?:есть\s+кто(?:[- ]нибудь)?|кто(?:[- ]нибудь)?\s+(?:есть|тут|здесь)|"
-    r"(?:вы|ты)\s+(?:тут|здесь)|алло|ау)[\s.!?,…]*", re.IGNORECASE,
-)
-
-
-def _start_text(text: str) -> bool:
-    return (text == NEW_CASE_LABEL or text.partition(" ")[0].split("@")[0] == "/start"
-            or GREETING.fullmatch(text) is not None
-            or PRESENCE_CHECK.fullmatch(text) is not None)
 
 
 def _notice_covers_input(notice: dict[str, Any], received_at: datetime) -> bool:
@@ -305,21 +294,14 @@ def _append(row: Submission, message_id: int, items: dict[str, Any]) -> bool:
     if len(parts) >= 32 and str(message_id) not in parts:
         return False
     parts[str(message_id)] = items
-    ordered = [parts[key] for key in sorted(parts, key=int)]
-    text = "\n".join(part["text"] for part in ordered if part["text"] and not (
-        not part["attachments"] and not part.get("forwarded") and _start_text(part["text"])
-    ))
-    attachments: dict[str, dict[str, Any]] = {}
-    for part in ordered:
-        for media in part["attachments"]:
-            attachments[media.get("file_unique_id") or media["file_id"]] = media
+    text, attachments = combine_reader_parts(parts)
     if len(text) > 20_000 or len(attachments) > 24:
         return False
     row.payload = {
         **row.payload,
         "reader_parts": parts,
         "text": text,
-        "attachments": list(attachments.values()),
+        "attachments": attachments,
         "media_present": bool(attachments),
         "updated_at": _now().isoformat(),
     }
@@ -466,7 +448,7 @@ def record_reader_message(
     text = items["text"]
     forwarded = bool(items.get("forwarded"))
     control = not items["attachments"] and not forwarded
-    start = control and _start_text(text)
+    start = control and is_start_text(text)
     if not (items["text"] or items["attachments"] or items.get("public_forward_url")):
         return False
     received_at = _date(message)
@@ -730,7 +712,7 @@ def _apply_action(
 
 def _has_submission_content(row: Submission, kind: str) -> bool:
     text = row.payload["text"].strip()
-    return bool((text and not _start_text(text)) or (
+    return bool((text and not is_start_text(text)) or (
         kind == "news_tip" and (row.payload["attachments"] or public_forward_urls(row.payload))
     ))
 

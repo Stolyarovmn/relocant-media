@@ -16,6 +16,7 @@ from relocant_media.services.reader_publication import material_fingerprint, per
 from relocant_media.services.reader_source_discovery import (
     DISCOVERY_FIELD,
     SOURCE_REVISION_FIELD,
+    confirmed_source_signal,
     pending_source_discovery,
     record_discovery_check,
 )
@@ -430,6 +431,12 @@ async def test_reader_followup_restores_only_private_source_search(engine, direc
             assert row.payload[SOURCE_REVISION_FIELD] == material_fingerprint(row.payload)
             assert DISCOVERY_FIELD not in row.payload
             assert [item.id for item in eligible] == [sid]
+            legacy = {key: value for key, value in row.payload.items()
+                      if key != SOURCE_REVISION_FIELD}
+            assert confirmed_source_signal(legacy)
+            assert not confirmed_source_signal({**legacy, "text": "Подмена текста"})
+            not_sent = {**legacy["reader_notices"], "added:7": {"status": "uncertain"}}
+            assert not confirmed_source_signal({**legacy, "reader_notices": not_sent})
         else:
             assert SOURCE_REVISION_FIELD not in row.payload and not eligible
     assert f"Добавлено к заявке №{ref}." == telegram.messages[-1][1]["text"]

@@ -16,6 +16,7 @@ from relocant_media.domain.event_facts import (
 )
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.primary_discovery import folded, topic_words
+from relocant_media.services.reader_message_parts import combine_reader_parts
 from relocant_media.services.reader_publication import POLICY, material_fingerprint
 from relocant_media.storage.models import RawItem, Submission
 
@@ -59,13 +60,48 @@ def _confirmed_source_choice(payload: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _verified_legacy_followups(
+    payload: dict[str, Any], publication: dict[str, Any], revision: str,
+) -> bool:
+    if SOURCE_REVISION_FIELD in payload:
+        return False
+    evidence = publication.get("confirmed")
+    confirmed_id = evidence.get("message_id") if isinstance(evidence, dict) else None
+    parts = payload.get("reader_parts")
+    notices = payload.get("reader_notices")
+    if (type(confirmed_id) is not int or confirmed_id <= 0 or not isinstance(parts, dict)
+            or not 1 <= len(parts) <= 32 or not isinstance(notices, dict)
+            or any(not isinstance(key, str) or not re.fullmatch(r"[1-9][0-9]{0,15}", key)
+                   for key in parts)):
+        return False
+    before = {key: part for key, part in parts.items() if int(key) < confirmed_id}
+    after = parts.keys() - before.keys()
+    if not before or not after:
+        return False
+    for key in after:
+        notice = notices.get(f"added:{key}")
+        if (int(key) <= confirmed_id or not isinstance(notice, dict)
+                or notice.get("status") != "sent"):
+            return False
+    try:
+        text, media = combine_reader_parts(before)
+        original = {**payload, "reader_parts": before, "text": text, "attachments": media}
+        if material_fingerprint(original) != publication.get("material_sha256"):
+            return False
+        text, media = combine_reader_parts(parts)
+        return material_fingerprint({**payload, "text": text, "attachments": media}) == revision
+    except (AttributeError, KeyError, TypeError):
+        return False
+
+
 def confirmed_source_signal(payload: dict[str, Any]) -> bool:
     publication = _confirmed_source_choice(payload)
     if publication is None:
         return False
-    return material_fingerprint(payload) in (
+    revision = material_fingerprint(payload)
+    return revision in (
         publication.get("material_sha256"), payload.get(SOURCE_REVISION_FIELD),
-    )
+    ) or _verified_legacy_followups(payload, publication, revision)
 
 
 def record_private_source_revision(row: Submission) -> None:
