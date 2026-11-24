@@ -25,9 +25,8 @@ from relocant_media.ai.package import (
     draft_sha256,
 )
 from relocant_media.collectors.base import RawItem as CollectedRawItem
-from relocant_media.collectors.linked_tour_map import ORGANIZER_INDEX
+from relocant_media.collectors.linked_tour_map import ORGANIZER_INDEX, parse_tour_place
 from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
-from relocant_media.collectors.linked_tour_map import parse_tour_place
 from relocant_media.collectors.ticket_vision_events import TicketCardUnavailable, parse_ticket_event
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation

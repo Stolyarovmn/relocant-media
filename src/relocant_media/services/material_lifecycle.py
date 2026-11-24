@@ -563,7 +563,7 @@ def _reissue_unattempted_event_fallback(
                 session, EvidenceDocument.model_validate(raw, from_attributes=True), [raw_id],
                 profile=load_city_profile(source.city),
             )
-        elif (source.ownership == "media" and source.city == "belgrade" and run is not None
+        elif (source.ownership == "media" and source.city == record.city and run is not None
                 and post is not None and len(archive) < PRIMARY_ATTEMPTS
                 and data.get("delivery_attempts") == 0):
             place = _new_place_for_date_hold(session, raw, source, run, post)
@@ -572,7 +572,7 @@ def _reissue_unattempted_event_fallback(
         if place is None:
             return
         start = min(_stamp(slot["starts_at"]) for slot in event_occurrences(place))
-    except (ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError):
         return
     deadline = min(material_deadline, start, now + FALLBACK_WAIT)
     if deadline <= now or session.scalar(select(Submission.id).where(
