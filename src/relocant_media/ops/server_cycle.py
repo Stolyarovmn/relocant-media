@@ -5,9 +5,9 @@ import copy
 import json
 import os
 import time
-from collections.abc import Coroutine, Iterable, Iterator
+from collections.abc import Coroutine, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import AsyncExitStack, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import zip_longest
@@ -43,6 +43,7 @@ from relocant_media.bot.formatting import (
     formatted_text_units,
     rich_editorial_html,
 )
+from relocant_media.collectors.base import Collector
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.collectors.beograd_article import (
     UTILITY_SECTIONS,
@@ -328,6 +329,30 @@ def review_only_venue_sources() -> dict[str, SourceConfig]:
         for source in load_source_registry(SOURCES)
         if is_undated_venue_source(source)
     }
+
+
+async def _collect_venues(
+    sources: Mapping[str, SourceConfig], collectors: Mapping[str, Collector],
+) -> list[list[CollectedRawItem] | Exception]:
+    limit = asyncio.Semaphore(3)
+    host_locks: dict[str, asyncio.Lock] = {}
+
+    async def collect(source_id: str, source: SourceConfig) -> list[CollectedRawItem] | Exception:
+        hosts = {urlsplit(str(source.url)).hostname, *source.extraction.approved_hosts}
+        # Sorted shared locks also cover redirects to a different approved host.
+        async with AsyncExitStack() as stack:
+            for host in sorted({host.removeprefix("www.") for host in hosts if host}):
+                await stack.enter_async_context(host_locks.setdefault(host, asyncio.Lock()))
+            async with limit:
+                try:
+                    return await collectors[source_id].collect()
+                except Exception as error:
+                    return error
+
+    # Apply results in registry order even when a later source responds first.
+    return await asyncio.gather(
+        *(collect(source_id, source) for source_id, source in sources.items())
+    )
 
 
 # Candidates fully assessed per cycle. Ranking is one cheap call and most items are rejected
@@ -899,16 +924,23 @@ async def collect_sources(
             result["traffic_secretariat_article_failures"] = len(
                 getattr(traffic, "item_failures", []),
             )
-        for source_id in (() if submissions_only else runtime_venues):
+        venues_to_collect = {} if submissions_only else runtime_venues
+        venue_results = []
+        if venues_to_collect:
+            with measure_collection(collection_seconds, "venues"):
+                venue_results = await _collect_venues(venues_to_collect, collectors)
+        for source_id, venue_notices in zip(venues_to_collect, venue_results, strict=True):
             collector = collectors[source_id]
             try:
-                with measure_collection(collection_seconds, "venues"):
-                    venue_notices = await collector.collect()
+                if isinstance(venue_notices, Exception):
+                    raise venue_notices
                 for item in venue_notices:
                     result["venue_items"] += 1
                     reason = event_content_reason(item.title, item.body, now=now)
-                    fresh = freshness_decision(item.title, item.body, item.published_at, now,
-                published_at_precision=item.published_at_precision)
+                    fresh = freshness_decision(
+                        item.title, item.body, item.published_at, now,
+                        published_at_precision=item.published_at_precision,
+                    )
                     if (source_id in review_venues and reason is None
                             and _is_review_only_venue_hold(item, now=now)):
                         result["venue_deferred"] += 1
