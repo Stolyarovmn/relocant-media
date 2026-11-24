@@ -14,6 +14,7 @@ from test_editorial_package import bind_context, package_payload, parse
 from test_editorial_pipeline import _document
 from test_linked_tour_map import ARTICLE as TOUR_ARTICLE
 from test_linked_tour_map import HTML as TOUR_HTML
+from test_linked_tour_map import INDEX as TOUR_INDEX
 from test_linked_tour_map import LINK as TOUR_LINK
 from test_linked_tour_map import ORGANIZER as TOUR_ORGANIZER
 
@@ -24,6 +25,7 @@ from relocant_media.ai.package import (
     draft_sha256,
 )
 from relocant_media.collectors.base import RawItem as CollectedRawItem
+from relocant_media.collectors.linked_tour_map import ORGANIZER_INDEX
 from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
 from relocant_media.collectors.ticket_vision_events import TicketCardUnavailable, parse_ticket_event
 from relocant_media.domain.city_profile import load_city_profile
@@ -435,7 +437,10 @@ def test_gpt_refresh_attaches_the_live_tour_map_to_the_new_review(fallback_sessi
     collector = server_cycle.fetch_public_article
 
     def serve(request):
-        pages = {TOUR_LINK.organizer: TOUR_ORGANIZER, TOUR_LINK.map_ticket: TOUR_HTML}
+        pages = {
+            ORGANIZER_INDEX: TOUR_INDEX,
+            TOUR_LINK.organizer: TOUR_ORGANIZER, TOUR_LINK.map_ticket: TOUR_HTML,
+        }
         return httpx.Response(200, text=pages[str(request.url)])
 
     async def fetch(config, url, client):

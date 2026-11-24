@@ -17,10 +17,9 @@ from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, Publica
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.publisher import Publisher
 from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
-from relocant_media.collectors.linked_tour_map import cited_tour_link
 from relocant_media.collectors.ticket_vision_events import SOURCE_ID as TICKET_VISION_SOURCE
 from relocant_media.collectors.ticket_vision_events import cited_ticket_urls
-from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, load_city_profile
+from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import (
     DEFAULT_EVENT_WINDOW,
     EventCandidate,
@@ -420,8 +419,6 @@ def _event_items(
     if len(members) < MAX_DOCUMENTS and (registered := named_venue_sources(anchor, anchor_source)):
         timezone = ZoneInfo(load_city_profile(anchor_source.city).timezone)
         published = anchor.published_at.astimezone(timezone).date()
-        tour = (cited_tour_link(anchor.body, DEFAULT_CITIES_ROOT / anchor_source.city)
-                if TOUR_MAP_SOURCE in registered else None)
         possible = session.execute(
             select(RawItem, Source)
             .join(Source, Source.id == RawItem.source_id)
@@ -437,7 +434,6 @@ def _event_items(
                 RawItem.ingested_at >= anchor.published_at - timedelta(days=60),
                 or_(Source.id != TICKET_VISION_SOURCE,
                     RawItem.url.in_(cited_ticket_urls(anchor.body))),
-                or_(Source.id != TOUR_MAP_SOURCE, RawItem.url == (tour.map_ticket if tour else "")),
             )
             .order_by(RawItem.ingested_at.desc(), RawItem.id.desc()).limit(61)
             .execution_options(populate_existing=True)

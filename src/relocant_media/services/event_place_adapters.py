@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup, Tag
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.collectors.kolarac_program import saved_linked_program
 from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
-from relocant_media.collectors.linked_tour_map import parse_tour_place, registered_tour_map_url
+from relocant_media.collectors.linked_tour_map import parse_tour_place
 from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, CityEditorialProfile
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.event_program import festival_program, registered_event_venues
@@ -346,8 +346,6 @@ def _bitef_facts(
 
 
 def _linked_tour_facts(document: EvidenceDocument, source_html: str) -> dict[str, Any] | None:
-    if not registered_tour_map_url(document.url, DEFAULT_CITIES_ROOT / "belgrade"):
-        return None
     try:
         place = parse_tour_place(source_html, document.url)
     except ValueError:

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from relocant_media.collectors.base import RawItem as CollectedArticle
 from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
 from relocant_media.collectors.linked_tour_map import STRATEGY as TOUR_MAP_STRATEGY
-from relocant_media.collectors.linked_tour_map import cited_tour_link, performers
+from relocant_media.collectors.linked_tour_map import performers, supported_tour_map_url
 from relocant_media.collectors.ticket_vision_events import SOURCE_ID as TICKET_VISION_SOURCE
 from relocant_media.collectors.ticket_vision_events import STRATEGY as TICKET_VISION_STRATEGY
 from relocant_media.collectors.ticket_vision_events import cited_ticket_urls
@@ -63,7 +63,7 @@ def named_venue_sources(item: RawItem, source: Source) -> dict[str, SourceConfig
                 and is_undated_venue_source(config)):
             result[config.id] = config
     tour_path = city / "sources" / f"{TOUR_MAP_SOURCE}.yaml"
-    if tour_path.is_file() and cited_tour_link(item.body, city) is not None:
+    if tour_path.is_file() and len(cited_ticket_urls(item.body)) == 1:
         config = load_source_file(tour_path)
         if (config.id == TOUR_MAP_SOURCE and config.extraction.strategy == TOUR_MAP_STRATEGY
                 and is_undated_venue_source(config)):
@@ -146,12 +146,11 @@ def _matches_cited_ticket(
 def _matches_cited_tour_map(
     media: RawItem | CollectedArticle, ticket: RawItem | CollectedArticle, *, published: date,
 ) -> bool:
-    link = cited_tour_link(media.body, DEFAULT_CITIES_ROOT / "belgrade")
-    if link is None or ticket.url != link.map_ticket:
+    if len(cited_ticket_urls(media.body)) != 1 or not supported_tour_map_url(ticket.url):
         return False
     artists = performers(folded(ticket.title))
     lead = folded(media.title + "\n" + media.body[:_LEAD_LIMIT])
-    if len(artists) < 2 or not artists <= topic_words(lead):
+    if not artists or not artists <= topic_words(lead):
         return False
     venue = re.search(r"^Mesto: (.+), Beograd\.$", ticket.body, re.M)
     if venue is None:

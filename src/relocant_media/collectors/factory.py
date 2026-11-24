@@ -28,7 +28,6 @@ from relocant_media.collectors.tob_events import TobEventsCollector
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.collectors.welcome_serbia_guidance import WelcomeSerbiaGuidanceCollector
 from relocant_media.collectors.yugoslavia_programs import YugoslaviaProgramsCollector
-from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT
 from relocant_media.sources.registry import SourceConfig
 
 
@@ -85,7 +84,7 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
     if strategy == TICKET_VISION_STRATEGY:
         return TicketVisionEventCollector(source, client)
     if strategy == TOUR_MAP_STRATEGY:
-        return LinkedTourMapCollector(source, client, DEFAULT_CITIES_ROOT / "belgrade")
+        return LinkedTourMapCollector(source, client)
     if strategy == "srbija_gov_article":
         return SrbijaGovArticleCollector(source, client)
     raise UnsupportedCollectorStrategyError(strategy)
