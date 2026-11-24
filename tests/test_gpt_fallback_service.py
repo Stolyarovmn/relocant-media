@@ -207,6 +207,8 @@ def test_unattempted_expired_event_fallback_reissues_only_a_fresh_request(fallba
     session.flush()
     early_request = gpt_fallback.build_request(session, now=retry, scheduler_run_id=cycle.id)
     assert early_request is not None
+    first_deadline = retry + timedelta(minutes=30)
+    assert early_request["candidates"][0]["respond_by"] == first_deadline.isoformat()
     early_presentation = early_request["candidates"][0]["presentation_by_rubric"]["weekend"]
     assert early_presentation.get("event_place") is None
     blocked = lifecycle_state(session, raw_id, now=later)
@@ -226,6 +228,7 @@ def test_unattempted_expired_event_fallback_reissues_only_a_fresh_request(fallba
     assert reissued["attempts"] == 2 and reissued["fallback_attempts"] == 0
     fresh_request = gpt_fallback.build_request(session, now=later, scheduler_run_id=cycle.id)
     assert fresh_request is not None
+    assert fresh_request["candidates"][0]["respond_by"] == reissued["fallback_deadline_at"]
     place = fresh_request["candidates"][0]["presentation_by_rubric"]["weekend"]["event_place"]
     assert place["starts_at"] == "2026-11-23T18:00:00+01:00"
     with pytest.raises(gpt_fallback.FallbackValidationError, match="раньше нового окна"):
@@ -404,6 +407,21 @@ def test_refresh_refuses_unregistered_source_or_expired_request_before_network(
     now = NOW + timedelta(hours=5) if error == "просрочен" else NOW
     with pytest.raises(ValueError, match=error):
         gpt_refresh.refresh_gpt_evidence(session.get_bind(), exchange, now=now)
+
+
+def test_request_deadline_is_advisory_and_legacy_requests_remain_valid(fallback_session):
+    session, raw, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    candidate = request["candidates"][0]
+    assert candidate.pop("respond_by") == (NOW + gpt_fallback.REQUEST_TTL).isoformat()
+    gpt_fallback.validate_fallback_candidate(session, request, raw.id, now=NOW)
+
+    candidate["respond_by"] = (NOW + timedelta(days=1)).isoformat()
+    with pytest.raises(gpt_fallback.FallbackValidationError, match="просрочен"):
+        gpt_fallback.validate_fallback_candidate(
+            session, request, raw.id, now=NOW + gpt_fallback.REQUEST_TTL + timedelta(seconds=1),
+        )
 
 
 def test_request_and_validation_are_read_only_and_exclude_private_payload(fallback_session):

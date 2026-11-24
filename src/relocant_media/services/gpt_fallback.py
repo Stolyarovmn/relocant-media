@@ -104,6 +104,7 @@ class _CandidateRequest(StrictModel):
     documents: list[PackageEventDocument] = Field(min_length=1, max_length=MAX_DOCUMENTS)
     presentation_by_rubric: dict[str, EditorialPresentation]
     flight_review_parent: PublishedPostReference | None = None
+    respond_by: AwareDatetime | None = None
 
 
 class _FallbackRequest(StrictModel):
@@ -285,6 +286,12 @@ def _ensure_fallback_open(session: Session, raw_id: int, *, now: datetime) -> No
         raise FallbackValidationError(str(error), code="material_closed") from error
 
 
+def _candidate_respond_by(session: Session, raw_id: int, *, request_end: datetime) -> str:
+    """Подсказать обработчику срок на момент экспорта. При импорте используется БД."""
+    deadline = response_deadline(session, raw_id)
+    return min(request_end, deadline or request_end).isoformat()
+
+
 def _candidate_request(
     session: Session,
     raw_id: int,
@@ -451,6 +458,9 @@ def build_request(
                         continue
                 except ValueError:
                     continue
+                candidate["respond_by"] = _candidate_respond_by(
+                    session, raw_id, request_end=now + REQUEST_TTL,
+                )
                 candidates.append(candidate)
                 _apply_request_references(request, references)
                 try:
@@ -683,8 +693,10 @@ def validate_fallback_candidate(
                 if marker == {"raw_item_id": requested.flight_review_parent.raw_item_id,
                               "message_id": requested.flight_review_parent.message_id}:
                     expected["flight_review_parent"] = link.get("parent")
-        if requested.model_dump(mode="json", exclude={"flight_review_parent"}
-                                if requested.flight_review_parent is None else None) != expected:
+        excluded = {"respond_by"}
+        if requested.flight_review_parent is None:
+            excluded.add("flight_review_parent")
+        if requested.model_dump(mode="json", exclude=excluded) != expected:
             raise FallbackValidationError(
                 "Снимок события или оформления изменился после запроса", code="snapshot_changed",
             )

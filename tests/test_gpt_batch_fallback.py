@@ -374,6 +374,7 @@ def test_batch_handoff_expires_from_finished_cycle_without_block_or_new_attempt(
     _record_rank(session, run, brief, rank)
     work = build_ranked_request(session, brief, rank, now=before)
     assert work is not None and work["created_at"] == before.isoformat()
+    assert work["candidates"][0]["respond_by"] == expiry.isoformat()
     package = package_for_request(work)
     assert pending_batch_ids(session, now=before) == {raw.id}
     assert pending_batch_ids(session, now=expiry) == set()
@@ -397,7 +398,7 @@ def test_batch_handoff_expires_from_finished_cycle_without_block_or_new_attempt(
 
 
 def test_material_deadline_and_terminal_owner_close_remain_stricter_than_batch_lease(batch):
-    session, raw, other, _ = batch
+    session, raw, other, run = batch
     lifecycle.lifecycle_state(session, raw.id, now=NOW)
     lifecycle.close_by_owner(session, other.id, now=NOW)
     from relocant_media.scheduler.models import SchedulerRun
@@ -407,5 +408,11 @@ def test_material_deadline_and_terminal_owner_close_remain_stricter_than_batch_l
     record.details = {**record.details, "deadline_at": (NOW+timedelta(seconds=30)).isoformat()}
     session.commit()
     assert pending_batch_ids(session, now=NOW) == {raw.id}
+    brief = build_batch_request(session, now=NOW)
+    rank = _rank(brief, [raw.id])
+    _record_rank(session, run, brief, rank)
+    work = build_ranked_request(session, brief, rank, now=NOW)
+    assert work is not None
+    assert work["candidates"][0]["respond_by"] == record.details["deadline_at"]
     assert pending_batch_ids(session, now=NOW+timedelta(seconds=30)) == set()
     assert session.get(EditorialRun, raw.id) is None

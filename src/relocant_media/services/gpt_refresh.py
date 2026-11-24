@@ -22,15 +22,18 @@ from relocant_media.ingestion.persistence import capture_collected_batch, sync_s
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services.editorial import _candidate, _reviewed_event_item
 from relocant_media.services.gpt_fallback import (
+    REQUEST_TTL,
     FallbackValidationError,
     _bounded_json,
     _candidate_request,
+    _candidate_respond_by,
     _public_host,
     _registry,
     refresh_target,
     validate_fallback_candidate,
 )
 from relocant_media.services.material_lifecycle import (
+    FALLBACK_WAIT,
     archive_for_retry,
     authorize_refreshed_evidence,
     can_retry_snapshot,
@@ -302,6 +305,13 @@ def refresh_gpt_evidence(
             raise FallbackValidationError("Сборщик не связал все документы с исходным событием")
         run = session.get(SchedulerRun, parsed.scheduler_run_id)
         assert run is not None
+        request_end = now + REQUEST_TTL
+        if parsed.batch_result_sha256 is not None:
+            assert run.finished_at is not None
+            request_end = min(request_end, run.finished_at + FALLBACK_WAIT)
+        refreshed["respond_by"] = _candidate_respond_by(
+            session, target_id, request_end=request_end,
+        )
         old = _refreshes(run)
         current_anchor = next(doc for doc in refreshed["documents"]
                               if doc["raw_item_id"] == target_id)
