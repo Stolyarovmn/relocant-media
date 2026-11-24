@@ -1,10 +1,60 @@
+import hashlib
 import json
 import sqlite3
 from datetime import UTC, datetime
 
 import pytest
 
+from relocant_media.ops import editorial_cycle_observation as observation
 from relocant_media.ops.editorial_cycle_observation import observe_cycle, observe_day
+
+
+@pytest.mark.parametrize("modified_field", [None, "run_id", "run_attempt", "snapshot_sha256"])
+def test_committed_receipt_reads_only_the_matching_local_snapshot(
+    tmp_path, monkeypatch, capsys, modified_field,
+):
+    snapshot = tmp_path / "editorial.sqlite3"
+    snapshot.write_bytes(b"saved")
+    receipt = tmp_path / "observation-receipt.json"
+    started_at = "2026-11-24T18:00:00+00:00"
+    proof = {
+        "run_id": "123",
+        "run_attempt": "2",
+        "snapshot_sha256": hashlib.sha256(b"saved").hexdigest(),
+        "started_at": started_at,
+    }
+    if modified_field:
+        proof[modified_field] = "1"
+    receipt.write_text(json.dumps(proof), encoding="utf-8")
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setattr("sys.argv", [
+        "editorial_cycle_observation", "--snapshot", str(snapshot), "--receipt", str(receipt),
+    ])
+
+    def unexpected_ssh(*args):
+        pytest.fail("The local receipt must not use SSH")
+
+    monkeypatch.setattr(observation, "SSHStateClient", unexpected_ssh)
+
+    def load_cycle(path, lower_bound):
+        assert path == snapshot and lower_bound == started_at
+        return {"status": "success"}
+
+    monkeypatch.setattr(observation, "observe_cycle", load_cycle)
+    day = {"standalone_published_count": 1}
+    monkeypatch.setattr(observation, "observe_day", lambda path, now: day)
+    if modified_field:
+        with pytest.raises(SystemExit) as error:
+            observation.main()
+        assert error.value.code == 1
+        assert json.loads(capsys.readouterr().out) == {"cycle_observation_error_type": "ValueError"}
+    else:
+        observation.main()
+        assert json.loads(capsys.readouterr().out) == {
+            "editorial_cycle_observation": {"status": "success"},
+            "editorial_day_observation": day,
+        }
 
 
 def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tmp_path):

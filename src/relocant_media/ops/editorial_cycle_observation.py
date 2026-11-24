@@ -216,16 +216,30 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", required=True, type=Path)
+    parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
     try:
-        client = SSHStateClient(SSHConfig.from_environment(os.environ))
-        state, _ = client.read()
-        if state.get("status") != "ready" or state.get("run_id") != os.environ["GITHUB_RUN_ID"]:
-            raise ValueError("snapshot has not been committed by this workflow")
+        run_id = os.environ["GITHUB_RUN_ID"]
+        if args.receipt is not None:
+            receipt = json.loads(args.receipt.read_text(encoding="utf-8"))
+            if (receipt.get("run_id") != run_id
+                    or receipt.get("run_attempt") != os.environ["GITHUB_RUN_ATTEMPT"]):
+                raise ValueError("snapshot has not been committed by this workflow attempt")
+            snapshot_sha256 = receipt["snapshot_sha256"]
+            started_at = receipt["started_at"]
+            if datetime.fromisoformat(started_at).utcoffset() is None:
+                raise ValueError("committed snapshot requires a timezone")
+        else:
+            client = SSHStateClient(SSHConfig.from_environment(os.environ))
+            state, _ = client.read()
+            if state.get("status") != "ready" or state.get("run_id") != run_id:
+                raise ValueError("snapshot has not been committed by this workflow")
+            snapshot_sha256 = state["snapshot"]["sha256"]
+            started_at = state["started_at"]
         with args.snapshot.open("rb") as stream:
-            if hashlib.file_digest(stream, "sha256").hexdigest() != state["snapshot"]["sha256"]:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != snapshot_sha256:
                 raise ValueError("local snapshot differs from committed state")
-        observation = observe_cycle(args.snapshot, state["started_at"])
+        observation = observe_cycle(args.snapshot, started_at)
         day_observation = observe_day(args.snapshot, datetime.now(UTC))
     except Exception as error:
         print(json.dumps({"cycle_observation_error_type": type(error).__name__}))
