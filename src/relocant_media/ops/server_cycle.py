@@ -591,9 +591,11 @@ def _live_document(original: EvidenceDocument, item: CollectedRawItem) -> Eviden
 def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     assert package.event is not None
     documents: list[EvidenceDocument] = []
+    map_inputs: list[tuple[EvidenceDocument, str | None]] = []
+    media = media_sources()
     # Each source is re-read through the same parser used at intake.
     registered = {
-        **venue_sources(), **review_only_venue_sources(), **media_sources(), **guide_sources(),
+        **venue_sources(), **review_only_venue_sources(), **media, **guide_sources(),
     }
     registered.update({
         key: load_source_file(SOURCES / f"{key}.yaml")
@@ -615,7 +617,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
                 with _note_source_unavailable(document.source_id):
                     item = _run_sync(fetch_venue(registered[document.source_id], document.url))
                 documents.append(_live_document(document, item))
-                verify_live_map(package.presentation, documents[-1], item.source_html)
+                map_inputs.append((documents[-1], item.source_html))
                 continue
             if document.source_id not in {"city_beograd_news", "cukarica_news"}:
                 raise ValueError("unsupported live source")
@@ -633,7 +635,10 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
                       else parse_cukarica_article)
             item = parser(response.text, source, str(response.url))
             documents.append(_live_document(document, item))
-            verify_live_map(package.presentation, documents[-1], response.text)
+            map_inputs.append((documents[-1], response.text))
+    media_context = tuple(document for document in documents if document.source_id in media)
+    for observed, source_html in map_inputs:
+        verify_live_map(package.presentation, observed, source_html, media=media_context)
     native = package.presentation.native_map if package.presentation else None
     point = native.get("point", {}) if native else {}
     if point.get("mode") == MAP_MODE:

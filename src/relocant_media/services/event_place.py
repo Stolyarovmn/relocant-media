@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
+from relocant_media.collectors.ticket_vision_events import SOURCE_ID as TICKET_SOURCE
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.map_links import map_event_id, map_occurrence_id
 from relocant_media.domain.source_locations import is_public_https_url
@@ -209,6 +210,7 @@ def resolve_event_place(
     source_html: str,
     *,
     profile: CityEditorialProfile,
+    media: tuple[EvidenceDocument, ...] = (),
 ) -> dict[str, Any] | None:
     """Caller проверяет официальный реестровый источник; результат подходит для двух ревью.
 
@@ -223,10 +225,10 @@ def resolve_event_place(
         or len(source_html.encode()) > MAX_HTML_BYTES
     ):
         return None
-    facts = (None if document.source_id == TOUR_MAP_SOURCE
+    facts = (None if document.source_id in {TOUR_MAP_SOURCE, TICKET_SOURCE}
              else _json_ld_facts(document, source_html, profile))
     if facts is None:
-        facts = extract_event_adapter(document, source_html, profile=profile)
+        facts = extract_event_adapter(document, source_html, profile=profile, media=media)
     if facts is None:
         return None
     if "occurrences" in facts:
@@ -322,5 +324,17 @@ def resolve_saved_event_place(
         if (snapshot.source_page != document.url or snapshot.source_html is None
                 or not _valid_snapshot(snapshot)):
             continue
-        return resolve_event_place(document, snapshot.source_html, profile=profile)
+        media = []
+        if document.source_id == TICKET_SOURCE:
+            for other_id in document_ids:
+                other = session.get(RawItem, other_id)
+                policy = session.get(Source, other.source_id) if other else None
+                if (other is not None and policy is not None and policy.city == profile.city_id
+                        and policy.enabled and policy.ownership == "media"
+                        and policy.source_type == "news_media" and not policy.high_risk
+                        and is_public_https_url(other.url)):
+                    media.append(EvidenceDocument.model_validate(other, from_attributes=True))
+        return resolve_event_place(
+            document, snapshot.source_html, profile=profile, media=tuple(media),
+        )
     return None
