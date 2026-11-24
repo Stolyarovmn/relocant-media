@@ -413,7 +413,9 @@ def test_runtime_venue_sources_include_dated_structured_collectors():
     assert "ticket_vision_events" not in venues
 
     review_only = server_cycle.review_only_venue_sources()
-    assert set(review_only) == {"venue_bitefartcafe", "venue_yugoslavia", "ticket_vision_events"}
+    assert set(review_only) == {
+        "venue_bitefartcafe", "venue_yugoslavia", "ticket_vision_events", "platinumlist_tour_maps",
+    }
     assert all(not source.policy.auto_publish for source in review_only.values())
 
     discovery = server_cycle.discovery_venue_sources()

@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.models import EvidenceDocument
+from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.map_links import map_event_id, map_occurrence_id
 from relocant_media.domain.source_locations import is_public_https_url
@@ -222,7 +223,8 @@ def resolve_event_place(
         or len(source_html.encode()) > MAX_HTML_BYTES
     ):
         return None
-    facts = _json_ld_facts(document, source_html, profile)
+    facts = (None if document.source_id == TOUR_MAP_SOURCE
+             else _json_ld_facts(document, source_html, profile))
     if facts is None:
         facts = extract_event_adapter(document, source_html, profile=profile)
     if facts is None:

@@ -12,6 +12,10 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 from test_editorial_package import bind_context, package_payload, parse
 from test_editorial_pipeline import _document
+from test_linked_tour_map import ARTICLE as TOUR_ARTICLE
+from test_linked_tour_map import HTML as TOUR_HTML
+from test_linked_tour_map import LINK as TOUR_LINK
+from test_linked_tour_map import ORGANIZER as TOUR_ORGANIZER
 
 from relocant_media.ai.package import (
     EditorialPackage,
@@ -20,6 +24,7 @@ from relocant_media.ai.package import (
     draft_sha256,
 )
 from relocant_media.collectors.base import RawItem as CollectedRawItem
+from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
 from relocant_media.collectors.ticket_vision_events import TicketCardUnavailable, parse_ticket_event
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation
@@ -411,6 +416,43 @@ async def test_unavailable_linked_ticket_is_an_unconfirmed_source(monkeypatch):
     ticket = gpt_fallback._registry()["ticket_vision_events"]
     (result,) = await gpt_refresh._collect([(ticket, "https://tickets.rs/event/some_event_27517")])
     assert isinstance(result, gpt_refresh.SourceUnavailableError)
+
+
+def test_gpt_refresh_attaches_the_live_tour_map_to_the_new_review(fallback_session, monkeypatch):
+    session, raw, _ = fallback_session
+    registry = gpt_fallback._registry()
+    sync_source(session, "belgrade", registry[TOUR_ARTICLE.source_id])
+    raw.source_id, raw.url = TOUR_ARTICLE.source_id, TOUR_ARTICLE.url
+    raw.title, raw.body = TOUR_ARTICLE.title, TOUR_ARTICLE.body
+    anchor = replace(TOUR_ARTICLE, external_id=raw.external_id, published_at=raw.published_at)
+    raw_id = raw.id
+    session.commit()
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    exchange = _refresh_exchange(request, raw_id, [TOUR_LINK.map_ticket])
+    engine = session.get_bind()
+    session.rollback()
+    collector = server_cycle.fetch_public_article
+
+    def serve(request):
+        pages = {TOUR_LINK.organizer: TOUR_ORGANIZER, TOUR_LINK.map_ticket: TOUR_HTML}
+        return httpx.Response(200, text=pages[str(request.url)])
+
+    async def fetch(config, url, client):
+        if url == anchor.url:
+            return anchor
+        assert config.id == TOUR_MAP_SOURCE
+        async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as simulated:
+            return await collector(config, url, simulated)
+
+    monkeypatch.setattr(server_cycle, "fetch_public_article", fetch)
+    refreshed = gpt_refresh.refresh_gpt_evidence(engine, exchange, now=NOW)
+    candidate, = refreshed["candidates"]
+    assert [doc["url"] for doc in candidate["documents"]] == [anchor.url, TOUR_LINK.map_ticket]
+    place = candidate["presentation_by_rubric"]["weekend"]["event_place"]
+    assert place["venue"]["address"] == "Dunavska 22, Beograd, Serbia"
+    assert place["starts_at"] == "2026-11-25T19:00:00+01:00"
+    gpt_fallback.validate_fallback_candidate(session, refreshed, raw_id, now=NOW)
 
 
 def test_refresh_substitutes_404_with_same_event_and_imports_only_live_evidence(

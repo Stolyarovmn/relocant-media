@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.channel_style import writing_brief
 from relocant_media.ai.package import StrictModel, canonical_json
 from relocant_media.collectors.base import RawItem as CollectedArticle
+from relocant_media.collectors.linked_tour_map import TourMapUnavailable
 from relocant_media.collectors.ticket_vision_events import TicketCardUnavailable
 from relocant_media.domain.dedup import EventCandidate, canonicalize_url, same_event
 from relocant_media.domain.source_locations import is_public_https_url
@@ -140,7 +141,8 @@ async def _collect(
             try:
                 result = await fetch_public_article(config, url, client)
             except Exception as error:
-                if isinstance(error, TicketCardUnavailable) or is_source_unavailable(error):
+                if (isinstance(error, (TicketCardUnavailable, TourMapUnavailable))
+                        or is_source_unavailable(error)):
                     return SourceUnavailableError(config.id)
                 raise
             if (not isinstance(result, CollectedArticle) or result.source_id != config.id

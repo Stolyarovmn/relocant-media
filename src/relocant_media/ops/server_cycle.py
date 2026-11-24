@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, or_, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
@@ -61,6 +61,8 @@ from relocant_media.collectors.cukarica_news import (
     parse_cukarica_news_list,
 )
 from relocant_media.collectors.factory import build_collector
+from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
+from relocant_media.collectors.linked_tour_map import tour_links
 from relocant_media.collectors.news_discovery import (
     NEWS_DISCOVERY_REGISTRY,
     collect_news_feed,
@@ -471,9 +473,11 @@ async def fetch_public_article(
 async def _cited_ticket_evidence(
     articles: Iterable[CollectedRawItem], media: Mapping[str, SourceConfig],
     config: SourceConfig, client: httpx.AsyncClient, *, now: datetime,
+    map_config: SourceConfig | None = None,
 ) -> list[CollectedRawItem]:
     candidates: dict[str, CollectedRawItem] = {}
     timezone = ZoneInfo("Europe/Belgrade")
+    maps = {link.article_ticket: link.map_ticket for link in tour_links(SOURCES.parent)}
     for article in articles:
         policy = media.get(article.source_id)
         if (policy is None or policy.ownership != "media" or policy.policy.high_risk
@@ -482,23 +486,69 @@ async def _cited_ticket_evidence(
         urls = cited_ticket_urls(article.body)
         if len(urls) == 1:
             candidates.setdefault(next(iter(urls)), article)
-        if len(candidates) >= 2:
-            break
+    selected = sorted(candidates, key=lambda url: url not in maps)[:2]
 
-    async def collect(url: str, article: CollectedRawItem) -> CollectedRawItem | None:
+    async def collect(
+        policy: SourceConfig, url: str, article: CollectedRawItem,
+    ) -> CollectedRawItem | None:
         assert article.published_at is not None
         try:
-            ticket = await fetch_public_article(config, url, client)
+            async with asyncio.timeout(25):
+                ticket = await fetch_public_article(policy, url, client)
         except (httpx.HTTPError, TimeoutError, ValueError):
             return None
         published = article.published_at.astimezone(timezone).date()
-        if (matches_venue_evidence(article, ticket, config, published=published)
+        if (matches_venue_evidence(article, ticket, policy, published=published)
                 and _is_review_only_venue_hold(ticket, now=now)):
             return ticket
         return None
 
-    gathered = await asyncio.gather(*(collect(url, article) for url, article in candidates.items()))
+    tasks = [collect(config, url, candidates[url]) for url in selected]
+    if map_config is not None:
+        tasks.extend(
+            collect(map_config, maps[url], candidates[url]) for url in selected if url in maps
+        )
+    gathered = await asyncio.gather(*tasks)
     return [ticket for ticket in gathered if ticket is not None]
+
+
+def _queued_tour_articles(
+    session: Session, media: Mapping[str, SourceConfig], *, now: datetime,
+) -> list[CollectedRawItem]:
+    # A recent article can leave a rolling RSS feed while its event is still upcoming.
+    links = tour_links(SOURCES.parent)
+    if not links:
+        return []
+    saved = set(session.scalars(select(RawItem.url).where(
+        RawItem.source_id == TOUR_MAP_SOURCE,
+        RawItem.url.in_([link.map_ticket for link in links]),
+    )))
+    tickets = [link.article_ticket for link in links if link.map_ticket not in saved]
+    if not tickets:
+        return []
+    rows = session.scalars(
+        select(RawItem)
+        .join(Source, Source.id == RawItem.source_id)
+        .outerjoin(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
+        .where(
+            Source.id.in_(media), Source.city == "belgrade", Source.enabled.is_(True),
+            Source.ownership == "media", Source.high_risk.is_(False),
+            RawItem.published_at.between(now - CHECK_WINDOW, now),
+            or_(EditorialRun.raw_item_id.is_(None), EditorialRun.delivery_status == "pending"),
+            or_(*(RawItem.body.contains(url, autoescape=True) for url in tickets)),
+        )
+        .order_by(RawItem.published_at.desc(), RawItem.id.desc()).limit(12)
+    )
+    return [
+        CollectedRawItem(
+            raw.source_id, raw.external_id, raw.url, raw.title, raw.body, raw.published_at,
+            published_at_precision=raw.published_at_precision,
+        )
+        for raw in rows if freshness_decision(
+            raw.title, raw.body, raw.published_at, now,
+            published_at_precision=raw.published_at_precision,
+        ).action == "keep"
+    ]
 
 
 @contextmanager
@@ -1012,9 +1062,13 @@ async def collect_sources(
             except Exception:
                 result["failures"] += 1
         if not submissions_only and (ticket_config := review_venues.get(TICKET_VISION_SOURCE)):
+            map_config = review_venues.get(TOUR_MAP_SOURCE)
+            with Session(engine) as session:
+                queued = _queued_tour_articles(session, media, now=now) if map_config else []
             with measure_collection(collection_seconds, "cited_tickets"):
                 tickets = await _cited_ticket_evidence(
-                    articles, media, ticket_config, client, now=now,
+                    (*articles, *queued), media, ticket_config, client, now=now,
+                    map_config=map_config,
                 )
             for ticket in tickets:
                 register_review_hold(ticket)

@@ -15,9 +15,12 @@ from relocant_media.collectors.beograd_article import match_beograd_article_url
 from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as TRAFFIC_SECRETARIAT_SOURCE
 from relocant_media.collectors.bgsaobracaj_notices import match_bgsaobracaj_notice
 from relocant_media.collectors.cukarica_news import ARTICLE_PATH
+from relocant_media.collectors.linked_tour_map import STRATEGY as TOUR_MAP_STRATEGY
+from relocant_media.collectors.linked_tour_map import registered_tour_map_url
 from relocant_media.collectors.ticket_vision_events import STRATEGY as TICKET_VISION_STRATEGY
 from relocant_media.collectors.ticket_vision_events import ticket_event_url
 from relocant_media.collectors.venue_feed import _allowed
+from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT
 from relocant_media.domain.flight_notices import city_carriers
 from relocant_media.sources.registry import SourceConfig
 
@@ -102,6 +105,10 @@ def source_for_url(url: str, sources: dict[str, SourceConfig]) -> str | None:
                 continue
             if source.extraction.strategy == TICKET_VISION_STRATEGY:
                 if ticket_event_url(url):
+                    return key
+                continue
+            if source.extraction.strategy == TOUR_MAP_STRATEGY:
+                if registered_tour_map_url(url, DEFAULT_CITIES_ROOT / "belgrade"):
                     return key
                 continue
             try:
