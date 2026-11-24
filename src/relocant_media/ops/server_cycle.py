@@ -1201,7 +1201,8 @@ async def collect_sources(
     result["raw_items_written"] = written
     result["metadata_holds"] = len(metadata_holds)
     result["review_required"] = changes
-    triage = triage_queue(engine, now=now)
+    with measure_collection(collection_seconds, "queue_triage"):
+        triage = triage_queue(engine, now=now)
     result["discarded_queue"] = triage["discarded"]
     result["collection_seconds"] = collection_seconds
     if output is not None:

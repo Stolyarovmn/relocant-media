@@ -8,7 +8,7 @@ COLLECTION_GROUPS = (
     "government_source", "reader_links", "published_watch", "city_pages", "municipality_pages",
     "water_utility", "traffic_secretariat", "venues", "media", "guides", "channel_previews",
     "channel_evidence", "news_feeds", "news_evidence", "utility_maps", "transport_map",
-    "reader_feedback",
+    "queue_triage", "reader_feedback",
 )
 
 

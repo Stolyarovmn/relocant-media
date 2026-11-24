@@ -105,7 +105,9 @@ async def test_road_map_notices_are_collected_without_an_editorial_anchor(collec
     monkeypatch.setattr(server_cycle, "BgprevozChangesCollector", MapCollector)
     result = await server_cycle.collect_sources(engine)
     assert result["transport_map_notices"] == 1
-    assert {"city_pages", "water_utility", "transport_map"} <= result["collection_seconds"].keys()
+    assert {"city_pages", "water_utility", "transport_map", "queue_triage"} <= (
+        result["collection_seconds"].keys()
+    )
     with Session(engine) as session:
         raw = session.scalar(select(RawItem).where(RawItem.url == document.url))
         assert raw is not None and raw.published_at is None
