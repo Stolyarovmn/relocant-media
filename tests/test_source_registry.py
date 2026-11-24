@@ -5,7 +5,7 @@ from relocant_media.sources.registry import load_source_registry
 
 def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    assert len(sources) == 37
+    assert len(sources) == 38
     assert len({source.id for source in sources}) == len(sources)
 
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")
@@ -38,10 +38,10 @@ def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     assert str(government.url) == "https://www.srbija.gov.rs/vesti/239/"
 
 
-def test_venue_sources_are_explicit_first_party_events():
+def test_venue_and_ticket_sources_are_explicit_event_sources():
     sources = load_source_registry(Path("cities/belgrade/sources"))
     venues = [s for s in sources if s.source_type == "official_venue_events"]
-    assert len(venues) == 8
+    assert len(venues) == 9
     assert all(s.ownership == "official" and s.categories == ("events",) for s in venues)
     assert all(s.verification.checked_at is not None for s in venues)
     assert all(s.extraction.status == "active" for s in venues
@@ -50,6 +50,12 @@ def test_venue_sources_are_explicit_first_party_events():
     natural_history = next(s for s in venues if s.id == "venue_natural_history")
     yugoslavia = next(s for s in venues if s.id == "venue_yugoslavia")
     marathon = next(s for s in venues if s.id == "venue_belgrade_marathon")
+    tickets = next(s for s in venues if s.id == "ticket_vision_events")
+
+    assert tickets.extraction.strategy == "ticket_vision_event"
+    assert tickets.extraction.feed_url is None
+    assert tickets.extraction.approved_hosts == ("tickets.rs",)
+    assert tickets.policy.auto_publish is False
 
     # Страница одного прошедшего забега: источник отключён, кода под него нет (#396).
     assert marathon.extraction.status == "inactive"
