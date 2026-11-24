@@ -158,9 +158,29 @@ def test_failed_ingestion_cannot_advance_checkpoint_or_call_ai(queue, tmp_path):
     report = run_cycle(engine, city="belgrade", output=tmp_path / "failed", now=NOW,
                        ingest=lambda: {"failures": 1}, process=forbidden)
     assert report["status"] == "PRIMARY_FAILED" and not report["window_complete"]
+    assert list(report["stage_seconds"]) == ["collection"]
     with Session(engine) as session:
         retry = begin_window(session, city="belgrade", now=NOW + timedelta(hours=3))
         assert retry.details["window"] == report["window"]
+
+
+def test_stage_measurements_are_saved_with_the_cycle(queue, tmp_path, monkeypatch):
+    engine, process = queue
+    ticks = iter((1, 3, 7, 8, 18, 23))
+    monkeypatch.setattr("relocant_media.ops.primary_cycle.monotonic", lambda: next(ticks))
+    report = run_cycle(
+        engine, city="belgrade", output=tmp_path / "timed", now=NOW,
+        ingest=ingest_ok, process=process, limit=2,
+        preselect=lambda candidates, limit: (candidates[:limit], {}),
+    )
+    assert report["status"] == "PRIMARY_PARTIAL"
+    assert report["stage_seconds"] == {"collection": 2, "candidate_selection": 4,
+                                       "batch_preselection": 1, "material_review": 10,
+                                       "remaining_scan": 5}
+    with Session(engine) as session:
+        assert session.get(SchedulerRun, report["run_id"]).details["stage_seconds"] == (
+            report["stage_seconds"]
+        )
 
 
 def test_running_checkpoint_survives_worker_crash(queue):

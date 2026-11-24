@@ -16,6 +16,8 @@ from relocant_media.domain.quiet_hours import QUIET_END, QUIET_START, QUIET_ZONE
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
 
 _TOKEN = re.compile(r"[a-zA-Z0-9_.:-]{1,80}")
+_PRIMARY_STAGES = ("collection", "candidate_selection", "batch_preselection", "material_review",
+                   "remaining_scan")
 
 
 def _token(value: object) -> str | None:
@@ -187,8 +189,15 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
             })
         batch = details.get("batch_preselection")
         waiting_for_gpt = isinstance(batch, dict) and batch.get("status") == "gpt_waiting"
+        stages = details.get("stage_seconds")
+        stage_seconds = ({} if not isinstance(stages, dict) else {
+            name: value for name in _PRIMARY_STAGES
+            if isinstance(value := stages.get(name), (int, float))
+            and not isinstance(value, bool) and 0 <= value <= 24 * 60 * 60
+        })
         return {"scheduler_run_id": cycle_id, "status": _token(status),
                 "gpt_batch_waiting": waiting_for_gpt,
+                **({"stage_seconds": stage_seconds} if stage_seconds else {}),
                 "materials": materials, "errors": [
                     {"raw_item_id": error["raw_item_id"], "type": _token(error.get("error_type")),
                      "site": _token(error.get("error_site"))}

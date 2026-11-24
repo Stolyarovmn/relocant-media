@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from relocant_media.ops.editorial_cycle_observation import observe_day
+from relocant_media.ops.editorial_cycle_observation import observe_cycle, observe_day
 
 
 def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tmp_path):
@@ -95,3 +95,19 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
     assert {"status": "human_review", "reason": None, "count": 1} in report["decisions"]
     with pytest.raises(ValueError, match="timezone"):
         observe_day(snapshot, datetime(2026, 11, 17))
+
+
+def test_cycle_observation_exposes_only_bounded_stage_measurements(tmp_path):
+    snapshot = tmp_path / "snapshot.sqlite3"
+    with sqlite3.connect(snapshot) as db:
+        db.execute("CREATE TABLE scheduler_run(id, task_key, status, details, started_at)")
+        start = "2026-11-17T12:00:00Z"
+        db.execute("INSERT INTO scheduler_run VALUES (1, 'editorial-primary:belgrade', ?, ?, ?)", (
+            "partial", json.dumps({"stage_seconds": {
+                "collection": 12.7, "material_review": 0, "candidate_selection": -2,
+                "batch_preselection": True, "remaining_scan": 100_000,
+                "PRIVATE source": 3,
+            }}), start,
+        ))
+    report = observe_cycle(snapshot, start)
+    assert report["stage_seconds"] == {"collection": 12.7, "material_review": 0}
