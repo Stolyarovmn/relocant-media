@@ -2,7 +2,7 @@ import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentMatchesId, incidentStatus, incidentTimes, kinds, launchDigestEvents,
   launchMap, mapTheme, nextTransition, readIncidents, repairLaunchPoint, shareLink,
-  pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
+  pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines, weeklyRoadState,
 } from "./core.js?v=__MAP_REVISION__";
 import { calendarLink } from "./calendar.js?v=__MAP_REVISION__";
 import {
@@ -358,14 +358,16 @@ function eventCard(incident, now) {
   card.dataset.id = incident.id;
   card.dataset.selected = String(state.selected === incident.id);
   const status = incidentStatus(incident, now);
+  const dateOnly = incident.roadSchedule === "weekly_day";
   const meta = make("div", "event-meta");
   const category = make("span", "event-type");
   const dot = make("i", "", kinds[incident.kind].icon);
   dot.setAttribute("aria-hidden", "true");
   category.append(dot, kinds[incident.kind].label);
-  const badge = make("span", "event-state", futureFrame() ? "На это время"
+  const badge = make("span", "event-state", futureFrame() ? (dateOnly ? "На эту дату" : "На это время")
     : status === "planned" ? "⏰ Запланировано"
-    : status === "closed" ? "Архив" : statuses[status]);
+    : status === "closed" ? "Архив"
+    : dateOnly && status === "unknown" ? "День работ" : statuses[status]);
   badge.dataset.status = status;
   meta.append(category, badge);
   const heading = make("h3");
@@ -386,7 +388,8 @@ function eventCard(incident, now) {
   if (times.length === 1 && !districts.length) card.append(make("p", "event-when", times[0]));
   if (times.length > 1 && !districts.length) {
     const details = make("details", "event-when");
-    details.append(make("summary", "", `Время работ · окон ${times.length}`));
+    const label = dateOnly ? "Дни работ" : "Время работ";
+    details.append(make("summary", "", `${label} · ${times.length}`));
     const windows = make("ul", "event-windows");
     for (const time of times) windows.append(make("li", "", time));
     details.append(windows);
@@ -418,8 +421,11 @@ function eventCard(incident, now) {
     card.append(make("p", "event-scope", `${scope} · ${settlement.municipality} · ${addressWindowText(settlement.window)}`));
   }
   if (incident.reportedScope) {
-    card.append(make("p", "event-scope", incident.reportedScope),
-      make("p", "event-scope", "Точки обозначают населённые пункты. Точные границы не указаны."));
+    card.append(make("p", "event-scope", incident.reportedScope));
+    if (incident.kind === "water") {
+      card.append(make("p", "event-scope",
+        "Точки обозначают населённые пункты. Точные границы не указаны."));
+    }
   }
   if (incident.repairSite) {
     card.append(make("p", "event-scope", "Точные границы отключения неизвестны."),
@@ -519,6 +525,9 @@ function bindFeature(layer, group, incident, label, window, fromRegister) {
     const time = incident.startDay !== null && incident.endDay !== null
       ? incidentTimes(incident)[0] : addressWindowText(window);
     popup.append(make("p", "", time));
+  } else if (incident.roadSchedule) {
+    const when = incidentCountdown(incident, viewClock());
+    if (when) popup.append(make("p", "", when));
   }
   if (roadOrientation(incident)) {
     popup.append(make("p", "", `Ориентир. ${roadGeometryNote}`));
@@ -654,9 +663,10 @@ function drawHeatCell(cell, zoom) {
 }
 
 function drawCorridorCaps(item, project) {
+  const weekly = weeklyRoadState(item.incident, item.now);
   for (const { coordinates, boundary, window } of item.lines) {
     if (boundary) continue;
-    const faded = item.archived || !unexpired(window, item.now);
+    const faded = item.archived || weekly === "planned" || !unexpired(window, item.now);
     for (const cap of corridorCaps(coordinates, project)) {
       globalThis.L.circleMarker(cap, {
         radius: 4, color: mapColor(item.incident.kind), weight: 2,
@@ -687,7 +697,8 @@ function renderPointClusters() {
     }
     if (state.layerView === "corridor" && zoom >= 15) drawCorridorCaps(item, project);
     const aggregate = overview && incident.id !== state.selected;
-    const exactLines = aggregate ? lines.filter((line) => !line.boundary) : [];
+    const exactLines = aggregate && weeklyRoadState(incident, now) !== "planned"
+      ? lines.filter((line) => !line.boundary) : [];
     densityLines.push(...exactLines.map(({ coordinates }) => ({ coordinates, incident })));
     const markerLines = aggregate ? lines.filter((line) => line.boundary) : lines;
     const markerAreas = aggregate ? areas.filter((area) => !keepsBoundaryInHeat(area)) : areas;
@@ -743,16 +754,19 @@ function renderVectors(overview, zoom) {
     const boundariesOnly = overview && !selected;
     const color = mapColor(incident.kind);
     const road = incident.kind === "road";
+    const weekly = weeklyRoadState(incident, now);
     for (const { coordinates, label, window, boundary, scope } of boundariesOnly ? [] : lines) {
       const expired = archived || !unexpired(window, now);
       const sidewalk = scope === "sidewalk";
       const style = road
         ? { opacity: expired ? .30 : selected || corridor ? .68 : .48, weight: roadLineWeight(zoom, selected) }
         : { opacity: expired ? .48 : .94, weight: selected || corridor ? 8 : 5 };
+      if (weekly === "planned" && !expired) style.opacity = selected ? .52 : .28;
       const className = sidewalk ? "outage-sidewalk" : road ? "outage-road" : "outage-line";
       const path = leaflet.polyline(coordinates, {
         color: scope === "traffic_change" ? trafficChangeColor : color,
         ...style, lineCap: "round", lineJoin: "round",
+        ...(weekly && weekly !== "active" ? { dashArray: "6 7" } : {}),
         ...(boundary ? { dashArray: "5 7", weight: selected ? 6 : 4 } : {}),
         ...(sidewalk ? { dashArray: "2 6", weight: selected ? 5 : 4, opacity: expired ? .45 : .95 } : {}),
         className,

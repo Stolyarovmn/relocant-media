@@ -35,9 +35,11 @@ from relocant_media.services.local_street_geometry import (
 )
 from relocant_media.services.media_review_packet import _valid_snapshot
 from relocant_media.services.road_scope import (
+    WeeklyRoadSchedule,
     is_road_restriction,
     resolve_road_segments,
     resolve_secretariat_stretches,
+    secretariat_weekly_schedule,
 )
 from relocant_media.services.transport_map import MAP_MODE, SOURCE_ID, matches_transport_notice
 from relocant_media.services.transport_map_source import extract_transport_map
@@ -213,6 +215,7 @@ class Incident(PublicModel):
     published_at: datetime | None = None
     archived: bool = False
     repair_site: Literal[True] | None = None
+    road_schedule: Literal["weekly_day", "weekly_hours"] | None = None
     points: Annotated[tuple[Pin, ...], Field(max_length=_MAX_HOUSES)] = ()
     lines: Annotated[tuple[Line, ...], Field(max_length=16)] = ()
     areas: Annotated[tuple[Area, ...], Field(max_length=_MAX_AREAS)] = ()
@@ -247,6 +250,11 @@ class Incident(PublicModel):
             raise ValueError("map publication date requires a timezone")
         if self.kind != "road" and any(line.scope is not None for line in self.lines):
             raise ValueError("road line scopes belong to the road layer")
+        if self.road_schedule and (
+            self.kind != "road" or not self.windows or len(self.lines) > 1
+            or any(line.starts_at is not None for line in self.lines)
+        ):
+            raise ValueError("weekly road schedule requires shared windows for one section")
         if self.repair_site and (self.kind != "water" or self.ends_at is None
                                  or self.ends_at.tzinfo is None or self.starts_at is not None
                                  or not self.points or any(point.address for point in self.points)
@@ -641,9 +649,48 @@ def _road_lines(geometry: dict[str, Any] | None) -> list[Line]:
     return [line] if line is not None else []
 
 
+def _weekly_secretariat_road(
+    document: EvidenceDocument, title: str | None, streets: StreetIndex,
+    schedule: WeeklyRoadSchedule,
+) -> Incident:
+    windows = []
+    for day in schedule.days:
+        if schedule.hours is None:
+            start = datetime.combine(day, time.min, tzinfo=_ZONE)
+            end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=_ZONE)
+        else:
+            start = datetime.combine(day, schedule.hours[0], tzinfo=_ZONE)
+            end = datetime.combine(day, schedule.hours[1], tzinfo=_ZONE)
+        windows.append(Window(starts_at=start, ends_at=end))
+
+    street = schedule.street.title()
+    scope = None
+    line = None
+    if schedule.crossings:
+        first, last = schedule.crossings
+        scope = f"{street}: {first.title()} — {last.title()}"
+        if stretches := resolve_secretariat_stretches(document, streets):
+            _, _, geometry = stretches[0]
+            segment = Segment.model_validate(geometry["segment"])
+            street = segment.street
+            line = _line(geometry["coordinates"], f"{street}: {segment.start} — {segment.end}")
+            if line is not None:
+                scope = None
+    elif schedule.parcel and schedule.cadastre:
+        scope = f"{street}, перед участком №{schedule.parcel} · {schedule.cadastre.title()}"
+
+    return _incident(
+        document, "road", title or f"Дорожные работы · {street}", tuple(windows),
+        source_map_url=document.url, lines=(line,) if line else (), reported_scope=scope,
+        road_schedule="weekly_hours" if schedule.hours else "weekly_day",
+    )
+
+
 def _secretariat_road(
     document: EvidenceDocument, title: str | None, streets: StreetIndex,
 ) -> Incident | None:
+    if schedule := secretariat_weekly_schedule(document):
+        return _weekly_secretariat_road(document, title, streets, schedule)
     lines = []
     windows = []
     street = ""

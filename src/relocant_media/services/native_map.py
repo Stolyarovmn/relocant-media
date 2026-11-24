@@ -203,7 +203,8 @@ def _secretariat_point(document: EvidenceDocument) -> dict[str, Any] | None:
     phases = [
         {"starts_on": start.isoformat(), "ends_on": end.isoformat(),
          "segment": geometry["segment"], "geometry_sha256": _digest(canonical_json(geometry)),
-         **({"scope": geometry["scope"]} if "scope" in geometry else {})}
+         **{key: geometry[key] for key in ("scope", "work_days", "work_hours")
+            if key in geometry}}
         for start, end, geometry in resolve_secretariat_stretches(document, streets)
     ]
     if not phases:

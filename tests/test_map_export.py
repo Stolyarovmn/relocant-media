@@ -32,6 +32,7 @@ from relocant_media.ops.belgrade_digests import morning_entries
 from relocant_media.ops.map_backfill import parse_targets, plan
 from relocant_media.ops.map_export import (
     Area,
+    MapFeed,
     Pin,
     _power,
     _water,
@@ -63,7 +64,10 @@ from relocant_media.services.native_map import (
     verify_live_native_map,
 )
 from relocant_media.services.rich_delivery import prepare_native_transport
-from relocant_media.services.road_scope import resolve_secretariat_stretches
+from relocant_media.services.road_scope import (
+    resolve_secretariat_stretches,
+    secretariat_weekly_schedule,
+)
 from relocant_media.services.transport_map import build_transport_map
 from relocant_media.services.utility_map import build_utility_point
 from relocant_media.services.utility_scope import extract_power_scopes
@@ -237,6 +241,78 @@ def _listed_document(body: str = _LISTED_ROAD) -> EvidenceDocument:
         source_id="bgsaobracaj_notices", url=_LISTED_URL, title="Промена саобраћаја у Устаничкој",
         body=body, published_at=datetime(2026, 11, 19, tzinfo=UTC), published_at_precision="day",
     )
+
+
+_WEEKLY_PARCEL = (
+    "Заузеће коловоза у ул. Онисима Поповића испред КП 10861 КО Звездара, "
+    "на територији општине Звездара, сваке среде, у периоду од 25. 11. 2026. до 16. 12. 2026."
+)
+_WEEKLY_SECTION = (
+    "Заузеће коловоза у ул. Устаничкој, од ул. Грчића Миленка до ул. Крушевачке, "
+    "на територији градске општине Вождовац, сваке среде од 8:30 до 17 часова, "
+    "у временском периоду од 25. 11. 2026. до 16. 12. 2026."
+)
+
+
+@pytest.mark.parametrize("with_section", [False, True])
+def test_weekly_road_keeps_distinct_windows_and_only_verified_geometry(with_section):
+    states = load_street_index(Path("cities/belgrade/map/roads.json.gz"))
+    body = _WEEKLY_SECTION if with_section else _WEEKLY_PARCEL
+    url = _LISTED_URL if with_section else "https://www.bgsaobracaj.rs/vest/5440/onisima-popovica"
+    document = _listed_document(body).model_copy(update={"url": url})
+    source = load_source_file(Path("cities/belgrade/sources/bgsaobracaj_notices.yaml"))
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        capture_collected_batch(session, [
+            CollectedItem(**document.model_dump(), external_id="1", source_html="<article/>"),
+        ])
+        (incident,) = export_map(
+            session, observed_at=datetime(2026, 11, 24, tzinfo=UTC), streets=states,
+        ).incidents
+        assert incident.road_schedule == ("weekly_hours" if with_section else "weekly_day")
+        days = ["2026-11-25", "2026-12-02", "2026-12-09", "2026-12-16"]
+        assert [window.starts_at.date().isoformat() for window in incident.windows] == days
+        assert incident.source_url == url and incident.id == map_event_id(url)
+        assert not incident.points and not incident.areas
+        assert read_map_feed(encode_map_feed(MapFeed(incidents=(incident,)))).incidents == (
+            incident,
+        )
+        presentation = build_presentation(
+            session, 1, (document,), document_ids=[1], profile=load_city_profile("belgrade"),
+            rubric_id="city_changes",
+        )
+        if with_section:
+            (line,) = incident.lines
+            assert line.starts_at is None and line.ends_at is None
+            assert len(line.coordinates) > 2 and "Крушевачка" in line.label
+            assert incident.windows[0].starts_at == datetime(2026, 11, 25, 7, 30, tzinfo=UTC)
+            assert incident.windows[0].ends_at == datetime(2026, 11, 25, 16, tzinfo=UTC)
+            assert incident.reported_scope is None and presentation.native_map is not None
+            (phase,) = presentation.native_map["point"]["road_phases"]
+            assert phase["work_days"] == days and phase["work_hours"] == ["08:30:00", "17:00:00"]
+        else:
+            assert not incident.lines
+            assert incident.reported_scope is not None and "10861" in incident.reported_scope
+            assert incident.windows[0].ends_at == datetime(2026, 11, 25, 23, tzinfo=UTC)
+            assert presentation.native_map is None
+    engine.dispose()
+
+
+@pytest.mark.parametrize("body", [
+    _WEEKLY_SECTION.replace("до 17", "до 06"),
+    _WEEKLY_SECTION.replace("8:30", "25:30"),
+    _WEEKLY_SECTION.replace("сваке среде", "сваког дана"),
+    _WEEKLY_SECTION.replace("16. 12. 2026.", "26. 11. 2025."),
+    _WEEKLY_SECTION + " Сваког петка.",
+    (_WEEKLY_SECTION.replace("сваке среде од 8:30", "сваке недеље од 2:30")
+     .replace("25. 11. 2026. до 16. 12.", "29. 3. 2026. до 5. 4.")),
+])
+def test_unconfirmed_recurrence_does_not_become_a_continuous_closure(body):
+    notice = _listed_document(body)
+    assert secretariat_weekly_schedule(notice) is None
+    assert not resolve_secretariat_stretches(notice, {})
 
 
 def test_traffic_change_connects_named_crossings_and_binds_the_post_button(monkeypatch):
