@@ -79,11 +79,25 @@ export function safeLink(value) {
 }
 
 const shareApp = "https://t.me/relocant_media_belgrade_bot";
+const repairTarget = /^repair_(event_[a-f0-9]{20})_(-?\d{1,9}_-?\d{1,9})$/;
+
+function repairKey(point) {
+  if (!coords(point?.lat, point?.lon)) return "";
+  return `${Math.round(point.lat * 1_000_000)}_${Math.round(point.lon * 1_000_000)}`;
+}
+
+export function repairLaunchPoint(incident, key) {
+  if (!incident.repairSite || !key) return null;
+  const matches = incident.points.filter((point) => repairKey(point) === key);
+  return matches.length === 1 ? matches[0] : null;
+}
 
 // Ссылка «Поделиться»: окно отправки Telegram с карточкой этой же карты.
-export function shareLink(id, title = "", places = false) {
+export function shareLink(id, title = "", places = false, repairPoint = null) {
   if (typeof id !== "string" || !eventId.test(id)) return "";
-  const target = `${shareApp}?startapp=${places ? "places_" : ""}${id}`;
+  const key = places ? "" : repairKey(repairPoint);
+  const start = key ? `repair_${id}_${key}` : `${places ? "places_" : ""}${id}`;
+  const target = `${shareApp}?startapp=${start}`;
   const text = typeof title === "string" ? title.trim().slice(0, 200) : "";
   return `https://t.me/share/url?url=${encodeURIComponent(target)}`
     + (text ? `&text=${encodeURIComponent(text)}` : "");
@@ -101,10 +115,17 @@ export function launchMap(search, telegramParam) {
   if (params.get("mode") === "places") {
     return { mode: "places", id: eventId.test(browserEvent) ? browserEvent : "" };
   }
-  if (!eventId.test(browserEvent)) {
+  if (eventId.test(browserEvent)) {
+    const key = params.get("repair");
+    if (key && repairTarget.test(`repair_${browserEvent}_${key}`)) {
+      return { mode: "incidents", id: browserEvent, repairKey: key };
+    }
+  } else {
     for (const value of [params.get("tgWebAppStartParam"), telegramParam]) {
       if (typeof value !== "string") continue;
       if (eventId.test(value)) break;
+      const repair = repairTarget.exec(value);
+      if (repair) return { mode: "incidents", id: repair[1], repairKey: repair[2] };
       if (value === "places") return { mode: "places", id: "" };
       if (value.startsWith("places_") && eventId.test(value.slice(7))) {
         return { mode: "places", id: value.slice(7) };

@@ -8,7 +8,8 @@ import {
   addressHits, addressWindowText, agendaDays, belgradeDate, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentMatchesId, incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
   mapTheme, nextTransition, placeCategory, placeCountdown, placeOnDay, placeOptionLabel, placeStatus,
-  pointsAtScale, readIncidents, readPlaces, searchAddresses, shareLink, straightLineDistance, streetBounds,
+  pointsAtScale, readIncidents, readPlaces, repairLaunchPoint, searchAddresses, shareLink,
+  straightLineDistance, streetBounds,
   unexpired, visibleMapLines,
 } from "../web/newsroom/map/core.js";
 import { agendaVisit, setupPlaces } from "../web/newsroom/map/places.js";
@@ -48,6 +49,29 @@ test("возврат к карте обновляет давние данные 
   assert.equal(snapshotRefreshDue(savedNow, savedNow + 59_999), false);
   assert.equal(snapshotRefreshDue(savedNow, savedNow + 60_000), true);
   assert.equal(snapshotRefreshDue(savedNow, savedNow - 1), true);
+});
+
+test("ссылка открывает одно подтверждённое место ремонта в общей карточке", () => {
+  const [incident] = readIncidents({ version: 1, incidents: [watchIncident("a", {
+    repair_site: true, starts_at: null,
+    points: [
+      { lat: 44.794192, lon: 20.488663, label: "Sazonova, 111" },
+      { lat: 44.735692, lon: 20.323031, label: "Trećeg januara, 2" },
+    ],
+  })] }, savedNow);
+  const intended = incident.points[1];
+  const shared = new URL(shareLink(incident.id, incident.title, false, intended));
+  const miniApp = new URL(shared.searchParams.get("url"));
+  const start = miniApp.searchParams.get("startapp");
+  const browser = `?event=${incident.id}&repair=44735692_20323031`;
+  for (const route of [launchMap("", start), launchMap(browser)]) {
+    assert.equal(route.id, incident.id);
+    assert.equal(repairLaunchPoint(incident, route.repairKey), intended);
+  }
+  assert.equal(repairLaunchPoint(incident, "44735691_20323031"), null);
+  assert.equal(repairLaunchPoint({ ...incident, repairSite: false }, "44735692_20323031"), null);
+  assert.equal(repairLaunchPoint({ ...incident, points: [intended, intended] }, "44735692_20323031"), null);
+  assert.equal(launchMap(`?mode=places&event=${incident.id}&repair=44735692_20323031`).mode, "places");
 });
 
 test("повторная карточка воды не считается отдельной, а обе ссылки открывают общий объект", () => {

@@ -1,7 +1,7 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentMatchesId, incidentStatus, incidentTimes, kinds, launchDigestEvents,
-  launchMap, mapTheme, nextTransition, readIncidents, shareLink,
+  launchMap, mapTheme, nextTransition, readIncidents, repairLaunchPoint, shareLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines,
 } from "./core.js?v=__MAP_REVISION__";
 import { calendarLink } from "./calendar.js?v=__MAP_REVISION__";
@@ -462,7 +462,8 @@ function eventCard(incident, now) {
   }
   const links = make("div", "event-links");
   links.append(link(incident.source, "Источник ↗"));
-  const share = shareLink(incident.id, incident.title);
+  const repairPoint = incident.id === state.selected ? state.selectedRepairPoint : null;
+  const share = shareLink(incident.id, incident.title, false, repairPoint);
   if (share) links.append(link(share, "Поделиться ↗"));
   const calendar = calendarLink(incident, Date.now());
   if (calendar) links.append(calendar);
@@ -957,11 +958,17 @@ function focusDigest() {
   if (locations.length && state.map) state.map.fitBounds(locations, { padding: [35, 65], maxZoom: 16 });
 }
 
+function openPendingEvent(incident) {
+  const repairPoint = repairLaunchPoint(incident, initialRoute.repairKey);
+  openEvent(incident, { repairPoint });
+}
+
 function openEvent(incident, { fromCard = false, repairPoint = null } = {}) {
   const now = viewClock();
   state.deepPending = "";
   state.selected = incident.id;
   state.selectedRepairPoint = repairPoint;
+  if (fromCard && repairPoint) state.expandedRepairSites.add(incident.id);
   state.keepSelectedInView = true;
   state.previewArchive = incidentStatus(incident, now) === "closed" ? incident.id : "";
   state.refocusEvent = !state.index && (incident.addresses.length || incident.segments.length)
@@ -1050,7 +1057,7 @@ async function loadEvents({ keepView = false } = {}) {
       return;
     }
     const pending = state.incidents.find((event) => incidentMatchesId(event, state.deepPending));
-    if (pending) openEvent(pending);
+    if (pending) openPendingEvent(pending);
     else {
       render();
       if (state.digestIds.length && !keepView) focusDigest();
@@ -1354,7 +1361,7 @@ function showMode(mode, id = "") {
   } else {
     places.leave();
     const pending = state.incidents.find((incident) => incidentMatchesId(incident, state.deepPending));
-    if (pending) openEvent(pending);
+    if (pending) openPendingEvent(pending);
     else render();
     syncFeed(state);
     scheduleClock();
