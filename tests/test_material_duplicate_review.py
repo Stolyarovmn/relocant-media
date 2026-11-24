@@ -18,6 +18,7 @@ from relocant_media.ops.candidates_cli import select_candidates
 from relocant_media.services import material_lifecycle as core
 from relocant_media.services.editorial import (
     EditorialService,
+    ReviewedEventInputs,
     _candidate,
     _document,
     _reviewed_event_item,
@@ -83,10 +84,23 @@ def seed_duplicate(engine, *, peer=False, body=BODY):
         session.commit()
 
 
-def proof(session):
+def proof(session, *, inputs=None, at=NOW):
     anchor, target = session.get(RawItem, 1), session.get(RawItem, 2)
     return reviewed_event_proof(session, anchor=anchor,
-        anchor_source=session.get(Source, anchor.source_id), target=target, now=NOW)
+        anchor_source=session.get(Source, anchor.source_id), target=target, now=at, inputs=inputs)
+
+
+def test_reusing_inputs_rechecks_deadline_and_invalidated_evidence(engine):
+    seed_duplicate(engine)
+    with Session(engine) as session:
+        inputs = ReviewedEventInputs()
+        expected = proof(session)
+        assert expected is not None and expected.kind == "reviewed"
+        assert proof(session, inputs=inputs) == expected
+        assert proof(session, inputs=inputs, at=NOW + timedelta(hours=7)) is None
+        run = session.get(EditorialRun, 2)
+        run.evidence["documents"][0]["raw_item_id"] = 2.0
+        assert proof(session, inputs=inputs) is None
 
 
 def test_exact_early_skip_is_confirmed_without_rank_documents_or_model(engine):

@@ -12,7 +12,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -44,6 +44,9 @@ from relocant_media.storage.models import (
     SourceRevision,
     Submission,
 )
+
+if TYPE_CHECKING:
+    from relocant_media.services.editorial import ReviewedEventInputs
 
 POLICY_VERSION = "material-lifecycle-v1"
 TASK_TYPE = "material_lifecycle"
@@ -79,6 +82,7 @@ class _SweepCache:
     records: dict[str, SchedulerRun]
     owner_reviews: list[Submission]
     reviewed_targets: list[tuple[RawItem, Source, EditorialRun, Post | None]]
+    reviewed_inputs: ReviewedEventInputs
 
 
 def _now(now: datetime) -> datetime:
@@ -662,7 +666,8 @@ def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
 
         cache = cast(_SweepCache | None, session.info.get("material_lifecycle_cache"))
         match = _reviewed_event_match(session, anchor=raw, anchor_source=source, now=now,
-                                     candidates=cache.reviewed_targets if cache else None)
+                                     candidates=cache.reviewed_targets if cache else None,
+                                     inputs=cache.reviewed_inputs if cache else None)
         if match is not None:
             target, proof = match
             reason = ("related_delivery_reconciliation_required"
@@ -1359,9 +1364,10 @@ def sweep_materials(session: Session, *, city: str, now: datetime,
         row[0].id: (row[0], row[1], row[2], row[3])
         for row in session.execute(query.order_by(RawItem.id))}
     reviews = _owner_reviews(session)
-    from relocant_media.services.editorial import _reviewed_event_candidates
+    from relocant_media.services.editorial import ReviewedEventInputs, _reviewed_event_candidates
 
-    cache = _SweepCache(objects, records, reviews, _reviewed_event_candidates(session, city))
+    cache = _SweepCache(objects, records, reviews, _reviewed_event_candidates(session, city),
+                        ReviewedEventInputs())
     selected_closed = closed_ids if raw_ids is None else closed_ids & raw_ids
     due, audits, fallback, excluded = [], [], [], set(selected_closed)
     blocked = [raw_id for raw_id in selected_closed
