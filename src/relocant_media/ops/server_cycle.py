@@ -1467,12 +1467,15 @@ def _prepare_reviewed(
     return result
 
 
-def policy_reassessment_ids(engine: Engine) -> tuple[list[int], list[int]]:
+def policy_reassessment_ids(
+    engine: Engine, *, now: datetime | None = None,
+) -> tuple[list[int], list[int]]:
+    now = now or datetime.now(UTC)
     corrections: list[int] = []
     policy_holds: list[int] = []
     with Session(engine) as session:
         reason = EditorialRun.outcome["reason"].as_string()
-        correction_cutoff = datetime.now(UTC) - timedelta(days=8)
+        correction_cutoff = now - timedelta(days=8)
         rows = session.scalars(select(EditorialRun).join(RawItem).join(Source)
             .where(Source.city == "belgrade", (EditorialRun.post_id.is_(None)
                    | reason.in_(("event_place_requires_verification", "package_requires_review"))),
@@ -1484,7 +1487,7 @@ def policy_reassessment_ids(engine: Engine) -> tuple[list[int], list[int]]:
                    ))
             .order_by(RawItem.published_at.desc())).all()
         for run in rows:
-            if eligible_policy_reassessment(session, run.raw_item_id):
+            if eligible_policy_reassessment(session, run.raw_item_id, now=now):
                 target = (policy_holds if run.outcome["reason"] == "source_auto_publish_disabled"
                           else corrections)
                 target.append(run.raw_item_id)
