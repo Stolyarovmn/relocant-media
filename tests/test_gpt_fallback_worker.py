@@ -975,6 +975,40 @@ def test_cli_reports_batch_failure_reason_without_request_text(
     assert "PRIVATE" not in emitted.out + emitted.err
 
 
+def test_cli_defers_refresh_without_matching_new_source(
+    ready_package, tmp_path, monkeypatch, capsys,
+):
+    engine, _ = ready_package
+    private = tmp_path / "private.json"
+    request = {"text": "PRIVATE-REQUEST"}
+    private.write_text(json.dumps({
+        "request": request,
+        "result": {"version": 3, "kind": "evidence_refresh", "raw_item_id": 23,
+                   "request_sha256": hashlib.sha256(canonical_json(request).encode()).hexdigest(),
+                   "urls": ["https://n1info.rs/vesti/unrelated-exhibition/"]},
+    }), encoding="utf-8")
+    output = tmp_path / "deferred-cycle"
+    monkeypatch.setenv("DATABASE_URL", str(engine.url))
+    monkeypatch.setattr(sys, "argv", ["worker", "--input", str(private), "--output", str(output)])
+
+    def unconfirmed(*args, **kwargs):
+        raise gpt_fallback.FallbackValidationError(
+            "PRIVATE-ERROR", code=worker.NO_MATCHING_REFRESH_SOURCE,
+        )
+
+    monkeypatch.setattr(worker, "refresh_gpt_evidence", unconfirmed)
+    worker.main()
+    actions_runtime._report_fallback_result(output)
+    emitted = capsys.readouterr().out
+    report, observation = (json.loads(line) for line in emitted.splitlines())
+    assert report["status"] == "PRIMARY_PARTIAL" and report["unresolved"] == 1
+    assert observation["gpt_fallback_result"]["deferred_reasons"] == {
+        "source_confirmation_missing": 1,
+    }
+    assert "PRIVATE" not in emitted
+    assert [item.name for item in output.iterdir()] == ["server-report.json"]
+
+
 def test_invalid_input_does_not_open_database_or_echo_private_data(tmp_path, monkeypatch, capsys):
     private = tmp_path / "private.json"
     private.write_text('{"PRIVATE-INVALID": "private-input"}', encoding="utf-8")

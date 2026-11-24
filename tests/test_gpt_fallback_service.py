@@ -299,6 +299,48 @@ def test_refresh_recollects_live_evidence_and_leaves_the_story_unresolved(
         gpt_fallback.validate_fallback_candidate(session, request, raw_id, now=refreshed_at)
 
 
+@pytest.mark.parametrize("has_confirmation", [False, True])
+def test_refresh_drops_unrelated_proposed_source(fallback_session, monkeypatch, has_confirmation):
+    session, raw, run = fallback_session
+    raw_id, cycle_id = raw.id, run.id
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    anchor = CollectedRawItem(raw.source_id, raw.external_id, raw.url, raw.title, raw.body,
+                              raw.published_at, published_at_precision="instant")
+    unrelated = CollectedRawItem(
+        "media_n1_srbija", "unrelated", "https://n1info.rs/vesti/unrelated-exhibition/",
+        "U Zemunu otvorena izložba", "Muzej najavljuje novu izložbu slikara u Zemunu.",
+        raw.published_at, published_at_precision="instant",
+    )
+    confirming = replace(anchor, source_id="cukarica_news", external_id="alternative",
+                         url="https://www.cukarica.rs/vesti/alternative")
+    results = [anchor, unrelated]
+    if has_confirmation:
+        results.append(confirming)
+    exchange = _refresh_exchange(request, raw_id, [item.url for item in results[1:]])
+    engine = session.get_bind()
+    session.rollback()
+
+    async def collect(links):
+        assert [url for _, url in links] == [item.url for item in results]
+        return results
+
+    monkeypatch.setattr(gpt_refresh, "_collect", collect)
+    if has_confirmation:
+        refreshed = gpt_refresh.refresh_gpt_evidence(engine, exchange, now=NOW)
+        candidate, = refreshed["candidates"]
+        assert [doc["url"] for doc in candidate["documents"]] == [anchor.url, confirming.url]
+        gpt_fallback.validate_fallback_candidate(session, refreshed, raw_id, now=NOW)
+    else:
+        with pytest.raises(gpt_fallback.FallbackValidationError) as error:
+            gpt_refresh.refresh_gpt_evidence(engine, exchange, now=NOW)
+        assert error.value.code == gpt_refresh.NO_MATCHING_REFRESH_SOURCE
+        assert "gpt_evidence_refresh" not in session.get(SchedulerRun, cycle_id).details
+        gpt_fallback.validate_fallback_candidate(session, request, raw_id, now=NOW)
+    assert session.scalar(select(RawItem).where(RawItem.url == unrelated.url)) is None
+    assert session.get(EditorialRun, raw_id) is None
+
+
 def test_refresh_substitutes_404_with_same_event_and_imports_only_live_evidence(
     fallback_session, monkeypatch,
 ):

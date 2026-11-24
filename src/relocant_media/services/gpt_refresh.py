@@ -51,6 +51,7 @@ from relocant_media.storage.models import EditorialRun, RawItem, Source
 
 MAX_ALTERNATIVES = 3
 MAX_REFRESHES = 2
+NO_MATCHING_REFRESH_SOURCE = "refresh_no_matching_source"
 
 
 class RefreshResult(StrictModel):
@@ -251,13 +252,25 @@ def refresh_gpt_evidence(
         raise FallbackValidationError("Сборщик не вернул результаты для всех адресов")
     original_unavailable = isinstance(collected[0], SourceUnavailableError)
     articles = [item for item in collected if isinstance(item, CollectedArticle)]
-    if not original_unavailable and (
-        len(articles) != len(planned)
-        or any(not same_event(anchor, _collected_candidate(item)) for item in articles)
-    ):
-        raise FallbackValidationError(
-            "Снимок события неполный или не совпадает с заданием", code="snapshot_changed",
-        )
+    verified_alternatives = []
+    if not original_unavailable:
+        existing_articles = [item for item in collected[:len(existing)]
+                             if isinstance(item, CollectedArticle)]
+        if len(existing_articles) != len(existing) or any(
+            not same_event(anchor, _collected_candidate(item)) for item in existing_articles
+        ):
+            raise FallbackValidationError(
+                "Собранный снимок исходных источников не совпадает с заданием",
+                code="refresh_existing_evidence_changed",
+            )
+        verified_alternatives = [item for item in collected[len(existing):]
+                                 if isinstance(item, CollectedArticle)
+                                 and same_event(anchor, _collected_candidate(item))]
+        if alternatives and not verified_alternatives:
+            raise FallbackValidationError(
+                "Новые источники не подтвердили то же событие", code=NO_MATCHING_REFRESH_SOURCE,
+            )
+        articles = existing_articles + verified_alternatives
     with Session(engine) as session:
         now = now or datetime.now(UTC)
         validate_fallback_candidate(session, payload.request, raw_id, now=now)
@@ -290,8 +303,8 @@ def refresh_gpt_evidence(
         else:
             if (articles[0].source_id, articles[0].external_id) != (raw.source_id, raw.external_id):
                 raise FallbackValidationError("Сборщик вернул новый ID исходного материала")
-            for config, _ in alternatives:
-                sync_source(session, profile.city_id, config)
+            for item in verified_alternatives:
+                sync_source(session, profile.city_id, registry[item.source_id])
             written, revisions = capture_collected_batch(session, articles)
             if written != len(articles) or revisions:
                 raise FallbackValidationError("Пересъём затронул ранее проверенный снимок")
