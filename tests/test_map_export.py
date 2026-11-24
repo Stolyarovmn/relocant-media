@@ -1,4 +1,5 @@
 import gzip
+import hashlib
 import json
 import re
 from datetime import UTC, datetime, timedelta
@@ -10,20 +11,28 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from test_editorial_package import package_payload
 from test_transport_map import _article, _map_html, _notice
 from test_utility_scope import document as power_document
 from test_water_outage_scope import document as water_document
 
 from relocant_media.ai.models import EvidenceDocument, RussianDraft
+from relocant_media.ai.package import canonical_json
 from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI, map_reply_markup
 from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.domain.city_profile import load_city_profile
-from relocant_media.domain.map_links import map_event_id, map_event_url
+from relocant_media.domain.map_links import (
+    is_map_event_url,
+    map_event_id,
+    map_event_url,
+    map_repair_url,
+)
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops.belgrade_digests import morning_entries
 from relocant_media.ops.map_backfill import parse_targets, plan
 from relocant_media.ops.map_export import (
     Area,
+    Pin,
     _power,
     _water,
     _water_aliases,
@@ -72,16 +81,20 @@ from relocant_media.storage.models import (
 NOW = datetime(2026, 11, 12, 7, tzinfo=UTC)
 
 
-def test_daily_water_repair_exports_only_verified_repair_site_without_start(monkeypatch):
+def _daily_repair_document() -> EvidenceDocument:
     url = ("https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/"
            "a116775/Kvarovi-na-vodovodnoj-mrezi-bice-otklonjeni-tokom-dana.html")
     title = "VODOVOD I KANALIZACIJA: Kvarovi na mreži za 24. novembar 2026. godine"
     body = ("24.11.2026.\n\nKvarovi na vodovodnoj mreži koji će biti otklonjeni:\n\n"
             "Do 15.00\n\nČukarica: 3. janura 2 – Ostružnica\n\n"
             "Bez v ode su potrošači u navedenim i okolnim ulicama")
-    observed_at = datetime(2026, 11, 24, 8, tzinfo=UTC)
-    document = EvidenceDocument(source_id="city_beograd_news", url=url, title=title, body=body,
-                                published_at=observed_at)
+    return EvidenceDocument(source_id="city_beograd_news", url=url, title=title, body=body,
+                            published_at=datetime(2026, 11, 24, 8, tzinfo=UTC))
+
+
+def test_daily_water_repair_exports_only_verified_repair_site_without_start(monkeypatch):
+    document = _daily_repair_document()
+    url, body, observed_at = document.url, document.body, document.published_at
     source = load_source_file(Path("cities/belgrade/sources/city_beograd_news.yaml"))
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -112,7 +125,12 @@ def test_daily_water_repair_exports_only_verified_repair_site_without_start(monk
             package, publisher, None,
             editorial_text=f"{draft.title}\n\n{draft.body}\n\nИсточник: {document.url}",
         )
-        assert prepared.map_url == f"https://t.me/relocant_media_belgrade_bot?startapp={incident.id}"
+        (target,) = incident.points
+        assert prepared.map_url == (
+            f"https://t.me/relocant_media_belgrade_bot?startapp=repair_{incident.id}_"
+            f"{round(target.lat * 1_000_000)}_{round(target.lon * 1_000_000)}"
+        )
+        assert is_map_event_url(prepared.map_url)
     assert incident.id == map_event_id(url)
     assert incident.repair_site
     assert incident.starts_at is None
@@ -128,6 +146,59 @@ def test_daily_water_repair_exports_only_verified_repair_site_without_start(monk
     ):
         assert build_utility_point(document.model_copy(update={"body": modified}), "",
                                    areas=areas) is None
+
+
+def test_repair_backfill_uses_the_reviewed_address_after_the_bulletin_expands():
+    document = _daily_repair_document()
+    app = "https://t.me/relocant_media_belgrade_bot"
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", load_source_file(
+            Path("cities/belgrade/sources/city_beograd_news.yaml"),
+        ))
+        capture_collected_batch(session, [
+            CollectedItem(**document.model_dump(), external_id="116775", source_html="<article/>"),
+        ])
+        raw = session.scalars(select(RawItem)).one()
+        payload = package_payload()
+        payload.update(raw_item_id=raw.id, source_id=raw.source_id, article_id=raw.external_id,
+                       evidence=document.model_dump(mode="json"))
+        draft = payload["outcome"]["draft"]
+        draft.update(title="Авария на водопроводе в Остружнице", body="Место ремонта: 3. janura 2.")
+        fingerprint = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
+        post = Post(city="belgrade", category="utilities", title=draft["title"], body=draft["body"],
+                    status="published", confidence=1, telegram_message_id=169,
+                    published_at=document.published_at)
+        session.add(post)
+        session.flush()
+        run = EditorialRun(raw_item_id=raw.id, post_id=post.id, delivery_status="sent", evidence={},
+                           outcome={"_package": payload, "_package_sha256": fingerprint})
+        session.add(run)
+        session.add(Submission(kind="owner_editorial_review", status="published", payload={
+            "raw_item_id": raw.id, "post_id": post.id, "owner_decision": "publish",
+            "telegram_channel_message_id": 169, "package_sha256": fingerprint,
+        }))
+        session.flush()
+        feed = export_map(session, observed_at=document.published_at)
+        (incident,) = feed.incidents
+        (target,) = incident.points
+        another = Pin(lat=44.794192, lon=20.488663, label="Место ремонта: Sazonova, 111")
+        cases = (((target, another), False), ((another,), True), ((target, target), True))
+        for points, error in cases:
+            updated = incident.model_copy(update={"points": points})
+            public = feed.model_copy(update={"incidents": (updated,)})
+            if error:
+                with pytest.raises(ValueError, match="missing or ambiguous"):
+                    plan(session, {169: incident.id}, public, app)
+            else:
+                assert plan(session, {169: incident.id}, public, app) == {
+                    169: map_repair_url(document.url, target.lat, target.lon, telegram_app=app),
+                }
+        run.outcome = {**run.outcome, "_package": {**payload, "city": "other"}}
+        with pytest.raises(ValueError, match="confirmed repair evidence is missing"):
+            plan(session, {169: incident.id}, feed, app)
+    engine.dispose()
 
 _LISTED_URL = (
     "https://www.bgsaobracaj.rs/vest/5435/izmena-rezima-saobraca%D1%98a-u-ustanicko%D1%98"
