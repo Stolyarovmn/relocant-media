@@ -143,13 +143,20 @@ def _verified_repair_sites(
     aliases = _repair_address_aliases(_BELGRADE_REPAIR_ALIASES)
     sites: dict[Coordinate, dict[str, float | str | None]] = {}
     for address in addresses:
-        key = (_name(address.municipality), _name(address.settlement or ""), _name(address.street))
-        alias = aliases.get(key)
-        street = alias.registry_street if alias else address.street
-        settlement = alias.registry_settlement if alias else address.settlement
-        municipality = (f"{address.municipality}, naselje {settlement}"
-                        if settlement else address.municipality)
-        found = areas.address(street, address.number, municipality)
+        street = address.street
+        found = areas.repair_address(
+            street, address.number, address.municipality, address.settlement,
+        )
+        if found is not None and _name(street) != _name(found.street):
+            street = found.street
+        elif found is None:
+            key = (_name(address.municipality), _name(address.settlement or ""), _name(street))
+            if alias := aliases.get(key):
+                street = alias.registry_street
+                scope = address.municipality
+                if alias.registry_settlement:
+                    scope += f", naselje {alias.registry_settlement}"
+                found = areas.address(street, address.number, scope)
         if found is None:
             continue
         place = address.settlement or address.municipality

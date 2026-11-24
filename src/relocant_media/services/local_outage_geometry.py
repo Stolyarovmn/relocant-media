@@ -22,6 +22,19 @@ _OSM_TYPES = {"n": "node", "w": "way", "r": "relation"}
 _OSM_REF = re.compile(r"[nwr][1-9][0-9]{0,12}")
 _HOUSE = re.compile(r"[1-9][0-9]{0,4}[а-яђјљњћџ]?")
 _SCOPE = re.compile(r",\s*(?:naselje|насеље)\s+", re.IGNORECASE)
+_ORDINAL_UNITS = (
+    "првог", "другог", "трећег", "четвртог", "петог", "шестог", "седмог", "осмог", "деветог",
+)
+_ORDINALS = {
+    **{word: number for number, word in enumerate(_ORDINAL_UNITS, start=1)},
+    **{word: number for number, word in enumerate((
+        "десетог", "једанаестог", "дванаестог", "тринаестог", "четрнаестог", "петнаестог",
+        "шеснаестог", "седамнаестог", "осамнаестог", "деветнаестог", "двадесетог",
+    ), start=10)},
+    **{f"двадесет {word}": number for number, word in enumerate(_ORDINAL_UNITS, start=21)},
+    "тридесетог": 30,
+    "тридесет првог": 31,
+}
 _MAX_BYTES = 150 * 1024 * 1024
 
 
@@ -40,6 +53,32 @@ def _street(value: str) -> str:
 def _scope(value: str) -> tuple[str, str]:
     values = _SCOPE.split(value, maxsplit=1)
     return _district(values[0]), _exact(values[1]) if len(values) == 2 else ""
+
+
+def _ordinal_street(street: str) -> str:
+    words = street.split(" ", 2)
+    if len(words) == 3 and (ordinal := _ORDINALS.get(" ".join(words[:2]))):
+        return f"{ordinal}. {words[2]}"
+    if len(words) >= 2 and (ordinal := _ORDINALS.get(words[0])):
+        return f"{ordinal}. {' '.join(words[1:])}"
+    return street
+
+
+def _one_letter_edit(left: str, right: str) -> bool:
+    left_words, right_words = left.split(), right.split()
+    if len(left_words) != len(right_words):
+        return False
+    edits = [(a, b) for a, b in zip(left_words, right_words, strict=True) if a != b]
+    if len(edits) != 1:
+        return False
+    shorter, longer = sorted(edits[0], key=len)
+    if len(shorter) < 4 or not shorter.isalpha() or not longer.isalpha():
+        return False
+    if len(shorter) == len(longer):
+        return sum(a != b for a, b in zip(shorter, longer, strict=True)) == 1
+    return len(longer) == len(shorter) + 1 and any(
+        shorter == longer[:i] + longer[i + 1:] for i in range(len(longer))
+    )
 
 
 def address_key(street: str, number: str, municipality: str) -> AddressKey | None:
@@ -89,8 +128,10 @@ class AreaIndex:
         self, addresses: dict[AddressKey, AddressLocation],
         settlements: dict[tuple[str, str], tuple[AreaPolygon, ...]],
         repeated_settlements: frozenset[tuple[str, str]] = frozenset(),
+        ambiguous_addresses: frozenset[AddressKey] = frozenset(),
     ) -> None:
         self._addresses = addresses
+        self._ambiguous_addresses = ambiguous_addresses
         self._settlements = settlements
         self._settlement_aliases: dict[tuple[str, str], tuple[AreaPolygon, ...]] = {}
         ambiguous = {(district, settlement_name_key(name))
@@ -102,9 +143,9 @@ class AreaIndex:
             self._settlement_aliases[key] = polygons
         for key in ambiguous:
             self._settlement_aliases.pop(key)
-        self._streets: dict[tuple[str, str], list[AddressLocation]] = {}
+        self._streets: dict[str, dict[str, list[AddressLocation]]] = {}
         for (district, street, _), location in addresses.items():
-            self._streets.setdefault((district, street), []).append(location)
+            self._streets.setdefault(district, {}).setdefault(street, []).append(location)
 
     def address(self, street: str, number: str, municipality: str) -> AddressLocation | None:
         district, place = _scope(municipality)
@@ -117,9 +158,43 @@ class AreaIndex:
             return found
         return None
 
+    def repair_address(
+        self, street: str, number: str, municipality: str, settlement: str | None,
+    ) -> AddressLocation | None:
+        """Для аварийного бюллетеня: точная улица, порядковый номер, одна опечатка."""
+        scope = f"{municipality}, naselje {settlement}" if settlement else municipality
+        if direct := self.address(street, number, scope):
+            return direct
+        district = _district(municipality)
+        key = address_key(street, number, district)
+        area = self.settlement(settlement, district) if settlement else ()
+        if key is None or (settlement and not area):
+            return None
+
+        wanted = _ordinal_street(key[1])
+        streets = self._streets.get(district, {})
+        uncertain = {road for region, road, _ in self._ambiguous_addresses if region == district}
+        exact: list[str] = []
+        approximate: list[str] = []
+        for road in streets.keys() | uncertain:
+            normalized = _ordinal_street(road)
+            if normalized != wanted and (not area or not _one_letter_edit(normalized, wanted)):
+                continue
+            locations = streets.get(road, [])
+            if area and road not in uncertain and not any(
+                _within(row.point, area) for row in locations
+            ):
+                continue
+            (exact if normalized == wanted else approximate).append(road)
+        candidates = exact or approximate
+        if len(candidates) != 1 or candidates[0] in uncertain:
+            return None
+        found = self._addresses.get((district, candidates[0], key[2]))
+        return found if found and (not area or _within(found.point, area)) else None
+
     def street(self, street: str, municipality: str) -> tuple[AddressLocation, ...]:
         district, place = _scope(municipality)
-        found = self._streets.get((district, _street(street)), ())
+        found = self._streets.get(district, {}).get(_street(street), [])
         if not place:
             return tuple(found)
         area = self.settlement(place, district)
@@ -177,7 +252,10 @@ def _url(ref: str) -> str:
     return f"https://www.openstreetmap.org/{_OSM_TYPES[ref[0]]}/{ref[1:]}"
 
 
-def _load(document: Any, fallback: dict[AddressKey, AddressLocation] | None = None) -> AreaIndex:
+def _load(
+    document: Any, fallback: dict[AddressKey, AddressLocation],
+    ambiguous_addresses: frozenset[AddressKey],
+) -> AreaIndex:
     if not isinstance(document, dict) or document.get("version") != 1:
         raise ValueError("Неизвестная версия индекса геометрии")
     buildings = {ref: _polygon(rings, _url(ref)) for ref, rings in document["buildings"].items()}
@@ -200,9 +278,9 @@ def _load(document: Any, fallback: dict[AddressKey, AddressLocation] | None = No
             if lookup in settlements and settlements[lookup] != polygons:
                 repeated.add(lookup)
             settlements[lookup] = polygons
-    return AreaIndex({**(fallback or {}), **addresses},
+    return AreaIndex({**fallback, **addresses},
                      {key: value for key, value in settlements.items() if key not in repeated},
-                     frozenset(repeated))
+                     frozenset(repeated), ambiguous_addresses)
 
 
 def _valid_rgz_url(url: str) -> bool:
@@ -214,7 +292,7 @@ def _valid_rgz_url(url: str) -> bool:
             and not parts.query and not parts.fragment)
 
 
-def _load_rgz(document: Any) -> dict[AddressKey, AddressLocation]:
+def _load_rgz(document: Any) -> tuple[dict[AddressKey, AddressLocation], frozenset[AddressKey]]:
     if not isinstance(document, dict) or document.get("version") != 1:
         raise ValueError("Неизвестная версия адресного индекса RGZ")
     result: dict[AddressKey, AddressLocation] = {}
@@ -234,7 +312,7 @@ def _load_rgz(document: Any) -> dict[AddressKey, AddressLocation]:
             if key in result and (result[key].point, result[key].source_id) != (entry.point, ref):
                 repeated.add(key)
             result[key] = entry
-    return {key: value for key, value in result.items() if key not in repeated}
+    return {key: value for key, value in result.items() if key not in repeated}, frozenset(repeated)
 
 
 def _read(path: Path) -> Any:
@@ -248,13 +326,13 @@ def _read(path: Path) -> Any:
 def load_area_index(path: Path) -> AreaIndex:
     """Подхватить контуры OSM и точные адреса из соседней выгрузки RGZ."""
     try:
-        fallback = _load_rgz(_read(path.with_name("rgz-addresses.json.gz")))
+        fallback, ambiguous = _load_rgz(_read(path.with_name("rgz-addresses.json.gz")))
     except (OSError, EOFError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
-        fallback = {}
+        fallback, ambiguous = {}, frozenset()
     try:
-        return _load(_read(path), fallback)
+        return _load(_read(path), fallback, ambiguous)
     except (OSError, EOFError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
-        return AreaIndex(fallback, {})
+        return AreaIndex(fallback, {}, ambiguous_addresses=ambiguous)
 
 
 def within_outage_segment(point: Coordinate, line: tuple[Coordinate, ...]) -> bool:
