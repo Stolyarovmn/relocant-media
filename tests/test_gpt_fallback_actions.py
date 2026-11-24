@@ -97,7 +97,7 @@ def test_preview_skips_invalid_ranked_handoff_before_blob_read_and_keeps_other_w
     assert store.sha == "initial" and store.state["status"] == "ready"
 
 
-@pytest.mark.parametrize("result_kind", ["package", "rank", "deferred"])
+@pytest.mark.parametrize("result_kind", ["package", "legacy_package", "rank", "deferred"])
 def test_fallback_uses_one_canonical_claim_and_no_primary_model(
     context, tmp_path, monkeypatch, result_kind,
 ):
@@ -115,7 +115,15 @@ def test_fallback_uses_one_canonical_claim_and_no_primary_model(
         ])
     else:
         result.update(version=1, packages=[{"raw_item_id": 23}])
-    result_sha = storage.save(canonical_json(result).encode())
+    encoded = json.dumps(result) if result_kind == "legacy_package" else canonical_json(result)
+    result_sha = storage.save(encoded.encode())
+    submission = runtime.GPTSubmission(123, result_sha, datetime.now(UTC))
+
+    def verified_submission(env, digest):
+        assert result_kind == "package"
+        assert env["GH_TOKEN"] == "mock-github" and digest == result_sha
+        return submission
+
     seen = []
 
     def child(command, env):
@@ -127,7 +135,13 @@ def test_fallback_uses_one_canonical_claim_and_no_primary_model(
         assert "GEMINI_API_KEY" not in env
         assert "EDITORIAL_OWNER_CHAT_ID" not in env
         assert "GPT_FALLBACK_BLOB_SHA256" not in env
-        if result_kind != "package":
+        assert "GH_TOKEN" not in env
+        if result_kind == "package":
+            assert command[-2] == "--submission"
+            assert runtime.GPTSubmission.read(Path(command[-1])) == submission
+        else:
+            assert "--submission" not in command
+        if result_kind in {"rank", "deferred"}:
             assert "TELEGRAM_BOT_TOKEN" not in env
             assert env["EDITORIAL_SEND_ENABLED"] == "false"
         else:
@@ -136,10 +150,12 @@ def test_fallback_uses_one_canonical_claim_and_no_primary_model(
         return 0
 
     monkeypatch.setattr(runtime, "run_child", child)
+    monkeypatch.setattr(runtime, "verified_submission", verified_submission)
     monkeypatch.setattr(runtime, "export_public", lambda *args: None)
     code = runtime.execute(store, storage, work=tmp_path / "private",
                            output=tmp_path / "data.json", folder="ssh_blobs", mode="fallback",
-                           environment={**environment(), "GPT_FALLBACK_BLOB_SHA256": result_sha})
+                           environment={**environment(), "GPT_FALLBACK_BLOB_SHA256": result_sha,
+                                        "GH_TOKEN": "mock-github"})
     assert code == 0
     assert seen == [True]
     assert store.state["status"] == "ready"

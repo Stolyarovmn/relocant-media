@@ -190,6 +190,7 @@ jobs:
         if: steps.start.outputs.status == 'ready' && steps.mode.outputs.value != 'recovery'
         id: runtime
         env:
+          GH_TOKEN: ${{ steps.mode.outputs.value == 'fallback' && github.token || '' }}
           EDITORIAL_STORAGE_BACKEND: ${{ vars.EDITORIAL_STORAGE_BACKEND || 'drive' }}
           EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
           EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
