@@ -3,6 +3,15 @@
   "checked_at": "2026-11-19",
   "venues": [
     {
+      "id": "hangar-luka-beograd",
+      "aliases": ["hangar luka beograd", "hangaru luke beograd", "hangar luke beograd", "хангар лука београд", "хангару луке београд"],
+      "ticket_names": ["luka beograd", "hangar luka beograd", "hangar luke beograd"],
+      "venue": {"name": "Hangar Luka Beograd", "address": "Dunavska 22, Beograd", "latitude": 44.8259913, "longitude": 20.4749125},
+      "coordinate_source_url": "https://www.openstreetmap.org/node/13257326394",
+      "venue_source_url": "https://app.bandgrid.com/venues/hangar-luka-beograd",
+      "note": "Точка отмечает Hangar, а не все площадки комплекса Luka Beograd. Для краткого названия на билете нужен полный зал в датированной статье с точной ссылкой на этот билет."
+    },
+    {
       "id": "bitefartcafe-winter",
       "aliases": ["mitropolita petra 8"],
       "venue": {"name": "BitefArtCafe", "address": "Mitropolita Petra 8, Beograd", "latitude": 44.8166243, "longitude": 20.4860226},

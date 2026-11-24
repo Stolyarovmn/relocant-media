@@ -235,7 +235,7 @@ def _live_place_facts(value: Any) -> Any:
 
 def verify_live_map(
     presentation: EditorialPresentation | None, document: EvidenceDocument,
-    source_html: str | None,
+    source_html: str | None, *, media: tuple[EvidenceDocument, ...] = (),
 ) -> None:
     """Изменение ссылки при неизменном тексте тоже требует нового пакета и ревью."""
     if presentation is not None and presentation.native_map is not None:
@@ -243,7 +243,7 @@ def verify_live_map(
     if presentation is not None and (place := presentation.event_place) is not None:
         if place["source_url"] == document.url:
             actual = resolve_event_place(
-                document, source_html or "", profile=load_city_profile("belgrade"),
+                document, source_html or "", profile=load_city_profile("belgrade"), media=media,
             )
             if actual is None or _live_place_facts(actual) != _live_place_facts(place):
                 raise ValueError("Площадка или расписание изменились в живом источнике")

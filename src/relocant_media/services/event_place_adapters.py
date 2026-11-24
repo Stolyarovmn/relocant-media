@@ -11,13 +11,20 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup, Tag
 
 from relocant_media.ai.models import EvidenceDocument
+from relocant_media.collectors.base import RawItem as Collected
 from relocant_media.collectors.kolarac_program import saved_linked_program
 from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
 from relocant_media.collectors.linked_tour_map import parse_tour_place
+from relocant_media.collectors.ticket_vision_events import SOURCE_ID as TICKET_SOURCE
+from relocant_media.collectors.ticket_vision_events import parse_ticket_event
 from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, CityEditorialProfile
+from relocant_media.domain.event_facts import event_dates
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.event_program import festival_program, registered_event_venues
 from relocant_media.services.exhibition_map_point import MAX_HTML_BYTES
+from relocant_media.services.primary_discovery import folded
+from relocant_media.services.venue_event_evidence import matches_venue_evidence
+from relocant_media.sources.registry import load_source_file
 
 _DOB_HOSTS = {"domomladine.org", "www.domomladine.org"}
 _DOB_CONTACT = "https://domomladine.org/kontakt/"
@@ -365,8 +372,70 @@ def _linked_tour_facts(document: EvidenceDocument, source_html: str) -> dict[str
     }
 
 
+def _ticket_venue_facts(
+    document: EvidenceDocument, source_html: str, profile: CityEditorialProfile,
+    media: tuple[EvidenceDocument, ...],
+) -> dict[str, Any] | None:
+    try:
+        config = load_source_file(
+            DEFAULT_CITIES_ROOT / profile.city_id / "sources" / f"{TICKET_SOURCE}.yaml",
+        )
+        ticket = parse_ticket_event(source_html, document.url, config)
+        if (ticket.title, ticket.body, None) != (
+            document.title, document.body, document.published_at,
+        ):
+            return None
+        stamp = re.fullmatch(
+            r"Datum događaja: (\d{2}\.\d{2}\.20\d{2})\.\n"
+            r"Početak: (\d{2}:\d{2})\.\nMesto: (.+), Beograd\.", ticket.body,
+        )
+        if stamp is None:
+            return None
+        start = datetime.strptime(f"{stamp[1]} {stamp[2]}", "%d.%m.%Y %H:%M")
+        timezone = ZoneInfo(profile.timezone)
+        matched: list[str] = []
+        for article in media:
+            if article.published_at is None:
+                continue
+            item = Collected(article.source_id, article.url, article.url,
+                             article.title, article.body, article.published_at)
+            if matches_venue_evidence(
+                item, ticket, config, published=article.published_at.astimezone(timezone).date(),
+            ):
+                lead = folded(f"{article.title}\n{article.body[:2500]}")
+                matched.extend(
+                    clause for clause in re.split(r"[\n;!?]|(?<=[a-z])\.\s+", lead)
+                    if event_dates(clause, start.year) == {start.date().isoformat()}
+                )
+        venues = [entry for entry in registered_event_venues(profile)
+                  if folded(stamp[3]) in entry.get("ticket_names", []) and any(
+                      re.search(r"(?<!\w)" + re.escape(folded(alias)) + r"(?!\w)", lead)
+                      for alias in entry["aliases"] for lead in matched
+                  )]
+        if len(venues) != 1:
+            return None
+        venue = venues[0]
+        location = venue["venue"]
+        if (not all(is_public_https_url(venue[key])
+                    for key in ("coordinate_source_url", "venue_source_url"))
+                or not 44.2 <= location["latitude"] <= 45.2
+                or not 19.8 <= location["longitude"] <= 21.1):
+            return None
+        return {
+            "event_name": document.title, "venue": location,
+            "starts_at": start.isoformat(), "ends_at": None,
+            "time_basis": "source_cited_ticket_registered_venue",
+            "schedule_source_url": document.url,
+            "coordinate_source_url": venue["coordinate_source_url"],
+            "venue_source_url": venue["venue_source_url"],
+        }
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def extract_event_adapter(
     document: EvidenceDocument, source_html: str, *, profile: CityEditorialProfile,
+    media: tuple[EvidenceDocument, ...] = (),
 ) -> dict[str, Any] | None:
     """Выделяет только явно датированное событие с подтверждённой площадкой."""
     if (profile.city_id != "belgrade" or not isinstance(source_html, str)
@@ -378,6 +447,8 @@ def extract_event_adapter(
         return _bitef_facts(document, source_html, profile)
     if document.source_id == TOUR_MAP_SOURCE:
         return _linked_tour_facts(document, source_html)
+    if document.source_id == TICKET_SOURCE:
+        return _ticket_venue_facts(document, source_html, profile, media)
     if document.source_id == "cukarica_news":
         from relocant_media.collectors.cukarica_news import (
             CukaricaExtractionError,
