@@ -5,7 +5,7 @@ from relocant_media.sources.registry import load_source_registry
 
 def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
     sources = load_source_registry(Path("cities/belgrade/sources"))
-    assert len(sources) == 39
+    assert len(sources) == 40
     assert len({source.id for source in sources}) == len(sources)
 
     euprava = next(source for source in sources if source.id == "euprava_foreigner_registration")
@@ -41,7 +41,7 @@ def test_belgrade_source_registry_loads_and_has_unique_ids() -> None:
 def test_venue_and_ticket_sources_are_explicit_event_sources():
     sources = load_source_registry(Path("cities/belgrade/sources"))
     venues = [s for s in sources if s.source_type == "official_venue_events"]
-    assert len(venues) == 10
+    assert len(venues) == 11
     assert all(s.ownership == "official" and s.categories == ("events",) for s in venues)
     assert all(s.verification.checked_at is not None for s in venues)
     assert all(s.extraction.status == "active" for s in venues
@@ -51,6 +51,11 @@ def test_venue_and_ticket_sources_are_explicit_event_sources():
     yugoslavia = next(s for s in venues if s.id == "venue_yugoslavia")
     marathon = next(s for s in venues if s.id == "venue_belgrade_marathon")
     tickets = next(s for s in venues if s.id == "ticket_vision_events")
+    longplay = next(s for s in venues if s.id == "venue_longplay")
+
+    assert longplay.extraction.strategy == "venue_feed"
+    assert longplay.extraction.feed_url == "https://longplay.rs/feed/?post_type=dogadjaj"
+    assert longplay.extraction.article_scope is not None
 
     assert tickets.extraction.strategy == "ticket_vision_event"
     assert tickets.extraction.feed_url is None
