@@ -262,6 +262,8 @@ jobs:
       - name: Report saved editorial decisions
         # #522: отчёт идёт сбоку и не меняет результат цикла редакции.
         continue-on-error: true
+        # Отчёт работает под блокировкой состояния: держим его не дольше минуты.
+        timeout-minutes: 1
         if: >-
           steps.runtime.outcome == 'success' &&
           (steps.mode.outputs.value == 'editorial' || steps.mode.outputs.value == 'auto') &&
