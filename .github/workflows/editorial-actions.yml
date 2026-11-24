@@ -260,6 +260,8 @@ jobs:
           python -m relocant_media.ops.actions_recovery --run-id "$RECOVERY_RUN_ID" \
             --checkpoint "$RECOVERY_CHECKPOINT" --work "$RUNNER_TEMP/editorial-work"
       - name: Report saved editorial decisions
+        # #522: отчёт идёт сбоку и не меняет результат цикла редакции.
+        continue-on-error: true
         if: >-
           steps.runtime.outcome == 'success' &&
           (steps.mode.outputs.value == 'editorial' || steps.mode.outputs.value == 'auto') &&

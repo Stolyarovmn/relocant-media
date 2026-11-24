@@ -357,3 +357,20 @@ def test_retry_waits_and_resumes_only_the_current_version(monkeypatch, delay, ad
         "gh", "workflow", "run", "editorial-actions.yml", "-R", "Stolyarovmn/relocant-media",
         "--ref", "main", "-f", "mode=auto",
     ])])
+
+
+_REPORT_WORKFLOWS = ("style-report.yml", "daily-analysis.yml", "campaign-brief.yml",
+                     "source-health.yml")
+
+
+def test_reports_never_change_the_editorial_cycle_result_or_hold_its_state_lock():
+    # #522: отчёт идёт сбоку; его сбой не должен останавливать цепочку, drain или
+    # засчитываться как сбой редакции.
+    steps = workflow()["jobs"]["cycle"]["steps"]
+    reports = [step for step in steps if step.get("name", "").startswith("Report ")]
+    assert reports
+    for step in reports:
+        assert step.get("continue-on-error") == "true", step["name"]
+    for name in _REPORT_WORKFLOWS:
+        text = WORKFLOW.with_name(name).read_text(encoding="utf-8")
+        assert "canonical-editorial-state" not in text, name
