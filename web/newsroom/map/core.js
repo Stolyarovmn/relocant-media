@@ -328,6 +328,9 @@ export function readIncidents(document, now = null) {
       watchTitle: title,
       archived,
       repairSite: record.kind === "water" && record.repair_site === true && end !== null,
+      roadSchedule: record.kind === "road" && windows.length
+        && ["weekly_day", "weekly_hours"].includes(record.road_schedule)
+        ? record.road_schedule : null,
       reportedScope: textValue(record.reported_scope),
       source,
       officialMap: safeLink(record.source_map_url),
@@ -393,7 +396,9 @@ export function incidentStatus(incident, now) {
   if (incident.end !== null && now >= incident.end) return "closed";
   if (incident.repairSite) return "active";
   if (incident.windows.length) {
-    if (incident.windows.some(({ start, end }) => start <= now && now < end)) return "active";
+    if (incident.windows.some(({ start, end }) => start <= now && now < end)) {
+      return incident.roadSchedule === "weekly_day" ? "unknown" : "active";
+    }
     if (now < incident.windows[0].start) return "planned";
     if (incident.windows.some(({ start }) => start > now)) return "between";
     if (incident.end === null) return "closed";
@@ -402,6 +407,14 @@ export function incidentStatus(incident, now) {
   if (incident.start !== null && now < incident.start) return "planned";
   if (incident.start !== null && incident.end !== null) return "active";
   return "unknown";
+}
+
+export function weeklyRoadState(incident, now) {
+  if (!incident.roadSchedule) return null;
+  const scheduledNow = !incident.archived
+    && incident.windows.some(({ start, end }) => start <= now && now < end);
+  if (!scheduledNow) return "planned";
+  return incident.roadSchedule === "weekly_day" ? "day" : "active";
 }
 
 export function unexpired(window, now, archive = false) {
@@ -465,6 +478,11 @@ export function nextTransition(incidents, now, hours = 0) {
 
 export function incidentCountdown(incident, now) {
   if (incident.archived || incidentStatus(incident, now) === "closed") return "";
+  if (incident.roadSchedule === "weekly_day") {
+    if (weeklyRoadState(incident, now) === "day") return "Часы не указаны";
+    const next = incident.windows.find(({ start }) => start > now);
+    return next ? `Следующая дата · ${day.format(next.start)}` : "";
+  }
   const windows = incident.windows.length ? incident.windows : [{ start: incident.start, end: incident.end }];
   const active = windows.filter(({ start, end }) => start !== null && end !== null
     && start <= now && end > now);
@@ -495,6 +513,9 @@ export function addressWindowText(window) {
 }
 
 export function incidentTimes(incident) {
+  if (incident.roadSchedule === "weekly_day") {
+    return incident.windows.map(({ start }) => day.format(start));
+  }
   if (incident.startDay !== null && incident.endDay !== null) {
     return [incident.startDay === incident.endDay
       ? day.format(incident.startDay)

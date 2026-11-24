@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID, match_bgsaobracaj_notice
@@ -123,6 +125,91 @@ _CALENDAR_DATE = re.compile(_PRINTED_DATE)
 _TIMED_OR_PHASED = re.compile(
     r"\b(?:фаз[аеу]|фазама|свак\w+|часов[аи]?|сати)\b|\b\d{1,2}:\d{2}\b",
 )
+_WEEKDAYS = {
+    "понедељка": 0, "уторка": 1, "среде": 2, "четвртка": 3,
+    "петка": 4, "суботе": 5, "недеље": 6,
+}
+_WEEKDAY = "|".join(_WEEKDAYS)
+_RECURS = re.compile(
+    rf"\bсвак(?:ог|е)\s+(?:{_WEEKDAY}|дана|радног дана|викенда)\b"
+    r"|\b(?:свакодневно|радним данима|викендом)\b",
+)
+_HOUR = r"\d{1,2}(?:[:.]\d{2})?"
+_WEEKLY_ROAD = re.compile(
+    r"\b(?:обустав[ае]\s+саобраћаја(?:\s*,\s*заузећа\s+коловоза)?"
+    r"|(?:заузећ[ае]|затварањ[ае])\s+(?:дела\s+)?коловоза)\s+"
+    rf"у\s+(?:улици|ул\.)\s+(?P<street>{_PLACE})"
+    rf"(?:\s*[, ]\s*од\s+(?:ул(?:ице)?\.?\s+)?(?P<start>{_PLACE})"
+    rf"\s+до\s+(?:ул(?:ице)?\.?\s+)?(?P<end>{_PLACE})"
+    rf"|\s+испред\s+кп\s+(?P<parcel>[0-9]{{1,8}}(?:/[0-9]{{1,6}})?)"
+    rf"\s+ко\s+(?P<cadastre>{_PLACE})),\s*"
+    rf"на територији (?:градске )?општине (?P<municipality>{_PLACE}),\s*"
+    rf"свак(?:ог|е)\s+(?P<weekday>{_WEEKDAY})"
+    rf"(?:\s+од\s+(?P<start_hour>{_HOUR})\s+до\s+(?P<end_hour>{_HOUR})"
+    r"(?:\s+часова|\s+часа|\s+сати)?)?\s*,\s*"
+    rf"{_LIST_PERIOD}\s*\.?\Z",
+)
+_MAX_WEEKLY_WINDOWS = 300
+_BELGRADE = ZoneInfo("Europe/Belgrade")
+
+
+@dataclass(frozen=True)
+class WeeklyRoadSchedule:
+    street: str
+    municipality: str
+    days: tuple[date, ...]
+    hours: tuple[time, time] | None
+    crossings: tuple[str, str] | None
+    parcel: str | None
+    cadastre: str | None
+
+
+def _printed_hour(value: str) -> time:
+    hour, _, minute = value.replace(".", ":").partition(":")
+    return time(int(hour), int(minute or "0"))
+
+
+def secretariat_weekly_schedule(document: EvidenceDocument) -> WeeklyRoadSchedule | None:
+    """Одно ограничение по конкретному дню недели в опубликованном диапазоне."""
+    if (document.source_id != SOURCE_ID or not match_bgsaobracaj_notice(document.url)
+            or len(document.body.encode()) > _MAX_NOTICE_BYTES
+            or len(_RECURS.findall(_name(document.body))) != 1):
+        return None
+    matches = [
+        match for line in document.body.splitlines()
+        if (match := _WEEKLY_ROAD.search(_name(line.strip("\u200b"))))
+    ]
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    municipality = match["municipality"]
+    dates = _listed_period(match["first"], match["last"])
+    if municipality not in _MUNICIPALITIES or dates is None:
+        return None
+    first, last = dates
+    delta = (_WEEKDAYS[match["weekday"]] - first.weekday()) % 7
+    offsets = range(delta, (last - first).days + 1, 7)
+    if not 1 <= len(offsets) <= _MAX_WEEKLY_WINDOWS:
+        return None
+    try:
+        hours = ((_printed_hour(match["start_hour"]), _printed_hour(match["end_hour"]))
+                 if match["start_hour"] is not None else None)
+    except ValueError:
+        return None
+    if hours is not None and hours[0] >= hours[1]:
+        return None
+    days = tuple(first + timedelta(days=offset) for offset in offsets)
+    for day in days:
+        for hour in hours or ():
+            local = datetime.combine(day, hour, tzinfo=_BELGRADE)
+            if local.utcoffset() != local.replace(fold=1).utcoffset():
+                return None
+    return WeeklyRoadSchedule(
+        street=match["street"].strip(), municipality=municipality,
+        days=days, hours=hours,
+        crossings=(match["start"], match["end"]) if match["start"] else None,
+        parcel=match["parcel"], cadastre=match["cadastre"],
+    )
 
 
 def _sentences(document: EvidenceDocument) -> list[str]:
@@ -310,6 +397,23 @@ def resolve_secretariat_stretches(
     if (document.source_id != SOURCE_ID or not match_bgsaobracaj_notice(document.url)
             or len(document.body.encode()) > _MAX_NOTICE_BYTES):
         return []
+    if _RECURS.search(_name(document.body)):
+        schedule = secretariat_weekly_schedule(document)
+        if schedule is None or schedule.crossings is None:
+            return []
+        start, end = schedule.crossings
+        geometry = _resolve(
+            {"street": schedule.street, "start": start, "end": end},
+            index, {schedule.municipality},
+        )
+        if geometry is None:
+            return []
+        return [(schedule.days[0], schedule.days[-1], {
+            **geometry,
+            "work_days": [day.isoformat() for day in schedule.days],
+            **({"work_hours": [hour.isoformat() for hour in schedule.hours]}
+               if schedule.hours else {}),
+        })]
     if listed := _listed_secretariat_stretches(document.body, index):
         return listed
     if sidewalk := _secretariat_sidewalk(document.body, index):

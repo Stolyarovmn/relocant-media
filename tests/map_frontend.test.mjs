@@ -10,7 +10,7 @@ import {
   mapTheme, nextTransition, placeCategory, placeCountdown, placeOnDay, placeOptionLabel, placeStatus,
   pointsAtScale, readIncidents, readPlaces, repairLaunchPoint, searchAddresses, shareLink,
   straightLineDistance, streetBounds,
-  unexpired, visibleMapLines,
+  unexpired, visibleMapLines, weeklyRoadState,
 } from "../web/newsroom/map/core.js";
 import { agendaVisit, setupPlaces } from "../web/newsroom/map/places.js";
 import { agendaFavorites } from "../web/newsroom/map/favorites.js";
@@ -28,6 +28,46 @@ const savedWindow = { starts_at: "2026-11-23T08:00:00+01:00", ends_at: "2026-11-
 const watchIncident = (id, overrides = {}) => ({
   id: `event_${id.repeat(20)}`, kind: "water", title: "Работы на водопроводе",
   source_url: "https://www.beograd.rs/", ...savedWindow, ...overrides,
+});
+
+test("еженедельный отрезок выделяется как действующий только внутри точного окна", () => {
+  const first = { starts_at: "2026-11-25T08:30:00+01:00", ends_at: "2026-11-25T17:00:00+01:00" };
+  const second = { starts_at: "2026-12-02T08:30:00+01:00", ends_at: "2026-12-02T17:00:00+01:00" };
+  const [incident] = readIncidents({ version: 1, incidents: [watchIncident("a", {
+    kind: "road", road_schedule: "weekly_hours", starts_at: first.starts_at, ends_at: second.ends_at,
+    windows: [first, second], lines: [{ coordinates: [[44.78, 20.48], [44.781, 20.481]] }],
+  })] });
+  const firstStart = Date.parse(first.starts_at);
+  const gap = Date.parse("2026-11-26T12:00:00+01:00");
+  assert.equal(weeklyRoadState(incident, firstStart - 1), "planned");
+  assert.equal(weeklyRoadState(incident, firstStart), "active");
+  assert.equal(weeklyRoadState(incident, Date.parse(first.ends_at)), "planned");
+  assert.equal(incidentStatus(incident, gap), "between");
+  assert.equal(incidentInPeriod(incident, gap, 24), null);
+  assert.equal(visibleMapLines(incident, Date.parse(second.starts_at)).length, 1);
+  assert.equal(visibleMapLines(incident, Date.parse(second.ends_at)).length, 0);
+});
+
+test("еженедельная дата без часов не превращается в круглосуточное перекрытие", () => {
+  const first = { starts_at: "2026-11-25T00:00:00+01:00", ends_at: "2026-11-26T00:00:00+01:00" };
+  const second = { starts_at: "2026-12-02T00:00:00+01:00", ends_at: "2026-12-03T00:00:00+01:00" };
+  const [incident] = readIncidents({ version: 1, incidents: [watchIncident("a", {
+    kind: "road", road_schedule: "weekly_day", starts_at: first.starts_at, ends_at: second.ends_at,
+    windows: [first, second], lines: [],
+  })] });
+  const onDate = Date.parse("2026-11-25T12:00:00+01:00");
+  const gap = Date.parse("2026-11-26T12:00:00+01:00");
+  assert.equal(weeklyRoadState(incident, onDate), "day");
+  assert.equal(incidentStatus(incident, onDate), "unknown");
+  assert.equal(incidentCountdown(incident, onDate), "Часы не указаны");
+  assert.match(incidentCountdown(incident, gap), /^Следующая дата · /);
+  assert.ok(incidentTimes(incident).every((label) => !label.includes("00:00")));
+  assert.equal(weeklyRoadState(incident, gap), "planned");
+  const calendar = buildCalendar(incident, Date.parse(first.starts_at) - 1000);
+  assert.match(calendar, /DTSTART;VALUE=DATE:20261125\r\nDTEND;VALUE=DATE:20261126/);
+  assert.match(calendar, /DTSTART;VALUE=DATE:20261202\r\nDTEND;VALUE=DATE:20261203/);
+  assert.match(calendar, /Часы работ не указаны/);
+  assert.equal(timelineBands([incident], onDate, gap).has("road"), false);
 });
 
 test("место ремонта видно до указанного срока без фиктивного начала работ", () => {

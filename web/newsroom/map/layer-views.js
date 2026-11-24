@@ -22,7 +22,7 @@ export function timelineLabel(instant, current) {
 export function timelineBands(incidents, origin, end) {
   const byKind = new Map();
   for (const incident of incidents) {
-    if (incident.archived) continue;
+    if (incident.archived || incident.roadSchedule === "weekly_day") continue;
     for (const span of incident.windows.length ? incident.windows : [incident]) {
       if (!Number.isFinite(span.start) || !Number.isFinite(span.end)) continue;
       const start = Math.max(origin, span.start);
