@@ -8,6 +8,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from sqlalchemy import create_engine, func, select
@@ -119,6 +120,16 @@ def run_cycle(
             "status": "PRIMARY_FAILED", "city": city, "run_id": run_id,
             "window": window, "window_complete": False, "telegram_transport": "fake",
         }
+        stage_seconds: dict[str, float] = {}
+        active_stage = "collection"
+        stage_started = monotonic()
+
+        def next_stage(name: str) -> None:
+            nonlocal active_stage, stage_started
+            transition = monotonic()
+            stage_seconds[active_stage] = round(transition - stage_started, 3)
+            active_stage, stage_started = name, transition
+
         if not close_window:
             heartbeat["scope_limited"] = True
         try:
@@ -127,6 +138,7 @@ def run_cycle(
             heartbeat["collection_failures"] = collection["failures"]
             if collection["failures"] and not allow_partial_ingest:
                 raise ValueError("source collection incomplete")
+            next_stage("candidate_selection")
             corrections, policy_holds = reassessment_ids() if reassessment_ids else ([], [])
             priority_ids = priority_items() if priority_items else set()
             due_ids, lifecycle_excluded = lifecycle_due() if lifecycle_due else ([], set())
@@ -155,6 +167,7 @@ def run_cycle(
             gpt_waiting = False
             gpt_candidate_ids: list[int] = []
             if preselect is not None:
+                next_stage("batch_preselection")
                 candidates = manifest["candidates"]
                 protected = [candidate for candidate in candidates if (
                     candidate["raw_item_id"] in priority_ids
@@ -245,6 +258,7 @@ def run_cycle(
                     }
             (output / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            next_stage("material_review")
             processed = []
             processing_errors = []
             for candidate in manifest["candidates"]:
@@ -271,6 +285,7 @@ def run_cycle(
                         raw_id = source_replacement_target(session, raw_id) or raw_id
                 if raw_id not in processed:
                     processed.append(raw_id)
+            next_stage("remaining_scan")
             with Session(engine) as session:
                 # Повторный sweep учитывает только что завершённые попытки.
                 if lifecycle_due:
@@ -306,6 +321,9 @@ def run_cycle(
         except Exception as error:
             # Do not persist exception messages: API errors can contain secrets.
             heartbeat["error_type"] = type(error).__name__
+        finally:
+            stage_seconds[active_stage] = round(monotonic() - stage_started, 3)
+            heartbeat["stage_seconds"] = stage_seconds
         with Session(engine) as session:
             stored = session.get(SchedulerRun, run_id)
             assert stored is not None
