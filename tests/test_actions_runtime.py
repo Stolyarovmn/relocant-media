@@ -1053,8 +1053,11 @@ def test_projection_failure_commits_receipts_without_public_artifact(
     assert not (tmp_path / 'work/public-projection.json').exists()
 
 
-def test_private_checkpoint_precedes_projection_and_survives_failed_commit(
-        context, tmp_path, monkeypatch):
+@pytest.mark.parametrize("fail_commit", [False, True])
+def test_private_checkpoint_precedes_projection_and_receipt_requires_committed_state(
+        context, tmp_path, monkeypatch, fail_commit):
+    from relocant_media.ops.newsroom_export import snapshot
+
     store, memory = context
     checkpoints = []
     class PrivateSSH(runtime.SSHStateClient):
@@ -1068,23 +1071,40 @@ def test_private_checkpoint_precedes_projection_and_survives_failed_commit(
             checkpoints.append(copy.deepcopy({'state': state, 'sha': expected_sha}))
             return 'c' * 64
     monkeypatch.setattr(runtime, 'run_child', lambda *args: 0)
-    def projection(*args):
+    work = tmp_path / 'work'
+    receipt = work / 'observation-receipt.json'
+    def projection(database, destination, *args):
         assert len(checkpoints) == 1
         assert checkpoints[0]['sha'] == store.sha
         assert checkpoints[0]['state']['intake_state'] == {'attempts': 2}
         assert checkpoints[0]['state']['last_exit_code'] == 0
-        raise ValueError('PRIVATE projection diagnostic')
+        assert not receipt.exists()
+        if fail_commit:
+            raise ValueError('PRIVATE projection diagnostic')
+        destination.write_text(json.dumps(snapshot(ROOT)), encoding="utf-8")
     monkeypatch.setattr(runtime, 'export_public', projection)
     store.state['intake_state'] = {'attempts': 2}
-    store.fail_commit = True
-    with pytest.raises(ValueError, match='conflict'):
-        runtime.execute(store, PrivateSSH(), work=tmp_path / 'work',
-            output=tmp_path / 'public.json', folder='folder_id_1', mode='editorial',
-            environment={'ACTIONS_CUTOVER_CONFIRMED': 'true',
-                         'GITHUB_REPOSITORY': runtime.REPO, 'GITHUB_REF': 'refs/heads/main'})
-    assert store.state['status'] == 'busy'
+    store.fail_commit = fail_commit
+    def execute():
+        return runtime.execute(store, PrivateSSH(), work=work, output=tmp_path / 'public.json',
+            folder='folder_id_1', mode='editorial', environment={
+                'ACTIONS_CUTOVER_CONFIRMED': 'true', 'GITHUB_REPOSITORY': runtime.REPO,
+                'GITHUB_REF': 'refs/heads/main', 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
+            })
+    if fail_commit:
+        with pytest.raises(ValueError, match='conflict'):
+            execute()
+        assert store.state['status'] == 'busy'
+        assert not (tmp_path / 'public.json').exists()
+        assert not receipt.exists()
+    else:
+        assert execute() == 0
+        assert store.state['status'] == 'ready'
+        assert json.loads(receipt.read_text(encoding="utf-8")) == {
+            'run_id': '123', 'run_attempt': '2', 'started_at': store.state['started_at'],
+            'snapshot_sha256': store.state['snapshot']['sha256'],
+        }
     assert checkpoints[0]['state']['snapshot']['sha256']
-    assert not (tmp_path / 'public.json').exists()
 
 
 @pytest.mark.parametrize('invalid', [None, {}, 'PRIVATE-TIP-TOKEN'])

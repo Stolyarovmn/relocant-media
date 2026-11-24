@@ -268,15 +268,10 @@ jobs:
           steps.runtime.outcome == 'success' &&
           (steps.mode.outputs.value == 'editorial' || steps.mode.outputs.value == 'auto') &&
           vars.EDITORIAL_STORAGE_BACKEND == 'ssh'
-        env:
-          EDITORIAL_SSH_HOST: ${{ vars.EDITORIAL_SSH_HOST }}
-          EDITORIAL_SSH_USER: ${{ vars.EDITORIAL_SSH_USER }}
-          EDITORIAL_SSH_PORT: ${{ vars.EDITORIAL_SSH_PORT || '22' }}
-          EDITORIAL_SSH_KEY_PATH: ${{ steps.storage.outputs.key_path }}
-          EDITORIAL_SSH_KNOWN_HOSTS_PATH: ${{ steps.storage.outputs.known_hosts_path }}
         run: |
           python -m relocant_media.ops.editorial_cycle_observation \
-            --snapshot "$RUNNER_TEMP/editorial-work/saved/editorial.sqlite3"
+            --snapshot "$RUNNER_TEMP/editorial-work/saved/editorial.sqlite3" \
+            --receipt "$RUNNER_TEMP/editorial-work/observation-receipt.json"
       - name: Publish only sanitized projection
         if: >-
           always() && steps.start.outputs.status == 'ready' && steps.mode.outputs.value != 'recovery' &&

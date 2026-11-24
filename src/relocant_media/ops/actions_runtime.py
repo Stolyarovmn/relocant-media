@@ -1316,6 +1316,17 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
     store.write(ready, busy_sha)
     _runtime_phase("state_committed")
     if mode in {"editorial", "intake"} and isinstance(drive, SSHStateClient):
+        if code == 0 and not projection_failed:
+            try:
+                (work / "observation-receipt.json").write_text(json.dumps({
+                    "run_id": ready["run_id"],
+                    "run_attempt": ready["run_attempt"],
+                    "started_at": ready["started_at"],
+                    "snapshot_sha256": manifest["sha256"],
+                }), encoding="utf-8")
+            except OSError as error:
+                print(json.dumps({"observation_receipt_error_type": type(error).__name__}),
+                      file=sys.stderr)
         _write_digest_watch(ready, environment, now=datetime.now(UTC))
     if (mode in {"editorial", "drain"} and code == 0
             and environment.get("GITHUB_ACTIONS") == "true"
