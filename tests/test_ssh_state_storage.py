@@ -471,6 +471,21 @@ def test_blob_roundtrip_immutable_and_header_never_contains_private_bytes(contex
     assert not list(backend.blobs.glob('.upload-*'))
 
 
+def test_verify_blob_reads_saved_file_without_returning_its_bytes(context):
+    backend, state, content = context
+    digest = state['snapshot']['sha256']
+    check = {'op': 'verify_blob', 'blob_id': digest}
+    header, body = request(backend, check)
+    assert header == {'sha256': digest, 'size': len(content)} and body == b''
+    with pytest.raises(storage.StorageError, match='invalid_request'):
+        request(backend, check, b'extra')
+
+    # Corrupt a stored byte without changing the file length or its name.
+    (backend.blobs / digest).write_bytes(bytes([content[0] ^ 1]) + content[1:])
+    with pytest.raises(storage.StorageError, match='storage_error'):
+        request(backend, check)
+
+
 @pytest.mark.parametrize('payload', [b'short', b'correct-extra'])
 def test_truncated_extra_or_wrong_hash_upload_cannot_be_installed(context, payload):
     backend, _, _ = context
@@ -498,6 +513,8 @@ def test_paths_and_unknown_operations_are_not_a_remote_filesystem_api(context, b
     backend, _, _ = context
     with pytest.raises(storage.StorageError):
         request(backend, {'op': 'get_blob', 'blob_id': blob_id})
+    with pytest.raises(storage.StorageError):
+        request(backend, {'op': 'verify_blob', 'blob_id': blob_id})
     with pytest.raises(storage.StorageError):
         request(backend, {'op': 'run', 'command': 'anything'})
 

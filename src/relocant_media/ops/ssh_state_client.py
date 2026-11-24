@@ -20,7 +20,7 @@ MAX_BLOB = 256 * 1024 * 1024
 MAX_HEADER = 1024 * 1024
 MAX_STATE = 512 * 1024
 REMOTE_HELPER = "/usr/local/libexec/relocant-media/ssh-state-storage"
-RETRY_SAFE_OPERATIONS = frozenset({"health", "read_state", "get_blob", "put_blob"})
+RETRY_SAFE_OPERATIONS = frozenset({"health", "read_state", "get_blob", "verify_blob", "put_blob"})
 ERRORS = frozenset({"state_missing", "blob_missing", "state_exists", "conflict",
                     "invalid_request", "storage_error", "bootstrap_blocked", "storage_capacity"})
 
@@ -114,6 +114,7 @@ class SSHStateClient:
 
     def __init__(self, config: SSHConfig) -> None:
         self.config = config
+        self._remote_blob_readback = False
 
     def exchange(
         self, request: dict[str, Any], payload: bytes = b"",
@@ -189,6 +190,7 @@ class SSHStateClient:
         sha = _sha(result.get("sha"))
         if _state_digest(state) != sha:
             raise SSHStorageError("storage_error")
+        self._remote_blob_readback = result.get("blob_readback") == "sha256-v1"
         capacity = result.get("capacity_low")
         return state, sha, capacity if type(capacity) is bool else None
 
@@ -252,7 +254,23 @@ class SSHStateClient:
         blob_id = hashlib.sha256(content).hexdigest()
         result, body = self.exchange({"op": "put_blob", "sha256": blob_id,
                                       "size": len(content)}, content)
-        if body or _sha(result.get("blob_id")) != blob_id or self.download(blob_id) != content:
+        if body or _sha(result.get("blob_id")) != blob_id:
+            raise SSHStorageError("storage_error")
+        if self._remote_blob_readback:
+            try:
+                verified, extra = self.exchange({"op": "verify_blob", "blob_id": blob_id})
+            except SSHStorageError as error:
+                if error.code != "invalid_request":
+                    raise
+                # The endpoint can be rolled back after read_state advertised support.
+                self._remote_blob_readback = False
+            else:
+                if (extra or verified.get("sha256") != blob_id
+                        or type(verified.get("size")) is not int
+                        or verified["size"] != len(content)):
+                    raise SSHStorageError("storage_error")
+                return blob_id
+        if self.download(blob_id) != content:
             raise SSHStorageError("storage_error")
         return blob_id
 

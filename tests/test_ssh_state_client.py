@@ -131,6 +131,10 @@ def test_blob_roundtrip_state_cas_and_busy_replay_block_without_github(
     with pytest.raises(client.SSHStorageError, match="state_exists"):
         storage.require_empty()
     original, sha = storage.read()
+    assert storage.upload(database, "ssh_blobs") == manifest["drive_file_id"]
+    assert calls[-2:] == ["put_blob", "verify_blob"]
+    assert storage.download(manifest["drive_file_id"]) == database.read_bytes()
+    assert calls[-1] == "get_blob"
     claimed = {**original, "status": "busy", "attempt": "attempt-1"}
     storage.write(claimed, sha)
     with pytest.raises(client.SSHStorageError, match="conflict"):

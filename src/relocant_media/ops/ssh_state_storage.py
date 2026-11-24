@@ -348,19 +348,24 @@ def serve(storage: Storage, incoming: BinaryIO, outgoing: BinaryIO) -> None:
         require(set(request) == {"op", "sha256", "size"})
         result: dict[str, Any] = storage.put_blob(
             request.get("sha256"), request.get("size"), incoming)
-    elif operation == "get_blob":
+    elif operation in {"get_blob", "verify_blob"}:
         require(set(request) == {"op", "blob_id"})
+        if operation == "verify_blob":
+            require(not incoming.read(1))
         stream, size = storage.blob(request.get("blob_id"))
         with stream:
-            outgoing.write(encode({"sha256": request["blob_id"], "size": size}) + b"\n")
-            while chunk := stream.read(CHUNK):
-                outgoing.write(chunk)
-        outgoing.flush()
-        return
+            result = {"sha256": request["blob_id"], "size": size}
+            if operation == "get_blob":
+                outgoing.write(encode(result) + b"\n")
+                while chunk := stream.read(CHUNK):
+                    outgoing.write(chunk)
+                outgoing.flush()
+                return
     elif operation == "read_state":
         require(set(request) == {"op"})
         result = storage.read_state()
         result["capacity_low"] = storage.capacity_low()
+        result["blob_readback"] = "sha256-v1"
     elif operation == "health":
         require(set(request) == {"op"})
         try:
