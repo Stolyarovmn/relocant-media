@@ -29,6 +29,20 @@ const watchIncident = (id, overrides = {}) => ({
   source_url: "https://www.beograd.rs/", ...savedWindow, ...overrides,
 });
 
+test("место ремонта видно до указанного срока без фиктивного начала работ", () => {
+  const [repair] = readIncidents({ version: 1, incidents: [watchIncident("a", {
+    repair_site: true, starts_at: null,
+    points: [{ lat: 44.735692, lon: 20.323031, label: "Место ремонта" }],
+  })] }, savedNow);
+  assert.equal(repair.repairSite, true);
+  assert.equal(repair.start, null);
+  assert.equal(incidentStatus(repair, savedNow), "active");
+  assert.match(incidentTimes(repair)[0], /^До .*14:00/);
+  assert.ok(incidentInPeriod(repair, savedNow, 24));
+  assert.equal(incidentStatus(repair, repair.end), "closed");
+  assert.equal(incidentInPeriod(repair, repair.end, 24), null);
+});
+
 test("возврат к карте обновляет давние данные без повторного запроса раньше минуты", () => {
   assert.equal(snapshotRefreshDue(0, savedNow), true);
   assert.equal(snapshotRefreshDue(savedNow, savedNow + 59_999), false);

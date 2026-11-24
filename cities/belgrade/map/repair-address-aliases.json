@@ -1,0 +1,14 @@
+[
+  {
+    "municipality": "Čukarica",
+    "settlement": "Ostružnica",
+    "street_names": ["3. janura", "3. januara", "Trećeg januara"],
+    "registry_street": "Trećeg januara",
+    "registry_settlement": null,
+    "evidence_urls": [
+      "https://www.beograd.rs/lat/servisne-informacije/elektricna-energija/a108427/Planirana-iskljucenja-na-elektro-mrezi.html",
+      "https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/a111065/Kvarovi-na-vodovodnoj-mrezi-bice-otklonjeni-tokom-dana.html",
+      "https://dina.openstreetmap.rs/ar/opstine/cukarica/BEOGRAD%20%28%C4%8CUKARICA%29.html"
+    ]
+  }
+]

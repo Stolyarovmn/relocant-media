@@ -306,6 +306,7 @@ export function readIncidents(document, now = null) {
       title: textValue(record.display_title) || title,
       watchTitle: title,
       archived,
+      repairSite: record.kind === "water" && record.repair_site === true && end !== null,
       reportedScope: textValue(record.reported_scope),
       source,
       officialMap: safeLink(record.source_map_url),
@@ -369,6 +370,7 @@ export function incidentMatchesId(incident, id) {
 export function incidentStatus(incident, now) {
   if (incident.archived) return "closed";
   if (incident.end !== null && now >= incident.end) return "closed";
+  if (incident.repairSite) return "active";
   if (incident.windows.length) {
     if (incident.windows.some(({ start, end }) => start <= now && now < end)) return "active";
     if (now < incident.windows[0].start) return "planned";
@@ -388,6 +390,7 @@ export function unexpired(window, now, archive = false) {
 export function incidentInPeriod(incident, now, hours = null) {
   if (hours === null) return incident;
   if (incident.archived) return null;
+  if (incident.repairSite) return incident.end > now ? incident : null;
   const until = now + hours * 3_600_000;
   const overlaps = ({ start, end }) => Number.isFinite(start) && start <= until
     && (end === null ? start > now : end > now);

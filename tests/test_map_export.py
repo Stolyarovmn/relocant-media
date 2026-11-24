@@ -45,6 +45,7 @@ from relocant_media.services.local_outage_geometry import (
     AreaIndex,
     AreaPolygon,
     address_key,
+    load_area_index,
 )
 from relocant_media.services.local_street_geometry import load_street_index
 from relocant_media.services.native_map import (
@@ -55,6 +56,7 @@ from relocant_media.services.native_map import (
 from relocant_media.services.rich_delivery import prepare_native_transport
 from relocant_media.services.road_scope import resolve_secretariat_stretches
 from relocant_media.services.transport_map import build_transport_map
+from relocant_media.services.utility_map import build_utility_point
 from relocant_media.services.utility_scope import extract_power_scopes
 from relocant_media.services.water_outage_scope import extract_water_outage_scopes
 from relocant_media.sources.registry import load_source_file
@@ -68,6 +70,65 @@ from relocant_media.storage.models import (
 )
 
 NOW = datetime(2026, 11, 12, 7, tzinfo=UTC)
+
+
+def test_daily_water_repair_exports_only_verified_repair_site_without_start(monkeypatch):
+    url = ("https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/"
+           "a116775/Kvarovi-na-vodovodnoj-mrezi-bice-otklonjeni-tokom-dana.html")
+    title = "VODOVOD I KANALIZACIJA: Kvarovi na mreži za 24. novembar 2026. godine"
+    body = ("24.11.2026.\n\nKvarovi na vodovodnoj mreži koji će biti otklonjeni:\n\n"
+            "Do 15.00\n\nČukarica: 3. janura 2 – Ostružnica\n\n"
+            "Bez v ode su potrošači u navedenim i okolnim ulicama")
+    observed_at = datetime(2026, 11, 24, 8, tzinfo=UTC)
+    document = EvidenceDocument(source_id="city_beograd_news", url=url, title=title, body=body,
+                                published_at=observed_at)
+    source = load_source_file(Path("cities/belgrade/sources/city_beograd_news.yaml"))
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    areas = load_area_index(Path("cities/belgrade/map/outage-areas.json.gz"))
+    monkeypatch.setattr("relocant_media.services.utility_map._repair_area_index", lambda _: areas)
+    with Session(engine) as session:
+        sync_source(session, "belgrade", source)
+        capture_collected_batch(session, [
+            CollectedItem(**document.model_dump(), external_id="116775", source_html="<article/>"),
+        ])
+        session.commit()
+        (incident,) = export_map(session, observed_at=observed_at, areas=areas).incidents
+        presentation = build_presentation(session, 1, (document,), document_ids=[1],
+                                          profile=load_city_profile("belgrade"),
+                                          rubric_id="city_changes")
+        draft = present_draft(
+            RussianDraft(title="Авария на водопроводе в Остружнице",
+                         body="Город рассчитывает завершить ремонт у дома №2 до 15:00.",
+                         claim_ids=("address",)), presentation, category="utilities",
+        )
+        presentation = bind_native_map_draft(presentation, draft)
+        verify_stored_presentation(session, 1, (document,), document_ids=[1],
+                                   presentation=presentation)
+        monkeypatch.setenv("RELOCANT_MAP_TELEGRAM_APP", "https://t.me/relocant_media_belgrade_bot")
+        package = SimpleNamespace(presentation=presentation, outcome=SimpleNamespace(draft=draft))
+        publisher = SimpleNamespace(bot=SimpleNamespace(send_notice_message=lambda *args: None))
+        _, prepared = prepare_native_transport(
+            package, publisher, None,
+            editorial_text=f"{draft.title}\n\n{draft.body}\n\nИсточник: {document.url}",
+        )
+        assert prepared.map_url == f"https://t.me/relocant_media_belgrade_bot?startapp={incident.id}"
+    assert incident.id == map_event_id(url)
+    assert incident.repair_site
+    assert incident.starts_at is None
+    assert incident.ends_at == datetime(2026, 11, 24, 14, tzinfo=UTC)
+    assert not incident.windows and not incident.areas and not incident.addresses
+    (pin,) = incident.points
+    assert pin.label == "Место ремонта: Trećeg januara, 2 · Ostružnica"
+    assert (pin.lat, pin.lon) == pytest.approx((44.735687, 20.323028), abs=0.00001)
+    assert presentation.native_map is not None
+    assert presentation.native_map["point"]["source_url"] == incident.source_url
+    for modified in (
+        body.replace("Ostružnica", "Sremčica"), body.replace("janura 2", "janura 99999"),
+    ):
+        assert build_utility_point(document.model_copy(update={"body": modified}), "",
+                                   areas=areas) is None
+
 _LISTED_URL = (
     "https://www.bgsaobracaj.rs/vest/5435/izmena-rezima-saobraca%D1%98a-u-ustanicko%D1%98"
 )

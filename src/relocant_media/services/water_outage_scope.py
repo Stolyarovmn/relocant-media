@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup, Tag
 
 from relocant_media.ai.models import EvidenceDocument
+from relocant_media.domain.water_bulletin import is_city_water_bulletin, is_shared_tanker_heading
 from relocant_media.services.utility_scope import SettlementScope, is_explicit_house
 
 MAX_HTML_BYTES = 2_000_000
@@ -118,6 +119,19 @@ _HOUR_RANGE = re.compile(
     r"\b(?:od|од)\s+([0-9]{1,2})\s+(?:do|до)\s+([0-9]{1,2})\s+"
     r"(?:sata|sati|сати|часа|časova|часова)\b", re.I,
 )
+_REPAIR_INTRO = re.compile(
+    r"(?:kvarovi na vodovodnoj mreži koji će biti otklonjeni|"
+    r"кварови на водоводној мрежи који ће бити отклоњени):", re.I,
+)
+_REPAIR_DEADLINE = re.compile(r"(?:do|до)\s+(\d{1,2})[.:](\d{2})", re.I)
+_REPAIR_OUTAGE = re.compile(r"(?:bez\s+v\s*ode|без\s+воды)\s+(?:su|су)\b", re.I)
+_REPAIR_ROW = re.compile(
+    rf"(?P<municipality>{_NAME}):\s+(?P<addresses>.+)", re.I,
+)
+_REPAIR_ADDRESS = re.compile(
+    rf"(?P<street>(?:[1-9]\d?\.\s+)?{_NAME})\s+(?P<number>[1-9]\d{{0,4}}[{_LETTERS}]?)"
+    rf"(?:\s+[–—-]\s+(?P<settlement>{_NAME}))?", re.I,
+)
 _NEWS_DATE = re.compile(
     r"\b(?:u|у)\s+"
     r"(ponedeljak|utorak|sredu|četvrtak|petak|subotu|nedelju|"
@@ -160,6 +174,59 @@ class WaterHouseRange:
     street: str
     first: int
     last: int
+
+
+@dataclass(frozen=True)
+class WaterRepairAddress:
+    street: str
+    number: str
+    municipality: str
+    settlement: str | None
+
+
+def daily_water_repairs(
+    document: EvidenceDocument,
+) -> tuple[datetime, tuple[WaterRepairAddress, ...]] | None:
+    """Один явно указанный срок и адреса аварий из городского бюллетеня."""
+    if (not _source_allowed(document) or not is_city_water_bulletin(document.url, document.title)
+            or len(document.body.encode()) > MAX_DOCUMENT_BYTES
+            or _CANCELLED.search(document.title + " " + document.body)):
+        return None
+    day = _single_event_date(document)
+    if day is None:
+        return None
+    rows = [value for line in document.body.splitlines() if (value := _normalized(line))]
+    lead = next((i for i, line in enumerate(rows) if _REPAIR_INTRO.fullmatch(line)), None)
+    if lead is None:
+        return None
+    body = []
+    confirmed_outage = False
+    for line in rows[lead + 1:]:
+        if confirmed_outage := _REPAIR_OUTAGE.match(line) is not None:
+            break
+        if is_shared_tanker_heading(line):
+            break
+        body.append(line)
+    if not confirmed_outage or not body:
+        return None
+    deadline = _REPAIR_DEADLINE.fullmatch(body[0])
+    if deadline is None:
+        return None
+    try:
+        ends_at = datetime.combine(day, time(int(deadline[1]), int(deadline[2])),
+                                   tzinfo=ZoneInfo("Europe/Belgrade"))
+    except ValueError:
+        return None
+    addresses = []
+    for line in body[1:]:
+        row = _REPAIR_ROW.fullmatch(line)
+        if row is None:
+            return None
+        for value in row["addresses"].split(","):
+            if address := _REPAIR_ADDRESS.fullmatch(value.strip()):
+                addresses.append(WaterRepairAddress(address["street"], address["number"],
+                                                    row["municipality"], address["settlement"]))
+    return (ends_at, tuple(dict.fromkeys(addresses))) if 0 < len(addresses) <= 120 else None
 
 
 @dataclass(frozen=True)
