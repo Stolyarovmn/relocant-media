@@ -10,11 +10,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from relocant_media.ai.provider import StructuredAIProvider
+from relocant_media.domain.audience import local_reader_interest, local_utility_notice
 from relocant_media.domain.city_profile import CityEditorialProfile
 from relocant_media.domain.freshness import evidence_freshness, resolved_disruption
 
 MAX_CANDIDATES = 30
-POLICY_VERSION = "batch-preselection-v2"
+POLICY_VERSION = "batch-preselection-v3"
+_LOCAL_VENUE_TYPES = frozenset({"official_venue_events", "official_events"})
+_LOCAL_CITY_TYPES = frozenset({"official_city_news", "official_municipal_news"})
 _LEGACY_PROVIDER_ERRORS = frozenset({
     "GeminiWorkerError", "GeminiCallTimeout", "GeminiQuotaCooldown", "StructuredOutputError",
 })
@@ -91,6 +94,23 @@ def _failure(audit: dict[str, Any], error: Exception, stage: str) -> None:
         kind if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", kind) else "Error"))
 
 
+def _local_first_party(candidate: dict[str, Any], locality_names: tuple[str, ...]) -> bool:
+    source, evidence = candidate["source"], candidate["evidence"]
+    if source.get("ownership") != "official" or source.get("high_risk") is True:
+        return False
+    source_type = source.get("type")
+    if not isinstance(source_type, str):
+        return False
+    if source_type in _LOCAL_VENUE_TYPES:
+        return True
+    title, body = str(evidence.get("title", "")), str(evidence.get("body", ""))
+    return local_utility_notice(
+        str(candidate.get("source_id", "")), str(evidence.get("url", "")), title, body,
+    ) or (
+        source_type in _LOCAL_CITY_TYPES and local_reader_interest(title, body, locality_names)
+    )
+
+
 def preselect_candidates(
     candidates: list[dict[str, Any]],
     provider: StructuredAIProvider,
@@ -99,6 +119,7 @@ def preselect_candidates(
     limit: int,
     now: datetime,
     recent_publications: list[dict[str, str]] | None = None,
+    local_place_aliases: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Вернуть до пяти исходных объектов; невыбранные не получают отказ и не меняются.
 
@@ -217,6 +238,16 @@ def preselect_candidates(
         ordered_ids.remove(road_notice_id)
         ordered_ids.insert(0, road_notice_id)
         audit["prioritized_local_road_closure_id"] = road_notice_id
+    if 2 <= limit < len(ordered_ids):
+        locality_names = (*profile.geography.city_aliases, *local_place_aliases)
+        local_official = next((
+            raw_id for raw_id in ordered_ids if _local_first_party(by_id[raw_id], locality_names)
+        ), None)
+        if local_official is not None and local_official not in ordered_ids[:limit]:
+            ordered_ids.remove(local_official)
+            # Preserve the lead choice, including the protected road closure above.
+            ordered_ids.insert(1, local_official)
+            audit["prioritized_local_official_id"] = local_official
     selected_ids = ordered_ids[:limit]
     audit["selected_ids"] = selected_ids
     audit["deferred_ids"] = ordered_ids[limit:]

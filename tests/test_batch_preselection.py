@@ -158,6 +158,38 @@ def test_one_fresh_local_closure_takes_priority_and_stale_or_resolved_closures_d
     assert 4 in audit["deferred_ids"]
 
 
+@pytest.mark.parametrize("status,expected", [
+    ("local_culture", True), ("local_venue", True), ("confirmed_water", True),
+    ("nonlocal_culture", False), ("high_risk", False), ("expired", False),
+])
+def test_at_most_one_qualifying_first_party_item_gets_a_place_after_the_lead(status, expected):
+    rows = candidates(8)
+    local = rows[0]
+    local["source"] = {"type": "official_city_news", "ownership": "official"}
+    local["evidence"].update(title="В Белграде открылась выставка", body="Подробности выставки.")
+    if status == "local_venue":
+        local["source"]["type"] = "official_venue_events"
+        local["evidence"].update(title="Вечерняя программа", body="Анонс площадки.")
+    elif status == "confirmed_water":
+        local["source_id"] = "city_beograd_news"
+        local["evidence"].update(
+            url="https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/1",
+            title="Отключение воды", body="Воды не будет с 08:00 до 14:00.",
+        )
+    elif status == "nonlocal_culture":
+        local["evidence"]["title"] = "В Загребе открылась выставка"
+    elif status == "high_risk":
+        local["source"]["high_risk"] = True
+    elif status == "expired":
+        local["evidence"]["published_at"] = (NOW - timedelta(days=10)).isoformat()
+
+    selected, audit = choose(rows, Provider(), limit=2)
+    assert selected == ([rows[7], local] if expected else rows[-1:-3:-1])
+    assert audit.get("prioritized_local_official_id") == (1 if expected else None)
+    only, _ = choose(rows, Provider(), limit=1)
+    assert only == [rows[7]]
+
+
 def test_culture_sport_city_stories_are_data_and_private_extras_are_not_sent():
     rows = candidates(6)
     rows[0]["evidence"]["title"] = "Белградский художник выпустил новый альбом"

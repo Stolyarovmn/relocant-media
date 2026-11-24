@@ -1765,12 +1765,15 @@ def main() -> None:
             return set(scope.get("submission_raw_ids", []))
         def deferred_items(session: Session) -> set[int]:
             return pending_gpt_ids(session, now=datetime.now(UTC))
+        profile = load_city_profile("belgrade")
+        local_places = load_queue_place_aliases("belgrade")
+
         def preselect(items: list[dict[str, Any]], limit: int
                       ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
             with Session(engine) as session:
                 recent = recent_publications(session, "belgrade", now=datetime.now(UTC))
             return preselect_candidates(
-                items, provider, profile=load_city_profile("belgrade"), limit=limit,
+                items, provider, profile=profile, limit=limit, local_place_aliases=local_places,
                 now=datetime.now(UTC), recent_publications=[
                     {"id": str(row["id"]), "title": row["title"], "body": row["body"]}
                     for row in recent[:20]],
@@ -1798,8 +1801,8 @@ def main() -> None:
             lifecycle_fallback_items=lambda: set(scope.get("lifecycle_fallback_ids", set())),
             limit=PROCESS_LIMIT,
             preselect=None if args.submissions_only else preselect,
-            locality_aliases=load_city_profile("belgrade").geography.city_aliases,
-            local_place_aliases=load_queue_place_aliases("belgrade"),
+            locality_aliases=profile.geography.city_aliases,
+            local_place_aliases=local_places,
             refresh_until=True, newest_first=True, allow_partial_ingest=True,
             priority_items=private_priorities,
             recent_source_counts=source_load,
