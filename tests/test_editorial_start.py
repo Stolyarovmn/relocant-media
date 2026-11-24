@@ -162,7 +162,9 @@ def test_pending_ci_exhausts_a_single_budget(monkeypatch):
 
 
 @pytest.mark.parametrize(("mode", "blob", "cycle", "expected"), [
-    ("fallback", GPT_RESULT, "", ["-f", f"fallback_blob_sha256={GPT_RESULT}"]),
+    ("fallback", GPT_RESULT, "", [
+        "-f", f"fallback_blob_sha256={GPT_RESULT}", "-f", "fallback_retry_source_run=456",
+    ]),
     ("fallback-preview", "", "12313", ["-f", "fallback_cycle_id=12313"]),
     ("fallback-preview", "", "", []),
 ])
@@ -207,4 +209,7 @@ def test_gpt_gate_allows_single_replacement_only_with_valid_inputs(
     }.items():
         monkeypatch.setenv(key, value)
     assert start.main() == expected
-    assert output.read_text() == "status=superseded\n"
+    expected_output = "status=superseded\n"
+    if mode == "fallback" and expected == 0:
+        expected_output += f"retry_digest={GPT_RESULT}\n"
+    assert output.read_text() == expected_output

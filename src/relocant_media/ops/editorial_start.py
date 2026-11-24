@@ -92,6 +92,8 @@ def restart(
     if mode not in RETRY_MODES or not re.fullmatch(r"[1-9][0-9]{0,19}", source_run):
         raise ValueError("invalid editorial retry")
     preserved = retry_inputs(mode, blob=blob, cycle_id=cycle_id)
+    if mode == "fallback":
+        preserved.extend(["-f", f"fallback_retry_source_run={source_run}"])
     deadline = time.monotonic() + 360
     while time.monotonic() < deadline:
         sha = main_sha(repo)
@@ -123,7 +125,8 @@ def main() -> int:
     cycle_id = os.environ.get("GPT_FALLBACK_CYCLE_ID", "")
     if sys.argv[1:] == ["gate"]:
         result = start_status(repo, os.environ["GITHUB_SHA"])
-        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+        output = Path(os.environ["GITHUB_OUTPUT"])
+        with output.open("a", encoding="utf-8") as stream:
             stream.write(f"status={result}\n")
         print(f"editorial_start={result}")
         if result == "ready":
@@ -138,6 +141,9 @@ def main() -> int:
                 retry_inputs(mode, blob=blob, cycle_id=cycle_id)
             except ValueError:
                 return 1
+            if mode == "fallback":
+                with output.open("a", encoding="utf-8") as stream:
+                    stream.write(f"retry_digest={blob}\n")
             return 0
         return 1
     if sys.argv[1:] == ["retry"]:
