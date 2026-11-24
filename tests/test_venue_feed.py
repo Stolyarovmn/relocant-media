@@ -1,11 +1,21 @@
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 
 import httpx
 import pytest
 
-from relocant_media.collectors.venue_feed import VenueFeedCollector, parse_venue_feed
-from relocant_media.sources.registry import ExtractionConfig, SourceConfig, load_source_registry
+from relocant_media.collectors.venue_feed import (
+    OutsideArticleScope,
+    VenueFeedCollector,
+    parse_venue_feed,
+)
+from relocant_media.sources.registry import (
+    ExtractionConfig,
+    SourceConfig,
+    load_source_file,
+    load_source_registry,
+)
 
 
 @pytest.fixture
@@ -87,6 +97,55 @@ async def test_full_article_and_stable_feed_date(source: SourceConfig) -> None:
     assert live.published_at_precision == "instant"
     assert "Verified full announcement" in live.body
     assert live.source_html == article
+
+
+@pytest.mark.asyncio
+async def test_organizer_feed_keeps_dated_local_event_and_skips_other_city() -> None:
+    source = load_source_file(Path("cities/belgrade/sources/venue_longplay.yaml"))
+    published = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
+    rss = "<rss><channel>" + "".join(
+        f"<item><title>{slug}</title><link>https://longplay.rs/dogadjaj/{slug}/</link>"
+        f"<pubDate>{format_datetime(published)}</pubDate></item>"
+        for slug in ("local-concert", "another-city")
+    ) + "</channel></rss>"
+    event_date = "19.jun 2027"
+    concerts = {
+        "/dogadjaj/local-concert/": (
+            "Luka Beograd",
+            "Bend će održati veliki koncert na otvorenom u Luci Beograd, Open Air Corner. "
+            "Ulaznice su u prodaji na svim prodajnim mestima organizatora.",
+        ),
+        "/dogadjaj/another-city/": (
+            "GKC Užice",
+            "Beogradski sastav održaće koncert u Gradskom kulturnom centru Užice od 20:00. "
+            "Ulaznice su u prodaji na svim prodajnim mestima organizatora.",
+        ),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/feed/":
+            assert request.url.params.get("post_type") == "dogadjaj"
+            return httpx.Response(200, text=rss)
+        venue, details = concerts[request.url.path]
+        return httpx.Response(200, text=f"""
+            <section class="single-event-section"><div class="container">
+              <h2>{event_date}</h2><h1>Koncert</h1>
+              <span>20:00</span><span class="single-event-location">{venue}</span>
+              <div class="single-event-content"><p>{details}</p></div>
+            </div></section>
+            <footer>Organizator u Beogradu</footer>
+        """)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False) as client:
+        collector = VenueFeedCollector(source, client)
+        items = await collector.collect()
+        assert not collector.item_failures
+        with pytest.raises(OutsideArticleScope):
+            await collector.collect_url("https://longplay.rs/dogadjaj/another-city/")
+        assert len(items) == 1
+        assert items[0] == await collector.collect_url("https://longplay.rs/dogadjaj/local-concert/")
+    assert items[0].published_at == published
+    assert all(fact in items[0].body for fact in (event_date, "20:00", "Open Air Corner"))
 
 
 @pytest.mark.asyncio

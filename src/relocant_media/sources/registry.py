@@ -6,6 +6,11 @@ import yaml
 from pydantic import BaseModel, Field, HttpUrl
 
 
+class ArticleScopeConfig(BaseModel):
+    selectors: tuple[str, ...] = Field(min_length=1)
+    pattern: str = Field(min_length=1)
+
+
 class ExtractionConfig(BaseModel):
     strategy: str
     status: str | None = None
@@ -14,6 +19,7 @@ class ExtractionConfig(BaseModel):
     feed_url: str | None = None
     article_selectors: tuple[str, ...] = (".entry-content", "article .content", "article")
     article_lead_selectors: tuple[str, ...] = ()
+    article_scope: ArticleScopeConfig | None = None
     page_text: bool = False  # feed carries only a teaser: fetch the article page
     approved_hosts: tuple[str, ...] = ()
     excluded_path_prefixes: tuple[str, ...] = ()

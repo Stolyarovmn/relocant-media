@@ -1,0 +1,29 @@
+id: venue_longplay
+name: Long Play
+publisher: Long Play
+ownership: official
+url: https://longplay.rs/dogadjaji/
+language: sr
+source_type: official_venue_events
+trust: 0.95
+check_every: 3h
+categories: [events]
+extraction:
+  strategy: venue_feed
+  status: active
+  feed_url: https://longplay.rs/feed/?post_type=dogadjaj
+  article_selectors: [".single-event-section > .container"]
+  article_scope:
+    selectors: [".single-event-location", ".single-event-content p:first-of-type"]
+    pattern: >-
+      (?ix) ^(?:luka\s+beograd | zappa\s+ba(?:za|rka) | sava\s+centar)$
+      | \b(?:u|na)\s+(?:beogradu|beogradskoj|beogradskom|luci\s+beograd)\b
+      | \bhangaru?\s+(?:luke|luka)\s+beograd\b
+  approved_hosts: [longplay.rs]
+policy:
+  auto_publish: true
+  high_risk: false
+verification:
+  checked_at: '2026-11-24'
+  note: RSS организатора содержит дату публикации. Дата и время события берутся из
+    официальной карточки. Белград проверяется по полю площадки и первому абзацу анонса.

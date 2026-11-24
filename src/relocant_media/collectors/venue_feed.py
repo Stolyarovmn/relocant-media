@@ -42,6 +42,10 @@ class PosterOnlyEvidence(ValueError):
     """Официальная карточка содержит афишу, но без текстовых сведений."""
 
 
+class OutsideArticleScope(ValueError):
+    """У карточки нет заявленной привязки к городу источника."""
+
+
 def _item_error_message(error: BaseException) -> str:
     """Return bounded single-line diagnostics without page content or response bodies."""
     return " ".join(str(error).split())[:MAX_ITEM_ERROR_MESSAGE]
@@ -172,6 +176,16 @@ def _article(
     *, program: tuple[str, str] | None = None,
 ) -> RawItem:
     soup = BeautifulSoup(html, "html.parser")
+    if scope := source.extraction.article_scope:
+        scope_fragments = [
+            element.get_text(" ", strip=True)
+            for selector in scope.selectors
+            if (element := soup.select_one(selector)) is not None
+        ]
+        if not any(scope_fragments):
+            raise ValueError("venue article locality fields missing")
+        if not any(re.search(scope.pattern, text) for text in scope_fragments):
+            raise OutsideArticleScope("venue article has no verified city reference")
     lead_text = ""
     if source.extraction.article_lead_selectors:
         lead = next((element for selector in source.extraction.article_lead_selectors
@@ -325,7 +339,8 @@ class VenueFeedCollector:
 
     def _needs_page(self) -> bool:
         extraction = self._source.extraction
-        return bool(extraction.article_lead_selectors or extraction.page_text)
+        return bool(extraction.article_lead_selectors or extraction.article_scope
+                    or extraction.page_text)
 
     async def _collect_article(
         self, url: str, entry: RawItem | None, *, require_page: bool = False,
@@ -369,6 +384,8 @@ class VenueFeedCollector:
         for entry in entries[:20]:
             try:
                 items.append(await self._collect_article(entry.url, entry))
+            except OutsideArticleScope:
+                continue
             except (ValueError, httpx.HTTPError) as error:
                 self.item_failures.append(
                     {
