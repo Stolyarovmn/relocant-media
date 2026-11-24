@@ -204,12 +204,20 @@ def draft_date_reason(title: str, body: str) -> str | None:
     return None
 
 
+# Explicit performance verbs also occur in announcements without the word "concert".
+_DATED_PERFORMANCE = re.compile(
+    r"\b(?:nastupa|nastupaju|nastupiće|nastupice|наступа|наступају|наступиће|выступит|выступят)\b",
+    re.IGNORECASE,
+)
+
+
 def _event_deadlines(text: str, published: datetime) -> list[date]:
     deadlines: list[date] = []
     # Do not join separate sentences: an unrelated historical date must not
     # become a deadline merely because another sentence mentions an event.
     for clause in re.split(r"[\n;!?]|(?<=[а-яa-z])\.\s+", text.casefold()):
-        if not _EVENT.search(clause):
+        performance = _DATED_PERFORMANCE.search(clause)
+        if not (_EVENT.search(clause) or performance):
             continue
         matches = list(_DATE.finditer(clause))
         dates: list[tuple[date, int, int]] = []
@@ -239,7 +247,7 @@ def _event_deadlines(text: str, published: datetime) -> list[date]:
         ]
         if endpoints:
             deadlines.extend(endpoints)
-        elif len(dates) == 1 and _SINGLE_EVENT.search(clause):
+        elif len(dates) == 1 and (performance or _SINGLE_EVENT.search(clause)):
             deadlines.append(dates[0][0])
         # Multiple unrelated dates are ambiguous and grant no age extension.
     return deadlines
