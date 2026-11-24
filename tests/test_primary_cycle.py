@@ -13,6 +13,7 @@ from relocant_media.ai.batch_preselection import preselect_candidates
 from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
 from relocant_media.ingestion.persistence import sync_source
 from relocant_media.ops.primary_cycle import begin_window, run_cycle
+from relocant_media.ops.server_cycle import queue_priorities
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.sources.registry import load_source_file
 from relocant_media.storage.models import EditorialRun, RawItem
@@ -69,6 +70,11 @@ def test_belgrade_road_notice_reaches_review_despite_national_volume_and_batch_r
             RawItem.source_id == "city_beograd_news", RawItem.external_id == "0",
         ))
         official.title = "Obustava saobraćaja u Geteovoj ulici"
+        city_event = session.scalar(select(RawItem).where(
+            RawItem.source_id == "city_beograd_news", RawItem.external_id == "1",
+        ))
+        city_event.title = "Nova izložba fotografija u Beogradu"
+        city_event.body = "Kulturni centar predstavlja radove lokalnih fotografa."
         media = load_source_file(Path("cities/belgrade/sources/media_n1_srbija.yaml"))
         sync_source(session, "belgrade", media)
         for index in range(32):
@@ -85,30 +91,33 @@ def test_belgrade_road_notice_reaches_review_despite_national_volume_and_batch_r
         )
         session.add(closure)
         session.commit()
-        official_id, closure_id = official.id, closure.id
+        official_id, closure_id, city_event_id = official.id, closure.id, city_event.id
 
     class LowerLocalPriority:
         def generate_json(self, **request):
             rows = json.loads(request["prompt"])["candidates"]
             assert rows[0]["raw_item_id"] == closure_id
+            city_row = next(row for row in rows if row["raw_item_id"] == city_event_id)
+            ranked = [row for row in reversed(rows) if row != city_row] + [city_row]
             return json.dumps({"ranking": [
                 {"raw_item_id": row["raw_item_id"], "reason": "Порядок модели"}
-                for row in reversed(rows)
+                for row in ranked
             ]})
 
     report = run_cycle(
         engine, city="belgrade", output=tmp_path / "local-road", now=NOW,
         ingest=ingest_ok, process=process, limit=3, newest_first=True,
+        candidate_priorities=lambda: queue_priorities({}, (media.id,)),
         locality_aliases=profile.geography.city_aliases,
         local_place_aliases=load_queue_place_aliases("belgrade"),
         preselect=lambda items, limit: preselect_candidates(
             items, LowerLocalPriority(), profile=profile, limit=limit, now=NOW,
         ),
     )
-    assert report["processed_raw_item_ids"][:2] == [official_id, closure_id]
+    assert report["processed_raw_item_ids"] == [official_id, closure_id, city_event_id]
     assert report["batch_preselection"]["protected_ids"] == [official_id]
     assert report["batch_preselection"]["prioritized_local_road_closure_id"] == closure_id
-    assert len(report["processed_raw_item_ids"]) == 3
+    assert report["batch_preselection"]["prioritized_local_official_id"] == city_event_id
     assert report["remaining_count"] > 30
 
 
