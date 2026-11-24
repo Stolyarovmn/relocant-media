@@ -1,4 +1,5 @@
 """Venue integration checks use public feed fixtures and no AI/network services."""
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.ai.package import EditorialPackage
 from relocant_media.collectors import venue_feed
+from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.ops import server_cycle
 from relocant_media.sources.registry import ExtractionConfig, load_source_registry
 from relocant_media.storage.models import RawItem
@@ -98,6 +100,7 @@ async def test_current_venue_announcement_ingested_without_ai(runtime):
     assert stats['venue_deferred'] == 0
     assert stats['raw_items_written'] == 1
     assert stored(engine)[0].body == BODY.strip()
+    assert stats['collection_seconds']['venues'] >= 0
 
 
 @pytest.mark.asyncio
@@ -129,14 +132,62 @@ async def test_failed_venue_does_not_block_other_sources(runtime):
     assert any('museum.example' in url for url in requests)
 
 
+@pytest.mark.asyncio
+async def test_venue_collection_bounds_concurrency_and_preserves_source_order(runtime):
+    _, venue, _, _, _ = runtime
+    hosts = {
+        'first': 'museum.example',
+        'redirect': 'ticket.example',
+        'second': 'hall.example',
+        'third': 'theatre.example',
+        'fourth': 'stage.example',
+    }
+    sources = {
+        name: venue.model_copy(update={'id': name, 'url': f'https://{host}/feed/'})
+        for name, host in hosts.items()
+    }
+    sources['redirect'] = sources['redirect'].model_copy(update={
+        'extraction': venue.extraction.model_copy(
+            update={'approved_hosts': ('www.museum.example',)},
+        ),
+    })
+    running: set[str] = set()
+    finished: list[str] = []
+    peak = 0
+
+    class StubCollector:
+        def __init__(self, name):
+            self.name = name
+
+        async def collect(self):
+            nonlocal peak
+            if self.name == 'redirect':
+                assert 'first' in finished
+            running.add(self.name)
+            peak = max(peak, len(running))
+            await asyncio.sleep(0)
+            if self.name == 'first':
+                await asyncio.sleep(0)
+            running.remove(self.name)
+            finished.append(self.name)
+            url = f'https://{hosts[self.name]}/event/'
+            return [CollectedRawItem(self.name, url, url, 'Koncert', BODY, NOW)]
+
+    outcomes = await server_cycle._collect_venues(
+        sources, {name: StubCollector(name) for name in sources},
+    )
+    assert peak == 3
+    assert finished[0] == 'second'
+    assert all(isinstance(items, list) for items in outcomes)
+    assert [items[0].source_id for items in outcomes] == list(sources)
+
+
 def package(document):
     return EditorialPackage.model_construct(event=SimpleNamespace(documents=(document,)))
 
 
 @pytest.mark.asyncio
 async def test_canonical_venue_evidence_matches_live_readback(runtime):
-    import asyncio
-
     engine, _, _, _, _ = runtime
     await server_cycle.collect_sources(engine)
     documents = stored(engine)
