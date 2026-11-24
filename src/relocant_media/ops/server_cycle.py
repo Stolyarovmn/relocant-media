@@ -14,6 +14,7 @@ from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import create_engine, func, select
@@ -76,6 +77,8 @@ from relocant_media.collectors.telegram_topics import (
     messenger_sources_for_city,
     runtime_channels_for_city,
 )
+from relocant_media.collectors.ticket_vision_events import SOURCE_ID as TICKET_VISION_SOURCE
+from relocant_media.collectors.ticket_vision_events import cited_ticket_urls
 from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.domain import quiet_hours
@@ -200,7 +203,10 @@ from relocant_media.services.transport_map import (
 from relocant_media.services.transport_map_source import extract_transport_map
 from relocant_media.services.utility_geography import resolve_power_points, resolve_utility_geometry
 from relocant_media.services.utility_map import BVK_NEWS_SOURCE, utility_scope
-from relocant_media.services.venue_event_evidence import is_undated_venue_source
+from relocant_media.services.venue_event_evidence import (
+    is_undated_venue_source,
+    matches_venue_evidence,
+)
 from relocant_media.services.watched_updates import queue_watched_change
 from relocant_media.services.water_outage_scope import extract_official_water_map
 from relocant_media.sources.registry import SourceConfig, load_source_file, load_source_registry
@@ -460,6 +466,39 @@ async def fetch_public_article(
     if not isinstance(item, CollectedRawItem):
         raise ValueError("live collector did not return an article")
     return item
+
+
+async def _cited_ticket_evidence(
+    articles: Iterable[CollectedRawItem], media: Mapping[str, SourceConfig],
+    config: SourceConfig, client: httpx.AsyncClient, *, now: datetime,
+) -> list[CollectedRawItem]:
+    candidates: dict[str, CollectedRawItem] = {}
+    timezone = ZoneInfo("Europe/Belgrade")
+    for article in articles:
+        policy = media.get(article.source_id)
+        if (policy is None or policy.ownership != "media" or policy.policy.high_risk
+                or article.published_at is None):
+            continue
+        urls = cited_ticket_urls(article.body)
+        if len(urls) == 1:
+            candidates.setdefault(next(iter(urls)), article)
+        if len(candidates) >= 2:
+            break
+
+    async def collect(url: str, article: CollectedRawItem) -> CollectedRawItem | None:
+        assert article.published_at is not None
+        try:
+            ticket = await fetch_public_article(config, url, client)
+        except (httpx.HTTPError, TimeoutError, ValueError):
+            return None
+        published = article.published_at.astimezone(timezone).date()
+        if (matches_venue_evidence(article, ticket, config, published=published)
+                and _is_review_only_venue_hold(ticket, now=now)):
+            return ticket
+        return None
+
+    gathered = await asyncio.gather(*(collect(url, article) for url, article in candidates.items()))
+    return [ticket for ticket in gathered if ticket is not None]
 
 
 @contextmanager
@@ -972,6 +1011,13 @@ async def collect_sources(
                     articles.append(item)
             except Exception:
                 result["failures"] += 1
+        if not submissions_only and (ticket_config := review_venues.get(TICKET_VISION_SOURCE)):
+            with measure_collection(collection_seconds, "cited_tickets"):
+                tickets = await _cited_ticket_evidence(
+                    articles, media, ticket_config, client, now=now,
+                )
+            for ticket in tickets:
+                register_review_hold(ticket)
         for source_id in guides:
             try:
                 # Fetched now, so the page text is verified now: no date inference involved.

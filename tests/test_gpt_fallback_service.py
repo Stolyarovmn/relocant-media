@@ -20,6 +20,7 @@ from relocant_media.ai.package import (
     draft_sha256,
 )
 from relocant_media.collectors.base import RawItem as CollectedRawItem
+from relocant_media.collectors.ticket_vision_events import TicketCardUnavailable, parse_ticket_event
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation
 from relocant_media.domain.policy import SOURCE_REPLACED_REASON
@@ -339,6 +340,77 @@ def test_refresh_drops_unrelated_proposed_source(fallback_session, monkeypatch, 
         gpt_fallback.validate_fallback_candidate(session, request, raw_id, now=NOW)
     assert session.scalar(select(RawItem).where(RawItem.url == unrelated.url)) is None
     assert session.get(EditorialRun, raw_id) is None
+
+
+@pytest.mark.parametrize(
+    "variant", ["confirmed", "unlinked", "other_date", "other_venue", "two_links"],
+)
+def test_refresh_accepts_only_the_ticket_card_cited_by_the_article(
+    fallback_session, monkeypatch, variant,
+):
+    session, raw, _ = fallback_session
+    registry = gpt_fallback._registry()
+    sync_source(session, "belgrade", registry["media_danas"])
+    raw.source_id = "media_danas"
+    raw.title = "Kreator & Overkill u Hangaru Luke Beograd"
+    raw.url = "https://www.danas.rs/kultura/kreator-overkill-koncert-sve-spremno/"
+    raw.body = (
+        "Koncert se održava 25. novembra 2026. godine u Hangaru Luke Beograd. "
+        "Nastupaju Kreator i Overkill. Ulaznice su u prodaji."
+    )
+    ticket_url = "https://tickets.rs/event/kreator_overkill_27517"
+    if variant != "unlinked":
+        raw.body += f" Ulaznice: {ticket_url}"
+    if variant == "two_links":
+        raw.body += " Još ulaznica: https://tickets.rs/event/some_other_event_27518"
+    anchor = CollectedRawItem(raw.source_id, raw.external_id, raw.url, raw.title, raw.body,
+                              raw.published_at, published_at_precision="instant")
+    ticket_day = 26 if variant == "other_date" else 25
+    venue = "Sava Centar" if variant == "other_venue" else "Luka Beograd"
+    ticket = parse_ticket_event(f"""
+      <link rel="canonical" href="{ticket_url}">
+      <h1>KREATOR + OVERKILL</h1>
+      <div class="selected-event">
+        <p><strong>KREATOR + OVERKILL</strong></p>
+        <p><strong>{venue}, Beograd</strong></p>
+        <p><strong>{ticket_day}. novembar 2026, sreda 19:00</strong></p>
+      </div>
+    """, ticket_url, registry["ticket_vision_events"])
+    raw_id = raw.id
+    engine = session.get_bind()
+    session.commit()
+    request = gpt_fallback.build_request(session, now=NOW)
+    assert request is not None
+    exchange = _refresh_exchange(request, raw_id, [ticket_url])
+    session.rollback()
+
+    async def collect(links):
+        assert [url for _, url in links] == [anchor.url, ticket_url]
+        return [anchor, ticket]
+
+    monkeypatch.setattr(gpt_refresh, "_collect", collect)
+    if variant != "confirmed":
+        with pytest.raises(gpt_fallback.FallbackValidationError) as error:
+            gpt_refresh.refresh_gpt_evidence(engine, exchange, now=NOW)
+        assert error.value.code == gpt_refresh.NO_MATCHING_REFRESH_SOURCE
+        return
+    refreshed = gpt_refresh.refresh_gpt_evidence(engine, exchange, now=NOW)
+    docs = refreshed["candidates"][0]["documents"]
+    assert [doc["url"] for doc in docs] == [anchor.url, ticket_url]
+    assert docs[1]["published_at"] is None and not docs[1]["auto_publish"]
+    assert "Početak: 19:00." in docs[1]["body"]
+    gpt_fallback.validate_fallback_candidate(session, refreshed, raw_id, now=NOW)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_linked_ticket_is_an_unconfirmed_source(monkeypatch):
+    async def unavailable(config, url, client):
+        raise TicketCardUnavailable("ticket card could not be verified")
+
+    monkeypatch.setattr(server_cycle, "fetch_public_article", unavailable)
+    ticket = gpt_fallback._registry()["ticket_vision_events"]
+    (result,) = await gpt_refresh._collect([(ticket, "https://tickets.rs/event/some_event_27517")])
+    assert isinstance(result, gpt_refresh.SourceUnavailableError)
 
 
 def test_refresh_substitutes_404_with_same_event_and_imports_only_live_evidence(

@@ -410,9 +410,10 @@ def test_runtime_venue_sources_include_dated_structured_collectors():
     assert venues["venue_natural_history"].extraction.strategy == "natural_history_news"
     assert "venue_bitefartcafe" not in venues
     assert "venue_yugoslavia" not in venues
+    assert "ticket_vision_events" not in venues
 
     review_only = server_cycle.review_only_venue_sources()
-    assert set(review_only) == {"venue_bitefartcafe", "venue_yugoslavia"}
+    assert set(review_only) == {"venue_bitefartcafe", "venue_yugoslavia", "ticket_vision_events"}
     assert all(not source.policy.auto_publish for source in review_only.values())
 
     discovery = server_cycle.discovery_venue_sources()
