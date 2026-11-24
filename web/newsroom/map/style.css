@@ -1048,6 +1048,32 @@ h1 {
 .event-windows { margin: 3px 0 0; padding-left: 17px; }
 .event-scope ul { margin: 4px 0 0; padding-left: 17px; }
 .event-scope summary { cursor: pointer; }
+.repair-sites summary {
+  min-block-size: 44px;
+  align-content: center;
+  color: var(--kind);
+  font-weight: 750;
+}
+.repair-sites .repair-site-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.repair-site-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-block-size: 44px;
+  inline-size: 100%;
+  border: 0;
+  border-block-start: 1px solid var(--stroke);
+  padding: 5px 2px;
+  background: transparent;
+  text-align: start;
+}
+.repair-site-button::after { content: "⊙" / ""; color: var(--kind); font-size: 1rem; }
+.repair-site-button:hover { color: var(--kind); }
 .event-address-hit { color: #205e44; font-weight: 700; }
 .event-links { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 7px; }
 .noscript { padding: 15px var(--gutter); }

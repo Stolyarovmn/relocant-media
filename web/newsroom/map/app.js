@@ -44,6 +44,8 @@ const state = {
   timelineOrigin: 0,
   timelineStep: 0,
   selected: "",
+  selectedRepairPoint: null,
+  expandedRepairSites: new Set(),
   previewArchive: "",
   refocusEvent: "",
   keepSelectedInView: false,
@@ -324,6 +326,32 @@ function addressLabel(address) {
   return address.number ? `${address.street}, ${address.number}` : address.street;
 }
 
+function repairSiteLabel(point) {
+  return point.label.replace(/^Место ремонта:\s*/i, "") || point.label;
+}
+
+function repairSiteList(incident) {
+  const details = make("details", "event-scope repair-sites");
+  details.append(make("summary", "", `Места ремонта · ${incident.points.length}`));
+  details.open = state.expandedRepairSites.has(incident.id);
+  details.addEventListener("toggle", () => {
+    if (!details.isConnected) return;
+    if (details.open) state.expandedRepairSites.add(incident.id);
+    else state.expandedRepairSites.delete(incident.id);
+  });
+  const list = make("ul", "repair-site-list");
+  for (const point of incident.points) {
+    const row = make("li");
+    const button = make("button", "repair-site-button", repairSiteLabel(point));
+    button.type = "button";
+    button.addEventListener("click", () => openEvent(incident, { fromCard: true, repairPoint: point }));
+    row.append(button);
+    list.append(row);
+  }
+  details.append(list);
+  return details;
+}
+
 function eventCard(incident, now) {
   const card = make("article", "event-card");
   card.dataset.kind = incident.kind;
@@ -394,7 +422,8 @@ function eventCard(incident, now) {
       make("p", "event-scope", "Точки обозначают населённые пункты. Точные границы не указаны."));
   }
   if (incident.repairSite) {
-    card.append(make("p", "event-scope", "На карте отмечены места ремонта. Точные границы отключения неизвестны."));
+    card.append(make("p", "event-scope", "Точные границы отключения неизвестны."),
+      repairSiteList(incident));
   }
   if (roadOrientation(incident)) {
     card.append(make("p", "event-scope", "Точные границы участка не подтверждены."));
@@ -501,6 +530,7 @@ function bindFeature(layer, group, incident, label, window, fromRegister) {
   }
   layer.bindPopup(popup).on("click", () => {
     state.selected = incident.id;
+    state.selectedRepairPoint = null;
     if (incidentStatus(incident, Date.now()) !== "closed") state.previewArchive = "";
     state.refocusEvent = "";
     state.focusNote = "";
@@ -868,8 +898,11 @@ function focusIncident(item) {
   state.map.closePopup();
   state.map.invalidateSize({ pan: false });
   const includeExpired = showsArchived(incident);
-  const locations = exactMapPoints(state.index, incident, now, includeExpired)
-    .map(({ lat, lon }) => [lat, lon]);
+  const repairPoint = incident.repairSite && incident.id === state.selected && state.selectedRepairPoint
+    ? incident.points.find(({ lat, lon }) => lat === state.selectedRepairPoint.lat
+      && lon === state.selectedRepairPoint.lon) : null;
+  const locations = repairPoint ? [[repairPoint.lat, repairPoint.lon]]
+    : exactMapPoints(state.index, incident, now, includeExpired).map(({ lat, lon }) => [lat, lon]);
   for (const line of visibleMapLines(incident, now, includeExpired)) {
     for (const point of line.coordinates) locations.push(point);
   }
@@ -902,7 +935,8 @@ function focusIncident(item) {
     showMapNote();
     return false;
   }
-  state.focusNote = roadOrientation(incident)
+  state.focusNote = repairPoint ? `Место ремонта — ${repairSiteLabel(repairPoint)}`
+    : roadOrientation(incident)
     ? `Ориентир. ${roadGeometryNote}`
     : incident.lines.some((line) => line.scope === "sidewalk")
       ? "Линия показывает отрезок улицы с ограничением на тротуаре."
@@ -923,10 +957,11 @@ function focusDigest() {
   if (locations.length && state.map) state.map.fitBounds(locations, { padding: [35, 65], maxZoom: 16 });
 }
 
-function openEvent(incident, { fromCard = false } = {}) {
+function openEvent(incident, { fromCard = false, repairPoint = null } = {}) {
   const now = viewClock();
   state.deepPending = "";
   state.selected = incident.id;
+  state.selectedRepairPoint = repairPoint;
   state.keepSelectedInView = true;
   state.previewArchive = incidentStatus(incident, now) === "closed" ? incident.id : "";
   state.refocusEvent = !state.index && (incident.addresses.length || incident.segments.length)
@@ -1234,6 +1269,7 @@ function clearInvisibleSelection() {
   const selected = visibleIncidents(viewClock()).find((incident) => incident.id === state.selected);
   if (!selected && state.selected) {
     state.selected = "";
+    state.selectedRepairPoint = null;
     state.previewArchive = "";
     state.refocusEvent = "";
     state.keepSelectedInView = false;
