@@ -14,7 +14,7 @@ from relocant_media.ops.newsroom_export import CITIES
 from relocant_media.ops.newsroom_export import snapshot as public_catalog
 from relocant_media.ops.newsroom_merge import merge
 from relocant_media.services.daily_brief import public_daily_brief
-from relocant_media.services.editorial_flow import public_editorial_flow
+from relocant_media.services.editorial_flow import PUBLICATION_DAY_END, public_editorial_flow
 from relocant_media.services.kpi import public_kpi
 from relocant_media.services.newsroom_control import public_delivery_checks
 
@@ -25,6 +25,7 @@ STATES = (
 )
 _CHANNELS = {"belgrade": "https://t.me/eduvbelgrad"}
 _CITY_ZONE = ZoneInfo("Europe/Belgrade")
+_BELGRADE_DAILY_POST_FLOOR = 6
 _EDITIONS = {"morning": "Белград сегодня", "evening": "Главное за день"}
 _EDITION_STATUS = {"pending": "ожидается", "unconfirmed": "выход не подтверждён",
                    "not_scheduled": "вне расписания"}
@@ -150,6 +151,20 @@ def build_status(
         actions.append("Сверить неопределённые отправки с Telegram; не повторять их автоматически.")
     if safe_counts.get("needs_reverify", 0):
         actions.append("Разобрать изменившиеся первоисточники через штатную повторную проверку.")
+    if city == "belgrade" and not stale and flow is not None:
+        flow_at = datetime.fromisoformat(flow["observed_at"])
+        reporting_end = datetime.combine(
+            date.fromisoformat(local_date), PUBLICATION_DAY_END, ZoneInfo(flow["timezone"]),
+        )
+        if reporting_end <= flow_at <= now:
+            cadence = next((row.get("publication_cadence") for row in flow["days"]
+                            if row["local_date"] == local_date), None)
+            if cadence is not None and cadence["posts"] < _BELGRADE_DAILY_POST_FLOOR:
+                actions.append(
+                    f"Низкий выпуск за {local_date} — {cadence['posts']} подтверждённых "
+                    f"постов при ориентире {_BELGRADE_DAILY_POST_FLOOR}. "
+                    "Проверить поступление новостей и результаты редакционного разбора."
+                )
     if any(value > 1 for value in reasons.values()):
         actions.append("Изучить повторяющиеся причины удержания в закрытом аудите, "
                        "сохраняя facts/utility guards.")
