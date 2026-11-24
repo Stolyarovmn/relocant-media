@@ -23,7 +23,10 @@ from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.event_program import festival_program, registered_event_venues
 from relocant_media.services.exhibition_map_point import MAX_HTML_BYTES
 from relocant_media.services.primary_discovery import folded
-from relocant_media.services.venue_event_evidence import matches_venue_evidence
+from relocant_media.services.venue_event_evidence import (
+    matches_venue_evidence,
+    verified_bitef_reschedule,
+)
 from relocant_media.sources.registry import load_source_file
 
 _DOB_HOSTS = {"domomladine.org", "www.domomladine.org"}
@@ -329,6 +332,9 @@ def _bitef_facts(
         day, month, year = days.pop()
         schedule = schedules[0]
         start = datetime(year, month, day, int(schedule["hour"]), int(schedule["minute"] or 0))
+        if (re.search(r"\bpomer\w*", folded(live.body))
+                and verified_bitef_reschedule(live.body) != start.date()):
+            return None
         venues = [entry for entry in registered_event_venues(profile)
                   if entry["id"] == "bitefartcafe-winter"
                   and schedule["address"].casefold() in entry["aliases"]]
