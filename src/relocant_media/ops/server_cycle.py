@@ -107,6 +107,7 @@ from relocant_media.ingestion.persistence import (
     sync_source,
     upsert_media_snapshot,
 )
+from relocant_media.ops.collection_timing import measure_collection
 from relocant_media.ops.cycle_audit import audit_cycle
 from relocant_media.ops.newsroom_status import summarize
 from relocant_media.ops.newsroom_triage import triage_queue
@@ -579,6 +580,7 @@ async def collect_sources(
     engine: Engine, *, output: Path | None = None, submissions_only: bool = False,
 ) -> dict[str, Any]:
     now = datetime.now(UTC)
+    collection_seconds: dict[str, float] = {}
     result: dict[str, Any] = {"sources_synced": 2, "sources_skipped": 0, "raw_items_written": 0,
               "failures": 0, "review_required": 0, "discarded_before_article_fetch": 0,
               "discarded_before_persistence": 0, "channel_failures": 0, "channel_leads": 0,
@@ -799,7 +801,9 @@ async def collect_sources(
                         continue
                     result["private_link_fetches"] += 1
                 attempted_tips.add(submission_id)
-                if await resolve_link(url) in {
+                with measure_collection(collection_seconds, "reader_links"):
+                    status = await resolve_link(url)
+                if status in {
                     "primary_source_collected", "primary_source_review_hold"
                 }:
                     linked.append(url)
@@ -811,7 +815,8 @@ async def collect_sources(
             if original.source_id not in collectors:
                 continue
             try:
-                current = await _collect_exact_url(collectors[original.source_id], original.url)
+                with measure_collection(collection_seconds, "published_watch"):
+                    current = await _collect_exact_url(collectors[original.source_id], original.url)
                 watch["checked"] += 1
                 if evidence_changed(original, current):
                     articles.append(current)
@@ -833,32 +838,36 @@ async def collect_sources(
         for source_id, url in pages:
             try:
                 utility_page = url in utility_pages
-                async with asyncio.timeout(20 if utility_page else None):
-                    page = await client.get(url, follow_redirects=False)
-                    page.raise_for_status()
-                    parser = (parse_beograd_news_list if source_id == "city_beograd_news"
-                              else parse_cukarica_news_list)
-                    links = parser(page.text, sources[source_id])
-                    if not links or len(links) > 100:
-                        raise ValueError("unexpected source list")
-                    if utility_page:
-                        prefix = f"{urlsplit(url).path}/"
-                        links = [item for item in links
-                                 if urlsplit(item.url).path.startswith(prefix)]
-                    for item in links[:50]:
-                        # Cards expose the date before downloading any full text.
-                        # Up to seven days lets an ongoing dated closure survive.
-                        if (item.published_at is None or item.published_at > now
-                                or item.published_at < now - timedelta(days=7)):
-                            result["discarded_before_article_fetch"] += 1
-                            continue
-                        await full_article(source_id, item.url)
+                group = "city_pages" if source_id == "city_beograd_news" else "municipality_pages"
+                with measure_collection(collection_seconds, group):
+                    async with asyncio.timeout(20 if utility_page else None):
+                        page = await client.get(url, follow_redirects=False)
+                        page.raise_for_status()
+                        parser = (parse_beograd_news_list if source_id == "city_beograd_news"
+                                  else parse_cukarica_news_list)
+                        links = parser(page.text, sources[source_id])
+                        if not links or len(links) > 100:
+                            raise ValueError("unexpected source list")
+                        if utility_page:
+                            prefix = f"{urlsplit(url).path}/"
+                            links = [item for item in links
+                                     if urlsplit(item.url).path.startswith(prefix)]
+                        for item in links[:50]:
+                            # Cards expose the date before downloading any full text.
+                            # Up to seven days lets an ongoing dated closure survive.
+                            if (item.published_at is None or item.published_at > now
+                                    or item.published_at < now - timedelta(days=7)):
+                                result["discarded_before_article_fetch"] += 1
+                                continue
+                            await full_article(source_id, item.url)
             except Exception:
                 result["failures"] += 1
         if not submissions_only:
             try:
                 async with asyncio.timeout(20):
-                    for item in await collectors[BVK_NEWS_SOURCE].collect():
+                    with measure_collection(collection_seconds, "water_utility"):
+                        water_notices = await collectors[BVK_NEWS_SOURCE].collect()
+                    for item in water_notices:
                         if freshness_decision(
                             item.title, item.body, item.published_at, now,
                             published_at_precision=item.published_at_precision,
@@ -869,7 +878,8 @@ async def collect_sources(
             traffic = collectors[TRAFFIC_SECRETARIAT_SOURCE]
             try:
                 async with asyncio.timeout(35):
-                    notices = await traffic.collect()
+                    with measure_collection(collection_seconds, "traffic_secretariat"):
+                        notices = await traffic.collect()
                     result["traffic_secretariat_items"] = len(notices)
                     for item in notices:
                         fresh = freshness_decision(
@@ -892,7 +902,9 @@ async def collect_sources(
         for source_id in (() if submissions_only else runtime_venues):
             collector = collectors[source_id]
             try:
-                for item in await collector.collect():
+                with measure_collection(collection_seconds, "venues"):
+                    venue_notices = await collector.collect()
+                for item in venue_notices:
                     result["venue_items"] += 1
                     reason = event_content_reason(item.title, item.body, now=now)
                     fresh = freshness_decision(item.title, item.body, item.published_at, now,
@@ -916,7 +928,9 @@ async def collect_sources(
                                     for error in item_failures)
         for source_id in (() if submissions_only else media):
             try:
-                for item in await collectors[source_id].collect():
+                with measure_collection(collection_seconds, "media"):
+                    media_notices = await collectors[source_id].collect()
+                for item in media_notices:
                     result["media_items"] += 1
                     if freshness_decision(item.title, item.body, item.published_at, now,
                             published_at_precision=item.published_at_precision
@@ -929,7 +943,9 @@ async def collect_sources(
         for source_id in guides:
             try:
                 # Fetched now, so the page text is verified now: no date inference involved.
-                for item in await collectors[source_id].collect():
+                with measure_collection(collection_seconds, "guides"):
+                    guide_notices = await collectors[source_id].collect()
+                for item in guide_notices:
                     result["guide_items"] += 1
                     articles.append(item)
             except Exception:
@@ -950,9 +966,10 @@ async def collect_sources(
 
         fetched_channels = []
         for offset in range(0, len(runtime_channels), 6):
-            fetched_channels.extend(await asyncio.gather(*(
-                fetch_channel(channel) for channel in runtime_channels[offset:offset + 6]
-            )))
+            with measure_collection(collection_seconds, "channel_previews"):
+                fetched_channels.extend(await asyncio.gather(*(
+                    fetch_channel(channel) for channel in runtime_channels[offset:offset + 6]
+                )))
         # The private signal is compared locally to fetched posts. Only the separate,
         # publicly fetched post is passed to the existing source discovery service.
         channel_leads = []
@@ -979,10 +996,11 @@ async def collect_sources(
                 remaining_forwards.setdefault(submission_id, []).append(
                     f"https://t.me/{ref[0]}/{ref[1]}",
                 )
-        forward_lookups = await asyncio.gather(*(
-            collect_forwarded_topic(allowed_channels[username], message_id, client, now=now)
-            for username, message_id in missing[:4]
-        ), return_exceptions=True)
+        with measure_collection(collection_seconds, "reader_links"):
+            forward_lookups = await asyncio.gather(*(
+                collect_forwarded_topic(allowed_channels[username], message_id, client, now=now)
+                for username, message_id in missing[:4]
+            ), return_exceptions=True)
         unavailable_forwards: set[int] = set()
         for ref, lead in zip(missing[:4], forward_lookups, strict=True):
             if isinstance(lead, TopicLead):
@@ -992,16 +1010,17 @@ async def collect_sources(
         for _, channel, lead, observation in sorted(channel_leads, key=lambda entry: not entry[0]):
             try:
                 result["channel_leads"] += 1
-                resolution = await resolve_public_discovery(
-                    lead,
-                    articles=articles,
-                    resolve_link=resolve_link,
-                    search_plan=plan_public_searches,
-                    search_official=search_official,
-                    accept_official=accept_official,
-                    register_official=register_official,
-                    search_budget=search_budget,
-                )
+                with measure_collection(collection_seconds, "channel_evidence"):
+                    resolution = await resolve_public_discovery(
+                        lead,
+                        articles=articles,
+                        resolve_link=resolve_link,
+                        search_plan=plan_public_searches,
+                        search_official=search_official,
+                        accept_official=accept_official,
+                        register_official=register_official,
+                        search_budget=search_budget,
+                    )
                 if interested := forwarded_tips.get((channel.lower(), lead.message_id)):
                     cited = set(lead.outbound_urls) & set(resolution.primary_urls)
                     verified = {
@@ -1027,19 +1046,23 @@ async def collect_sources(
                            "status": "not_checked"}
             news_feed_observations.append(observation)
             try:
-                news_leads = await collect_news_feed(feed, client, now=now, observation=observation)
+                with measure_collection(collection_seconds, "news_feeds"):
+                    news_leads = await collect_news_feed(
+                        feed, client, now=now, observation=observation,
+                    )
                 for news_lead in news_leads[:20]:
                     result["news_leads"] += 1
-                    resolution = await resolve_public_discovery(
-                        news_lead,
-                        articles=articles,
-                        resolve_link=resolve_link,
-                        search_plan=plan_public_searches,
-                        search_official=search_official,
-                        accept_official=accept_official,
-                        register_official=register_official,
-                        search_budget=search_budget,
-                    )
+                    with measure_collection(collection_seconds, "news_evidence"):
+                        resolution = await resolve_public_discovery(
+                            news_lead,
+                            articles=articles,
+                            resolve_link=resolve_link,
+                            search_plan=plan_public_searches,
+                            search_official=search_official,
+                            accept_official=accept_official,
+                            register_official=register_official,
+                            search_budget=search_budget,
+                        )
                     result["primary_searches"] += resolution.searches_performed
                     news_topics.append({"url": news_lead.url,
                         "source_id": news_lead.source_id,
@@ -1063,9 +1086,11 @@ async def collect_sources(
                          for text, received, _ in reader_signals.values()} - {None}
             if strengths:
                 previous_urls[saved_article.url] = "anchored" in strengths
-        for url in sorted(previous_urls, key=previous_urls.__getitem__, reverse=True)[:4]:
-            await resolve_link(url)
-        result["utility_map_requests"] = await _enrich_utility_maps(engine, client, articles)
+        with measure_collection(collection_seconds, "reader_links"):
+            for url in sorted(previous_urls, key=previous_urls.__getitem__, reverse=True)[:4]:
+                await resolve_link(url)
+        with measure_collection(collection_seconds, "utility_maps"):
+            result["utility_map_requests"] = await _enrich_utility_maps(engine, client, articles)
     transport_source = None
     transport_notices = []
     if not submissions_only:
@@ -1074,9 +1099,10 @@ async def collect_sources(
             async with asyncio.timeout(40), httpx.AsyncClient(
                 timeout=12, trust_env=False, verify=source_ssl_context(),
             ) as transport_client:
-                fetched_notices = await BgprevozChangesCollector(
-                    transport_source, transport_client,
-                ).collect(limit=TRANSPORT_MAP_LIMIT)
+                with measure_collection(collection_seconds, "transport_map"):
+                    fetched_notices = await BgprevozChangesCollector(
+                        transport_source, transport_client,
+                    ).collect(limit=TRANSPORT_MAP_LIMIT)
             for notice in fetched_notices:
                 official = EvidenceDocument.model_validate(notice, from_attributes=True)
                 if extract_transport_map(official, notice.source_html or ""):
@@ -1177,6 +1203,7 @@ async def collect_sources(
     result["review_required"] = changes
     triage = triage_queue(engine, now=now)
     result["discarded_queue"] = triage["discarded"]
+    result["collection_seconds"] = collection_seconds
     if output is not None:
         (output / "published-source-watch.json").write_text(
             json.dumps(watch, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1730,7 +1757,8 @@ def main() -> None:
             scope.update(stats)
             # Reader questions can be sent as soon as source triage commits.
             # They should not wait behind model calls or public delivery.
-            send_feedback()
+            with measure_collection(stats.setdefault("collection_seconds", {}), "reader_feedback"):
+                send_feedback()
             return stats
         def allowed_items() -> set[int]:
             return set(scope.get("submission_raw_ids", []))

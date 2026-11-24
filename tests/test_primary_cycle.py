@@ -156,10 +156,13 @@ def test_failed_ingestion_cannot_advance_checkpoint_or_call_ai(queue, tmp_path):
         raise AssertionError("must not process a failed collection")
 
     report = run_cycle(engine, city="belgrade", output=tmp_path / "failed", now=NOW,
-                       ingest=lambda: {"failures": 1}, process=forbidden)
+                       ingest=lambda: {"failures": 1, "collection_seconds": {"city_pages": 20}},
+                       process=forbidden)
     assert report["status"] == "PRIMARY_FAILED" and not report["window_complete"]
     assert list(report["stage_seconds"]) == ["collection"]
     with Session(engine) as session:
+        run = session.get(SchedulerRun, report["run_id"])
+        assert run.details["collection_seconds"] == {"city_pages": 20}
         retry = begin_window(session, city="belgrade", now=NOW + timedelta(hours=3))
         assert retry.details["window"] == report["window"]
 

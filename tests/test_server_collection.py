@@ -11,7 +11,7 @@ from test_transport_map import _map_html, _notice
 from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.collectors.news_discovery import NewsDiscoveryFeed, NewsLead
 from relocant_media.collectors.telegram_topics import TopicLead
-from relocant_media.ops import server_cycle
+from relocant_media.ops import collection_timing, server_cycle
 from relocant_media.storage.models import EditorialRun, RawItem
 from relocant_media.storage.sqlite_schema import initialize_sqlite
 
@@ -105,10 +105,22 @@ async def test_road_map_notices_are_collected_without_an_editorial_anchor(collec
     monkeypatch.setattr(server_cycle, "BgprevozChangesCollector", MapCollector)
     result = await server_cycle.collect_sources(engine)
     assert result["transport_map_notices"] == 1
+    assert {"city_pages", "water_utility", "transport_map"} <= result["collection_seconds"].keys()
     with Session(engine) as session:
         raw = session.scalar(select(RawItem).where(RawItem.url == document.url))
         assert raw is not None and raw.published_at is None
         assert session.get(EditorialRun, raw.id) is None
+
+
+def test_collection_timer_counts_repeated_and_interrupted_attempts(monkeypatch):
+    ticks = iter((10, 11, 20, 24))
+    monkeypatch.setattr(collection_timing, "monotonic", lambda: next(ticks))
+    durations = {}
+    with collection_timing.measure_collection(durations, "city_pages"):
+        pass
+    with pytest.raises(TimeoutError), collection_timing.measure_collection(durations, "city_pages"):
+        raise TimeoutError
+    assert durations == {"city_pages": 5}
 
 
 @pytest.mark.asyncio
