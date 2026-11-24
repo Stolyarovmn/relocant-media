@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from pydantic import BaseModel, TypeAdapter
+
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.exhibition_map_point import _coordinate
 from relocant_media.services.local_outage_geometry import AreaIndex, Coordinate, load_area_index
 from relocant_media.services.transport_map_image import render_transport_map
+from relocant_media.services.utility_geography import _name
 from relocant_media.services.utility_scope import extract_power_addresses, extract_power_scopes
 from relocant_media.services.water_outage_scope import (
     daily_water_repairs,
@@ -30,6 +33,21 @@ SEGMENT_LIMIT = 3
 OSM_ATTRIBUTION = "https://www.openstreetmap.org/copyright"
 _OSM_OBJECT = re.compile(r"https://www\.openstreetmap\.org/(?:node|way)/[1-9][0-9]*\Z")
 _BELGRADE_AREAS = Path("cities/belgrade/map/outage-areas.json.gz")
+_BELGRADE_REPAIR_ALIASES = _BELGRADE_AREAS.with_name("repair-address-aliases.json")
+
+
+class _RepairAddressAlias(BaseModel):
+    municipality: str
+    settlement: str
+    street_names: tuple[str, ...]
+    registry_street: str
+    registry_settlement: str | None
+    evidence_urls: tuple[str, ...]
+
+
+_REPAIR_ALIAS_SCHEMA: TypeAdapter[list[_RepairAddressAlias]] = TypeAdapter(
+    list[_RepairAddressAlias],
+)
 
 
 def utility_scope(document: EvidenceDocument) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -97,6 +115,22 @@ def _repair_area_index(path: Path) -> AreaIndex:
     return load_area_index(path)
 
 
+@lru_cache(maxsize=1)
+def _repair_address_aliases(path: Path) -> dict[tuple[str, str, str], _RepairAddressAlias]:
+    try:
+        rows = _REPAIR_ALIAS_SCHEMA.validate_json(path.read_bytes())
+    except (OSError, ValueError):
+        return {}
+    aliases: dict[tuple[str, str, str], _RepairAddressAlias] = {}
+    for row in rows:
+        for name in row.street_names:
+            key = (_name(row.municipality), _name(row.settlement), _name(name))
+            if not all(key) or key in aliases:
+                return {}
+            aliases[key] = row
+    return aliases
+
+
 def _verified_repair_sites(
     document: EvidenceDocument, areas: AreaIndex | None,
 ) -> dict[str, Any] | None:
@@ -106,17 +140,15 @@ def _verified_repair_sites(
     ends_at, addresses = parsed
     if areas is None:
         areas = _repair_area_index(_BELGRADE_AREAS)
+    aliases = _repair_address_aliases(_BELGRADE_REPAIR_ALIASES)
     sites: dict[Coordinate, dict[str, float | str | None]] = {}
     for address in addresses:
-        street = address.street
-        municipality = address.municipality
-        if address.settlement:
-            municipality = f"{municipality}, naselje {address.settlement}"
-        # Город относит эту улицу к Остружнице, RGZ — к BEOGRAD (ČUKARICA).
-        if (municipality.casefold() == "čukarica, naselje ostružnica"
-                and street.casefold() in {"3. janura", "3. januara", "trećeg januara"}):
-            street = "Trećeg januara"
-            municipality = address.municipality
+        key = (_name(address.municipality), _name(address.settlement or ""), _name(address.street))
+        alias = aliases.get(key)
+        street = alias.registry_street if alias else address.street
+        settlement = alias.registry_settlement if alias else address.settlement
+        municipality = (f"{address.municipality}, naselje {settlement}"
+                        if settlement else address.municipality)
         found = areas.address(street, address.number, municipality)
         if found is None:
             continue

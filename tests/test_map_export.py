@@ -56,6 +56,7 @@ from relocant_media.services.native_map import (
 from relocant_media.services.rich_delivery import prepare_native_transport
 from relocant_media.services.road_scope import resolve_secretariat_stretches
 from relocant_media.services.transport_map import build_transport_map
+from relocant_media.services.utility_map import build_utility_point
 from relocant_media.services.utility_scope import extract_power_scopes
 from relocant_media.services.water_outage_scope import extract_water_outage_scopes
 from relocant_media.sources.registry import load_source_file
@@ -122,6 +123,11 @@ def test_daily_water_repair_exports_only_verified_repair_site_without_start(monk
     assert (pin.lat, pin.lon) == pytest.approx((44.735687, 20.323028), abs=0.00001)
     assert presentation.native_map is not None
     assert presentation.native_map["point"]["source_url"] == incident.source_url
+    for modified in (
+        body.replace("Ostružnica", "Sremčica"), body.replace("janura 2", "janura 99999"),
+    ):
+        assert build_utility_point(document.model_copy(update={"body": modified}), "",
+                                   areas=areas) is None
 
 _LISTED_URL = (
     "https://www.bgsaobracaj.rs/vest/5435/izmena-rezima-saobraca%D1%98a-u-ustanicko%D1%98"

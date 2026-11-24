@@ -52,6 +52,12 @@ PYTHONPATH=src uv run --with osmium==4.3.2 --with shapely==2.1.2 python \
 [Адресный регистр RGZ](https://www.rgz.gov.rs/adresni-registar) ·
 [Публичный срез OSM Serbia](https://dina.openstreetmap.rs/ar/report.html)
 
+`repair-address-aliases.json` хранит подтверждённые варианты названий улиц
+для аварийных бюллетеней. Запись совпадает по общине, поселению и названию.
+`registry_settlement: null` означает поиск точного адреса по общине, если
+в источниках улица относится к поселению, а в регистре записана в разделе общины.
+Источники сопоставления указываются в `evidence_urls`.
+
 ```sh
 report='https://dina.openstreetmap.rs/ar/opstine/novibeograd/BEOGRAD%20%28NOVI%20BEOGRAD%29.html'
 curl --fail --location "$report" --output novi-beograd.html
