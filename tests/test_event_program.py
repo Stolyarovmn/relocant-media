@@ -198,7 +198,9 @@ def hold(state):
 def test_completed_map_reenters_pipeline_and_preserves_previous_package_in_audit(state):
     engine, session, item, run, _, payload = hold(state)
     assert eligible_map_hold(session, item.id, now=NOW)
-    assert item.id in policy_reassessment_ids(engine)[0]
+    assert item.id in policy_reassessment_ids(engine, now=NOW)[0]
+    expired = datetime(2026, 11, 25, 0, tzinfo=UTC)
+    assert item.id not in policy_reassessment_ids(engine, now=expired)[0]
     with pytest.raises(PackageConflictError):
         import_package(session, EditorialPackage.model_validate_json(canonical_json(payload)),
                        now=NOW)
