@@ -49,7 +49,7 @@ def test_cloudflare_copy_follows_the_same_guarded_pages_artifact(workflow, sha):
     path = ROOT / ".github/workflows" / workflow
     job = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]["deploy"]
     steps = job["steps"]
-    check, download, upload = steps[2:]
+    check, download, upload, readback = steps[2:]
     assert job["env"]["EXPECTED_SHA"] == sha
     assert check["if"] == "steps.current.outputs.deploy == 'true'"
     guarded = "steps.current.outputs.deploy == 'true' && steps.cloudflare.outputs.ready == 'true'"
@@ -63,6 +63,12 @@ def test_cloudflare_copy_follows_the_same_guarded_pages_artifact(workflow, sha):
     assert '-size +"$CLOUDFLARE_MAX_FILE_BYTES"c' in upload["run"]
     assert job["env"]["WRANGLER_VERSION"].count(".") == 2
     assert '"wrangler@$WRANGLER_VERSION" pages deploy' in upload["run"]
+    assert upload["id"] == "cloudflare_publish"
+    assert readback["if"] == "steps.cloudflare_publish.outcome == 'success'"
+    assert readback["continue-on-error"]
+    assert "CLOUDFLARE_API_TOKEN" not in readback["env"]
+    assert "map/incidents.json map/events.json" in readback["run"]
+    assert 'cmp -s "$SITE_DIR/$file" "$observed"' in readback["run"]
 
 
 def test_largest_public_file_fits_cloudflare_pages_limit(tmp_path: Path) -> None:

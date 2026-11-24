@@ -546,6 +546,7 @@ jobs:
           name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cloudflare-artifact
       - name: Deploy the same projection to Cloudflare Pages
+        id: cloudflare_publish
         if: steps.current.outputs.deploy == 'true' && steps.cloudflare.outputs.ready == 'true'
         continue-on-error: true
         env:
@@ -566,3 +567,33 @@ jobs:
           npx --yes "wrangler@$WRANGLER_VERSION" pages deploy "$SITE_DIR" \
             --project-name "$CLOUDFLARE_PAGES_PROJECT" --branch main \
             --commit-hash "$EXPECTED_SHA" --commit-dirty=true
+      - name: Verify the two public Cloudflare map feeds
+        if: steps.cloudflare_publish.outcome == 'success'
+        continue-on-error: true
+        env:
+          SITE_DIR: ${{ runner.temp }}/cloudflare-site
+        run: |
+          set -euo pipefail
+          observed=$(mktemp)
+          trap 'rm -f -- "$observed"' EXIT
+          failed=0
+          for file in map/incidents.json map/events.json; do
+            url="https://$CLOUDFLARE_PAGES_PROJECT.pages.dev/$file?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            matched=false
+            for delay in 0 2 4; do
+              sleep "$delay"
+              if curl --fail --silent --show-error --proto '=https' --connect-timeout 5 \
+                --max-time 10 --max-filesize "$CLOUDFLARE_MAX_FILE_BYTES" \
+                -o "$observed" "$url" && cmp -s "$SITE_DIR/$file" "$observed"; then
+                printf 'Cloudflare map readback verified: %s %s\n' "$file" \
+                  "$(sha256sum < "$observed" | cut -d ' ' -f1)"
+                matched=true
+                break
+              fi
+            done
+            if [ "$matched" != true ]; then
+              echo "::error::Cloudflare map readback does not match the deployed artifact: $file"
+              failed=1
+            fi
+          done
+          exit "$failed"
