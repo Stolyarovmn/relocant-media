@@ -20,6 +20,7 @@ from relocant_media.services.reader_publication import POLICY, material_fingerpr
 from relocant_media.storage.models import RawItem, Submission
 
 DISCOVERY_FIELD = "reader_source_discovery"
+SOURCE_REVISION_FIELD = "reader_source_revision_sha256"
 RECHECK_INTERVAL = timedelta(hours=6)
 CHECK_WINDOW = timedelta(hours=48)
 REVIEW_CANDIDATE_LIMIT = 3
@@ -45,16 +46,43 @@ def _dates_in(value: str, year: int) -> frozenset[str]:
     return event_dates(value, year) | event_dates(folded(value), year)
 
 
-def confirmed_source_signal(payload: dict[str, Any]) -> bool:
+def _confirmed_source_choice(payload: dict[str, Any]) -> dict[str, Any] | None:
     publication = payload.get("reader_publication")
-    return bool(
+    if (
         isinstance(publication, dict)
         and publication.get("version") == POLICY["version"]
         and publication.get("stage") == "confirmed"
         and publication.get("ownership") == "source"
         and publication.get("permission") == "private"
-        and publication.get("material_sha256") == material_fingerprint(payload)
+    ):
+        return publication
+    return None
+
+
+def confirmed_source_signal(payload: dict[str, Any]) -> bool:
+    publication = _confirmed_source_choice(payload)
+    if publication is None:
+        return False
+    return material_fingerprint(payload) in (
+        publication.get("material_sha256"), payload.get(SOURCE_REVISION_FIELD),
     )
+
+
+def record_private_source_revision(row: Submission) -> None:
+    """Keep author follow-ups searchable within the same private source request."""
+    if row.kind != "news_tip" or row.status != "reader_review":
+        return
+    publication = _confirmed_source_choice(row.payload)
+    if publication is None:
+        return
+    revision = material_fingerprint(row.payload)
+    if revision == row.payload.get(SOURCE_REVISION_FIELD):
+        return
+    if revision == publication.get("material_sha256") and SOURCE_REVISION_FIELD not in row.payload:
+        return
+    payload = {**row.payload, SOURCE_REVISION_FIELD: revision}
+    payload.pop(DISCOVERY_FIELD, None)
+    row.payload = payload
 
 
 def pending_source_discovery(

@@ -10,9 +10,15 @@ from sqlalchemy.orm import Session
 import relocant_media.api.app as api
 from relocant_media.ops.intake_batch import collect_batch
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
-from relocant_media.services.private_intake import receive_private_tips
+from relocant_media.services.private_intake import process_private_updates, receive_private_tips
 from relocant_media.services.reader_forwarded_source import public_forward_urls
-from relocant_media.services.reader_publication import material_fingerprint
+from relocant_media.services.reader_publication import material_fingerprint, permission_reason
+from relocant_media.services.reader_source_discovery import (
+    DISCOVERY_FIELD,
+    SOURCE_REVISION_FIELD,
+    pending_source_discovery,
+    record_discovery_check,
+)
 from relocant_media.services.submission_feedback import reply_to_submissions, resolve_submission
 from relocant_media.services.submission_queue import batch_submissions, pending_submissions
 from relocant_media.services.submission_reference import PUBLIC_REFERENCE_PATTERN
@@ -373,6 +379,60 @@ async def test_reader_confirmation_precedes_editorial_and_followup_reopens_case(
         assert row.payload["attachments"][0]["kind"] == "video"
         assert row.payload["feedback"]["missing_primary"]["user_wait_seconds"] >= 42
         assert row.payload["feedback"]["missing_primary"]["accepted_wait_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True], ids=["bot-chat", "channel-dm"])
+@pytest.mark.parametrize("source_only", [False, True], ids=["own", "private-source"])
+async def test_reader_followup_restores_only_private_source_search(engine, direct, source_only):
+    telegram = Telegram(direct)
+
+    async def accept(*updates):
+        return await process_private_updates(
+            engine, telegram, list(updates),
+            reader_feedback_enabled=True, publication_enabled=True,
+        )
+
+    await accept(telegram.message(1, text="Афиша городского фестиваля"))
+    await accept(telegram.press(2, "Предложить новость"))
+    await accept(telegram.press(3, "Чужой источник" if source_only else "Мой материал"))
+    if not source_only:
+        await accept(telegram.press(4, "Разрешить публикацию"))
+        await accept(telegram.press(5, "Без подписи"))
+    sid = submission_id(engine)
+    ref = public_reference(engine, sid)
+    await accept(telegram.press(6, f"Отправить №{ref}"))
+    received_id, _ = telegram.messages[-1]
+    with Session(engine) as session:
+        row = session.get(Submission, sid)
+        assert row.status == "reader_review"
+        original_confirmation = row.payload["reader_publication"]
+        if source_only:
+            record_discovery_check(row, now=datetime.now(UTC), status="no_match")
+        else:
+            assert permission_reason(row.payload, APPROVED_CHANNEL_ID) is None
+        session.commit()
+
+    await accept(telegram.message(
+        7, caption="Программа появилась на афише", photo=[{"file_id": "extra"}],
+        reply_to_message={"message_id": received_id},
+    ))
+    with Session(engine) as session:
+        row, = session.scalars(select(Submission))
+        assert row.id == sid and row.status == "reader_review"
+        assert row.payload["reader_publication"] == original_confirmation
+        assert row.payload["attachments"][0]["file_id"] == "extra"
+        assert permission_reason(row.payload, APPROVED_CHANNEL_ID) is not None
+        eligible = pending_source_discovery(
+            session, city="belgrade", now=datetime.now(UTC), has_article_link=lambda _: False,
+        )
+        if source_only:
+            assert row.payload[SOURCE_REVISION_FIELD] == material_fingerprint(row.payload)
+            assert DISCOVERY_FIELD not in row.payload
+            assert [item.id for item in eligible] == [sid]
+        else:
+            assert SOURCE_REVISION_FIELD not in row.payload and not eligible
+    assert f"Добавлено к заявке №{ref}." == telegram.messages[-1][1]["text"]
 
 
 @pytest.mark.asyncio

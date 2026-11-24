@@ -22,6 +22,7 @@ from relocant_media.services.reader_publication import (
     material_fingerprint,
     publication_prompt,
 )
+from relocant_media.services.reader_source_discovery import record_private_source_revision
 from relocant_media.services.submission_reference import (
     PUBLIC_REFERENCE_PATTERN,
     new_submission_reference,
@@ -322,6 +323,7 @@ def _append(row: Submission, message_id: int, items: dict[str, Any]) -> bool:
         "media_present": bool(attachments),
         "updated_at": _now().isoformat(),
     }
+    record_private_source_revision(row)
     return True
 
 
