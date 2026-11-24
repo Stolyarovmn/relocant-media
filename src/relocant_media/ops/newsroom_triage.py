@@ -2,7 +2,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -35,24 +35,35 @@ def triage_queue(engine: Engine, *, now: datetime) -> dict[str, Any]:
     decisions: list[dict[str, Any]] = []
     with Session(engine) as session:
         lock_editorial_city(session, "belgrade")
-        rows = session.execute(select(RawItem, Source.source_type).join(Source).where(
-            Source.city == "belgrade", Source.enabled.is_(True),
-        ).order_by(RawItem.id)).all()
-        for item, source_type in rows:
-            # These undated notices corroborate maps for dated news. Freezing them
-            # as editorial holds would prevent the collector from updating geometry.
-            if source_type == "official_transport_changes" and item.published_at is None:
-                continue
-            run = session.get(EditorialRun, item.id)
+        reason = EditorialRun.outcome["reason"].as_string()
+        old_guide_hold = and_(
+            Source.source_type == GUIDE_SOURCE_TYPE, reason == "publication_date_unknown",
+            EditorialRun.outcome["triage_version"].as_string() == "freshness-v1",
+        )
+        editable_hold = and_(
+            EditorialRun.post_id.is_(None), EditorialRun.delivery_status == "pending",
+            EditorialRun.staging_message_id.is_(None),
+            or_(reason == "source_auto_publish_disabled", old_guide_hold),
+        )
+        rows = session.execute(
+            select(RawItem, Source.source_type, EditorialRun).join(Source)
+            .outerjoin(EditorialRun, EditorialRun.raw_item_id == RawItem.id)
+            .where(
+                Source.city == "belgrade", Source.enabled.is_(True),
+                or_(EditorialRun.raw_item_id.is_(None), editable_hold),
+                # Undated transport notices supply map evidence, not editorial holds.
+                or_(Source.source_type != "official_transport_changes",
+                    RawItem.published_at.is_not(None)),
+            ).order_by(RawItem.id),
+        ).all()
+        for item, source_type, run in rows:
             if run is not None and _wrong_guide_date_hold(run, source_type, item, now):
                 # The news rule parked this undated guide before guides were recognised.
                 session.delete(run)
                 continue
             # Completed reviews, drafts and delivery claims remain immutable.
-            if run is not None and (run.post_id is not None
-                    or run.delivery_status != "pending"
-                    or run.outcome.get("reason") != "source_auto_publish_disabled"
-                    or run.staging_message_id is not None
+            if run is not None and (
+                    run.outcome.get("reason") != "source_auto_publish_disabled"
                     or any(run.outcome.get(k) is not None
                            for k in ("claims", "draft", "verification"))
                     or "_package" in run.outcome or "_autonomous_assessment" in run.outcome):

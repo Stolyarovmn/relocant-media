@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from facts_check_helpers import bind_facts_check
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 from test_channel_delivery import reviewed as _reviewed
 from test_editorial_integration import prepare_service
@@ -320,6 +320,45 @@ def test_triage_old_holds_closes_without_copying_body_or_touching_receipts(seede
         assert run.outcome["status"] == "skipped"
         assert run.outcome["previous_decision"]["status"] == "human_review"
         assert run.evidence == {"original": "retained"}
+
+
+def test_triage_does_not_fetch_completed_history_one_item_at_a_time(seeded):
+    from relocant_media.ops.newsroom_triage import triage_queue
+
+    engine, raw_id, _ = seeded
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        item = session.get(RawItem, raw_id)
+        item.published_at = now - timedelta(days=10)
+        historical = [
+            RawItem(source_id=item.source_id, external_id=f"old-{i}", url=f"https://example.org/{i}",
+                    title="Старый материал", body="Уже есть редакционное решение",
+                    published_at=item.published_at)
+            for i in range(12)
+        ]
+        session.add_all(historical)
+        session.flush()
+        session.add_all([
+            EditorialRun(raw_item_id=older.id,
+                         outcome={"status": "skipped", "reason": "ranking_rejected"},
+                         evidence={}, delivery_status="pending")
+            for older in historical
+        ])
+        session.commit()
+
+    reads = []
+
+    def capture(_connection, _cursor, statement, *_):
+        if statement.lstrip().startswith("SELECT") and "raw_item" in statement:
+            reads.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        report = triage_queue(engine, now=now)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert len(reads) == 1
+    assert [decision["raw_item_id"] for decision in report["decisions"]] == [raw_id]
 
 
 @pytest.mark.parametrize("field", ["receipt", "draft", "verification", "package", "assessed"])
