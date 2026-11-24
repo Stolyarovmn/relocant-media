@@ -65,7 +65,8 @@ def test_bootstrap_private_atomic_state_and_exact_readback(context):
     sha = initialize(context)
     result, body = request(backend, {'op': 'read_state'})
     assert type(result.pop('capacity_low')) is bool
-    assert result == {'state': state, 'sha': sha} and body == b''
+    assert result == {'state': state, 'sha': sha, 'blob_readback': 'sha256-v1'}
+    assert body == b''
     assert sha == hashlib.sha256(backend.pointer.read_bytes()).hexdigest()
     assert stat.S_IMODE(backend.pointer.stat().st_mode) == 0o600
     assert stat.S_IMODE((backend.root / 'state.lock').stat().st_mode) == 0o600
@@ -89,7 +90,9 @@ def test_capacity_warning_is_early_and_does_not_touch_pointer(context, monkeypat
     monkeypatch.setattr(storage.shutil, 'disk_usage',
                         lambda _: SimpleNamespace(total=total, free=free))
     result, body = request(backend, {'op': 'read_state'})
-    assert result == {'state': state, 'sha': sha, 'capacity_low': warning}
+    assert result == {
+        'state': state, 'sha': sha, 'capacity_low': warning, 'blob_readback': 'sha256-v1',
+    }
     assert body == b''
     assert backend.read_state() == {'state': state, 'sha': sha}
 
@@ -471,6 +474,21 @@ def test_blob_roundtrip_immutable_and_header_never_contains_private_bytes(contex
     assert not list(backend.blobs.glob('.upload-*'))
 
 
+def test_verify_blob_reads_saved_file_without_returning_its_bytes(context):
+    backend, state, content = context
+    digest = state['snapshot']['sha256']
+    check = {'op': 'verify_blob', 'blob_id': digest}
+    header, body = request(backend, check)
+    assert header == {'sha256': digest, 'size': len(content)} and body == b''
+    with pytest.raises(storage.StorageError, match='invalid_request'):
+        request(backend, check, b'extra')
+
+    # Corrupt a stored byte without changing the file length or its name.
+    (backend.blobs / digest).write_bytes(bytes([content[0] ^ 1]) + content[1:])
+    with pytest.raises(storage.StorageError, match='storage_error'):
+        request(backend, check)
+
+
 @pytest.mark.parametrize('payload', [b'short', b'correct-extra'])
 def test_truncated_extra_or_wrong_hash_upload_cannot_be_installed(context, payload):
     backend, _, _ = context
@@ -498,6 +516,8 @@ def test_paths_and_unknown_operations_are_not_a_remote_filesystem_api(context, b
     backend, _, _ = context
     with pytest.raises(storage.StorageError):
         request(backend, {'op': 'get_blob', 'blob_id': blob_id})
+    with pytest.raises(storage.StorageError):
+        request(backend, {'op': 'verify_blob', 'blob_id': blob_id})
     with pytest.raises(storage.StorageError):
         request(backend, {'op': 'run', 'command': 'anything'})
 

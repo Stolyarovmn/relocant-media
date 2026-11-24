@@ -63,6 +63,14 @@ and a forced-command key. No private GitHub control repository is required for S
 The legacy manifest field `drive_file_id` contains the blob SHA256 for this backend;
 it remains internal compatibility data, not a Drive dependency.
 
+Ответ `read_state` сообщает поддержку `blob_readback=sha256-v1`. После загрузки
+клиент запрашивает `verify_blob`. Сервер заново читает сохранённый файл целиком
+и отвечает его размером и проверенным SHA-256. Клиент сверяет оба значения до
+получения квитанции о записи. Старый endpoint сохраняет полное обратное скачивание.
+Если endpoint откатили между `read_state` и сверкой, явный `invalid_request`
+переключает клиента на полное скачивание. Ошибка целостности блокирует запись.
+Восстановление и проверка архивных копий продолжают скачивать и сверять файл целиком.
+
 The existing workflow concurrency group and atomic compare-and-swap claim protect
 one writer. The server accepts ready→busy and matching busy→ready transitions.
 Busy never expires. A lost runner or unknown outcome requires reconciliation;
