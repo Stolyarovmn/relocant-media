@@ -1077,7 +1077,9 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
         result = json.loads(fallback_file.read_text(encoding="utf-8"))["result"]
         submission = (
             verified_submission(environment, gpt_input)
-            if result.get("packages") or result.get("rejected") else None
+            if (result.get("packages") or result.get("rejected"))
+            and hashlib.sha256(canonical_json(result).encode()).hexdigest() == gpt_input
+            else None
         )
         if _gpt_result_expired(database, fallback_file, datetime.now(UTC), submission):
             # До захвата блокировки: состояние не меняется, повтор ничего не даст.
