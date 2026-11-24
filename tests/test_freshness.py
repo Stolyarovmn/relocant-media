@@ -155,3 +155,20 @@ def test_spaced_numeric_concert_date_preserves_future_and_discards_expired() -> 
     published = NOW - timedelta(days=3)
     assert freshness_decision('Концерт 31. 10. 2026.', '', published, NOW).action == 'keep'
     assert freshness_decision('Концерт 10. 10. 2026.', '', NOW, NOW).reason == 'event_expired'
+
+
+@pytest.mark.parametrize(("lead", "expected"), [
+    ("Kreator i Overkill nastupaju u sredu, 25. novembra, u Hangaru.",
+     "dated_event_still_relevant"),
+    ("Музичари наступају 25. новембра у Београду.", "dated_event_still_relevant"),
+    ("Музыканты выступят 25 ноября в Белграде.", "dated_event_still_relevant"),
+    ("Kreator i Overkill nastupaju 21. novembra u Hangaru.", "event_expired"),
+    ("Kreator i Overkill nastupali su 25. novembra prošle godine.",
+     "publication_outside_news_window"),
+    ("Kreator i Overkill nastupaju 25. ili 26. novembra i 28. novembra.",
+     "publication_outside_news_window"),
+])
+def test_performance_announcements_need_an_explicit_unambiguous_date(lead, expected):
+    published = datetime(2026, 11, 20, 14, 31, tzinfo=UTC)
+    now = datetime(2026, 11, 24, 9, tzinfo=UTC)
+    assert freshness_decision("U Hangaru", lead, published, now).reason == expected
