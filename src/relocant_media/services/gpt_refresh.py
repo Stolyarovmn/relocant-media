@@ -7,6 +7,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import Field, field_validator, model_validator
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.channel_style import writing_brief
 from relocant_media.ai.package import StrictModel, canonical_json
 from relocant_media.collectors.base import RawItem as CollectedArticle
+from relocant_media.collectors.ticket_vision_events import TicketCardUnavailable
 from relocant_media.domain.dedup import EventCandidate, canonicalize_url, same_event
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
@@ -46,6 +48,7 @@ from relocant_media.services.source_replacement import (
     is_source_unavailable,
     record_source_replacement,
 )
+from relocant_media.services.venue_event_evidence import matches_venue_evidence, named_venue_sources
 from relocant_media.sources.registry import SourceConfig
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 
@@ -137,7 +140,7 @@ async def _collect(
             try:
                 result = await fetch_public_article(config, url, client)
             except Exception as error:
-                if is_source_unavailable(error):
+                if isinstance(error, TicketCardUnavailable) or is_source_unavailable(error):
                     return SourceUnavailableError(config.id)
                 raise
             if (not isinstance(result, CollectedArticle) or result.source_id != config.id
@@ -220,7 +223,7 @@ def refresh_gpt_evidence(
         parsed, profile, candidate, _ = validate_fallback_candidate(
             session, payload.request, raw_id, now=now or datetime.now(UTC),
         )
-        raw, _ = _require_unresolved(session, raw_id, now=now)
+        raw, source = _require_unresolved(session, raw_id, now=now)
         run = session.get(SchedulerRun, parsed.scheduler_run_id)
         assert run is not None
         origin_id = _refresh_origin_id(session, run, raw_id)
@@ -245,6 +248,17 @@ def refresh_gpt_evidence(
         if len({source.id for source, _ in planned}) != len(planned):
             raise FallbackValidationError("Нужен один документ от каждого источника")
         anchor = _candidate(raw)
+        venue_sources = named_venue_sources(raw, source)
+        published = (raw.published_at.astimezone(ZoneInfo(profile.timezone)).date()
+                     if raw.published_at is not None else None)
+
+    def matches(item: CollectedArticle) -> bool:
+        venue = venue_sources.get(item.source_id)
+        return same_event(anchor, _collected_candidate(item)) or bool(
+            venue is not None and published is not None
+            and matches_venue_evidence(raw, item, venue, published=published)
+        )
+
     # Внешнее подпроцессное объявление URL не становится доказательством до сбора.
     # Надёжная связь источников берётся из тех же правил, что и обычная редакционная пачка.
     collected = asyncio.run(_collect(planned))
@@ -257,7 +271,7 @@ def refresh_gpt_evidence(
         existing_articles = [item for item in collected[:len(existing)]
                              if isinstance(item, CollectedArticle)]
         if len(existing_articles) != len(existing) or any(
-            not same_event(anchor, _collected_candidate(item)) for item in existing_articles
+            not matches(item) for item in existing_articles
         ):
             raise FallbackValidationError(
                 "Собранный снимок исходных источников не совпадает с заданием",
@@ -265,7 +279,7 @@ def refresh_gpt_evidence(
             )
         verified_alternatives = [item for item in collected[len(existing):]
                                  if isinstance(item, CollectedArticle)
-                                 and same_event(anchor, _collected_candidate(item))]
+                                 and matches(item)]
         if alternatives and not verified_alternatives:
             raise FallbackValidationError(
                 "Новые источники не подтвердили то же событие", code=NO_MATCHING_REFRESH_SOURCE,

@@ -15,6 +15,8 @@ from relocant_media.collectors.beograd_article import match_beograd_article_url
 from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as TRAFFIC_SECRETARIAT_SOURCE
 from relocant_media.collectors.bgsaobracaj_notices import match_bgsaobracaj_notice
 from relocant_media.collectors.cukarica_news import ARTICLE_PATH
+from relocant_media.collectors.ticket_vision_events import STRATEGY as TICKET_VISION_STRATEGY
+from relocant_media.collectors.ticket_vision_events import ticket_event_url
 from relocant_media.collectors.venue_feed import _allowed
 from relocant_media.domain.flight_notices import city_carriers
 from relocant_media.sources.registry import SourceConfig
@@ -97,6 +99,10 @@ def source_for_url(url: str, sources: dict[str, SourceConfig]) -> str | None:
             return "cukarica_news"
         for key, source in sources.items():
             if source.source_type != "official_venue_events":
+                continue
+            if source.extraction.strategy == TICKET_VISION_STRATEGY:
+                if ticket_event_url(url):
+                    return key
                 continue
             try:
                 _allowed(url, source)

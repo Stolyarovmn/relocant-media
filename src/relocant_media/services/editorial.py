@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.publisher import Publisher
+from relocant_media.collectors.ticket_vision_events import SOURCE_ID as TICKET_VISION_SOURCE
+from relocant_media.collectors.ticket_vision_events import cited_ticket_urls
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.dedup import (
     DEFAULT_EVENT_WINDOW,
@@ -429,6 +431,8 @@ def _event_items(
                 Source.high_risk.is_(False),
                 RawItem.published_at.is_(None),
                 RawItem.ingested_at >= anchor.published_at - timedelta(days=60),
+                or_(Source.id != TICKET_VISION_SOURCE,
+                    RawItem.url.in_(cited_ticket_urls(anchor.body))),
             )
             .order_by(RawItem.ingested_at.desc(), RawItem.id.desc()).limit(61)
             .execution_options(populate_existing=True)

@@ -20,6 +20,8 @@ from relocant_media.collectors.official_guide import OfficialGuideCollector
 from relocant_media.collectors.page_snapshot import PageSnapshotCollector
 from relocant_media.collectors.srbija_gov_article import SrbijaGovArticleCollector
 from relocant_media.collectors.srbijavoz_news import SrbijavozNewsCollector
+from relocant_media.collectors.ticket_vision_events import STRATEGY as TICKET_VISION_STRATEGY
+from relocant_media.collectors.ticket_vision_events import TicketVisionEventCollector
 from relocant_media.collectors.tob_events import TobEventsCollector
 from relocant_media.collectors.venue_feed import VenueFeedCollector
 from relocant_media.collectors.welcome_serbia_guidance import WelcomeSerbiaGuidanceCollector
@@ -77,6 +79,8 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return BitefArtCafeEventsCollector(source, client)
     if strategy == "musicology_blog":
         return MusicologyBlogCollector(source, client)
+    if strategy == TICKET_VISION_STRATEGY:
+        return TicketVisionEventCollector(source, client)
     if strategy == "srbija_gov_article":
         return SrbijaGovArticleCollector(source, client)
     raise UnsupportedCollectorStrategyError(strategy)
