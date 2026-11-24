@@ -6,8 +6,8 @@ import {
 } from "./core.js?v=__MAP_REVISION__";
 import { calendarLink } from "./calendar.js?v=__MAP_REVISION__";
 import {
-  corridorCaps, heatCells, heatComposition, heatOverview, layerView, timelineBands, timelineInstant,
-  timelineLabel, timelineSteps,
+  corridorCaps, heatCells, heatComposition, heatOverview, keepsBoundaryInHeat, layerView,
+  timelineBands, timelineInstant, timelineLabel, timelineSteps,
 } from "./layer-views.js?v=__MAP_REVISION__";
 import { setupPlaces } from "./places.js?v=__MAP_REVISION__";
 import { loadSnapshot, snapshotNotice, snapshotRefreshDue } from "./snapshots.js?v=__MAP_REVISION__";
@@ -19,6 +19,7 @@ const searchResults = byId("address-results");
 const eventList = byId("event-list");
 const feedback = byId("feedback");
 const mapFrame = byId("map").parentElement;
+const heatLegend = byId("heat-legend");
 const layerButtons = [...byId("layer-filter").querySelectorAll("button")];
 const periodButtons = [...byId("incident-periods").querySelectorAll("button")];
 const timelineInput = byId("timeline-time");
@@ -644,6 +645,7 @@ function renderPointClusters() {
   const markers = [];
   const density = [];
   const densityLines = [];
+  let heatBoundaries = false;
   for (const item of state.mapItems) {
     const { incident, lines, areas, points, roadPaths, archived, now } = item;
     for (const path of roadPaths) {
@@ -654,13 +656,19 @@ function renderPointClusters() {
     const exactLines = aggregate ? lines.filter((line) => !line.boundary) : [];
     densityLines.push(...exactLines.map(({ coordinates }) => ({ coordinates, incident })));
     const markerLines = aggregate ? lines.filter((line) => line.boundary) : lines;
-    for (const point of pointsAtScale(points, markerLines, areas, zoom, project)) {
+    const markerAreas = aggregate ? areas.filter((area) => !keepsBoundaryInHeat(area)) : areas;
+    heatBoundaries ||= markerAreas.length < areas.length;
+    for (const point of pointsAtScale(points, markerLines, markerAreas, zoom, project)) {
       const target = aggregate && !point.approximate ? density : markers;
       target.push({ ...point, incident, archived, now });
     }
   }
   const cells = heatCells(density, project, densityLines);
-  byId("heat-legend").hidden = !cells.length;
+  heatLegend.hidden = !cells.length && !heatBoundaries;
+  heatLegend.textContent = [
+    ...(cells.length ? ["Круги — число объявлений, секторы — виды работ"] : []),
+    ...(heatBoundaries ? ["Заливка — граница района или посёлка"] : []),
+  ].join(" · ");
   for (const cell of cells) drawHeatCell(cell, zoom);
   for (const group of clusterMapPoints(markers, project, mobile.matches ? 49 : 43)) {
     if (group.length > 1) {
@@ -698,10 +706,10 @@ function renderVectors(overview, zoom) {
     const { incident, lines, areas, archived, now } = item;
     item.roadPaths = [];
     const selected = incident.id === state.selected;
-    if (overview && !selected) continue;
+    const boundariesOnly = overview && !selected;
     const color = mapColor(incident.kind);
     const road = incident.kind === "road";
-    for (const { coordinates, label, window, boundary, scope } of lines) {
+    for (const { coordinates, label, window, boundary, scope } of boundariesOnly ? [] : lines) {
       const expired = archived || !unexpired(window, now);
       const sidewalk = scope === "sidewalk";
       const style = road
@@ -719,12 +727,13 @@ function renderVectors(overview, zoom) {
       if (road && !boundary && !sidewalk) item.roadPaths.push(path);
     }
     for (const area of areas) {
+      if (boundariesOnly && !keepsBoundaryInHeat(area)) continue;
       const expired = archived || !unexpired(area.window, now);
       const fill = road ? selected ? .51 : .42 : area.scope === "settlement" ? .24 : selected ? .68 : .49;
       bindFeature(leaflet.polygon(area.rings, {
         color, fillColor: color, weight: selected ? 2.8 : 1.8,
         opacity: expired ? .50 : road ? .60 : .92,
-        fillOpacity: expired ? .12 : corridor ? fill * .64 : fill,
+        fillOpacity: expired ? .12 : boundariesOnly ? .18 : corridor ? fill * .64 : fill,
         className: road ? "outage-road" : `outage-${area.scope}`,
       }), state.eventLayer, incident, area.label, area.window);
     }

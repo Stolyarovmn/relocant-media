@@ -14,8 +14,8 @@ import {
 import { agendaVisit, setupPlaces } from "../web/newsroom/map/places.js";
 import { agendaFavorites } from "../web/newsroom/map/favorites.js";
 import {
-  corridorCaps, heatCells, heatComposition, heatOverview, layerView, timelineBands, timelineInstant,
-  timelineLabel, timelineSteps,
+  corridorCaps, heatCells, heatComposition, heatOverview, keepsBoundaryInHeat, layerView,
+  timelineBands, timelineInstant, timelineLabel, timelineSteps,
 } from "../web/newsroom/map/layer-views.js";
 import { loadSnapshot, snapshotRefreshDue } from "../web/newsroom/map/snapshots.js";
 
@@ -179,6 +179,12 @@ test("плотность считает объявления в ячейке и 
     { x: 38, y: 38, incidents: [water, power] },
     { x: 114, y: 38, incidents: [water] },
   ]);
+});
+
+test("на тепловой карте район сохраняет границу, а дома входят в плотность", () => {
+  assert.equal(keepsBoundaryInHeat({ scope: "settlement" }), true);
+  assert.equal(keepsBoundaryInHeat({ scope: "building" }), false);
+  assert.equal(keepsBoundaryInHeat({ scope: "road" }), false);
 });
 
 test("длинный участок считается в каждой пересечённой ячейке и только один раз в каждой", () => {

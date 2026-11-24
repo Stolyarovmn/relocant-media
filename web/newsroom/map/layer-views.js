@@ -48,6 +48,10 @@ export function heatOverview(view, zoom, preciseRoute) {
   return view === "heat" && zoom < 15 && !preciseRoute;
 }
 
+export function keepsBoundaryInHeat(area) {
+  return area.scope === "settlement";
+}
+
 // Leaflet's projected world pixels keep cell membership fixed across screen sizes at a given zoom.
 const HEAT_CELL_SIZE = 76;
 
