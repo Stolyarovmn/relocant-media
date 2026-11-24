@@ -165,6 +165,7 @@ def test_published_only_uses_identical_text_without_draft_calls(reviewed, fakes,
     assert not summary["full_comparable"]
     for name, stats in summary["bundles"].items():
         assert stats["call_count"] == 2 and stats["drafts_ready"] is None
+        assert stats["median_seconds_on_paired_reviews"] >= 0
         assert list(stats["by_role_and_model"]) == [f"review:{BUNDLES[name]['review']}"]
     markdown = model_trial.markdown(result)
     assert "Ревью опубликованных текстов" in markdown
@@ -432,6 +433,30 @@ def test_pair_needs_facts_and_utility_verdicts_from_both_bundles():
     assert model_trial._reviewed({"reviews": only_facts}) is False
     assert model_trial._reviewed({"reviews": {**only_facts, "utility": {"verdict": None}}}) \
         is False
+
+
+def test_matched_median_uses_only_the_same_completed_reviews():
+    def bundle(seconds, *, failed=False):
+        reviews = {role: {"verdict": "approve"} for role in ("facts", "utility")}
+        published = {"seconds": seconds, "double_approval": not failed, "reviews": reviews}
+        if failed:
+            published["error_type"] = "GeminiWorkerError"
+        return {"published": published, "full": {}, "seconds": seconds, "call_errors": int(failed),
+                "input_chars": 1, "output_chars": 1, "draft_status": "not_run"}
+
+    items = [
+        {"current": bundle(20), "candidate": bundle(25), "facts_verdicts_differ": False},
+        {"current": bundle(1, failed=True), "candidate": bundle(180),
+         "facts_verdicts_differ": False},
+        {"current": bundle(12), "candidate": bundle(200, failed=True),
+         "facts_verdicts_differ": False},
+    ]
+    summary = model_trial.summarize(items, BUNDLES, [], published_only=True)
+    assert summary["pairs_published_reviewed"] == 1
+    assert [row["median_seconds_on_paired_reviews"] for row in summary["bundles"].values()] == [
+        20, 25,
+    ]
+    assert [row["median_seconds_per_item"] for row in summary["bundles"].values()] == [12, 180]
 
 
 def test_longest_429_pause_is_reported_per_model_without_response_text(reviewed, fakes):

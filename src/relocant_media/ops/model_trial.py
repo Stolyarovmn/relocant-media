@@ -277,7 +277,9 @@ def trial_bundle(package: EditorialPackage, when: datetime, provider: Structured
         except Exception as error:
             result["draft_status"] = "error"
             result["draft_error_type"] = type(error).__name__
+    review_started = time.monotonic()
     result["published"] = _review(package, documents, when, provider)
+    result["published"]["seconds"] = round(time.monotonic() - review_started, 3)
     full: dict[str, Any] = {"double_approval": False, "reviews": {}}
     if (outcome is not None and outcome.status is PublicationStatus.READY
             and outcome.draft is not None):
@@ -331,7 +333,14 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
               stopped: bool = False, published_only: bool = False) -> dict[str, Any]:
     result: dict[str, Any] = {"items": len(items), "bundles": {},
                             "scope": "published_reviews" if published_only else "full_pipeline"}
-    for bundle in bundles:
+    names = tuple(bundles)
+    published_pairs = [item for item in items if all(
+        _reviewed(item[name]["published"]) for name in names
+    )]
+    timed_published_pairs = [item for item in published_pairs if all(
+        "seconds" in item[name]["published"] for name in names
+    )]
+    for bundle in names:
         rows = [item[bundle] for item in items]
         errors: dict[str, int] = {}
         for row in rows:
@@ -370,14 +379,15 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
             "call_error_share": (round(sum(1 for call in bundle_calls if "error_type" in call)
                                        / len(bundle_calls), 2) if bundle_calls else None),
             "median_seconds_per_item": _median([row["seconds"] for row in rows]),
+            "median_seconds_on_paired_reviews": _median([
+                item[bundle]["published"]["seconds"] for item in timed_published_pairs
+            ]),
             "median_input_chars_per_item": _median([row["input_chars"] for row in rows]),
             "median_output_chars_per_item": _median([row["output_chars"] for row in rows]),
             "by_role_and_model": by_model,
             "quota_429": _quota_429(bundle_calls),
         }
-    names = list(result["bundles"])
-    result["pairs_published_reviewed"] = sum(
-        1 for item in items if all(_reviewed(item[name]["published"]) for name in names))
+    result["pairs_published_reviewed"] = len(published_pairs)
     result["pairs_full_reviewed"] = None if published_only else sum(
         1 for item in items if all(_reviewed(item[name]["full"]) for name in names))
     result["facts_verdicts_differ"] = sum(1 for item in items if item["facts_verdicts_differ"])
@@ -457,13 +467,15 @@ def markdown(result: dict[str, Any]) -> str:
              f"Пар, где обе связки дошли до вердикта — {pairs}",
              f"Технически недоступных материалов — {summary['unavailable']}. Остановка из-за квоты "
              f"— {'да' if summary['stopped_for_quota'] else 'нет'}. Проба {verdict}.",
-             f"Пригодность к сравнению — {comparable}", ""]
+             f"Пригодность к сравнению — {comparable}",
+             "Парная медиана показывает время двух ревью одного опубликованного текста "
+             "на общем наборе с вердиктами обеих связок.", ""]
     columns = ["Связка", "Модели"]
     if not published_only:
         columns += ["Полная связка: оба ревью одобрили", "Черновик готов",
                     "Флаги фактов в новом черновике"]
-    columns += ["Ревью опубликованного: оба одобрили", "Ошибки вызовов", "Медиана, с",
-                "Медиана ввода, симв.", "Медиана вывода, симв."]
+    columns += ["Ревью опубликованного: оба одобрили", "Ошибки вызовов", "Медиана попыток, с",
+                "Медиана ревью на общих парах, с", "Медиана ввода, симв.", "Медиана вывода, симв."]
     lines += ["| " + " | ".join(columns) + " |", "|" + "|".join(["---"] * len(columns)) + "|"]
     for name, stats in summary["bundles"].items():
         models = result["models"][name]
@@ -472,10 +484,12 @@ def markdown(result: dict[str, Any]) -> str:
         full = "" if published_only else (
             f"{stats['full_double_approval']} | {stats['drafts_ready']} | "
             f"{stats['full_facts_flags']} | ")
+        paired = stats.get("median_seconds_on_paired_reviews")
         lines.append(
             f"| {name} | {labels} | {full}{stats['published_double_approval']} | "
             f"{stats['call_errors']} | "
-            f"{stats['median_seconds_per_item']} | {stats['median_input_chars_per_item']} | "
+            f"{stats['median_seconds_per_item']} | {'—' if paired is None else paired} | "
+            f"{stats['median_input_chars_per_item']} | "
             f"{stats['median_output_chars_per_item']} |")
     lines += ["", "| Связка | Роль и модель | Вызовы | Ошибки | Ввод, симв. | Вывод, симв. |",
               "|---|---|---|---|---|---|"]
