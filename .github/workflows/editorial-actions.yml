@@ -38,6 +38,10 @@ on:
         description: SHA256 of the private GPT result or evidence refresh request
         type: string
         required: false
+      fallback_retry_source_run:
+        description: Original Actions run ID for an automatic fallback retry
+        type: string
+        required: false
       fallback_cycle_id:
         description: Optional exact scheduler run ID for GPT fallback preview
         type: string
@@ -156,6 +160,9 @@ jobs:
                 vars.ACTIONS_EDITORIAL_ENABLED == 'true' &&
                 vars.ACTIONS_CUTOVER_CONFIRMED == 'true' }}
         run: python src/relocant_media/ops/editorial_start.py gate
+      - name: GPT fallback preflight receipt ${{ steps.start.outputs.retry_digest }}
+        if: steps.start.outputs.retry_digest != ''
+        run: echo 'GPT fallback paused before opening state'
       - name: Prepare storage-only SSH identity
         if: steps.start.outputs.status == 'ready'
         id: storage
