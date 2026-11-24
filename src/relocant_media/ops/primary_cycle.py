@@ -136,6 +136,8 @@ def run_cycle(
             collection = ingest()
             (output / "ingest.json").write_text(json.dumps(collection), encoding="utf-8")
             heartbeat["collection_failures"] = collection["failures"]
+            if collection_seconds := collection.get("collection_seconds"):
+                heartbeat["collection_seconds"] = collection_seconds
             if collection["failures"] and not allow_partial_ingest:
                 raise ValueError("source collection incomplete")
             next_stage("candidate_selection")

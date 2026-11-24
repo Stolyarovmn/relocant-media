@@ -29,6 +29,7 @@ from relocant_media.collectors.tls import source_ssl_context
 from relocant_media.domain.freshness import freshness_decision
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
 from relocant_media.ops import server_cycle as base
+from relocant_media.ops.collection_timing import measure_collection
 from relocant_media.services.primary_discovery import source_for_url
 from relocant_media.services.published_watch import evidence_changed, published_sources
 from relocant_media.services.submission_feedback import resolve_submission
@@ -211,20 +212,22 @@ async def collect_sources(
     submissions_only: bool = False,
 ) -> dict[str, Any]:
     now = datetime.now(UTC)
-    async with httpx.AsyncClient(
-        timeout=25, trust_env=False, verify=source_ssl_context(),
-    ) as client:
-        direct = await _collect_direct_tips(
-            engine,
-            client,
-            submissions_only=submissions_only,
-            now=now,
-        )
-        watch = (
-            {"checked": 0, "changed": 0, "failures": 0}
-            if submissions_only
-            else await _watch_published(engine, client, now=now)
-        )
+    collection_seconds: dict[str, float] = {}
+    with measure_collection(collection_seconds, "government_source"):
+        async with httpx.AsyncClient(
+            timeout=25, trust_env=False, verify=source_ssl_context(),
+        ) as client:
+            direct = await _collect_direct_tips(
+                engine,
+                client,
+                submissions_only=submissions_only,
+                now=now,
+            )
+            watch = (
+                {"checked": 0, "changed": 0, "failures": 0}
+                if submissions_only
+                else await _watch_published(engine, client, now=now)
+            )
 
     result = await _BASE_COLLECT_SOURCES(
         engine,
@@ -246,6 +249,7 @@ async def collect_sources(
     )
     result["srbija_gov_direct"] = {**direct, "linked_submissions": newly_linked}
     result["srbija_gov_watch"] = watch
+    result.setdefault("collection_seconds", {}).update(collection_seconds)
     return result
 
 

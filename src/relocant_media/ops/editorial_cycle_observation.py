@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from relocant_media.domain.quiet_hours import QUIET_END, QUIET_START, QUIET_ZONE
+from relocant_media.ops.collection_timing import COLLECTION_GROUPS
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
 
 _TOKEN = re.compile(r"[a-zA-Z0-9_.:-]{1,80}")
@@ -22,6 +23,16 @@ _PRIMARY_STAGES = ("collection", "candidate_selection", "batch_preselection", "m
 
 def _token(value: object) -> str | None:
     return value if isinstance(value, str) and _TOKEN.fullmatch(value) else None
+
+
+def _safe_durations(value: object, names: tuple[str, ...]) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        name: round(seconds, 3) for name in names
+        if isinstance(seconds := value.get(name), (int, float))
+        and not isinstance(seconds, bool) and 0 <= seconds <= 24 * 60 * 60
+    }
 
 
 def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
@@ -189,15 +200,12 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
             })
         batch = details.get("batch_preselection")
         waiting_for_gpt = isinstance(batch, dict) and batch.get("status") == "gpt_waiting"
-        stages = details.get("stage_seconds")
-        stage_seconds = ({} if not isinstance(stages, dict) else {
-            name: value for name in _PRIMARY_STAGES
-            if isinstance(value := stages.get(name), (int, float))
-            and not isinstance(value, bool) and 0 <= value <= 24 * 60 * 60
-        })
+        stage_seconds = _safe_durations(details.get("stage_seconds"), _PRIMARY_STAGES)
+        collection_seconds = _safe_durations(details.get("collection_seconds"), COLLECTION_GROUPS)
         return {"scheduler_run_id": cycle_id, "status": _token(status),
                 "gpt_batch_waiting": waiting_for_gpt,
                 **({"stage_seconds": stage_seconds} if stage_seconds else {}),
+                **({"collection_seconds": collection_seconds} if collection_seconds else {}),
                 "materials": materials, "errors": [
                     {"raw_item_id": error["raw_item_id"], "type": _token(error.get("error_type")),
                      "site": _token(error.get("error_site"))}

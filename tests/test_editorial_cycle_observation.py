@@ -107,7 +107,12 @@ def test_cycle_observation_exposes_only_bounded_stage_measurements(tmp_path):
                 "collection": 12.7, "material_review": 0, "candidate_selection": -2,
                 "batch_preselection": True, "remaining_scan": 100_000,
                 "PRIVATE source": 3,
+            }, "collection_seconds": {
+                "city_pages": 10.12345, "reader_links": None, "channel_previews": True,
+                "transport_map": -1, "news_feeds": float("inf"), "media": "6",
+                "https://example.org/private": 14,
             }}), start,
         ))
     report = observe_cycle(snapshot, start)
     assert report["stage_seconds"] == {"collection": 12.7, "material_review": 0}
+    assert report["collection_seconds"] == {"city_pages": 10.123}
