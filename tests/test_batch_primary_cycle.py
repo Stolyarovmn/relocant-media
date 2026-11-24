@@ -27,10 +27,7 @@ class Provider:
     def generate_json(self, **kwargs):
         self.calls.append(kwargs)
         candidates = json.loads(kwargs["prompt"])["candidates"]
-        return json.dumps({"ranking": [
-            {"raw_item_id": row["raw_item_id"], "reason": "Интересная городская история"}
-            for row in reversed(candidates)
-        ]})
+        return json.dumps({"ranking": [row["candidate_number"] for row in reversed(candidates)]})
 
 
 def raw_ids(engine):
@@ -170,7 +167,9 @@ def test_gemini_failure_checkpoints_whole_public_pool_for_gpt(queue, tmp_path):
     )
     assert len(provider.calls) == 1
     prompt = json.loads(provider.calls[0]["prompt"])
-    submitted_ids = [row["raw_item_id"] for row in prompt["candidates"]]
+    with Session(engine) as session:
+        ids_by_url = dict(session.execute(select(RawItem.url, RawItem.id)).all())
+    submitted_ids = [ids_by_url[row["evidence"]["url"]] for row in prompt["candidates"]]
     assert len(submitted_ids) == 10
     assert report["status"] == "PRIMARY_PARTIAL" and report["fallback_required"] is True
     assert report["window_complete"] is False

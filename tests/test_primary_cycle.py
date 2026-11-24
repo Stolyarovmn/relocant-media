@@ -92,17 +92,15 @@ def test_belgrade_road_notice_reaches_review_despite_national_volume_and_batch_r
         session.add(closure)
         session.commit()
         official_id, closure_id, city_event_id = official.id, closure.id, city_event.id
+        closure_url, city_event_url = closure.url, city_event.url
 
     class LowerLocalPriority:
         def generate_json(self, **request):
             rows = json.loads(request["prompt"])["candidates"]
-            assert rows[0]["raw_item_id"] == closure_id
-            city_row = next(row for row in rows if row["raw_item_id"] == city_event_id)
+            assert rows[0]["evidence"]["url"] == closure_url
+            city_row = next(row for row in rows if row["evidence"]["url"] == city_event_url)
             ranked = [row for row in reversed(rows) if row != city_row] + [city_row]
-            return json.dumps({"ranking": [
-                {"raw_item_id": row["raw_item_id"], "reason": "Порядок модели"}
-                for row in ranked
-            ]})
+            return json.dumps({"ranking": [row["candidate_number"] for row in ranked]})
 
     report = run_cycle(
         engine, city="belgrade", output=tmp_path / "local-road", now=NOW,
