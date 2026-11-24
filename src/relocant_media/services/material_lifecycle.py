@@ -529,7 +529,8 @@ def _new_place_for_date_hold(
         return None
     place, _ = official
     return resolve_saved_event_place(
-        session, _document(place), [place.id], profile=load_city_profile(source.city),
+        session, _document(place), [item.id for item, _ in members],
+        profile=load_city_profile(source.city),
     )
 
 
