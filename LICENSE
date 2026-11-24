@@ -1,33 +1,43 @@
-Copyright (c) 2026 the owner of the GitHub account Stolyarovmn. All rights reserved.
+Copyright (c) 2026 the owner of the GitHub account Stolyarovmn (Relocant Media).
+All rights reserved.
 
-This repository is published for transparency only. It is NOT open source.
+1. Original materials. The original source code, prompts, editorial rules,
+configuration and texts in this repository that were created for Relocant
+Media are protected by copyright. They are published for viewing only; this
+is not an open-source license. No permission is granted to copy, modify,
+distribute, deploy or run them, or to use them to build a competing service,
+except with prior written permission of the copyright holder. This notice does
+not limit the rights that applicable law or the GitHub Terms of Service grant
+to users, including viewing and forking on GitHub.
 
-No license is granted to copy, modify, merge, publish, distribute, sublicense,
-sell, deploy or run this software, its prompts, configuration, source lists,
-map code, data feeds or any other contents, in whole or in part, for any
-purpose, except:
+2. Third-party materials. Third-party materials, data and dependencies keep
+their own licenses and attribution requirements, and this notice does not
+claim rights in them. This includes map data derived from OpenStreetMap
+(© OpenStreetMap contributors, ODbL, https://www.openstreetmap.org/copyright),
+other open address and geographic data described in cities/*/map/README.md,
+and third-party libraries.
 
-  - viewing the repository on GitHub and forking it within GitHub, as required
-    by the GitHub Terms of Service, without any further use;
-  - use with prior written permission of the copyright holder.
-
-Any other use, including creating a competing service, channel, bot or map
-from this code or data, is prohibited.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+THE ORIGINAL MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
 
 ---
 
-Авторское право (c) 2026 владелец аккаунта GitHub Stolyarovmn. Все права защищены.
+Авторское право (c) 2026 владелец аккаунта GitHub Stolyarovmn (Relocant Media).
+Все права защищены.
 
-Репозиторий открыт только для просмотра. Это НЕ открытое программное обеспечение.
+1. Оригинальные материалы. Исходный код, промпты, редакционные правила,
+настройки и тексты, созданные для Relocant Media, охраняются авторским правом.
+Они открыты только для просмотра; это не открытая лицензия. Без письменного
+разрешения правообладателя их нельзя копировать, изменять, распространять,
+разворачивать и запускать, а также использовать для создания конкурирующего
+сервиса. Это уведомление не ограничивает права, которые прямо дают применимое
+законодательство и условия GitHub, включая просмотр и форк на GitHub.
 
-Без письменного разрешения правообладателя запрещено копировать, изменять,
-публиковать, распространять, продавать, разворачивать и запускать этот код,
-промпты, настройки, списки источников, код карты, ленты данных и любое другое
-содержимое репозитория, полностью или частично. Разрешены только просмотр
-и форк внутри GitHub в объёме, который требуют условия GitHub, без иного
-использования. Создание конкурирующего сервиса, канала, бота или карты
-на основе этого кода или данных запрещено.
+2. Сторонние материалы. Сторонние материалы, данные и зависимости остаются
+под своими лицензиями и требованиями атрибуции; это уведомление не заявляет
+прав на них. Сюда относятся картографические данные, производные
+от OpenStreetMap (© участники OpenStreetMap, ODbL,
+https://www.openstreetmap.org/copyright), другие открытые адресные
+и географические данные, описанные в cities/*/map/README.md, и сторонние
+библиотеки.
 
-ПРОГРАММА ПРЕДОСТАВЛЯЕТСЯ «КАК ЕСТЬ», БЕЗ КАКИХ-ЛИБО ГАРАНТИЙ.
+ОРИГИНАЛЬНЫЕ МАТЕРИАЛЫ ПРЕДОСТАВЛЯЮТСЯ «КАК ЕСТЬ», БЕЗ КАКИХ-ЛИБО ГАРАНТИЙ.
