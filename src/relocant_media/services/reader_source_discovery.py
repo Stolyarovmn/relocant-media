@@ -16,10 +16,12 @@ from relocant_media.domain.event_facts import (
 )
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.primary_discovery import folded, topic_words
+from relocant_media.services.reader_message_parts import combine_reader_parts
 from relocant_media.services.reader_publication import POLICY, material_fingerprint
 from relocant_media.storage.models import RawItem, Submission
 
 DISCOVERY_FIELD = "reader_source_discovery"
+SOURCE_REVISION_FIELD = "reader_source_revision_sha256"
 RECHECK_INTERVAL = timedelta(hours=6)
 CHECK_WINDOW = timedelta(hours=48)
 REVIEW_CANDIDATE_LIMIT = 3
@@ -45,16 +47,78 @@ def _dates_in(value: str, year: int) -> frozenset[str]:
     return event_dates(value, year) | event_dates(folded(value), year)
 
 
-def confirmed_source_signal(payload: dict[str, Any]) -> bool:
+def _confirmed_source_choice(payload: dict[str, Any]) -> dict[str, Any] | None:
     publication = payload.get("reader_publication")
-    return bool(
+    if (
         isinstance(publication, dict)
         and publication.get("version") == POLICY["version"]
         and publication.get("stage") == "confirmed"
         and publication.get("ownership") == "source"
         and publication.get("permission") == "private"
-        and publication.get("material_sha256") == material_fingerprint(payload)
-    )
+    ):
+        return publication
+    return None
+
+
+def _verified_legacy_followups(
+    payload: dict[str, Any], publication: dict[str, Any], revision: str,
+) -> bool:
+    if SOURCE_REVISION_FIELD in payload:
+        return False
+    evidence = publication.get("confirmed")
+    confirmed_id = evidence.get("message_id") if isinstance(evidence, dict) else None
+    parts = payload.get("reader_parts")
+    notices = payload.get("reader_notices")
+    if (type(confirmed_id) is not int or confirmed_id <= 0 or not isinstance(parts, dict)
+            or not 1 <= len(parts) <= 32 or not isinstance(notices, dict)
+            or any(not isinstance(key, str) or not re.fullmatch(r"[1-9][0-9]{0,15}", key)
+                   for key in parts)):
+        return False
+    before = {key: part for key, part in parts.items() if int(key) < confirmed_id}
+    after = parts.keys() - before.keys()
+    if not before or not after:
+        return False
+    for key in after:
+        notice = notices.get(f"added:{key}")
+        if (int(key) <= confirmed_id or not isinstance(notice, dict)
+                or notice.get("status") != "sent"):
+            return False
+    try:
+        text, media = combine_reader_parts(before)
+        original = {**payload, "reader_parts": before, "text": text, "attachments": media}
+        if material_fingerprint(original) != publication.get("material_sha256"):
+            return False
+        text, media = combine_reader_parts(parts)
+        return material_fingerprint({**payload, "text": text, "attachments": media}) == revision
+    except (AttributeError, KeyError, TypeError):
+        return False
+
+
+def confirmed_source_signal(payload: dict[str, Any]) -> bool:
+    publication = _confirmed_source_choice(payload)
+    if publication is None:
+        return False
+    revision = material_fingerprint(payload)
+    return revision in (
+        publication.get("material_sha256"), payload.get(SOURCE_REVISION_FIELD),
+    ) or _verified_legacy_followups(payload, publication, revision)
+
+
+def record_private_source_revision(row: Submission) -> None:
+    """Keep author follow-ups searchable within the same private source request."""
+    if row.kind != "news_tip" or row.status != "reader_review":
+        return
+    publication = _confirmed_source_choice(row.payload)
+    if publication is None:
+        return
+    revision = material_fingerprint(row.payload)
+    if revision == row.payload.get(SOURCE_REVISION_FIELD):
+        return
+    if revision == publication.get("material_sha256") and SOURCE_REVISION_FIELD not in row.payload:
+        return
+    payload = {**row.payload, SOURCE_REVISION_FIELD: revision}
+    payload.pop(DISCOVERY_FIELD, None)
+    row.payload = payload
 
 
 def pending_source_discovery(

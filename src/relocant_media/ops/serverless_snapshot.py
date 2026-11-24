@@ -14,11 +14,11 @@ from sqlalchemy.orm import Session
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.reader_intake import (
     DRAFT_STATES,
-    NEW_CASE_LABEL,
     OPEN_STATES,
     ROUTES,
     WELCOME_MENU,
 )
+from relocant_media.services.reader_message_parts import NEW_CASE_LABEL
 from relocant_media.services.submission_reference import submission_reference
 from relocant_media.storage.models import Submission, TelegramConversation, TelegramUpdateReceipt
 

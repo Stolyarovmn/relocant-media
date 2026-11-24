@@ -13,7 +13,7 @@ from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
 from relocant_media.services.private_intake import process_private_updates
 from relocant_media.services.reader_intake import DRAFT_STATES, ROUTE_LABELS, ROUTES, _identity
 from relocant_media.services.reader_publication import POLICY
-from relocant_media.services.reader_source_discovery import DISCOVERY_FIELD
+from relocant_media.services.reader_source_discovery import DISCOVERY_FIELD, SOURCE_REVISION_FIELD
 from relocant_media.services.submission_reference import (
     PUBLIC_REFERENCE_PATTERN,
     submission_reference,
@@ -35,6 +35,7 @@ def _import_draft(session: Session, entry: dict[str, Any], update_id: int) -> No
     payload.pop("reader_media_review", None)
     payload.pop("public_source_review", None)
     payload.pop(DISCOVERY_FIELD, None)
+    payload.pop(SOURCE_REVISION_FIELD, None)
     reference = draft["reference"]
     user_id = draft["telegram_user_id"]
     status = draft["status"]

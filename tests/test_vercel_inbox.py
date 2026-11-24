@@ -149,6 +149,8 @@ async def test_new_draft_matches_reference_instead_of_local_sqlite_id(engine):
 async def test_publication_choices_survive_import_and_cloud_cannot_approve_media(engine):
     from test_reader_publication import material
 
+    from relocant_media.services.reader_source_discovery import SOURCE_REVISION_FIELD
+
     event = envelope()
     event["draft"].update(kind="news_tip", status="new")
     event["draft"]["payload"].update(material())
@@ -156,6 +158,7 @@ async def test_publication_choices_survive_import_and_cloud_cannot_approve_media
     event["draft"]["payload"]["reader_media_review"] = {
         "decision": "approved", "owner_user_id": OWNER,
     }
+    event["draft"]["payload"][SOURCE_REVISION_FIELD] = "f" * 64
     event["notice"] = {"key": "accepted", "status": "sent", "telegram_message_id": 201}
     await import_inbox(engine, OwnerBot([]), [event], owner_user_id=OWNER, owner_chat_id=OWNER_CHAT)
     with Session(engine) as session:
@@ -163,6 +166,7 @@ async def test_publication_choices_survive_import_and_cloud_cannot_approve_media
         assert row.status == "reader_review"
         assert row.payload["reader_publication"] == material()["reader_publication"]
         assert "reader_media_review" not in row.payload
+        assert SOURCE_REVISION_FIELD not in row.payload
 
 
 @pytest.mark.asyncio
