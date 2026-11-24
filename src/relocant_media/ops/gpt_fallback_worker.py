@@ -43,7 +43,11 @@ from relocant_media.services.gpt_fallback import (
     validate_fallback_candidate,
     validate_fallback_package,
 )
-from relocant_media.services.gpt_refresh import RefreshInput, refresh_gpt_evidence
+from relocant_media.services.gpt_refresh import (
+    NO_MATCHING_REFRESH_SOURCE,
+    RefreshInput,
+    refresh_gpt_evidence,
+)
 from relocant_media.services.material_lifecycle import (
     PUBLISHED_TRANSPORT_DUPLICATE,
     LifecycleBlockedError,
@@ -666,10 +670,18 @@ def main() -> None:
                             canonical_json(continuation), encoding="utf-8",
                         )
     except Exception as error:
-        report = {"status": "PRIMARY_FAILED", "mode": "subscription_gpt_fallback",
-                  "error_type": _error_type(error), "model_calls": 0,
-                  "processing_errors": [_error_entry(stage, error)],
-                  "fallback_required": True}
+        if (stage == "refresh" and isinstance(error, FallbackValidationError)
+                and error.code == NO_MATCHING_REFRESH_SOURCE):
+            report = {
+                "status": "PRIMARY_PARTIAL", "mode": "subscription_gpt_fallback",
+                "model_calls": 0, "fallback_required": True, "unresolved": 1, "sent_count": 0,
+                "deferred_reasons": {FallbackDeferredReason.SOURCE_CONFIRMATION: 1},
+            }
+        else:
+            report = {"status": "PRIMARY_FAILED", "mode": "subscription_gpt_fallback",
+                      "error_type": _error_type(error), "model_calls": 0,
+                      "processing_errors": [_error_entry(stage, error)],
+                      "fallback_required": True}
     finally:
         if engine is not None:
             engine.dispose()
