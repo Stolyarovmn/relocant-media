@@ -12,6 +12,8 @@ from bs4 import BeautifulSoup, Tag
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.collectors.kolarac_program import saved_linked_program
+from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
+from relocant_media.collectors.linked_tour_map import parse_tour_place
 from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, CityEditorialProfile
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.event_program import festival_program, registered_event_venues
@@ -343,6 +345,26 @@ def _bitef_facts(
         return None
 
 
+def _linked_tour_facts(document: EvidenceDocument, source_html: str) -> dict[str, Any] | None:
+    try:
+        place = parse_tour_place(source_html, document.url)
+    except ValueError:
+        return None
+    if (place.title, place.body, None) != (document.title, document.body, document.published_at):
+        return None
+    return {
+        "event_name": place.title,
+        "venue": {
+            "name": place.venue, "address": place.address,
+            "latitude": place.latitude, "longitude": place.longitude,
+        },
+        "starts_at": place.start.isoformat(), "ends_at": None,
+        "time_basis": "source_linked_tour_program_start",
+        "schedule_source_url": document.url, "coordinate_source_url": document.url,
+        "venue_source_url": document.url,
+    }
+
+
 def extract_event_adapter(
     document: EvidenceDocument, source_html: str, *, profile: CityEditorialProfile,
 ) -> dict[str, Any] | None:
@@ -354,6 +376,8 @@ def extract_event_adapter(
         return _kolarac_facts(document, source_html, profile)
     if document.source_id == "venue_bitefartcafe":
         return _bitef_facts(document, source_html, profile)
+    if document.source_id == TOUR_MAP_SOURCE:
+        return _linked_tour_facts(document, source_html)
     if document.source_id == "cukarica_news":
         from relocant_media.collectors.cukarica_news import (
             CukaricaExtractionError,

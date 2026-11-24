@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, PublicationStatus
 from relocant_media.ai.pipeline import EditorialPipeline
 from relocant_media.bot.publisher import Publisher
+from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
 from relocant_media.collectors.ticket_vision_events import SOURCE_ID as TICKET_VISION_SOURCE
 from relocant_media.collectors.ticket_vision_events import cited_ticket_urls
 from relocant_media.domain.city_profile import load_city_profile
@@ -442,6 +443,12 @@ def _event_items(
                 (item, policy) for item, policy in possible
                 if matches_venue_evidence(anchor, item, registered[policy.id], published=published)
             ]
+            # Two cards for the reviewed pair are one source of event location.
+            # Prefer the organizer-linked card if there is no other competing venue evidence.
+            ticket_sources = {TICKET_VISION_SOURCE, TOUR_MAP_SOURCE}
+            if (len(matches) == 2 and {policy.id for _, policy in matches} == ticket_sources
+                    and matches[0][0].body.splitlines()[:2] == matches[1][0].body.splitlines()[:2]):
+                matches = [pair for pair in matches if pair[1].id == TOUR_MAP_SOURCE]
             if len(matches) == 1:
                 item, policy = matches[0]
                 total = sum(len(raw.title) + len(raw.body) for raw, _ in (*members, matches[0]))

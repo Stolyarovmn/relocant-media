@@ -14,6 +14,8 @@ from relocant_media.collectors.cukarica_news import CukaricaNewsCollector
 from relocant_media.collectors.eds_belgrade_outages import EdsBelgradeOutagesCollector
 from relocant_media.collectors.euprava_service import EupravaServiceCollector
 from relocant_media.collectors.health_duty import HealthDutyCollector
+from relocant_media.collectors.linked_tour_map import STRATEGY as TOUR_MAP_STRATEGY
+from relocant_media.collectors.linked_tour_map import LinkedTourMapCollector
 from relocant_media.collectors.musicology_blog import MusicologyBlogCollector
 from relocant_media.collectors.natural_history_news import NaturalHistoryNewsCollector
 from relocant_media.collectors.official_guide import OfficialGuideCollector
@@ -81,6 +83,8 @@ def build_collector(source: SourceConfig, client: httpx.AsyncClient) -> Collecto
         return MusicologyBlogCollector(source, client)
     if strategy == TICKET_VISION_STRATEGY:
         return TicketVisionEventCollector(source, client)
+    if strategy == TOUR_MAP_STRATEGY:
+        return LinkedTourMapCollector(source, client)
     if strategy == "srbija_gov_article":
         return SrbijaGovArticleCollector(source, client)
     raise UnsupportedCollectorStrategyError(strategy)

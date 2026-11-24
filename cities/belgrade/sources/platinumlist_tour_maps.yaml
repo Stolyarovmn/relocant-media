@@ -1,0 +1,20 @@
+id: platinumlist_tour_maps
+name: Platinumlist Serbia
+publisher: Platinumlist
+ownership: official
+url: https://serbia.platinumlist.net/
+language: en
+source_type: official_venue_events
+trust: 0.9
+check_every: 3h
+categories: [events]
+extraction:
+  strategy: platinumlist_tour_map
+  status: active
+  approved_hosts: [serbia.platinumlist.net]
+policy:
+  auto_publish: false
+  high_risk: false
+verification:
+  checked_at: '2026-11-24'
+  note: Площадка и точка карты берутся с точной билетной карточки по ссылке из афиши организатора. Время выступления не подменяет дату публикации.

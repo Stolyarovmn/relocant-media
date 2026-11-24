@@ -6,6 +6,9 @@ from datetime import date
 from urllib.parse import urlsplit
 
 from relocant_media.collectors.base import RawItem as CollectedArticle
+from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
+from relocant_media.collectors.linked_tour_map import STRATEGY as TOUR_MAP_STRATEGY
+from relocant_media.collectors.linked_tour_map import performers, supported_tour_map_url
 from relocant_media.collectors.ticket_vision_events import SOURCE_ID as TICKET_VISION_SOURCE
 from relocant_media.collectors.ticket_vision_events import STRATEGY as TICKET_VISION_STRATEGY
 from relocant_media.collectors.ticket_vision_events import cited_ticket_urls
@@ -17,7 +20,9 @@ from relocant_media.services.primary_discovery import folded, topic_words
 from relocant_media.sources.registry import SourceConfig, load_source_file
 from relocant_media.storage.models import RawItem, Source
 
-_STRUCTURED = frozenset({"bitefartcafe_events", "yugoslavia_programs", TICKET_VISION_STRATEGY})
+_STRUCTURED = frozenset({
+    "bitefartcafe_events", "yugoslavia_programs", TICKET_VISION_STRATEGY, TOUR_MAP_STRATEGY,
+})
 _LEAD_LIMIT = 2500
 _CHANGED = re.compile(
     r"\b(?:otkaz|odloz|pomer|cancel|postpon|reschedul|otmen|perenos)\w*"
@@ -57,6 +62,12 @@ def named_venue_sources(item: RawItem, source: Source) -> dict[str, SourceConfig
                 and config.extraction.strategy == TICKET_VISION_STRATEGY
                 and is_undated_venue_source(config)):
             result[config.id] = config
+    tour_path = city / "sources" / f"{TOUR_MAP_SOURCE}.yaml"
+    if tour_path.is_file() and len(cited_ticket_urls(item.body)) == 1:
+        config = load_source_file(tour_path)
+        if (config.id == TOUR_MAP_SOURCE and config.extraction.strategy == TOUR_MAP_STRATEGY
+                and is_undated_venue_source(config)):
+            result[config.id] = config
     for source_id, names in aliases.items():
         if not _named_venue(lead, names):
             continue
@@ -78,6 +89,8 @@ def matches_venue_evidence(
         return False
     if config.extraction.strategy == TICKET_VISION_STRATEGY:
         return _matches_cited_ticket(media, venue, published=published)
+    if config.extraction.strategy == TOUR_MAP_STRATEGY:
+        return _matches_cited_tour_map(media, venue, published=published)
     media_title, venue_title = folded(media.title), folded(venue.title)
     shared_title = (topic_words(media_title) & topic_words(venue_title)) - topic_words(config.name)
     if len(shared_title) < 2 or not copies_source_text(media_title, (venue_title,), run_words=3):
@@ -127,7 +140,38 @@ def _matches_cited_ticket(
         names.extend(f"{first[:-1]}{ending} {rest}" for ending in ("e", "i", "u", "om"))
     if not _named_venue(lead, names):
         return False
-    dates = event_dates(ticket.body, published.year)
+    return _matches_cited_date(lead, ticket.body, published=published)
+
+
+def _matches_cited_tour_map(
+    media: RawItem | CollectedArticle, ticket: RawItem | CollectedArticle, *, published: date,
+) -> bool:
+    if len(cited_ticket_urls(media.body)) != 1 or not supported_tour_map_url(ticket.url):
+        return False
+    artists = performers(folded(ticket.title))
+    lead = folded(media.title + "\n" + media.body[:_LEAD_LIMIT])
+    if not artists or not artists <= topic_words(lead):
+        return False
+    venue = re.search(r"^Mesto: (.+), Beograd\.$", ticket.body, re.M)
+    if venue is None:
+        return False
+    name = folded(venue[1])
+    # "Hangar Luka Beograd" is also written "u Hangaru Luke Beograd" in Serbian.
+    # Preserve the whole venue name even when the head noun and its modifier are declined.
+    parts = name.split()
+    pattern = r"\s+".join(
+        re.escape(part[:-1]) + "[aeiu]" if index < len(parts) - 1 and part.endswith("a")
+        else re.escape(part) + "u?" if index == 0 and not part.endswith("a")
+        else re.escape(part)
+        for index, part in enumerate(parts)
+    )
+    return bool(re.search(r"(?<!\w)" + pattern + r"(?!\w)", lead)) and _matches_cited_date(
+        lead, ticket.body, published=published,
+    )
+
+
+def _matches_cited_date(lead: str, body: str, *, published: date) -> bool:
+    dates = event_dates(body, published.year)
     if len(dates) != 1 or _CHANGED.search(lead):
         return False
     article_day, event_day = published.isoformat(), next(iter(dates))
