@@ -212,6 +212,7 @@ class Incident(PublicModel):
     ends_on: date | None = None
     published_at: datetime | None = None
     archived: bool = False
+    repair_site: Literal[True] | None = None
     points: Annotated[tuple[Pin, ...], Field(max_length=_MAX_HOUSES)] = ()
     lines: Annotated[tuple[Line, ...], Field(max_length=16)] = ()
     areas: Annotated[tuple[Area, ...], Field(max_length=_MAX_AREAS)] = ()
@@ -246,6 +247,11 @@ class Incident(PublicModel):
             raise ValueError("map publication date requires a timezone")
         if self.kind != "road" and any(line.scope is not None for line in self.lines):
             raise ValueError("road line scopes belong to the road layer")
+        if self.repair_site and (self.kind != "water" or self.ends_at is None
+                                 or self.ends_at.tzinfo is None or self.starts_at is not None
+                                 or not self.points or any(point.address for point in self.points)
+                                 or self.areas or self.lines or self.addresses or self.windows):
+            raise ValueError("water repair sites require isolated points and an explicit deadline")
         return self
 
 
@@ -567,6 +573,17 @@ def _water(
     )
 
 
+def _water_repair(
+    document: EvidenceDocument, title: str | None, repairs: dict[str, Any],
+) -> Incident:
+    return Incident(
+        id=map_event_id(document.url), kind="water", source_url=document.url,
+        title=" ".join((title or "Аварийные работы на водопроводе").split())[:260],
+        published_at=document.published_at, ends_at=datetime.fromisoformat(repairs["ends_at"]),
+        points=tuple(Pin.model_validate(point) for point in repairs["points"]), repair_site=True,
+    )
+
+
 def _transport_card_title(original: str) -> str:
     text = " ".join(original.split())
     if (stop := _TRANSPORT_STOP.match(text)) is not None:
@@ -809,11 +826,13 @@ def export_map(
                         if not transport_notice_suspended(document.body) else None)
         else:
             html, geography = _source_html(session, item)
-            point = build_utility_point(document, html, geography)
+            point = build_utility_point(document, html, geography, areas=areas)
             schedule = extract_power_scopes(document)
             water_scopes = extract_water_outage_scopes(document)
             if schedule:
                 incident = _power(document, schedule, point, title, areas)
+            elif point is not None and (repairs := point.get("repair_sites")) is not None:
+                incident = _water_repair(document, title, repairs)
             elif (water_scopes or (point and point["mode"] == UTILITY_MAP_MODE)
                   or reported_water_places(document) is not None):
                 incident = _water(document, point, title, streets or {}, areas, water_scopes)

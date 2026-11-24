@@ -393,6 +393,9 @@ function eventCard(incident, now) {
     card.append(make("p", "event-scope", incident.reportedScope),
       make("p", "event-scope", "Точки обозначают населённые пункты. Точные границы не указаны."));
   }
+  if (incident.repairSite) {
+    card.append(make("p", "event-scope", "На карте отмечены места ремонта. Точные границы отключения неизвестны."));
+  }
   if (roadOrientation(incident)) {
     card.append(make("p", "event-scope", "Точные границы участка не подтверждены."));
   }

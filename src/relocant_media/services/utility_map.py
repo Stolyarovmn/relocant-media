@@ -3,16 +3,20 @@
 import hashlib
 import re
 from datetime import UTC
+from functools import lru_cache
 from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.services.exhibition_map_point import _coordinate
+from relocant_media.services.local_outage_geometry import AreaIndex, Coordinate, load_area_index
 from relocant_media.services.transport_map_image import render_transport_map
 from relocant_media.services.utility_scope import extract_power_addresses, extract_power_scopes
 from relocant_media.services.water_outage_scope import (
+    daily_water_repairs,
     extract_official_water_map,
     extract_water_outage_scopes,
     extract_water_segments,
@@ -25,6 +29,7 @@ ADDRESS_LIMIT = 8
 SEGMENT_LIMIT = 3
 OSM_ATTRIBUTION = "https://www.openstreetmap.org/copyright"
 _OSM_OBJECT = re.compile(r"https://www\.openstreetmap\.org/(?:node|way)/[1-9][0-9]*\Z")
+_BELGRADE_AREAS = Path("cities/belgrade/map/outage-areas.json.gz")
 
 
 def utility_scope(document: EvidenceDocument) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -87,14 +92,52 @@ def _map_geography(
     return {"points": points, "lines": lines}
 
 
+@lru_cache(maxsize=1)
+def _repair_area_index(path: Path) -> AreaIndex:
+    return load_area_index(path)
+
+
+def _verified_repair_sites(
+    document: EvidenceDocument, areas: AreaIndex | None,
+) -> dict[str, Any] | None:
+    parsed = daily_water_repairs(document)
+    if parsed is None:
+        return None
+    ends_at, addresses = parsed
+    if areas is None:
+        areas = _repair_area_index(_BELGRADE_AREAS)
+    sites: dict[Coordinate, dict[str, float | str | None]] = {}
+    for address in addresses:
+        street = address.street
+        municipality = address.municipality
+        if address.settlement:
+            municipality = f"{municipality}, naselje {address.settlement}"
+        # Город относит эту улицу к Остружнице, RGZ — к BEOGRAD (ČUKARICA).
+        if (municipality.casefold() == "čukarica, naselje ostružnica"
+                and street.casefold() in {"3. janura", "3. januara", "trećeg januara"}):
+            street = "Trećeg januara"
+            municipality = address.municipality
+        found = areas.address(street, address.number, municipality)
+        if found is None:
+            continue
+        place = address.settlement or address.municipality
+        label = f"Место ремонта: {street}, {address.number} · {place}"
+        sites.setdefault(found.point, {
+            "lat": found.point[0], "lon": found.point[1], "label": label,
+            "coordinate_source": "rgz" if found.osm_url is None else None,
+        })
+    return {"ends_at": ends_at.isoformat(), "points": list(sites.values())} if sites else None
+
+
 def build_utility_point(
-    document: EvidenceDocument, html: str, geography: Any = None,
+    document: EvidenceDocument, html: str, geography: Any = None, *, areas: AreaIndex | None = None,
 ) -> dict[str, Any] | None:
     addresses, segments = utility_scope(document)
     official = extract_official_water_map(document, html)
+    repairs = _verified_repair_sites(document, areas)
     if (not addresses and not segments and official is None
             and not extract_power_scopes(document) and not extract_water_outage_scopes(document)
-            and reported_water_places(document) is None):
+            and reported_water_places(document) is None and repairs is None):
         return None
     verified = _map_geography(geography, addresses, segments)
     point = {
@@ -103,6 +146,8 @@ def build_utility_point(
         "addresses": addresses, "segments": segments, "official_map_url": official,
         "geography": verified,
     }
+    if repairs is not None:
+        point["repair_sites"] = repairs
     # A single legible scheme per post. Other locations stay accessible through map links.
     if verified["lines"] and official is None:
         try:
