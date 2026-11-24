@@ -1,5 +1,6 @@
 """Добавить кнопки карты к выбранным опубликованным постам из проверенного снимка."""
 
+import hashlib
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -9,11 +10,14 @@ import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.package import EditorialPackage, canonical_json
 from relocant_media.bot.api import TelegramBotAPI
-from relocant_media.domain.map_links import map_event_id, map_event_url
+from relocant_media.domain.map_links import map_event_id, map_event_url, map_repair_url
 from relocant_media.ops.events_export import EventsFeed, export_events, read_events_feed
-from relocant_media.ops.map_export import MapFeed, read_map_feed
+from relocant_media.ops.map_export import Incident, MapFeed, read_map_feed
 from relocant_media.services.channel_delivery import APPROVED_CHANNEL_ID
+from relocant_media.services.utility_map import build_utility_point
+from relocant_media.services.water_outage_scope import daily_water_repairs
 from relocant_media.storage.models import EditorialRun, Post, RawItem, Submission
 
 _FEED_URL = "https://stolyarovmn.github.io/relocant-media/map/incidents.json"
@@ -50,6 +54,36 @@ def _owner_confirmed(session: Session, post: Post, run: EditorialRun, message_id
             and receipts[0].payload.get("package_sha256") == package)
 
 
+def _reviewed_repair_url(
+    post: Post, run: EditorialRun, raw: RawItem, event: Incident, telegram_app: str,
+) -> str | None:
+    payload = canonical_json(run.outcome.get("_package"))
+    if hashlib.sha256(payload.encode()).hexdigest() != run.outcome.get("_package_sha256"):
+        raise ValueError("confirmed repair evidence is missing")
+    package = EditorialPackage.model_validate_json(payload)
+    draft = package.outcome.draft
+    if (package.raw_item_id != raw.id or package.city != post.city
+            or package.source_id != raw.source_id or package.article_id != raw.external_id
+            or package.evidence.url != raw.url or package.evidence.source_id != raw.source_id
+            or (post.title, post.body) != (draft.title, draft.body)):
+        raise ValueError("published post does not match the confirmed repair evidence")
+    parsed = daily_water_repairs(package.evidence)
+    if parsed is None or parsed[0] != event.ends_at:
+        raise ValueError("confirmed repair time differs from the public map")
+    if len(parsed[1]) != 1:
+        return None
+    point = build_utility_point(package.evidence, "")
+    sites = (point or {}).get("repair_sites", {}).get("points", [])
+    matches = [
+        pin for site in sites for pin in event.points
+        if (pin.lat, pin.lon, pin.label) == (site["lat"], site["lon"], site["label"])
+    ]
+    if len(sites) != 1 or len(matches) != 1:
+        raise ValueError("confirmed repair address is missing or ambiguous in the public map")
+    target = matches[0]
+    return map_repair_url(raw.url, target.lat, target.lon, telegram_app=telegram_app)
+
+
 def plan(
     session: Session, targets: Mapping[int, str], feed: MapFeed, telegram_app: str,
 ) -> dict[int, str]:
@@ -79,6 +113,8 @@ def plan(
             raise ValueError("published post, delivery receipt and map event must match")
         url = map_event_url(raw.url, telegram_app=telegram_app)
         old_url = receipt.get("map_url") if isinstance(receipt, dict) else None
+        if event.repair_site and old_url != url:
+            url = _reviewed_repair_url(post, run, raw, event, telegram_app) or url
         if not url.startswith("https://t.me/") or old_url not in (None, url):
             raise ValueError("configured Telegram link or historical markup differs")
         buttons[message_id] = url

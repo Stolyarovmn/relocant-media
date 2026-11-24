@@ -1,6 +1,7 @@
 """Стабильные ссылки на объявления в публичной карте Белграда."""
 
 import hashlib
+import math
 import re
 from datetime import timedelta
 
@@ -19,6 +20,12 @@ _MAP_LINK_PREFIXES = (
     *(f"{app}?startapp=places_" for app in _TELEGRAM_APPS),
 )
 _EVENT_ID = re.compile(r"event_[0-9a-f]{20}")
+_REPAIR_KEY = r"(-?[0-9]{1,9})_(-?[0-9]{1,9})"
+_REPAIR_ROUTES = (
+    re.compile(re.escape(f"{_MAP_PAGE}?event=") + _EVENT_ID.pattern + r"&repair=" + _REPAIR_KEY),
+    *(re.compile(re.escape(f"{app}?startapp=repair_") + _EVENT_ID.pattern + "_" + _REPAIR_KEY)
+      for app in _TELEGRAM_APPS),
+)
 
 
 def map_event_id(source_url: str) -> str:
@@ -45,10 +52,27 @@ def map_event_url(
     return f"{_MAP_PAGE}?{mode}event={event}"
 
 
+def map_repair_url(
+    source_url: str, latitude: float, longitude: float, *, telegram_app: str | None = None,
+) -> str:
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise ValueError("invalid repair coordinates")
+    # Keep the coordinate key identical to Math.round on the Mini App.
+    lat, lon = (math.floor(value * 1_000_000 + 0.5) for value in (latitude, longitude))
+    event = map_event_id(source_url)
+    if telegram_app in _TELEGRAM_APPS:
+        return f"{telegram_app}?startapp=repair_{event}_{lat}_{lon}"
+    return f"{_MAP_PAGE}?event={event}&repair={lat}_{lon}"
+
+
 def is_map_event_url(url: str) -> bool:
     if any(url.startswith(prefix) and _EVENT_ID.fullmatch(url[len(prefix):])
            for prefix in _MAP_LINK_PREFIXES):
         return True
+    for route in _REPAIR_ROUTES:
+        if match := route.fullmatch(url):
+            lat, lon = map(int, match.groups())
+            return abs(lat) <= 90_000_000 and abs(lon) <= 180_000_000
     prefixes = (f"{_MAP_PAGE}?events=", *(f"{app}?startapp=digest_" for app in _TELEGRAM_APPS))
     for prefix in prefixes:
         if url.startswith(prefix):
