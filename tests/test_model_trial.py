@@ -43,6 +43,28 @@ SKIPPED = EditorialOutcome(status=PublicationStatus.SKIPPED, reason="not_local",
                           confidence=1, rationale="x"), confidence=1)
 
 
+def test_invalid_review_counts_only_schema_codes_and_role(reviewed):
+    session, run = reviewed
+    _sent(session, run)
+
+    class InvalidReviewProvider(FakeProvider):
+        def generate_json(self, **kwargs):
+            return '{"verdict":"approve","score":80,"private_field_name":"private_value"}'
+
+    result = model_trial.run_trial(
+        session.get_bind().url.database, BUNDLES, InvalidReviewProvider, limit=1,
+        published_only=True,
+    )
+    summary = result["summary"]
+    assert summary["pairs_published_reviewed"] == 0
+    for bundle in ("current", "candidate"):
+        report = summary["bundles"][bundle]
+        assert report["error_types"] == {"StructuredOutputError": 1}
+        assert report["review_schema_errors"] == {"facts.extra_forbidden": 1, "facts.missing": 1}
+        assert report["call_errors"] == 0
+    assert "private_" not in json.dumps(summary)
+
+
 @pytest.fixture
 def fakes(monkeypatch):
     calls = []

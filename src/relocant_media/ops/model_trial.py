@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -33,7 +34,7 @@ from relocant_media.ai.model_roles import RoleRoutedProvider, role_for, role_mod
 from relocant_media.ai.models import EditorialOutcome, PublicationStatus
 from relocant_media.ai.package import EditorialPackage, PackageOutcome
 from relocant_media.ai.pipeline import EditorialPipeline
-from relocant_media.ai.provider import StructuredAIProvider
+from relocant_media.ai.provider import StructuredAIProvider, StructuredOutputError
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.storage.models import EditorialRun, Post, Submission
 
@@ -46,6 +47,12 @@ WAIT_BUDGET_SECONDS = 600.0
 MAX_PAUSE_SECONDS = 120.0
 INVALID_ERROR_SHARE = 0.5
 _QUOTA_PHASES = frozenset({"http_error_429", "quota_cooldown"})
+REVIEW_ROLES = ("facts", "utility")
+_SCHEMA_ERROR_TYPES = frozenset({
+    "json_invalid", "model_type", "missing", "extra_forbidden", "literal_error", "list_type",
+    "tuple_type", "int_type", "float_type", "string_type", "bool_type",
+    "greater_than_equal", "less_than_equal", "string_too_short", "too_short", "too_long",
+})
 
 
 @dataclass
@@ -230,15 +237,27 @@ def _placeholders(package: EditorialPackage) -> EditorialPackage:
 
 
 def _review(package: EditorialPackage, documents: tuple[Any, ...], when: datetime,
-            provider: StructuredAIProvider) -> dict[str, Any]:
+            provider: StructuredAIProvider, log: CallLog) -> dict[str, Any]:
     """Both independent reviews; a review failure is recorded and counts as not approved."""
     audit: list[dict[str, Any]] = []
     result: dict[str, Any] = {}
+    first = len(log.calls)
     try:
         reviewed_package(_placeholders(package), provider, lambda: documents, now=when,
                          audit=audit.append)
     except Exception as error:
         result["error_type"] = type(error).__name__
+        if (isinstance(error, StructuredOutputError)
+                and isinstance(error.__cause__, ValidationError) and len(log.calls) > first):
+            role = log.calls[-1]["task"].removeprefix("independent_")
+            if role in REVIEW_ROLES:
+                types = {
+                    entry["type"] if entry["type"] in _SCHEMA_ERROR_TYPES else "other"
+                    for entry in error.__cause__.errors(
+                        include_input=False, include_context=False, include_url=False,
+                    )
+                }
+                result["schema_error_types"] = [f"{role}.{kind}" for kind in sorted(types)]
     result["reviews"] = _verdicts(audit)
     result["double_approval"] = ("error_type" not in result and bool(audit) and all(
         entry.get("verdict") == "approve" for entry in audit))
@@ -278,13 +297,13 @@ def trial_bundle(package: EditorialPackage, when: datetime, provider: Structured
             result["draft_status"] = "error"
             result["draft_error_type"] = type(error).__name__
     review_started = time.monotonic()
-    result["published"] = _review(package, documents, when, provider)
+    result["published"] = _review(package, documents, when, provider, log)
     result["published"]["seconds"] = round(time.monotonic() - review_started, 3)
     full: dict[str, Any] = {"double_approval": False, "reviews": {}}
     if (outcome is not None and outcome.status is PublicationStatus.READY
             and outcome.draft is not None):
         try:
-            full = _review(_with_new_draft(package, outcome), documents, when, provider)
+            full = _review(_with_new_draft(package, outcome), documents, when, provider, log)
         except Exception as error:
             full["error_type"] = type(error).__name__
     result["full"] = full
@@ -343,11 +362,15 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
     for bundle in names:
         rows = [item[bundle] for item in items]
         errors: dict[str, int] = {}
+        schema_errors: dict[str, int] = {}
         for row in rows:
             for key in (row.get("draft_error_type"), row["published"].get("error_type"),
                         row["full"].get("error_type")):
                 if key:
                     errors[key] = errors.get(key, 0) + 1
+            for review in (row["published"], row["full"]):
+                for key in review.get("schema_error_types", ()):
+                    schema_errors[key] = schema_errors.get(key, 0) + 1
         by_model: dict[str, dict[str, int]] = {}
         phases: dict[str, int] = {}
         bundle_calls = [call for call in calls if call["bundle"] == bundle]
@@ -372,6 +395,7 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
             "published_facts_flags": sum(_facts_flags(row["published"]) for row in rows),
             "call_errors": sum(row["call_errors"] for row in rows),
             "error_types": errors,
+            "review_schema_errors": schema_errors,
             "error_phases": phases,
             "retries": sum(1 for call in bundle_calls if call.get("retry")),
             "call_count": len(bundle_calls),
@@ -401,9 +425,6 @@ def summarize(items: list[dict[str, Any]], bundles: Iterable[str],
     result["full_comparable"] = usable and not published_only and result["pairs_full_reviewed"] > 0
     result["valid"] = result["published_comparable"] or result["full_comparable"]
     return result
-
-
-REVIEW_ROLES = ("facts", "utility")
 
 
 def _reviewed(review: dict[str, Any]) -> bool:
