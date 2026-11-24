@@ -148,7 +148,7 @@ async def deliver_reviewed(
             raise DeliveryBlockedError("title presentation does not match channel mode")
         if reason := event_map_review_reason(
             package.presentation, package.outcome.ranking.category, post.title, post.body,
-            current_delivery=True,
+            current_delivery=True, city=city,
         ):
             raise DeliveryBlockedError(reason)
         package_sha256 = hashlib.sha256(

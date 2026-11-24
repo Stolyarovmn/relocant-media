@@ -333,7 +333,7 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
     from relocant_media.domain.event_map_policy import event_map_review_reason
 
     map_reason = event_map_review_reason(
-        package.presentation, outcome.ranking.category, draft.title, draft.body,
+        package.presentation, outcome.ranking.category, draft.title, draft.body, city=package.city,
     )
     if map_reason is not None and status == PublicationStatus.READY:
         status, reason = PublicationStatus.HUMAN_REVIEW, map_reason

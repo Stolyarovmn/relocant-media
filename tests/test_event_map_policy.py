@@ -48,3 +48,28 @@ def test_historical_hashes_remain_compatible_but_pending_delivery_is_checked():
 ])
 def test_story_or_result_does_not_require_invented_visitor_place(category, title, body):
     assert event_map_review_reason(presentation(), category, title, body) is None
+
+
+@pytest.mark.parametrize("delivery", [False, True])
+def test_away_match_broadcast_does_not_need_a_local_map(delivery):
+    assert event_map_review_reason(
+        presentation(), "sport", "Где смотреть матч Литва — Сербия",
+        "Сербия проведёт выездной матч в Клайпеде.\n\nТрансляцию покажут на RTS 2.",
+        city="belgrade", current_delivery=delivery,
+    ) is None
+
+
+@pytest.mark.parametrize("title,body", [
+    ("Матч в Белграде начнётся в 19:00", "Телетрансляция на RTS 2."),
+    ("Италия проведёт выездной матч в Белграде", "Игра пройдёт в субботу. Прямой эфир на RTS 2."),
+    ("Италия сыграет в гостях",
+     "Игра пройдёт в субботу.\n\nНачало матча в Белграде в 19:00. Трансляция на RTS 2."),
+    ("Публичный просмотр выездного матча Сербии", "Прямая трансляция на большом экране."),
+    ("Сербия сыграет в гостях", "Трансляцию покажут на RTS 2. Посмотреть вместе можно в баре."),
+    ("Сербия сыграет в гостях", "Трансляция на большом экране.\n\nГде: Клуб навијача."),
+    ("Игра начнётся в 19:00", "Место ещё не объявили. Телетрансляция на RTS 2."),
+    ("Матч начнётся в 19:00", "Игру покажут по телевидению.\n\nВ прошлый раз играли в гостях."),
+])
+def test_broadcast_does_not_remove_map_check_for_local_or_unconfirmed_events(title, body):
+    assert event_map_review_reason(presentation(), "sport", title, body, city="belgrade") == (
+        "event_place_requires_verification")

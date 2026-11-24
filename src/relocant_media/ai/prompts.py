@@ -78,5 +78,8 @@ they make a dense notice easier to scan. For a confirmed outage throughout a set
 neighborhood, give its name and coverage once and omit individual houses within it. A list
 of addresses, streets or an administrative heading alone is never evidence of full coverage.
 Mention individual houses for targeted outages and preserve any hamlet or area qualifier.
+For a sports broadcast, say it is an away match when the verified claims support this. Keep
+the match start, the broadcast start, and their time zones distinct. Mention a local screening
+or meeting place only when the evidence confirms that readers can attend it.
 """
 DRAFT_SYSTEM = DRAFT_BASE_SYSTEM + CHANNEL_DRAFT_STYLE
