@@ -12,6 +12,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from relocant_media.domain.event_map_policy import event_map_review_reason
+from relocant_media.domain.map_links import is_map_event_url
 from relocant_media.domain.quiet_hours import QUIET_END, QUIET_START, QUIET_ZONE
 from relocant_media.ops.collection_timing import COLLECTION_GROUPS
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
@@ -35,6 +37,15 @@ def _safe_durations(value: object, names: tuple[str, ...]) -> dict[str, float]:
     }
 
 
+def _confirmed_map_button(raw: str, message_id: int) -> bool:
+    receipt = json.loads(raw).get("_rich_delivery")
+    if not isinstance(receipt, dict):
+        return False
+    url = receipt.get("map_url")
+    return (receipt.get("state") == "sent" and receipt.get("message_ids") == [message_id]
+            and isinstance(url, str) and is_map_event_url(url))
+
+
 def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
     """Аудит календарного дня: только публичные номера, счётчики и коды причин.
 
@@ -54,7 +65,8 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
     uri = snapshot.resolve(strict=True).as_uri() + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True)) as db:
         rows = db.execute(
-            """SELECT post.telegram_message_id, post.category, editorial_run.outcome
+            """SELECT post.telegram_message_id, post.category, editorial_run.outcome,
+                      post.title, post.body
                FROM post JOIN editorial_run ON editorial_run.post_id = post.id
                WHERE post.city = 'belgrade' AND editorial_run.delivery_status = 'sent'
                  AND post.telegram_message_id IS NOT NULL
@@ -62,12 +74,15 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
                  AND julianday(post.published_at) <= julianday(?)
                ORDER BY post.published_at, post.id""", bounds,
         ).fetchall()
-        unconfirmed = []
-        for message_id, category, raw in rows:
-            outcome = json.loads(raw)
-            receipt = outcome.get("_rich_delivery") or {}
-            if category in {"events", "transport", "utilities"} and not receipt.get("map_url"):
-                unconfirmed.append(message_id)
+        map_posts: dict[int, tuple[str, bool]] = {}
+        for message_id, category, raw, title, body in rows:
+            if category in {"transport", "utilities"} or event_map_review_reason(
+                None, category, title, body, current_delivery=True, city="belgrade",
+            ) is not None:
+                _, already_confirmed = map_posts.get(message_id, (category, False))
+                map_posts[message_id] = (
+                    category, already_confirmed or _confirmed_map_button(raw, message_id),
+                )
         decisions = db.execute(
             """SELECT json_extract(editorial_run.outcome, '$.status'),
                       json_extract(editorial_run.outcome, '$.reason'), COUNT(*)
@@ -121,11 +136,26 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
                GROUP BY 1, 2, 3, 4 ORDER BY 5 DESC LIMIT 30""",
             ((now - timedelta(days=30)).astimezone(UTC).isoformat(),),
         ).fetchall()
+    unconfirmed = [message_id for message_id, (_, confirmed) in map_posts.items() if not confirmed]
+    confirmed_count = len(map_posts) - len(unconfirmed)
+    by_category: dict[str, dict[str, int]] = {}
+    for category, confirmed in map_posts.values():
+        counts = by_category.setdefault(category, {"posts": 0, "confirmed_at_send": 0})
+        counts["posts"] += 1
+        counts["confirmed_at_send"] += int(confirmed)
     return {
         "local_date": local.date().isoformat(), "timezone": QUIET_ZONE.key,
         "standalone_published_count": len(rows),
         "published_message_ids": [row[0] for row in rows],
         "map_button_delivery_unconfirmed": unconfirmed,
+        "map_button_coverage": {
+            "posts": len(map_posts),
+            "confirmed_at_send": confirmed_count,
+            "unconfirmed": len(unconfirmed),
+            "confirmed_percent": round(100 * confirmed_count / len(map_posts), 1)
+            if map_posts else None,
+            "by_category": by_category,
+        },
         "morning_hold": {
             "materials": len(held),
             "published_message_ids": sorted({

@@ -61,7 +61,7 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
     snapshot = tmp_path / "snapshot.sqlite3"
     with sqlite3.connect(snapshot) as db:
         db.executescript("""
-            CREATE TABLE post(id, city, telegram_message_id, category, published_at);
+            CREATE TABLE post(id, city, telegram_message_id, category, published_at, title, body);
             CREATE TABLE source(id, city);
             CREATE TABLE raw_item(id, source_id);
             CREATE TABLE editorial_run(post_id, raw_item_id, delivery_status, outcome, created_at);
@@ -81,15 +81,32 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
             db.execute("INSERT INTO submission VALUES (?, 'news_tip', ?, ?, ?)",
                        (ident, json.dumps(payload), status, "2026-11-17T08:00:00+00:00"))
         # Полночь Белграда = 23:00 UTC накануне; вчерашний пост не входит.
-        for number, published, category, outcome in [
-            (125, "2026-11-16T22:59:00+00:00", "events", {}),
-            (126, "2026-11-16T23:01:00+00:00", "transport", {}),
+        map_url = "https://t.me/relocant_media_belgrade_bot?startapp=places_event_0123456789abcdef0123"
+        for number, published, category, title, body, outcome in [
+            (125, "2026-11-16T22:59:00+00:00", "events", "Выставка", "", {}),
+            (126, "2026-11-16T23:01:00+00:00", "transport", "Перекрытие", "", {}),
             (128, "2026-11-17T10:36:00+00:00", "events",
-             {"_rich_delivery": {"map_url": "https://t.me/bot?startapp=places_example"}}),
-            (130, "2026-11-18T00:00:00+00:00", "events", {}),
+             "Концерт", "Площадка: городской зал.", {"_rich_delivery": {
+                 "map_url": map_url, "state": "sent", "message_ids": [128],
+             }}),
+            (130, "2026-11-18T00:00:00+00:00", "events", "Концерт", "", {}),
+            (131, "2026-11-17T11:37:00+00:00", "events",
+             "Как подключиться к ярмарке", "Участвовать можно онлайн.", {}),
+            (132, "2026-11-17T12:38:00+00:00", "culture",
+             "Выставка", "Где: городской музей.", {"_rich_delivery": {
+                 "map_url": map_url, "state": "sent", "message_ids": [128],
+             }}),
+            (133, "2026-11-17T13:39:00+00:00", "utilities",
+             "Отключение воды", "", {"_rich_delivery": {
+                 "map_url": "https://example.org/unrelated", "state": "sent", "message_ids": [133],
+             }}),
+            (134, "2026-11-17T14:40:00+00:00", "transport",
+             "Изменение движения", "", {"_rich_delivery": {
+                 "map_url": map_url, "state": "uncertain", "message_ids": [134],
+             }}),
         ]:
-            db.execute("INSERT INTO post VALUES (?, 'belgrade', ?, ?, ?)",
-                       (number, number, category, published))
+            db.execute("INSERT INTO post VALUES (?, 'belgrade', ?, ?, ?, ?, ?)",
+                       (number, number, category, published, title, body))
             db.execute("INSERT INTO raw_item VALUES (?, 'a')", (number,))
             db.execute("INSERT INTO editorial_run VALUES (?, ?, 'sent', ?, ?)",
                        (number, number, json.dumps(outcome), published))
@@ -124,9 +141,20 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
             }), date, city))
     report = observe_day(snapshot, datetime(2026, 11, 17, 21, tzinfo=UTC))
     assert report["local_date"] == "2026-11-17"
-    assert report["standalone_published_count"] == 2
-    assert report["published_message_ids"] == [126, 128]
-    assert report["map_button_delivery_unconfirmed"] == [126]
+    assert report["standalone_published_count"] == 6
+    assert report["published_message_ids"] == [126, 128, 131, 132, 133, 134]
+    assert report["map_button_delivery_unconfirmed"] == [126, 132, 133, 134]
+    assert report["map_button_coverage"] == {
+        "posts": 5, "confirmed_at_send": 1, "unconfirmed": 4, "confirmed_percent": 20.0,
+        "by_category": {
+            "transport": {"posts": 2, "confirmed_at_send": 0},
+            "events": {"posts": 1, "confirmed_at_send": 1},
+            "culture": {"posts": 1, "confirmed_at_send": 0},
+            "utilities": {"posts": 1, "confirmed_at_send": 0},
+        },
+    }
+    assert observe_day(snapshot, datetime(2026, 11, 16, 2, tzinfo=UTC))[
+        "map_button_coverage"]["confirmed_percent"] is None
     assert report["gpt_deferred_count"] == 6
     assert report["morning_hold"] == {
         "materials": 3, "published_message_ids": [128], "deadline_exceeded": 1,
