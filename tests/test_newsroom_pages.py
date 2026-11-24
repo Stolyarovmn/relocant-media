@@ -34,11 +34,43 @@ def test_pages_deploy_requires_current_code_after_acquiring_its_slot(workflow, s
     path = ROOT / ".github/workflows" / workflow
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     job = data["jobs"]["deploy"]
-    guard, deploy = job["steps"]
+    guard, deploy, *_cloudflare = job["steps"]
     assert guard["env"]["EXPECTED_SHA"] == sha
     assert "git/ref/heads/main" in guard["run"]
     assert deploy["if"] == "steps.current.outputs.deploy == 'true'"
     assert (job.get("concurrency") or data["concurrency"])["group"] == "newsroom-pages"
+
+
+@pytest.mark.parametrize("workflow,sha", [
+    ("newsroom-pages.yml", "${{ needs.build.outputs.revision }}"),
+    ("editorial-actions.yml", "${{ github.sha }}"),
+])
+def test_cloudflare_copy_follows_the_same_guarded_pages_artifact(workflow, sha):
+    path = ROOT / ".github/workflows" / workflow
+    job = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]["deploy"]
+    steps = job["steps"]
+    check, download, upload = steps[2:]
+    assert job["env"]["EXPECTED_SHA"] == sha
+    assert check["if"] == "steps.current.outputs.deploy == 'true'"
+    guarded = "steps.current.outputs.deploy == 'true' && steps.cloudflare.outputs.ready == 'true'"
+    assert download["if"] == guarded and upload["if"] == guarded
+    assert download["with"]["name"] == steps[1]["with"]["artifact_name"]
+    # The token reaches only the two steps that need it, never the main-ref guard.
+    assert "CLOUDFLARE_API_TOKEN" not in job["env"]
+    assert "CLOUDFLARE_API_TOKEN" not in steps[0].get("env", {})
+    assert upload["env"]["CLOUDFLARE_API_TOKEN"] == "${{ secrets.CLOUDFLARE_API_TOKEN }}"
+    assert int(job["env"]["CLOUDFLARE_MAX_FILE_BYTES"]) == 25 * 1024 * 1024
+    assert '-size +"$CLOUDFLARE_MAX_FILE_BYTES"c' in upload["run"]
+    assert job["env"]["WRANGLER_VERSION"].count(".") == 2
+    assert '"wrangler@$WRANGLER_VERSION" pages deploy' in upload["run"]
+
+
+def test_largest_public_file_fits_cloudflare_pages_limit(tmp_path: Path) -> None:
+    from relocant_media.ops.pages_assets import copy_assets
+
+    copy_assets(ROOT, tmp_path)
+    largest = max(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file())
+    assert largest <= 25 * 1024 * 1024
 
 
 def test_catalog_separates_cities_and_unknown_runtime() -> None:
