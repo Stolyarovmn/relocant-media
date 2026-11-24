@@ -27,6 +27,7 @@ from relocant_media.ai.package import (
 from relocant_media.collectors.base import RawItem as CollectedRawItem
 from relocant_media.collectors.linked_tour_map import ORGANIZER_INDEX
 from relocant_media.collectors.linked_tour_map import SOURCE_ID as TOUR_MAP_SOURCE
+from relocant_media.collectors.linked_tour_map import parse_tour_place
 from relocant_media.collectors.ticket_vision_events import TicketCardUnavailable, parse_ticket_event
 from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.domain.editorial_products import EditorialPresentation
@@ -258,6 +259,96 @@ def _refresh_exchange(request: dict, raw_id: int, urls: list[str]):
             "raw_item_id": raw_id, "urls": urls,
         },
     })
+
+
+@pytest.mark.parametrize(
+    "protected", [None, "owner", "delivery", "invalid_hash", "changed", "spent", "expired"],
+)
+def test_new_verified_place_reissues_the_unspent_fallback_after_an_absolute_date_hold(
+    fallback_session, protected,
+):
+    session, raw, cycle = fallback_session
+    registry = gpt_fallback._registry()
+    sync_source(session, "belgrade", registry[TOUR_ARTICLE.source_id])
+    sync_source(session, "belgrade", registry[TOUR_MAP_SOURCE])
+    raw.source_id, raw.url = TOUR_ARTICLE.source_id, TOUR_ARTICLE.url
+    raw.title, raw.body = TOUR_ARTICLE.title, TOUR_ARTICLE.body
+    raw_id = raw.id
+    session.flush()
+    assert before_attempt(session, raw_id, now=NOW)
+    after_error(session, raw_id, "GeminiWorkerError", now=NOW)
+    second = NOW + timedelta(minutes=5)
+    assert before_attempt(session, raw_id, now=second)
+    after_error(session, raw_id, "GeminiWorkerError", now=second)
+    early = gpt_fallback.build_request(session, now=second, scheduler_run_id=cycle.id)
+    assert early is not None
+    value = package_for_request(early, manual_category="events")
+    draft = value.outcome.draft.model_copy(update={"title": "Завтра выступят Kreator и Overkill"})
+    value = value.model_copy(update={"outcome": value.outcome.model_copy(update={"draft": draft})})
+    payload = value.model_dump(mode="json")
+    digest = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
+    post = Post(city="belgrade", category="events", status="human_review",
+                title=draft.title, body=draft.body, confidence=Decimal("0.85"))
+    session.add(post)
+    session.flush()
+    post_id = post.id
+    session.add(EditorialRun(
+        raw_item_id=raw_id, post_id=post_id, delivery_status="pending",
+        outcome={"status": "human_review", "reason": "draft_requires_absolute_event_date",
+                 "_package": payload, "_package_sha256": digest},
+        evidence={"documents": early["candidates"][0]["documents"]},
+    ))
+    session.flush()
+    late = NOW + timedelta(minutes=45)
+    blocked = lifecycle_state(session, raw_id, now=late)
+    assert blocked["reason"] == "fallback_deadline_exceeded"
+    assert sweep_materials(session, city="belgrade", now=late, raw_ids={raw_id},
+                           reissue_event_fallback=True).fallback_ids == ()
+    place = parse_tour_place(TOUR_HTML, TOUR_LINK.map_ticket)
+    capture_collected_batch(session, [CollectedRawItem(
+        TOUR_MAP_SOURCE, "107365", TOUR_LINK.map_ticket, place.title, place.body,
+        None, source_html=TOUR_HTML,
+    )])
+    stored = session.get(EditorialRun, raw_id)
+    if protected == "owner":
+        session.add(Submission(
+            kind="owner_editorial_review", status="cancelled",
+            payload={"raw_item_id": raw_id},
+        ))
+    if protected == "delivery":
+        stored.staging_message_id = 17
+    if protected == "invalid_hash":
+        stored.outcome = {**stored.outcome, "_package_sha256": "0" * 64}
+    if protected == "changed":
+        raw.body += "\nIzmenjena vest."
+    if protected == "spent":
+        record = session.scalar(select(SchedulerRun).where(
+            SchedulerRun.task_type == "material_lifecycle",
+            SchedulerRun.details["raw_item_id"].as_integer() == raw_id,
+        ))
+        record.details = {**record.details, "fallback_attempts": 1}
+    if protected == "expired":
+        late = datetime.fromisoformat(blocked["deadline_at"])
+    session.flush()
+    sweep = sweep_materials(session, city="belgrade", now=late, raw_ids={raw_id},
+                            reissue_event_fallback=True)
+    if protected:
+        assert sweep.fallback_ids == ()
+        assert session.get(EditorialRun, raw_id) is not None
+        return
+    assert sweep.fallback_ids == (raw_id,)
+    state = lifecycle_state(session, raw_id, now=late)
+    assert state["deadline_at"] == blocked["deadline_at"]
+    assert state["attempts"] == 2 and state["fallback_attempts"] == 0
+    archived, = state["attempt_records"]
+    assert archived["post_id"] == post_id and archived["outcome"]["_package_sha256"] == digest
+    assert session.get(Post, post_id).status == "blocked"
+    assert session.get(EditorialRun, raw_id) is None
+    renewed = gpt_fallback.build_request(session, now=late, scheduler_run_id=cycle.id)
+    assert renewed["candidates"][0]["presentation_by_rubric"]["weekend"]["event_place"]
+    with pytest.raises(gpt_fallback.FallbackValidationError, match="раньше нового окна"):
+        gpt_fallback.validate_fallback_candidate(session, early, raw_id, now=late)
+    gpt_fallback.validate_fallback_candidate(session, renewed, raw_id, now=late)
 
 
 def test_refresh_recollects_live_evidence_and_leaves_the_story_unresolved(

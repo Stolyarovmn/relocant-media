@@ -24,7 +24,7 @@ from relocant_media.collectors.bgsaobracaj_notices import SOURCE_ID as SECRETARI
 from relocant_media.collectors.bgsaobracaj_notices import match_bgsaobracaj_notice
 from relocant_media.domain.city_profile import DEFAULT_CITIES_ROOT, load_city_profile
 from relocant_media.domain.flight_notices import FLIGHT_REVIEW_REASON
-from relocant_media.domain.freshness import FreshnessDecision, evidence_freshness
+from relocant_media.domain.freshness import FreshnessDecision, draft_date_reason, evidence_freshness
 from relocant_media.domain.policy import (
     AUTO_PUBLISH_CATEGORIES,
     HIGH_RISK_CATEGORIES,
@@ -476,10 +476,67 @@ def _reopen_unexpired_road_work(
     session.delete(run)
 
 
+def _new_place_for_date_hold(
+    session: Session, raw: RawItem, source: Source, run: EditorialRun, post: Post,
+) -> dict[str, Any] | None:
+    from relocant_media.ai.package import EditorialPackage, canonical_json
+    from relocant_media.domain.dedup import event_key
+    from relocant_media.services.editorial import (
+        _candidate,
+        _document,
+        _event_items,
+        _snapshot_member,
+    )
+    from relocant_media.services.event_place import resolve_saved_event_place
+
+    block = run.outcome.get("_lifecycle_block")
+    if (source.source_type != "news_media" or post.status != "blocked"
+            or post.category not in {"events", "culture", "sport"}
+            or run.delivery_status != "pending" or _has_receipt(run, post)
+            or run.outcome.get("status") != "blocked"
+            or run.outcome.get("reason") != "lifecycle_fallback_deadline_exceeded"
+            or {key for key in run.outcome if key.startswith("_")} != {
+                "_lifecycle_block", "_package", "_package_sha256",
+            } or not isinstance(block, dict) or block.get("policy_version") != POLICY_VERSION
+            or block.get("previous_status") != "human_review"
+            or block.get("previous_reason") != draft_date_reason(post.title, post.body)
+            or block.get("previous_reason") != "draft_requires_absolute_event_date"):
+        return None
+    payload = canonical_json(run.outcome["_package"])
+    if hashlib.sha256(payload.encode()).hexdigest() != run.outcome["_package_sha256"]:
+        return None
+    package = EditorialPackage.model_validate_json(payload)
+    if (package.version != 2 or package.event is None or package.city != source.city
+            or (package.raw_item_id, package.source_id, package.article_id)
+            != (raw.id, raw.source_id, raw.external_id)
+            or package.event.event_key != event_key(_candidate(raw))
+            or package.evidence.model_dump(mode="json") != _document(raw).model_dump(mode="json")
+            or package.outcome.ranking.category != post.category
+            or (package.outcome.draft.title, package.outcome.draft.body) != (post.title, post.body)
+            or package.presentation is not None and package.presentation.event_place is not None):
+        return None
+    members = _event_items(session, anchor=raw, anchor_source=source)
+    previously_reviewed = {
+        doc.raw_item_id: doc.model_dump(mode="json") for doc in package.event.documents
+    }
+    current = {item.id: _snapshot_member(item, policy) for item, policy in members}
+    if (run.evidence.get("documents") != list(previously_reviewed.values())
+            or any(current.get(key) != value for key, value in previously_reviewed.items())):
+        return None
+    official = next(((item, policy) for item, policy in members if policy.ownership == "official"),
+                    None)
+    if official is None or official[0].id in previously_reviewed:
+        return None
+    place, _ = official
+    return resolve_saved_event_place(
+        session, _document(place), [place.id], profile=load_city_profile(source.city),
+    )
+
+
 def _reissue_unattempted_event_fallback(
     session: Session, record: SchedulerRun, *, now: datetime,
 ) -> None:
-    """Одна новая выдача резерва для будущего события без черновика или попытки GPT."""
+    """Одна выдача оставшейся попытки GPT для будущего события с проверенной картой."""
     from relocant_media.services.event_place import event_occurrences, resolve_saved_event_place
 
     data = record.details
@@ -496,15 +553,22 @@ def _reissue_unattempted_event_fallback(
         return
     try:
         raw, source, run, post = _objects(session, raw_id)
-        if (run is not None or post is not None or not source.enabled or not source.auto_publish
-                or source.ownership != "official" or source.high_risk
+        if (not source.enabled or not source.auto_publish or source.high_risk
                 or data.get("fingerprints", {}).get(str(raw_id)) != _fingerprint(raw)
                 or _fresh(raw, source, now).action != "keep"):
             return
-        place = resolve_saved_event_place(
-            session, EvidenceDocument.model_validate(raw, from_attributes=True), [raw_id],
-            profile=load_city_profile(source.city),
-        )
+        archive = list(data.get("attempt_records", []))
+        if source.ownership == "official" and run is None and post is None:
+            place = resolve_saved_event_place(
+                session, EvidenceDocument.model_validate(raw, from_attributes=True), [raw_id],
+                profile=load_city_profile(source.city),
+            )
+        elif (source.ownership == "media" and source.city == "belgrade" and run is not None
+                and post is not None and len(archive) < PRIMARY_ATTEMPTS
+                and data.get("delivery_attempts") == 0):
+            place = _new_place_for_date_hold(session, raw, source, run, post)
+        else:
+            return
         if place is None:
             return
         start = min(_stamp(slot["starts_at"]) for slot in event_occurrences(place))
@@ -516,9 +580,13 @@ def _reissue_unattempted_event_fallback(
         Submission.payload["raw_item_id"].as_integer() == raw_id,
     ).limit(1)) is not None:
         return
+    if run is not None and post is not None:
+        archive.append({**_attempt_archive(run, now), "post_id": post.id})
+        session.delete(run)
     _set(record, now=now, state="waiting_fallback", action="fallback", next_at=now,
          reason="verified_event_fallback_reissued", fallback_deadline_at=deadline.isoformat(),
          fallback_reissued_at=now.isoformat(),
+         attempt_records=archive,
          previous_fallback_deadline_at=previous_deadline.isoformat())
     record.finished_at = None
 
