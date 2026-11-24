@@ -30,6 +30,7 @@ from relocant_media.services.gpt_fallback import (
     _apply_request_references,
     _bounded_json,
     _candidate_request,
+    _candidate_respond_by,
     _ensure_fallback_open,
     _recent_runs,
     _registered_public,
@@ -364,6 +365,8 @@ def build_ranked_request(
                                             for_export=True)
         if run.details["batch_preselection"]["status"] != "gpt_ranked":
             raise FallbackValidationError("Ранжирование GPT ещё не принято")
+        assert run.finished_at is not None
+        request_end = run.finished_at + FALLBACK_WAIT
         profile = load_city_profile("belgrade")
         registry = _registry()
         targets = {origin: refresh_target(session, run, origin) for origin in selected}
@@ -397,8 +400,12 @@ def build_ranked_request(
         if protected_ids:
             protected = build_request(session, now=now, scheduler_run_id=run.id)
             if protected is not None:
-                candidates.extend(candidate for candidate in protected["candidates"]
-                                  if candidate["raw_item_id"] in protected_ids)
+                for candidate in protected["candidates"]:
+                    raw_id = candidate["raw_item_id"]
+                    if raw_id in protected_ids:
+                        candidates.append({**candidate, "respond_by": _candidate_respond_by(
+                            session, raw_id, request_end=request_end,
+                        )})
                 # Конверт с привязкой к пакету немного больше обычного.
                 while candidates:
                     _apply_request_references(request, references)
@@ -430,6 +437,9 @@ def build_ranked_request(
                 )
             except ValueError:
                 continue
+            candidate["respond_by"] = _candidate_respond_by(
+                session, raw_id, request_end=request_end,
+            )
             candidates.append(candidate)
             _apply_request_references(request, references)
             try:
