@@ -65,7 +65,8 @@ def test_bootstrap_private_atomic_state_and_exact_readback(context):
     sha = initialize(context)
     result, body = request(backend, {'op': 'read_state'})
     assert type(result.pop('capacity_low')) is bool
-    assert result == {'state': state, 'sha': sha} and body == b''
+    assert result == {'state': state, 'sha': sha, 'blob_readback': 'sha256-v1'}
+    assert body == b''
     assert sha == hashlib.sha256(backend.pointer.read_bytes()).hexdigest()
     assert stat.S_IMODE(backend.pointer.stat().st_mode) == 0o600
     assert stat.S_IMODE((backend.root / 'state.lock').stat().st_mode) == 0o600
@@ -89,7 +90,9 @@ def test_capacity_warning_is_early_and_does_not_touch_pointer(context, monkeypat
     monkeypatch.setattr(storage.shutil, 'disk_usage',
                         lambda _: SimpleNamespace(total=total, free=free))
     result, body = request(backend, {'op': 'read_state'})
-    assert result == {'state': state, 'sha': sha, 'capacity_low': warning}
+    assert result == {
+        'state': state, 'sha': sha, 'capacity_low': warning, 'blob_readback': 'sha256-v1',
+    }
     assert body == b''
     assert backend.read_state() == {'state': state, 'sha': sha}
 
