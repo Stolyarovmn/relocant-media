@@ -555,3 +555,17 @@ def test_single_reviewed_cards_keep_their_source_based_id():
     for record in TypeAdapter(tuple[ReviewedMapEvent, ...]).validate_json(registry.read_bytes()):
         card = record.card("belgrade", "Europe/Belgrade", NOW)
         assert card.id == map_event_id(record.source_url) and card.group_id is None
+
+
+# Ручные карточки под отдельные посты больше не добавляются (#515): точка афиши
+# берётся общим путём из официальной карточки или реестра залов event-venues.json.
+_FROZEN_REVIEWED_POSTS = frozenset({100, 104, 121, 130, 141})
+
+
+def test_reviewed_registry_is_frozen_to_legacy_posts():
+    registry = Path("cities/belgrade/reviewed-map-events.json")
+    message_ids = {row["message_id"] for row in json.loads(registry.read_text(encoding="utf-8"))}
+    assert message_ids <= _FROZEN_REVIEWED_POSTS, (
+        "Новые ручные карточки под отдельный пост запрещены (#515): добавьте площадку "
+        "в cities/<city>/event-venues.json или общий адаптер источника."
+    )
