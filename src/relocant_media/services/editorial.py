@@ -109,26 +109,28 @@ def _document_candidate(document: EvidenceDocument, raw_id: int) -> EventCandida
         title=document.title, body=document.body, published_at=document.published_at)
 
 
-def _same_proven_event(left: EvidenceDocument, right: EvidenceDocument) -> bool:
-    left_candidate, right_candidate = _document_candidate(left, 1), _document_candidate(right, 2)
-    if same_verified_route_detour(left_candidate, right_candidate):
+def _same_proven_event(left: EventCandidate, right: EventCandidate) -> bool:
+    if same_verified_route_detour(left, right):
         return True
+    if not same_event(left, right):
+        return False
     left_body, right_body = normalize_text(left.body), normalize_text(right.body)
     if min(len(left_body.split()), len(right_body.split())) < 4:
         return False
-    return bool(same_event(left_candidate, right_candidate)
-        and not conflicting_facts(
+    return bool(not conflicting_facts(
             f"{left.title}\n{left.body}", f"{right.title}\n{right.body}", 0, 0)
         and (left_body == right_body or title_similarity(left.body, right.body) >= 0.9
              or min(len(left_body), len(right_body)) >= 80
              and title_similarity(left.body, right.body) >= 0.8))
 
 
-def _stored_duplicate_documents(run: EditorialRun) -> tuple[tuple[int, EvidenceDocument,
-                                                                  dict[str, Any]], ...]:
-    snapshots = run.evidence.get("documents")
+_StoredDocuments = tuple[tuple[int, EvidenceDocument, dict[str, Any]], ...]
+
+
+def _stored_duplicate_documents(raw_item_id: int, evidence: dict[str, Any]) -> _StoredDocuments:
+    snapshots = evidence.get("documents")
     if snapshots is None:
-        snapshots = [{**run.evidence, "raw_item_id": run.raw_item_id}]
+        snapshots = [{**evidence, "raw_item_id": raw_item_id}]
     if not isinstance(snapshots, list) or not 1 <= len(snapshots) <= 10:
         raise ValueError("Нет ограниченного снимка проверенного события")
     documents, seen = [], set()
@@ -144,11 +146,44 @@ def _stored_duplicate_documents(run: EditorialRun) -> tuple[tuple[int, EvidenceD
         seen.add(snapshot["raw_item_id"])
     if sum(len(doc.title)+len(doc.body) for _, doc, _ in documents) > 120_000:
         raise ValueError("Снимок проверенного события превышает предел")
-    primary = EvidenceDocument.model_validate(run.evidence)
-    if not any(raw_id == run.raw_item_id and document == primary
+    primary = EvidenceDocument.model_validate(evidence)
+    if not any(raw_id == raw_item_id and document == primary
                for raw_id, document, _ in documents):
         raise ValueError("Нет исходного проверенного документа")
     return tuple(documents)
+
+
+class ReviewedEventInputs:
+    """Reuse parsed evidence and candidate features for one sweep. Proofs stay live."""
+
+    def __init__(self) -> None:
+        self._documents: dict[int, tuple[bytes, _StoredDocuments]] = {}
+        self._candidates: dict[tuple[int, str, str, str, str, str | None], EventCandidate] = {}
+
+    def documents(self, run: EditorialRun) -> _StoredDocuments:
+        evidence = json.dumps(
+            run.evidence, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+        )
+        version = hashlib.sha256(evidence.encode()).digest()
+        cached = self._documents.get(run.raw_item_id)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        documents = _stored_duplicate_documents(run.raw_item_id, json.loads(evidence))
+        if len(self._documents) >= 1024:
+            self._documents.clear()
+        self._documents[run.raw_item_id] = (version, documents)
+        return documents
+
+    def candidate(self, document: EvidenceDocument, raw_id: int) -> EventCandidate:
+        published = document.published_at.isoformat() if document.published_at is not None else None
+        key = (raw_id, document.source_id, document.url, document.title, document.body, published)
+        candidate = self._candidates.get(key)
+        if candidate is None:
+            candidate = _document_candidate(document, raw_id)
+            if len(self._candidates) >= 2048:
+                self._candidates.clear()
+            self._candidates[key] = candidate
+        return candidate
 
 
 def _possible_saved_package_match(run: EditorialRun, anchor: EvidenceDocument, city: str) -> bool:
@@ -184,6 +219,7 @@ def reviewed_event_proof(
     session: Session, *, anchor: RawItem, anchor_source: Source, target: RawItem,
     target_source: Source | None = None, run: EditorialRun | None = None,
     post: Post | None = None, now: datetime | None = None,
+    inputs: ReviewedEventInputs | None = None,
 ) -> ReviewedEventProof | None:
     """Перепроверить источник подавления; ID, заголовок и пустой skipped недостаточны.
 
@@ -217,23 +253,24 @@ def reviewed_event_proof(
         if is_terminal_blocked(session, target.id, now=now or datetime.now(UTC)):
             return None
     try:
-        documents = _stored_duplicate_documents(run)
+        documents = (inputs.documents(run) if inputs is not None
+                     else _stored_duplicate_documents(run.raw_item_id, run.evidence))
     except (ValueError, TypeError, ValidationError):
         documents = ()
-    saved_match = (run.evidence.get("city") == anchor_source.city
-                   and any(_same_proven_event(anchor_document, doc) for _, doc, _ in documents))
-    possible_saved_match = (run.evidence.get("city") == anchor_source.city and any(same_event(
-        _document_candidate(anchor_document, anchor.id), _document_candidate(doc, raw_id),
-    ) for raw_id, doc, _ in documents))
+    candidate_for = inputs.candidate if inputs is not None else _document_candidate
+    anchor_candidate = candidate_for(anchor_document, anchor.id)
+    saved_candidates = (tuple(candidate_for(doc, raw_id) for raw_id, doc, _ in documents)
+                        if run.evidence.get("city") == anchor_source.city else ())
+    saved_match = any(_same_proven_event(anchor_candidate, saved) for saved in saved_candidates)
     kind: Literal["reviewed", "published", "delivery_reconciliation"]
     if transport:
         if confirmed_send and saved_match:
             kind = "published"
-        elif (possible_saved_match or _possible_saved_package_match(
+        elif (any(same_event(anchor_candidate, saved) for saved in saved_candidates)
+              or _possible_saved_package_match(
                   run, anchor_document, anchor_source.city)
-              or canonicalize_url(anchor.url) == canonicalize_url(target.url)
-              or same_event(_document_candidate(anchor_document, anchor.id),
-                            _document_candidate(_document(target), target.id))):
+              or anchor_candidate.resolved_canonical_url == canonicalize_url(target.url)
+              or same_event(anchor_candidate, candidate_for(_document(target), target.id))):
             kind = "delivery_reconciliation"
         else:
             return None
@@ -316,12 +353,14 @@ def _reviewed_event_candidates(
 def _reviewed_event_match(
     session: Session, *, anchor: RawItem, anchor_source: Source, now: datetime | None = None,
     candidates: list[tuple[RawItem, Source, EditorialRun, Post | None]] | None = None,
+    inputs: ReviewedEventInputs | None = None,
 ) -> tuple[RawItem, ReviewedEventProof] | None:
     rows = (_reviewed_event_candidates(session, anchor_source.city)
             if candidates is None else candidates)
     for item, source, run, post in rows:
         proof = reviewed_event_proof(session, anchor=anchor, anchor_source=anchor_source,
-                                    target=item, target_source=source, run=run, post=post, now=now)
+                                    target=item, target_source=source, run=run, post=post, now=now,
+                                    inputs=inputs)
         if proof is not None:
             return item, proof
     return None
