@@ -2,14 +2,15 @@ import json
 import shutil
 import subprocess
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from relocant_media.bot.api import TelegramAPIError
+from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
 from relocant_media.services.private_intake import process_private_updates
 from relocant_media.services.reader_forwarded_source import public_forward_urls
 from relocant_media.services.reader_publication import (
@@ -188,8 +189,18 @@ class Bot:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["timeout", "not_modified", None])
-async def test_closed_keyboard_reconciles_without_repeating_final_answer(failure):
+@pytest.mark.parametrize(("failure", "description", "expected"), [
+    ("timeout", "", "cleared"),
+    ("http_retry", "Bad Request: message is not modified", "cleared"),
+    ("not_modified", "Bad Request: message is not modified", "cleared"),
+    ("http", "Bad Request: message is not modified: reply markup is the same", "cleared"),
+    ("http", "Bad Request: message to edit not found", "unavailable"),
+    ("http", "Bad Request: message can't be edited", "unavailable"),
+    (None, "", "cleared"),
+])
+async def test_closed_keyboard_reconciles_without_repeating_final_answer(
+    failure, description, expected,
+):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
 
@@ -199,10 +210,17 @@ async def test_closed_keyboard_reconciles_without_repeating_final_answer(failure
         async def _call(self, method, payload):
             if method == "editMessageReplyMarkup":
                 self.attempts += 1
-                if self.attempts == 1 and failure == "timeout":
+                if self.attempts <= 2 and failure == "timeout":
                     raise TimeoutError("test")
                 if failure == "not_modified":
-                    raise TelegramAPIError("Bad Request: message is not modified")
+                    raise TelegramAPIError(description)
+                if failure == "http" or (failure == "http_retry" and self.attempts <= 2):
+                    code = 400 if failure == "http" else 503
+                    response = httpx.Response(
+                        code, json={"ok": False, "error_code": code, "description": description},
+                        request=httpx.Request("POST", "https://example.org/editMessageReplyMarkup"),
+                    )
+                    return TelegramBotAPI._result(method, response)
             return await super()._call(method, payload)
 
     try:
@@ -220,19 +238,28 @@ async def test_closed_keyboard_reconciles_without_repeating_final_answer(failure
         bot = KeyboardBot()
         owner = {"owner_user_id": OWNER, "owner_chat_id": OWNER}
         await process_reader_resolutions(engine, bot, enabled=True, **owner)
-        if failure == "timeout":
+        retry_delays = (2, 10) if failure in {"timeout", "http_retry"} else ()
+        for attempts, minutes in enumerate(retry_delays, 1):
             await process_reader_resolutions(engine, bot, enabled=True, **owner)
-            assert bot.attempts == 1
+            assert bot.attempts == attempts
             with Session(engine) as session:
                 row = session.get(Submission, sid)
                 state = deepcopy(row.payload["reader_resolution"])
-                state["owner_keyboard"]["retry_at"] = "2020-01-01T00:00:00+00:00"
+                receipt = state["owner_keyboard"]
+                assert receipt["status"] == "retry"
+                assert receipt["attempts"] == attempts
+                if failure == "http_retry":
+                    assert receipt["http_status"] == 503
+                attempted_at = datetime.fromisoformat(receipt["attempted_at"])
+                retry_at = datetime.fromisoformat(receipt["retry_at"])
+                assert retry_at - attempted_at == timedelta(minutes=minutes)
+                receipt["retry_at"] = "2020-01-01T00:00:00+00:00"
                 row.payload = {**row.payload, "reader_resolution": state}
                 session.commit()
             await process_reader_resolutions(engine, bot, enabled=True, **owner)
         with Session(engine) as session:
             row = session.get(Submission, sid)
-            assert row.payload["reader_resolution"]["owner_keyboard"]["status"] == "cleared"
+            assert row.payload["reader_resolution"]["owner_keyboard"]["status"] == expected
         before = bot.attempts
         await process_reader_resolutions(engine, bot, enabled=True, **owner)
         assert bot.attempts == before
