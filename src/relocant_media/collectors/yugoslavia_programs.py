@@ -70,6 +70,24 @@ def _allowed_url(value: str, source: SourceConfig, *, detail: bool) -> str:
     return urlunsplit(("https", parsed.netloc, parsed.path or "/", "", ""))
 
 
+def _calendar_has_only_exhibitions(soup: BeautifulSoup, source: SourceConfig) -> bool:
+    cards = soup.select(".program__list > .program__list-items > li")
+    if not cards:
+        return False
+    hosts = {source.url.host, *source.extraction.approved_hosts}
+    for card in cards:
+        kind = card.select_one(".program__list-type")
+        link = card.select_one("a[href]")
+        href = link.get("href") if link else None
+        if kind is None or kind.get_text(strip=True) != "Изложба" or not isinstance(href, str):
+            return False
+        parts = urlsplit(urljoin(str(source.url), href))
+        if (parts.scheme != "https" or parts.hostname not in hosts
+                or not re.fullmatch(r"/rs/exhibition/[^/]+/?", parts.path)):
+            return False
+    return True
+
+
 def _program_links(html: str, source: SourceConfig) -> list[str]:
     if len(html.encode("utf-8")) > MAX_BYTES:
         raise ValueError("Museum of Yugoslavia calendar response too large")
@@ -97,7 +115,7 @@ def _program_links(html: str, source: SourceConfig) -> list[str]:
         links.append(candidate)
         if len(links) > MAX_PROGRAMS:
             raise ValueError("unexpected Museum of Yugoslavia program count")
-    if not links:
+    if not links and not _calendar_has_only_exhibitions(soup, source):
         raise ValueError("Museum of Yugoslavia program links missing")
     return links
 
@@ -257,6 +275,7 @@ class YugoslaviaProgramsCollector:
         self._source = source
         self._client = client
         self.item_failures: list[dict[str, str]] = []
+        self.empty_reason: str | None = None
         _allowed_url(str(source.url), source, detail=False)
 
     async def _fetch(self, value: str, *, detail: bool) -> str:
@@ -303,8 +322,12 @@ class YugoslaviaProgramsCollector:
 
     async def collect(self) -> list[RawItem]:
         self.item_failures = []
+        self.empty_reason = None
         listing = await self._fetch(str(self._source.url), detail=False)
         links = _program_links(listing, self._source)
+        if not links:
+            self.empty_reason = "calendar_exhibitions_only"
+            return []
         items: list[RawItem] = []
         for link in links:
             try:
