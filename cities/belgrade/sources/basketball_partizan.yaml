@@ -1,0 +1,26 @@
+id: basketball_partizan
+name: KK Partizan
+publisher: Košarkaški klub Partizan
+ownership: official
+url: https://www.partizan.basketball/vesti/aktuelno
+language: sr
+source_type: official_sports_news
+trust: 0.95
+check_every: 30m
+categories: [sport]
+extraction:
+  strategy: venue_feed
+  status: active
+  approved_hosts: [partizan.basketball]
+  page_text: true
+  article_selectors: ['.single-news-wrapper .page-content']
+  article_index:
+    item_selector: '.news-container .nc-col.item'
+    link_selector: 'a.more[href]'
+    date_selector: '.content .date'
+    path_pattern: '/vesti/aktuelno/[0-9]+'
+policy:
+  auto_publish: true
+verification:
+  checked_at: '2026-11-25'
+  note: Дата публикации из официального списка связывается с полным текстом по ID статьи.

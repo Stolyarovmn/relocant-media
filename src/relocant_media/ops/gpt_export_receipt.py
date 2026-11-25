@@ -22,7 +22,7 @@ PUBLIC_SOURCE_TYPES = frozenset({
     "official_city_portal", "official_city_news", "official_municipal_news",
     "official_government_service", "official_health_service_info", "official_parking_service_news",
     "official_government_news", "official_rail_operator_news", "official_events",
-    "official_government_guidance",
+    "official_government_guidance", "official_sports_news",
 })
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _HEAD = re.compile(r"[0-9a-f]{40}\Z")

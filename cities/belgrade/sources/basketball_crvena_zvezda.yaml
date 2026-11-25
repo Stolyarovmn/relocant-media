@@ -1,0 +1,24 @@
+id: basketball_crvena_zvezda
+name: KK Crvena zvezda
+publisher: Košarkaški klub Crvena zvezda
+ownership: official
+url: https://kkcrvenazvezda.rs/news
+language: sr
+source_type: official_sports_news
+trust: 0.95
+check_every: 30m
+categories: [sport]
+extraction:
+  strategy: venue_feed
+  status: active
+  page_text: true
+  article_index:
+    item_selector: 'section.Active [class*="Column_column__"]:has(a[href^="/news/"])'
+    link_selector: 'a[href^="/news/"]'
+    date_selector: span
+    path_pattern: '/news/[^/]+'
+policy:
+  auto_publish: true
+verification:
+  checked_at: '2026-11-25'
+  note: Дата берётся из ленты клуба, точное время и текст — из разметки статьи.
