@@ -871,10 +871,22 @@ def export_public(database: Path, output: Path, observed_at: str, run_dir: Path 
 EDITORIAL_INTERVAL = timedelta(minutes=30)
 
 
+def parse_state_timestamp(value: object, now: datetime) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None or stamp > now + timedelta(minutes=1):
+        return None
+    return stamp
+
+
 def editorial_due(state: dict[str, Any], now: datetime) -> bool:
     """Editorial is due unless one was checkpointed less than 30 minutes ago."""
-    last = state.get("last_editorial_at")
-    return not isinstance(last, str) or now - datetime.fromisoformat(last) >= EDITORIAL_INTERVAL
+    last = parse_state_timestamp(state.get("last_editorial_at"), now)
+    return last is None or now - last >= EDITORIAL_INTERVAL
 
 
 def private_quota_observation(directory: Path) -> dict[str, Any] | None:
