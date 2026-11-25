@@ -15,6 +15,12 @@ export function timelineInstant(origin, step) {
   return next + (Math.min(timelineSteps, Math.max(1, step)) - 1) * halfHour;
 }
 
+export function timelineStepAt(origin, instant) {
+  if (!Number.isFinite(instant) || instant <= origin) return 0;
+  const step = 1 + (instant - timelineInstant(origin, 1)) / halfHour;
+  return Number.isInteger(step) && step >= 1 && step <= timelineSteps ? step : 0;
+}
+
 export function timelineLabel(instant, current) {
   return current ? "Сейчас" : hourLabel.format(instant);
 }
