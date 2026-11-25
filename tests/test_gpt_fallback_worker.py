@@ -308,13 +308,23 @@ def test_revalidation_failure_prevents_import_after_successful_live_fetch(
         assert session.get(EditorialRun, package.raw_item_id) is None
 
 
-@pytest.mark.parametrize("invalidate", [False, True])
+@pytest.mark.parametrize("invalidate,declares_version", [
+    (False, False), (False, True), (True, False),
+])
 def test_real_fallback_validation_requires_the_recorded_gemini_failure(
-    fallback_session, monkeypatch, invalidate,
+    fallback_session, monkeypatch, invalidate, declares_version,
 ):
     session, raw, scheduler = fallback_session
     request = gpt_fallback.build_request(session, now=NOW)
     package = package_for_request(request)
+    if declares_version:
+        package = package.model_copy(update={"outcome": package.outcome.model_copy(update={
+            "writing_matrix_version": CHANNEL_STYLE_VERSION,
+        })})
+        digest = context_sha256(package)
+        package = package.model_copy(update={"reviews": tuple(
+            review.model_copy(update={"context_sha256": digest}) for review in package.reviews
+        )})
     fetched = []
     if invalidate:
         scheduler.details = {"processing_errors": [
@@ -336,7 +346,8 @@ def test_real_fallback_validation_requires_the_recorded_gemini_failure(
     assert (stored is None) is invalidate
     if stored is not None:
         assert stored.outcome["writing_matrix_version"] == CHANNEL_STYLE_VERSION
-        assert "writing_matrix_version" not in stored.outcome["_package"]["outcome"]
+        package_outcome = stored.outcome["_package"]["outcome"]
+        assert ("writing_matrix_version" in package_outcome) is declares_version
 
 
 def test_fallback_cannot_attest_a_different_writing_matrix(fallback_session):
