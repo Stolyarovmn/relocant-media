@@ -7,11 +7,14 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from relocant_media.ai.gemini_process import GeminiWorkerError
 from relocant_media.ai.models import EvidenceDocument, RankingResult
 from relocant_media.ai.public_cache import PublicPreparationCache
 from relocant_media.domain.policy import SOURCE_REPLACED_REASON
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import material_lifecycle as core
+from relocant_media.services import material_lifecycle_runtime as lifecycle_runtime
+from relocant_media.services.gpt_fallback import _registry
 from relocant_media.services.material_lifecycle_runtime import MaterialLifecycleRuntime
 from relocant_media.storage.models import Base, EditorialRun, Post, RawItem, Source
 
@@ -132,6 +135,54 @@ def test_confirmed_rejection_never_calls_delegate(engine):
     assert ledger(engine)["rejection_review"]["decision"] == "confirm_rejection"
     with Session(engine) as session:
         assert session.get(EditorialRun, 1) is not None
+
+
+@pytest.mark.parametrize(("enabled", "ownership", "registered", "error_type", "handoff"), [
+    (True, "official", True, GeminiWorkerError, True),
+    (True, "media", True, GeminiWorkerError, True),
+    (False, "official", True, GeminiWorkerError, False),
+    (True, "reader", True, GeminiWorkerError, False),
+    (True, "official", False, GeminiWorkerError, False),
+    (True, "official", True, ValueError, False),
+])
+def test_first_technical_audit_failure_uses_existing_gpt_window(
+    engine, monkeypatch, enabled, ownership, registered, error_type, handoff,
+):
+    profile = _registry()["city_beograd_news"].model_copy(update={
+        "id": "official", "ownership": "media" if ownership == "media" else "official",
+    })
+    sources = {"official": profile} if registered else {}
+    monkeypatch.setattr(lifecycle_runtime, "_registry", lambda: sources)
+    with Session(engine) as session:
+        source = session.get(Source, "official")
+        source.ownership = ownership
+        source.url = str(profile.url)
+        source.source_type = profile.source_type
+        session.get(RawItem, 1).url = "https://www.beograd.rs/lat/beoinfo-vesti/a116900/notice.html"
+        session.commit()
+    rejected(engine)
+    provider = Provider(engine, error=error_type("test"))
+    runtime = MaterialLifecycleRuntime(engine, "belgrade", provider, NOW, fallback_enabled=enabled)
+    assert runtime.reconcile().rejection_audit_ids == (1,)
+    original = ledger(engine)
+    result = runtime.process(1, lambda _: pytest.fail("Ошибка аудита не разрешает публикацию"))
+    state = result["lifecycle"]
+    assert state["deadline_at"] == original["deadline_at"]
+    assert state["audit_attempts"] == 1 and state["fallback_attempts"] == 0
+    assert [call["task"] for call in provider.calls] == ["audit_rejection"]
+    assert state["rejection_review_history"][-1]["error_type"] == error_type.__name__
+    if handoff:
+        assert state["reason"] == "rejection_audit_model_unavailable"
+        assert state["rejection_justified"] is None and state["unconfirmed_rejection_fallback"]
+        assert runtime.reconcile().fallback_ids == (1,)
+        with Session(engine) as session:
+            assert core.can_retry_snapshot(session, 1, now=NOW)
+    else:
+        assert state["next_action"] == "audit_rejection"
+        assert runtime.reconcile().fallback_ids == ()
+    with Session(engine) as session:
+        assert session.get(EditorialRun, 1).outcome["status"] == "skipped"
+        assert session.scalar(select(Post)) is None
 
 
 def test_bounded_drain_can_stop_between_audit_and_full_retry(engine):

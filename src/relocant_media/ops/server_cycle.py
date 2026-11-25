@@ -1929,7 +1929,9 @@ def main() -> None:
         )
         from relocant_media.services.material_lifecycle_runtime import MaterialLifecycleRuntime
 
-        lifecycle = MaterialLifecycleRuntime(engine, "belgrade", provider)
+        lifecycle = MaterialLifecycleRuntime(
+            engine, "belgrade", provider, fallback_enabled=gpt_fallback_enabled,
+        )
 
         def lifecycle_due() -> tuple[list[int], set[int]]:
             # Резерв открывает цикл, который формирует запрос после сохранения состояния.

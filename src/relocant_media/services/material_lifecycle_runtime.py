@@ -22,6 +22,7 @@ from relocant_media.domain.city_profile import load_city_profile
 from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import material_lifecycle as core
 from relocant_media.services.editorial import reviewed_event_proof, source_replacement_target
+from relocant_media.services.gpt_fallback import GEMINI_FAILURES, _registered_public, _registry
 from relocant_media.services.policy_reassessment import eligible_policy_reassessment
 from relocant_media.storage.models import EditorialRun, RawItem, Source
 
@@ -46,10 +47,11 @@ class _FreshRankProvider:
 
 class MaterialLifecycleRuntime:
     def __init__(self, engine: Engine, city: str, provider: StructuredAIProvider,
-                 now: datetime | None = None):
+                 now: datetime | None = None, *, fallback_enabled: bool = False):
         if now is not None and (now.tzinfo is None or now.utcoffset() is None):
             raise ValueError("Нужно время с часовым поясом")
         self.engine, self.city, self.provider, self.now = engine, city, provider, now
+        self.fallback_enabled = fallback_enabled
 
     def _time(self) -> datetime:
         return self.now.astimezone(UTC) if self.now is not None else datetime.now(UTC)
@@ -146,8 +148,21 @@ class MaterialLifecycleRuntime:
             if channel == "delivery":
                 core.delivery_failure(session, raw_id, type(error).__name__, now=self._time())
             else:
-                core.after_error(session, raw_id, type(error).__name__, now=self._time(),
-                                 channel=channel)
+                error_type = type(error).__name__
+                fallback_on_audit_error = False
+                if (channel == "rejection_audit" and self.fallback_enabled
+                        and error_type in GEMINI_FAILURES):
+                    raw = session.get(RawItem, raw_id)
+                    source = session.get(Source, raw.source_id) if raw is not None else None
+                    fallback_on_audit_error = bool(
+                        raw is not None and source is not None
+                        and source.ownership in {"official", "media"}
+                        and _registered_public(raw, source, _registry().get(source.id)),
+                    )
+                core.after_error(
+                    session, raw_id, error_type, now=self._time(), channel=channel,
+                    fallback_on_audit_error=fallback_on_audit_error,
+                )
             state = self._state(session, raw_id)
             session.commit()
         return {"raw_item_id": raw_id, "status": state["state"],
