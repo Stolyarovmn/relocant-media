@@ -127,8 +127,10 @@ async def test_unknown_owner_edit_not_retried_for_same_version(engine):
     await process_reader_resolutions(engine, bot, enabled=True, **owner)
     with Session(engine) as session:
         row = session.get(Submission, row_id)
+        owner_card = row.payload['reader_resolution']['owner_notice']
+        sent_at = datetime.fromisoformat(owner_card['sent_at'])
         row.payload = {**row.payload, 'text': 'Новая версия',
-                       'updated_at': datetime.now(UTC).isoformat()}
+                       'updated_at': (sent_at + timedelta(seconds=1)).isoformat()}
         session.commit()
     bot.fail_send = True
     result = await process_reader_resolutions(engine, bot, enabled=True, **owner)
