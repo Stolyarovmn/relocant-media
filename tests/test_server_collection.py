@@ -34,6 +34,7 @@ def collection(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server_cycle, "datetime", Clock)
     monkeypatch.setattr(server_cycle, "venue_sources", lambda: {})
+    monkeypatch.setattr(server_cycle, "sports_sources", lambda: {})
     monkeypatch.setattr(server_cycle, "parse_beograd_news_list", lambda *_: cards)
     monkeypatch.setattr(server_cycle, "parse_cukarica_news_list", lambda *_: [])
     monkeypatch.setattr(server_cycle, "load_verified_news_feeds", lambda _: ())
@@ -86,6 +87,47 @@ def item(age, *, url=BEOGRAD, body="Самостоятельный первои�
 def rows(engine):
     with Session(engine) as session:
         return [(r.source_id, r.url, r.body) for r in session.scalars(select(RawItem))]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("submissions_only", [True, False])
+async def test_sports_sources_are_polled_only_during_editorial_collection(
+    collection, monkeypatch, submissions_only,
+):
+    from pathlib import Path
+
+    from relocant_media.sources.registry import load_source_file
+
+    engine, _, _, _, _ = collection
+    directory = Path("cities/belgrade/sources")
+    local = load_source_file(directory / "basketball_crvena_zvezda.yaml")
+    sources = {local.id: local}
+    monkeypatch.setattr(server_cycle, "sports_sources", lambda: sources)
+    url = "https://kkcrvenazvezda.rs/news/rezultat-evrolige"
+    result_item = CollectedItem(
+        local.id, url, url, "Результат матча Евролиги в Белграде", "Местный клуб выиграл 84:78.",
+        NOW - timedelta(hours=1), published_at_precision="instant",
+    )
+    collected = []
+
+    class SportsCollector:
+        def __init__(self, source_id):
+            self.source_id = source_id
+
+        async def collect(self):
+            collected.append(self.source_id)
+            return [result_item]
+
+    build = server_cycle.build_collector
+    monkeypatch.setattr(
+        server_cycle, "build_collector",
+        lambda source, client: SportsCollector(source.id) if source.id in sources
+        else build(source, client),
+    )
+    result = await server_cycle.collect_sources(engine, submissions_only=submissions_only)
+    assert collected == ([] if submissions_only else [local.id])
+    assert result["sports_items"] == (0 if submissions_only else 1)
+    assert ((local.id, url, result_item.body) in rows(engine)) is not submissions_only
 
 
 @pytest.mark.asyncio

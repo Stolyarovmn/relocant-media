@@ -82,7 +82,7 @@ from relocant_media.collectors.telegram_topics import (
 from relocant_media.collectors.ticket_vision_events import SOURCE_ID as TICKET_VISION_SOURCE
 from relocant_media.collectors.ticket_vision_events import cited_ticket_urls
 from relocant_media.collectors.tls import source_ssl_context
-from relocant_media.collectors.venue_feed import VenueFeedCollector
+from relocant_media.collectors.venue_feed import VenueFeedCollector, _index_article_url
 from relocant_media.domain import quiet_hours
 from relocant_media.domain.attention import source_priorities, venue_attention
 from relocant_media.domain.city_profile import load_city_profile, load_queue_place_aliases
@@ -414,6 +414,17 @@ def guide_sources() -> dict[str, SourceConfig]:
     }
 
 
+def sports_sources() -> dict[str, SourceConfig]:
+    return {
+        source.id: source
+        for source in load_source_registry(SOURCES)
+        if source.extraction.strategy == "venue_feed"
+        and source.extraction.status == "active"
+        and source.source_type == "official_sports_news"
+        and source.ownership == "official"
+    }
+
+
 def _is_review_only_venue_hold(item: Any, *, now: datetime) -> bool:
     if event_content_reason(item.title, item.body, now=now) is not None:
         return False
@@ -596,6 +607,7 @@ def fetch_documents(package: EditorialPackage) -> tuple[EvidenceDocument, ...]:
     # Each source is re-read through the same parser used at intake.
     registered = {
         **venue_sources(), **review_only_venue_sources(), **media, **guide_sources(),
+        **sports_sources(),
     }
     registered.update({
         key: load_source_file(SOURCES / f"{key}.yaml")
@@ -715,6 +727,7 @@ async def collect_sources(
     # Intake still resolves explicit links to registered media; it skips feed discovery below.
     media = media_sources()
     guides = {} if submissions_only else guide_sources()
+    sports = sports_sources()
     discovery_venues = discovery_venue_sources()
     news_feeds = () if submissions_only else load_verified_news_feeds(NEWS_DISCOVERY_REGISTRY)
     sources = {key: load_source_file(SOURCES / f"{key}.yaml")
@@ -723,12 +736,16 @@ async def collect_sources(
     sources.update(runtime_venues)
     sources.update(media)
     sources.update(guides)
+    sources.update(sports)
     result["sources_synced"] = len(sources)
     result["media_sources"] = len(media)
     result["media_items"] = 0
     result["media_deferred"] = 0
     result["guide_sources"] = len(guides)
     result["guide_items"] = 0
+    result["sports_items"] = 0
+    result["sports_deferred"] = 0
+    result["sports_article_failures"] = 0
     result["venue_sources"] = len(venues)
     result["venue_review_only_sources"] = len(review_venues)
     result["venue_items"] = 0
@@ -851,6 +868,7 @@ async def collect_sources(
         })
         collectors.update({key: build_collector(source, client) for key, source in media.items()})
         collectors.update({key: build_collector(source, client) for key, source in guides.items()})
+        collectors.update({key: build_collector(source, client) for key, source in sports.items()})
 
         async def full_article(source_id: str, url: str) -> str:
             if url in fetched:
@@ -914,9 +932,13 @@ async def collect_sources(
         for submission_id, payload in tips:
             linked = []
             for url in tip_urls(payload):
-                if source_for_url(url, sources) is None:
+                source_id = source_for_url(url, sources)
+                if source_id is None:
                     attempted_tips.add(submission_id)
                     continue
+                source = sources[source_id]
+                if source.extraction.article_index is not None:
+                    url = _index_article_url(url, source)
                 if urlsplit(url).query:
                     attempted_tips.add(submission_id)
                     continue
@@ -1057,6 +1079,28 @@ async def collect_sources(
                 result["venue_article_failures"] += len(item_failures)
                 venue_errors.extend({"source_id": source_id, **error}
                                     for error in item_failures)
+        if not submissions_only:
+            with measure_collection(collection_seconds, "sports"):
+                sports_results = await _collect_venues(sports, collectors)
+            for source_id, batch in zip(sports, sports_results, strict=True):
+                result["sports_article_failures"] += len(
+                    getattr(collectors[source_id], "item_failures", []),
+                )
+                if isinstance(batch, Exception):
+                    result["failures"] += 1
+                    continue
+                for item in batch:
+                    fresh = freshness_decision(
+                        item.title, item.body, item.published_at, now,
+                        published_at_precision=item.published_at_precision,
+                    )
+                    if fresh.action == "keep":
+                        register_official(item)
+                        result["sports_items"] += 1
+                    else:
+                        result["sports_deferred"] += 1
+                        if fresh.action == "hold" and item.published_at_precision == "day":
+                            metadata_holds.append(item)
         for source_id in (() if submissions_only else media):
             try:
                 with measure_collection(collection_seconds, "media"):

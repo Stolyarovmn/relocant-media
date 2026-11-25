@@ -6,7 +6,7 @@ import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import feedparser
 import httpx
@@ -83,6 +83,51 @@ def _allowed(url: str, source: SourceConfig) -> str:
     return url
 
 
+def _index_article_url(url: str, source: SourceConfig) -> str:
+    index = source.extraction.article_index
+    assert index is not None
+    parts = urlsplit(_allowed(url, source))
+    path = parts.path.rstrip("/")
+    if not re.fullmatch(index.path_pattern, path):
+        raise ValueError("unsupported article index link")
+    # An index article is identified by its path. Language query and host aliases
+    # don't identify separate news items.
+    return urlunsplit(("https", urlsplit(str(source.url)).netloc, path, "", ""))
+
+
+def parse_article_index(html: str, source: SourceConfig) -> list[RawItem]:
+    index = source.extraction.article_index
+    assert index is not None
+    soup = BeautifulSoup(html, "html.parser")
+    entries: dict[str, RawItem] = {}
+    for row in soup.select(index.item_selector):
+        link = row.select_one(index.link_selector)
+        href = link.get("href") if link else None
+        if not isinstance(href, str):
+            continue
+        stamps = {
+            match[0].rstrip(".") for element in row.select(index.date_selector)
+            if (match := re.fullmatch(r"\d{2}\.\d{2}\.\d{4}\.?", element.get_text(strip=True)))
+        }
+        if len(stamps) != 1:
+            continue
+        try:
+            url = _index_article_url(urljoin(str(source.url), href), source)
+            day = datetime.strptime(stamps.pop(), "%d.%m.%Y")
+        except ValueError:
+            continue
+        published = day.replace(tzinfo=BELGRADE).astimezone(UTC)
+        entries.setdefault(url, RawItem(
+            source.id, url, url, "", "", published, published_at_precision="day",
+        ))
+    if not entries:
+        raise ValueError("official article index has no dated article links")
+    return sorted(
+        entries.values(), key=lambda item: item.published_at or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+
+
 def _balkan_foreign_only(tags: list[dict[str, object]], context: str) -> bool:
     terms = [" ".join(value.split()) for tag in tags if isinstance(value := tag.get("term"), str)]
     countries = {
@@ -112,6 +157,9 @@ def parse_venue_feed(
         # publication field; updated/discovered timestamps are never substitutes.
         published = _date(dict.get(entry, "published"))
         if not title or not link or published is None or published > datetime.now(UTC):
+            continue
+        if (discover and source.extraction.feed_title_pattern
+                and not re.search(source.extraction.feed_title_pattern, title)):
             continue
         try:
             url = _allowed(urljoin(str(source.url), link), source)
@@ -173,7 +221,7 @@ def _complete_kolarac_heading(title: str) -> bool:
 
 def _article(
     html: str, url: str, source: SourceConfig, fallback: datetime | None,
-    *, program: tuple[str, str] | None = None,
+    *, program: tuple[str, str] | None = None, fallback_precision: str = "instant",
 ) -> RawItem:
     soup = BeautifulSoup(html, "html.parser")
     if scope := source.extraction.article_scope:
@@ -268,8 +316,9 @@ def _article(
         local = _rts_publication(soup)
         precision = local_clock_precision(local)
         published = local.astimezone(UTC)
-    else:
-        published = published or fallback
+    elif published is None:
+        published = fallback
+        precision = fallback_precision
     if program is not None:
         title, body = program
         complete_schedule = True
@@ -318,7 +367,10 @@ class VenueFeedCollector:
 
     async def _entries(self, *, discover: bool = True) -> list[RawItem]:
         url = self._source.extraction.feed_url or str(self._source.url)
-        return parse_venue_feed(await self._fetch(url), self._source, discover=discover)
+        body = await self._fetch(url)
+        if self._source.extraction.article_index is not None:
+            return parse_article_index(body, self._source)
+        return parse_venue_feed(body, self._source, discover=discover)
 
     async def _program_pdf(self, url: str) -> bytes:
         _allowed(url, self._source)
@@ -359,7 +411,10 @@ class VenueFeedCollector:
             raise
         published = entry.published_at if entry else None
         try:
-            article = entry if use_feed else _article(html, url, self._source, published)
+            article = entry if use_feed else _article(
+                html, url, self._source, published,
+                fallback_precision=entry.published_at_precision if entry else "instant",
+            )
         except PosterOnlyEvidence:
             link = linked_program(html, url)
             if link is None:
@@ -404,7 +459,8 @@ class VenueFeedCollector:
         return items
 
     async def collect_url(self, url: str, *, require_page: bool = False) -> RawItem:
-        _allowed(url, self._source)
+        url = (_index_article_url(url, self._source) if self._source.extraction.article_index
+               else _allowed(url, self._source))
         try:
             entry = next((item for item in await self._entries(discover=False) if item.url == url),
                          None)

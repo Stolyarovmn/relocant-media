@@ -1,0 +1,25 @@
+id: basketball_virtus_belgrade
+name: Virtus Bologna
+publisher: Virtus Pallacanestro Bologna
+ownership: official
+url: https://www.virtus.it/news/
+language: it
+source_type: official_sports_news
+trust: 0.95
+check_every: 6h
+categories: [sport]
+extraction:
+  strategy: venue_feed
+  status: active
+  feed_url: https://www.virtus.it/feed/
+  feed_title_pattern: &belgrade_club '(?i)\b(?:crvena\s+zvezda|stella\s+rossa|partizan)\b'
+  page_text: true
+  article_selectors: ['.bigslam-single-article-content']
+  article_scope:
+    selectors: [h1]
+    pattern: *belgrade_club
+policy:
+  auto_publish: true
+verification:
+  checked_at: '2026-11-25'
+  note: Сбор и перепроверка карточек, в заголовке которых явно указан белградский клуб.
