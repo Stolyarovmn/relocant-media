@@ -53,6 +53,7 @@ MAX_EVENTS = 1000
 MAX_FEED_BYTES = 2_000_000
 MAX_EVENT_COURSES = 4
 MAX_COURSE_POINTS = 4096
+REVIEWED_MAP_EVENT_ARCHIVE_AGE = timedelta(days=7)
 # Другой город включается явно, вместе с проверенным публичным каналом.
 PUBLIC_CHANNELS = {"belgrade": "eduvbelgrad"}
 Label = Annotated[str, Field(min_length=1, max_length=500)]
@@ -508,7 +509,8 @@ def _reviewed_events(
 def export_events(session: Session, *, observed_at: datetime, city: str = "belgrade") -> EventsFeed:
     if observed_at.tzinfo is None or city not in PUBLIC_CHANNELS:
         raise ValueError("explicit city channel and aware snapshot time required")
-    archive_cutoff = observed_at.astimezone(UTC) - MAP_ARCHIVE_AGE
+    observed_utc = observed_at.astimezone(UTC)
+    archive_cutoff = observed_utc - MAP_ARCHIVE_AGE
     profile = load_city_profile(city)
     policy = json.loads(Path(f"cities/{city}/pin-policy.json").read_text(encoding="utf-8"))
     rows = session.execute(
@@ -536,7 +538,8 @@ def export_events(session: Session, *, observed_at: datetime, city: str = "belgr
     )
     reviewed = _reviewed_events(session, city, profile.timezone, observed_at)
     reviewed_posts = {event.post_url for event in reviewed.values()}
-    events = {key: event for key, event in reviewed.items() if event.expires_at >= archive_cutoff}
+    reviewed_cutoff = observed_utc - REVIEWED_MAP_EVENT_ARCHIVE_AGE
+    events = {key: event for key, event in reviewed.items() if event.expires_at >= reviewed_cutoff}
     for item, run, post in rows:
         if len(events) >= MAX_EVENTS:
             break
