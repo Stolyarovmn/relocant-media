@@ -30,7 +30,9 @@ from relocant_media.ai.models import (
     VerificationResult,
 )
 from relocant_media.ai.pipeline import _citations_are_grounded, _verification_map
+from relocant_media.domain.audience import official_water_notice
 from relocant_media.domain.editorial_products import EditorialPresentation
+from relocant_media.domain.freshness import has_draft_calendar_day
 from relocant_media.domain.policy import AUTO_PUBLISH_CATEGORIES, requires_human_review
 from relocant_media.domain.sensitivity import personal_detail_reason, sensitive_topic_reason
 
@@ -286,11 +288,25 @@ def evaluate_package(package: EditorialPackage, *, now: datetime | None = None) 
             raise ValueError("review does not match source/article/exact draft")
     confidence = min(outcome.confidence, outcome.ranking.confidence,
                      *(confidence for _, confidence in verdicts.values()))
+    official_water = (
+        outcome.ranking.category == "utilities" and package.event is not None
+        and has_draft_calendar_day(draft.title, draft.body)
+        and any(
+            document.raw_item_id == package.raw_item_id and document.ownership == "official"
+            and document.auto_publish and not document.high_risk
+            and official_water_notice(document.source_id, document.url, document.title,
+                                      document.body)
+            for document in package.event.documents
+        )
+    )
     status, reason = outcome.status, outcome.reason
-    if status == PublicationStatus.READY:
+    if status == PublicationStatus.READY or (
+        official_water and status == PublicationStatus.HUMAN_REVIEW
+        and reason == "package_requires_review"
+    ):
         status, reason = PublicationStatus.HUMAN_REVIEW, "package_requires_review"
         eligible = (
-            package.outcome.ranking.category.strip().lower() in AUTO_PUBLISH_CATEGORIES
+            (outcome.ranking.category.strip().lower() in AUTO_PUBLISH_CATEGORIES or official_water)
             and package.outcome.ranking.should_process
             and not requires_human_review(outcome.ranking.category, confidence)
             and all(

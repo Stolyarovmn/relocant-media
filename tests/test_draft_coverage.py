@@ -149,6 +149,48 @@ def test_confirmed_transport_change_remains_eligible_independent_of_public_event
     assert evaluate_package(parse(payload), now=NOW).status == "ready"
 
 
+def test_protest_announcement_does_not_prove_traffic_limit_even_with_approved_coverage():
+    payload = synthetic_package()
+    statement = "Taksisti su najavili protest na trgu."
+    payload["evidence"]["body"] = statement
+    payload["event"]["documents"][0]["body"] = statement
+    claim = payload["outcome"]["claims"]["claims"][0]
+    claim["text"] = "Таксисты анонсировали акцию на площади."
+    claim["citations"][0]["quote"] = statement
+    payload["outcome"]["draft"].update(
+        title="Акция таксистов ограничит движение", body=claim["text"])
+    seal(payload)
+    outcome = evaluate_package(parse(payload), now=NOW)
+    assert outcome.status == "human_review"
+    assert outcome.reason == "draft_coverage_unsupported"
+
+
+@pytest.mark.parametrize("obstacle", [None, "no_date", "shadow_source", "review_hold"])
+def test_official_water_notice_can_publish_with_confirmed_day_and_no_hours(obstacle):
+    payload = synthetic_package(category="utilities")
+    source_id = "city_beograd_news"
+    url = "https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/a1/x.html"
+    date = " 26 ноября" if obstacle != "no_date" else ""
+    statement = f"Отключение воды на Садовой{date}."
+    payload["source_id"] = source_id
+    payload["evidence"].update(source_id=source_id, url=url, body=statement)
+    payload["event"]["documents"][0].update(
+        source_id=source_id, url=url, body=statement, auto_publish=obstacle != "shadow_source",
+    )
+    claim = payload["outcome"]["claims"]["claims"][0]
+    claim["text"] = statement
+    claim["citations"][0].update(source_id=source_id, url=url, quote=statement)
+    payload["outcome"].update(status="human_review", reason="package_requires_review")
+    payload["outcome"]["draft"].update(title=statement.rstrip("."), body=statement)
+    for review in payload["reviews"]:
+        review["source_id"] = source_id
+    seal(payload)
+    if obstacle == "review_hold":
+        payload["reviews"][0]["verdict"] = "hold"
+    outcome = evaluate_package(parse(payload), now=NOW)
+    assert outcome.status == ("human_review" if obstacle else "ready")
+
+
 @pytest.mark.parametrize("category", ["culture", "sport", "city"])
 def test_ordinary_local_subjects_do_not_need_a_transport_effect(category):
     payload = synthetic_package(category=category)

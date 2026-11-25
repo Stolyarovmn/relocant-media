@@ -204,6 +204,15 @@ def draft_date_reason(title: str, body: str) -> str | None:
     return None
 
 
+def has_service_day(title: str, body: str) -> bool:
+    """Find a date clue in a service notice for selection, without inferring an interval."""
+    return bool(_DATE.search(f"{title}\n{body}") or _RELATIVE.search(f"{title}\n{body}"))
+
+
+def has_draft_calendar_day(title: str, body: str) -> bool:
+    return any(map(_valid_draft_day, _draft_date_parts(f"{title}\n{body}")))
+
+
 # Explicit performance verbs also occur in announcements without the word "concert".
 _DATED_PERFORMANCE = re.compile(
     r"\b(?:nastupa|nastupaju|nastupiće|nastupice|наступа|наступају|наступиће|выступит|выступят)\b",

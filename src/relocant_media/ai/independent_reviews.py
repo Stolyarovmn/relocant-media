@@ -24,6 +24,7 @@ from relocant_media.ai.draft_coverage import (
     DraftFactsCheck,
     draft_coverage_reason,
 )
+from relocant_media.ai.evidence_scope import ACTIVE_SEARCH_INSTRUCTION
 from relocant_media.ai.models import EvidenceDocument
 from relocant_media.ai.package import (
     EditorialPackage,
@@ -199,8 +200,9 @@ def reviewed_package(
             "происшествия проверь личные детали. Диагноз, индивидуальные медицинские сведения, "
             "полное имя, школа, домашний адрес, семейные обстоятельства и лишние приметы "
             "требуют исправления, даже если известны из открытого источника. Исключение — "
-            "сведения из действующего официального объявления о розыске, если они нужны "
-            "для поиска. После подтверждения, что человека нашли, допустим только итог. "
+            "сведения из действующей публичной ориентировки, если они нужны для поиска. "
+            "После подтверждения, что человека нашли, допустим только итог. "
+            + ACTIVE_SEARCH_INSTRUCTION
         )
         if profile is not None:
             instructions = instructions.replace(
