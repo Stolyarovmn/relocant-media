@@ -1,4 +1,5 @@
 const cacheName = "relocant-map-public-feeds-v1";
+const timestampSkew = 60_000;
 
 export function snapshotRefreshDue(lastCheck, now = Date.now()) {
   return !lastCheck || now < lastCheck || now - lastCheck >= 60_000;
@@ -12,12 +13,17 @@ async function openCache(storage) {
   }
 }
 
-function snapshot(data, decode) {
+function snapshot(response, data, decode) {
   const generatedAt = typeof data?.generated_at === "string" ? data.generated_at : "";
+  const timestamp = Date.parse(generatedAt);
+  // Prefer the host clock because the phone can be set to the wrong date.
+  const serverNow = Date.parse(response.headers.get("date") ?? "");
+  const now = Number.isFinite(serverNow) ? serverNow : Date.now();
+  if (timestamp > now + timestampSkew) throw new Error("Дата снимка карты в будущем");
   return {
     entries: decode(data),
     generatedAt,
-    timestamp: Date.parse(generatedAt),
+    timestamp,
   };
 }
 
@@ -25,7 +31,7 @@ async function savedSnapshot(cache, url, decode) {
   try {
     const response = await (await cache)?.match(url);
     if (!response) return null;
-    const saved = snapshot(await response.json(), decode);
+    const saved = snapshot(response, await response.json(), decode);
     return Number.isFinite(saved.timestamp) ? saved : null;
   } catch {
     return null;
@@ -42,7 +48,7 @@ export async function loadSnapshot(path, decode, { fetcher = fetch, storage } = 
   try {
     response = await fetcher(url, { cache: "no-cache", signal: controller.signal });
     if (!response.ok) throw new Error("Данные недоступны");
-    fresh = snapshot(await response.clone().json(), decode);
+    fresh = snapshot(response, await response.clone().json(), decode);
   } catch (error) {
     const previous = await savedSnapshot(cache, url, decode);
     if (!previous) throw error;
