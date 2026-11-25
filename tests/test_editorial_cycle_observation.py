@@ -113,8 +113,10 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
         ]:
             db.execute("INSERT INTO raw_item VALUES (?, 'a')", (item_id,))
             if post_id is not None:
-                db.execute("INSERT INTO post VALUES (?, 'belgrade', NULL, 'health', NULL)",
-                           (post_id,))
+                db.execute(
+                    "INSERT INTO post (id, city, category) VALUES (?, 'belgrade', 'health')",
+                    (post_id,),
+                )
             db.execute("INSERT INTO editorial_run VALUES (?, ?, 'pending', ?, ?)", (
                 post_id, item_id, json.dumps(decision), "2026-11-17T19:59:00+00:00",
             ))
