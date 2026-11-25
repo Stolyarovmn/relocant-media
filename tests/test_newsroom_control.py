@@ -373,6 +373,45 @@ def test_sent_without_valid_receipt_stays_visible_for_reconciliation(message_id)
         }
 
 
+@pytest.mark.parametrize(("staging_id", "has_publication_time", "state", "missing_count"), [
+    (2, False, "held", 0),
+    (0, False, "uncertain", 1),
+    (2, True, "uncertain", 1),
+])
+def test_test_chat_receipt_does_not_count_as_uncertain_channel_send(
+    staging_id, has_publication_time, state, missing_count
+):
+    engine, now = _engine(), datetime(2026, 10, 19, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add(_source("city"))
+        session.flush()
+        raw = _raw("city", "a", "A unique notice", now)
+        post = _post(raw.title)
+        if has_publication_time:
+            post.published_at = now + timedelta(minutes=7)
+        session.add_all([raw, post])
+        session.flush()
+        run = _run(raw, post, delivery="sent")
+        run.staging_message_id = staging_id
+        session.add_all([run, CollectorFailure(
+            source_id="city", strategy="rss", error_type="TimeoutError",
+            message="Source failure", occurred_at=now + timedelta(hours=1),
+        )])
+        session.commit()
+
+        result = build_newsroom_inbox(session)
+        item = result["items"][0]
+        assert item["state"] == state
+        assert item["telegram_message_id"] is None
+        assert item["retry"]["automatic_retry"] is False
+        assert result["delivery_checks"]["sent_without_receipt"] == missing_count
+        if state == "held":
+            assert item["reason_code"] == "staging_delivery_only"
+            assert item["retry"]["policy"] == "none"
+            assert run.delivery_status == "sent"
+            assert run.staging_message_id == staging_id
+
+
 @pytest.mark.parametrize("message_id", [11, None])
 @pytest.mark.parametrize(("delivery", "check"), [
     ("uncertain", "uncertain_send"), ("sending", "sending"),
