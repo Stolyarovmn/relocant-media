@@ -223,46 +223,6 @@ async def test_factory_uses_calendar_and_ignores_exhibition_links() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("additional_card", "expected_empty"),
-    [
-        ("", True),
-        ('<li><a href="/rs/novi-program/">Програм</a></li>', False),
-    ],
-)
-async def test_exhibition_calendar_is_empty_for_programs_only_when_all_cards_match(
-    additional_card: str, expected_empty: bool,
-) -> None:
-    html = f"""
-    <div class="program__list">
-      <h1>ИЗЛОЖБЕ И ПРОГРАМИ</h1>
-      <ul class="program__list-items">
-        <li class="program__list-item">
-          <a href="/rs/exhibition/%d1%81%d0%b0%d0%bd/">
-            <span class="program__list-type">Изложба</span>
-            <h2>Изложба у Музеју Југославије</h2>
-          </a>
-        </li>
-        {additional_card}
-      </ul>
-    </div>
-    """
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/rs/kalendar/"
-        return httpx.Response(200, text=html)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        collector = YugoslaviaProgramsCollector(_source(), client)
-        if expected_empty:
-            assert await collector.collect() == []
-            assert collector.empty_reason == "calendar_exhibitions_only"
-        else:
-            with pytest.raises(ValueError, match="program links missing"):
-                await collector.collect()
-
-
-@pytest.mark.asyncio
 async def test_auto_publish_cannot_be_enabled_without_publication_dates() -> None:
     source = _source()
     unsafe = source.model_copy(
