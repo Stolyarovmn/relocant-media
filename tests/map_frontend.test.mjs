@@ -525,6 +525,42 @@ test("карта возвращает проверенный снимок пос
   assert.equal(responses.size, 1);
 });
 
+test("снимок с будущей меткой не блокирует актуальные объявления", async () => {
+  let stored;
+  const storage = { open: async () => ({
+    match: async () => stored?.clone(),
+    put: async (_url, response) => { stored = response.clone(); },
+  }) };
+  const url = "./incidents.json";
+  const publishedAt = "2026-11-25T01:50:00Z";
+  const future = "2199-11-25T01:50:00Z";
+  const headers = { date: new Date("2026-11-25T01:51:00Z").toUTCString() };
+  const feed = (generated_at, entries = [], serverHeaders = headers) =>
+    Response.json({ version: 1, generated_at, incidents: entries }, { headers: serverHeaders });
+  const original = () => feed(publishedAt, [{
+    id: waterId, kind: "water", title: "Работы на водопроводе", source_url: "https://www.beograd.rs/",
+  }]);
+
+  await loadSnapshot(url, readIncidents, { storage, fetcher: async () => original() });
+  const fallback = await loadSnapshot(url, readIncidents, { storage, fetcher: async () => feed(future) });
+  assert.equal(fallback.cached, true);
+  assert.equal(fallback.generatedAt, publishedAt);
+  assert.equal(fallback.entries[0].id, waterId);
+  assert.equal((await stored.clone().json()).generated_at, publishedAt);
+
+  stored = feed(future);
+  const recovered = await loadSnapshot(url, readIncidents, { storage, fetcher: async () => original() });
+  assert.equal(recovered.cached, false);
+  assert.equal(recovered.entries[0].id, waterId);
+  assert.equal((await stored.clone().json()).generated_at, publishedAt);
+
+  const serverClock = await loadSnapshot(url, readIncidents, {
+    storage, fetcher: async () => feed(future, [], { date: new Date(future).toUTCString() }),
+  });
+  assert.equal(serverClock.cached, false);
+  assert.equal(serverClock.generatedAt, future);
+});
+
 test("кэш выключен в некоторых браузерах, свежие данные всё равно открываются", async () => {
   const storage = { open: async () => { throw new Error("storage blocked"); } };
   const readable = await loadSnapshot("./events.json", readPlaces, {
