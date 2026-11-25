@@ -223,6 +223,45 @@ async def test_factory_uses_calendar_and_ignores_exhibition_links() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_calendar_collects_current_programs_with_cyrillic_slug() -> None:
+    current_path = "/rs/program/vodjenje-%d1%8d%d0%ba%d1%81%d0%ba%d1%83%d1%80%d1%81%d0%b8%d1%8f/"
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.raw_path.decode("ascii")
+        requested.append(path)
+        if path == "/rs/kalendar/":
+            return httpx.Response(
+                200, text='<h1>ИЗЛОЖБЕ И ПРОГРАМИ</h1><a href="/rs/izlozba/test/">Изложба</a>'
+            )
+        if path == "/rs/lista-programa/":
+            return httpx.Response(200, text=f"""
+                <main>
+                    <section class="section exhibitions">
+                        <h1>Актуелни програми</h1>
+                        <a href="{current_path}">Текући програм</a>
+                        <a href="/rs/program/a%2f..%2f..%2fhidden/">Непозната адреса</a>
+                    </section>
+                    <section class="info-box">
+                        <h3>ЗАВРШЕНИ ПРОГРАМИ</h3>
+                        <a href="{DETAIL_PATH}">Завршени програм</a>
+                    </section>
+                </main>
+                """)
+        if path == current_path:
+            return httpx.Response(200, text=_detail(day="Дан: 29.11-29.11.2026."))
+        raise AssertionError(request.url)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        items = await YugoslaviaProgramsCollector(_source(), client).collect()
+
+    assert [item.url for item in items] == [f"https://muzej-jugoslavije.org{current_path}"]
+    assert "Дан: 29.11-29.11.2026." in items[0].body
+    assert items[0].published_at is None
+    assert requested == ["/rs/kalendar/", "/rs/lista-programa/", current_path]
+
+
+@pytest.mark.asyncio
 async def test_auto_publish_cannot_be_enabled_without_publication_dates() -> None:
     source = _source()
     unsafe = source.model_copy(

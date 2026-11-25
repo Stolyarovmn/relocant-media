@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from datetime import date
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -18,9 +18,11 @@ MAX_BYTES = 3_000_000
 MAX_PROGRAMS = 30
 MAX_ITEM_ERROR_MESSAGE = 200
 _LIST_PATH = "/rs/kalendar"
-_DETAIL_PATH = re.compile(r"^/rs/program/(?P<slug>[a-z0-9][a-z0-9-]*)/?$")
+_PROGRAM_LIST_PATH = "/rs/lista-programa"
+_DETAIL_SLUG = re.compile(r"[a-z0-9\u0400-\u04ff][a-z0-9\u0400-\u04ff-]*")
 _LOCATION_PATH = re.compile(r"^/rs/lokacija/[a-z0-9][a-z0-9-]*/?$")
 _CALENDAR_HEADING = "ИЗЛОЖБЕ И ПРОГРАМИ"
+_PROGRAM_LIST_HEADING = "Актуелни програми"
 _DAY = re.compile(
     r"^Дан:\s*(?P<start_day>\d{2})\.(?P<start_month>\d{2})-"
     r"(?P<end_day>\d{2})\.(?P<end_month>\d{2})\.(?P<year>20\d{2})\.$"
@@ -63,24 +65,39 @@ def _allowed_url(value: str, source: SourceConfig, *, detail: bool) -> str:
 
     path = parsed.path.rstrip("/") or "/"
     if detail:
-        if _DETAIL_PATH.fullmatch(path) is None:
+        prefix, _, slug = path.rpartition("/")
+        if (
+            prefix != "/rs/program"
+            or _DETAIL_SLUG.fullmatch(unquote(slug, errors="strict")) is None
+        ):
             raise ValueError("unapproved Museum of Yugoslavia detail path")
-    elif path != _LIST_PATH:
-        raise ValueError("unapproved Museum of Yugoslavia calendar path")
+    elif path not in {_LIST_PATH, _PROGRAM_LIST_PATH}:
+        raise ValueError("unapproved Museum of Yugoslavia listing path")
     return urlunsplit(("https", parsed.netloc, parsed.path or "/", "", ""))
 
 
-def _program_links(html: str, source: SourceConfig) -> list[str]:
+def _program_links(html: str, source: SourceConfig, *, program_list: bool = False) -> list[str]:
     if len(html.encode("utf-8")) > MAX_BYTES:
-        raise ValueError("Museum of Yugoslavia calendar response too large")
-    visible_lines = normalize_visible_text(html).splitlines()
-    if _CALENDAR_HEADING not in visible_lines:
-        raise ValueError("Museum of Yugoslavia calendar heading missing")
+        raise ValueError("Museum of Yugoslavia listing response too large")
     soup = BeautifulSoup(html, "html.parser")
+    if program_list:
+        section = soup.select_one("main section.exhibitions:has(h1)")
+        heading = section.find("h1") if section is not None else None
+        if (
+            section is None
+            or not isinstance(heading, Tag)
+            or heading.get_text(" ", strip=True) != _PROGRAM_LIST_HEADING
+        ):
+            raise ValueError("Museum of Yugoslavia current program section missing")
+        nodes = section.find_all("a")
+    else:
+        if _CALENDAR_HEADING not in normalize_visible_text(html).splitlines():
+            raise ValueError("Museum of Yugoslavia calendar heading missing")
+        nodes = soup.find_all("a")
 
     links: list[str] = []
     seen: set[str] = set()
-    for node in soup.find_all("a"):
+    for node in nodes:
         if not isinstance(node, Tag):
             continue
         href = node.get("href")
@@ -97,8 +114,6 @@ def _program_links(html: str, source: SourceConfig) -> list[str]:
         links.append(candidate)
         if len(links) > MAX_PROGRAMS:
             raise ValueError("unexpected Museum of Yugoslavia program count")
-    if not links:
-        raise ValueError("Museum of Yugoslavia program links missing")
     return links
 
 
@@ -303,8 +318,14 @@ class YugoslaviaProgramsCollector:
 
     async def collect(self) -> list[RawItem]:
         self.item_failures = []
-        listing = await self._fetch(str(self._source.url), detail=False)
-        links = _program_links(listing, self._source)
+        listing_url = str(self._source.url)
+        program_list = urlsplit(listing_url).path.rstrip("/") == _PROGRAM_LIST_PATH
+        listing = await self._fetch(listing_url, detail=False)
+        links = _program_links(listing, self._source, program_list=program_list)
+        if not links and not program_list:
+            fallback_url = urljoin(listing_url, f"{_PROGRAM_LIST_PATH}/")
+            fallback = await self._fetch(fallback_url, detail=False)
+            links = _program_links(fallback, self._source, program_list=True)
         items: list[RawItem] = []
         for link in links:
             try:
