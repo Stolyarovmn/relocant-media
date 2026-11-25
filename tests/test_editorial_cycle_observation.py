@@ -98,11 +98,32 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
             json.dumps({"status": "human_review", "reason": "PRIVATE TOKEN:secret"}),
             "2026-11-17T08:00:00+00:00",
         ))
+        rejected = {"status": "skipped", "reason": "ranking_rejected"}
+        blocked = {
+            "status": "blocked", "reason": "lifecycle_separate_publication_approval_required",
+        }
+        lifecycle_rejection = {**blocked, "_lifecycle_block": {
+            "previous_status": "skipped", "previous_reason": "ranking_rejected",
+        }}
+        for item_id, post_id, decision in [
+            (600, None, rejected),
+            (601, None, lifecycle_rejection),
+            (602, None, blocked),
+            (603, 603, lifecycle_rejection),
+        ]:
+            db.execute("INSERT INTO raw_item VALUES (?, 'a')", (item_id,))
+            if post_id is not None:
+                db.execute("INSERT INTO post VALUES (?, 'belgrade', NULL, 'health', NULL)",
+                           (post_id,))
+            db.execute("INSERT INTO editorial_run VALUES (?, ?, 'pending', ?, ?)", (
+                post_id, item_id, json.dumps(decision), "2026-11-17T19:59:00+00:00",
+            ))
         db.execute("""
             INSERT INTO scheduler_run VALUES
             (1, 'editorial-primary:belgrade', ?, ?, ?, 'belgrade', 'editorial_primary')
         """, (
-            "partial", json.dumps({"gpt_deferred_count": 6, "remaining_count": 100}),
+            "partial", json.dumps({"gpt_deferred_count": 6, "remaining_count": 100,
+                                   "processed_raw_item_ids": [600, 601, 602, 603]}),
             "2026-11-17T20:00:00+00:00",
         ))
         for ident, raw, date, city, status, reason, replacement in [
@@ -143,6 +164,17 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
          "outcome": "published", "count": 1},
     ]
     assert {"status": "human_review", "reason": None, "count": 1} in report["decisions"]
+    assert {"status": "skipped", "reason": "ranking_rejected", "count": 2} in report["decisions"]
+    assert {"status": "blocked", "reason": "lifecycle_separate_publication_approval_required",
+            "count": 2} in report["decisions"]
+    cycle = observe_cycle(snapshot, "2026-11-17T20:00:00Z")
+    assert cycle is not None
+    assert [(row["status"], row["reason"]) for row in cycle["materials"]] == [
+        ("skipped", "ranking_rejected"),
+        ("skipped", "ranking_rejected"),
+        ("blocked", "lifecycle_separate_publication_approval_required"),
+        ("blocked", "lifecycle_separate_publication_approval_required"),
+    ]
     with pytest.raises(ValueError, match="timezone"):
         observe_day(snapshot, datetime(2026, 11, 17))
 

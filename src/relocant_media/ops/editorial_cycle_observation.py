@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,19 @@ _PRIMARY_STAGES = ("collection", "candidate_selection", "batch_preselection", "m
 
 def _token(value: object) -> str | None:
     return value if isinstance(value, str) and _TOKEN.fullmatch(value) else None
+
+
+def _reported_decision(
+    status: object, reason: object, delivery: object, has_post: bool,
+    previous_status: object, previous_reason: object,
+) -> tuple[str | None, str | None]:
+    if (
+        status == "blocked" and reason == "lifecycle_separate_publication_approval_required"
+        and delivery == "pending" and not has_post
+        and previous_status == "skipped" and previous_reason == "ranking_rejected"
+    ):
+        return "skipped", "ranking_rejected"
+    return _token(status), _token(reason)
 
 
 def _safe_durations(value: object, names: tuple[str, ...]) -> dict[str, float]:
@@ -70,14 +84,24 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
                 unconfirmed.append(message_id)
         decisions = db.execute(
             """SELECT json_extract(editorial_run.outcome, '$.status'),
-                      json_extract(editorial_run.outcome, '$.reason'), COUNT(*)
+                      json_extract(editorial_run.outcome, '$.reason'),
+                      editorial_run.delivery_status, editorial_run.post_id IS NOT NULL,
+                      json_extract(editorial_run.outcome, '$._lifecycle_block.previous_status'),
+                      json_extract(editorial_run.outcome, '$._lifecycle_block.previous_reason'),
+                      COUNT(*)
                FROM editorial_run JOIN raw_item ON raw_item.id = editorial_run.raw_item_id
                JOIN source ON source.id = raw_item.source_id
                WHERE source.city = 'belgrade'
                  AND julianday(editorial_run.created_at) >= julianday(?)
                  AND julianday(editorial_run.created_at) <= julianday(?)
-               GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 20""", bounds,
+               GROUP BY 1, 2, 3, 4, 5, 6""", bounds,
         ).fetchall()
+        decision_counts: Counter[tuple[str | None, str | None]] = Counter()
+        for status, reason, delivery, has_post, before_status, before_reason, count in decisions:
+            decision = _reported_decision(
+                status, reason, delivery, bool(has_post), before_status, before_reason,
+            )
+            decision_counts[decision] += count
         held = db.execute(
             """SELECT lifecycle.status, json_extract(lifecycle.details, '$.reason'),
                       post.telegram_message_id
@@ -136,8 +160,8 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
                 for status, reason, _ in held
             ),
         },
-        "decisions": [{"status": _token(status), "reason": _token(reason), "count": count}
-                      for status, reason, count in decisions],
+        "decisions": [{"status": status, "reason": reason, "count": count}
+                      for (status, reason), count in decision_counts.most_common(20)],
         "latest_cycle_status": _token(cycle[0]) if cycle else None,
         "gpt_deferred_count": details.get("gpt_deferred_count", 0),
         "remaining_count": details.get("remaining_count"),
@@ -167,7 +191,7 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
         materials = []
         for raw_id in details.get("processed_raw_item_ids", [])[:5]:
             row = db.execute(
-                """SELECT raw_item.source_id, editorial_run.outcome,
+                """SELECT raw_item.source_id, editorial_run.outcome, editorial_run.post_id,
                           editorial_run.delivery_status, post.telegram_message_id, post.category
                    FROM raw_item
                    LEFT JOIN editorial_run ON editorial_run.raw_item_id = raw_item.id
@@ -177,8 +201,14 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
             ).fetchone()
             if row is None:
                 continue
-            source, raw_outcome, delivery, message_id, category = row
+            source, raw_outcome, post_id, delivery, message_id, category = row
             outcome = json.loads(raw_outcome) if raw_outcome else {}
+            before = outcome.get("_lifecycle_block")
+            previous = before if isinstance(before, dict) else {}
+            decision_status, decision_reason = _reported_decision(
+                outcome.get("status"), outcome.get("reason"), delivery, post_id is not None,
+                previous.get("previous_status"), previous.get("previous_reason"),
+            )
             presentation = (outcome.get("_package") or {}).get("presentation") or {}
             native_map = bool(presentation.get("native_map"))
             source_map = bool(presentation.get("source_map"))
@@ -187,7 +217,7 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
                           "source_link" if source_map else None)
             materials.append({
                 "raw_item_id": raw_id, "source_id": _token(source),
-                "status": _token(outcome.get("status")), "reason": _token(outcome.get("reason")),
+                "status": decision_status, "reason": decision_reason,
                 "rubric": _token(presentation.get("rubric_id")),
                 "has_map": native_map or source_map or has_button,
                 "map_format": map_format,
