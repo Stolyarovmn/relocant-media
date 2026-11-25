@@ -45,6 +45,8 @@ _OWNER_ACTION = re.compile(
 )
 _MEDIA_METHODS = {"photo": "sendPhoto", "video": "sendVideo",
                   "document": "sendDocument", "voice": "sendVoice", "audio": "sendAudio"}
+_KEYBOARD_TERMINAL = ("cleared", "unavailable")
+_KEYBOARD_RETRY_MINUTES = (2, 10, 30, 120)
 _NO_ACTION = "Редакция рассмотрела ваше обращение. Дальнейших действий по нему не планируется."
 _EXPIRED = (
     "Обращение закрыто. За время проверки мы не нашли достаточного подтверждения, "
@@ -572,6 +574,27 @@ async def _owner_media(
     return sent, uncertain
 
 
+def _keyboard_edit_outcome(error: Exception) -> str | None:
+    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 400:
+        try:
+            body = error.response.json()
+        except ValueError:
+            return None
+        description = body.get("description") if isinstance(body, dict) else None
+        if not isinstance(description, str):
+            return None
+    elif isinstance(error, TelegramAPIError):
+        description = str(error).removeprefix("Telegram editMessageReplyMarkup failed: ")
+    else:
+        return None
+    reason = description.lower().removeprefix("bad request: ")
+    if reason.startswith("message is not modified"):
+        return "cleared"
+    if reason in {"message to edit not found", "message can't be edited"}:
+        return "unavailable"
+    return None
+
+
 async def _clear_closed_reader_keyboard(
     session: Session, row: Submission, bot: TelegramBotAPI, *, owner_chat_id: int,
 ) -> bool:
@@ -582,9 +605,15 @@ async def _clear_closed_reader_keyboard(
     if (row.status != "closed" or not row.payload.get("reader_publication")
             or card.get("status") != "sent" or card.get("chat_id") != owner_chat_id
             or not _positive(card.get("telegram_message_id"))
-            or receipt.get("status") == "cleared" or (retry is not None and retry > now)):
+            or receipt.get("status") in _KEYBOARD_TERMINAL or (retry is not None and retry > now)):
         return False
-    record = {"status": "clearing", "attempted_at": now.isoformat()}
+    previous_attempts = receipt.get("attempts")
+    attempts = 1
+    if type(previous_attempts) is int and previous_attempts > 0:
+        attempts += previous_attempts
+    record: dict[str, Any] = {
+        "status": "clearing", "attempted_at": now.isoformat(), "attempts": attempts,
+    }
     _set_resolution(row, owner_keyboard=record)
     session.commit()
     try:
@@ -598,11 +627,15 @@ async def _clear_closed_reader_keyboard(
     except Exception as error:
         # Empty markup is an idempotent projection, not a new message.
         # An interrupted edit may be repeated; final reader answers never are.
-        if isinstance(error, TelegramAPIError) and "message is not modified" in str(error).lower():
-            record["status"] = "cleared"
+        if outcome := _keyboard_edit_outcome(error):
+            record["status"] = outcome
         else:
+            delay_index = min(attempts, len(_KEYBOARD_RETRY_MINUTES)) - 1
+            delay = timedelta(minutes=_KEYBOARD_RETRY_MINUTES[delay_index])
             record.update(status="retry", error_type=type(error).__name__,
-                          retry_at=(now + timedelta(minutes=2)).isoformat())
+                          retry_at=(now + delay).isoformat())
+            if isinstance(error, httpx.HTTPStatusError):
+                record["http_status"] = error.response.status_code
     else:
         record["status"] = "cleared"
     _set_resolution(row, owner_keyboard=record)
@@ -639,7 +672,7 @@ async def process_reader_resolutions(
                  func.coalesce(
                      Submission.payload["reader_resolution"]["owner_keyboard"]["status"].as_string(),
                      "",
-                 ) != "cleared"),
+                 ).not_in(_KEYBOARD_TERMINAL)),
             and_(Submission.kind == "news_tip",
                  Submission.status.in_(("expired", "waiting_primary", "source_linked"))),
             and_(Submission.kind == "news_tip", Submission.status == "reader_review",

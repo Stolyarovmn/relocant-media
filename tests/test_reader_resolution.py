@@ -89,12 +89,14 @@ async def test_late_material_refreshes_same_owner_card_once_and_reply_still_rout
     card_id = 51
     with Session(engine) as session:
         row = session.get(Submission, row_id)
+        owner_card = row.payload['reader_resolution']['owner_notice']
+        sent_at = datetime.fromisoformat(owner_card['sent_at'])
         row.payload = {**row.payload, 'text': 'Уточнение автора',
-                       'updated_at': datetime.now(UTC).isoformat(), 'attachments': [
+                       'updated_at': (sent_at + timedelta(seconds=1)).isoformat(), 'attachments': [
             {'kind': 'photo', 'file_id': 'photo'}, {'kind': 'video', 'file_id': 'video'}]}
         if legacy:
             resolution = dict(row.payload['reader_resolution'])
-            card = dict(resolution['owner_notice'])
+            card = dict(owner_card)
             card.pop('content_sha256')
             row.payload = {**row.payload, 'reader_resolution': {**resolution, 'owner_notice': card}}
         session.commit()
