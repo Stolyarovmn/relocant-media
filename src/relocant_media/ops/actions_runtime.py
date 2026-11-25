@@ -306,7 +306,10 @@ def _export_gpt_request(
             if request is None:
                 request = build_batch_request(session, now=now, scheduler_run_id=scheduler_run_id)
             if request is None:
-                request = build_request(session, now=now, scheduler_run_id=scheduler_run_id)
+                request = build_request(
+                    session, now=now, scheduler_run_id=scheduler_run_id,
+                    minimum_response_time=GPT_RESPONSE_MIN_MARGIN,
+                )
             deadlines = (_request_deadlines(session, request)
                          if request is not None else [])
     finally:
@@ -445,10 +448,15 @@ def _export_committed_fallback(
     try:
         with Session(engine) as session, session.no_autoflush:
             session.connection().exec_driver_sql("PRAGMA query_only=ON")
-            request = (build_request(session, now=now, scheduler_run_id=preferred_cycle)
-                       if preferred_cycle is not None else None)
+            request = (
+                build_request(session, now=now, scheduler_run_id=preferred_cycle,
+                              minimum_response_time=GPT_RESPONSE_MIN_MARGIN)
+                if preferred_cycle is not None else None
+            )
             if request is None:
-                request = build_request(session, now=now)
+                request = build_request(
+                    session, now=now, minimum_response_time=GPT_RESPONSE_MIN_MARGIN,
+                )
             if request is not None:
                 _require_public_fallback_documents(session, request)
     finally:

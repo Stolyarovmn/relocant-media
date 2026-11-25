@@ -3,11 +3,12 @@
 import copy
 import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from test_actions_runtime import context as _context
 from test_actions_runtime import state as _state
@@ -22,7 +23,9 @@ from relocant_media.ops.gpt_export_receipt import (
     validate_export_marker,
     validate_request_binding,
 )
+from relocant_media.scheduler.models import SchedulerRun
 from relocant_media.services import gpt_fallback
+from relocant_media.services.material_lifecycle import adopt_fallback_request, response_deadline
 from relocant_media.storage.models import Base, RawItem, Source
 
 context, state = _context, _state
@@ -370,3 +373,72 @@ def test_registered_public_news_venue_and_guide_still_export(
     payload = json.loads(storage.download(receipt["gpt_fallback_request_sha256"]))
     validate_request_binding(receipt, payload)
     assert "PRIVATE_READER_SENTINEL" not in captured.out+captured.err
+
+
+@pytest.mark.parametrize("next_candidate", ["none", "same_cycle", "other_cycle", "boundary"])
+def test_committed_export_selects_candidates_with_time_to_respond(
+    tmp_path, monkeypatch, capsys, next_candidate,
+):
+    database = export_database(tmp_path, monkeypatch)
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    try:
+        with Session(engine) as session:
+            first = session.scalar(select(RawItem).where(RawItem.external_id == "fallback-1"))
+            cycle = session.scalar(select(SchedulerRun))
+            preferred_id = cycle.id
+            time_remaining = (timedelta(minutes=10) if next_candidate == "boundary"
+                              else timedelta(seconds=64))
+            fallback_opened = NOW - timedelta(minutes=30) + time_remaining
+            assert adopt_fallback_request(session, first.id, now=fallback_opened)
+            assert response_deadline(session, first.id) == NOW + time_remaining
+            expected_id = first.id
+            expected_cycle = preferred_id
+            if next_candidate in {"same_cycle", "other_cycle"}:
+                second = RawItem(
+                    source_id=first.source_id, external_id="fallback-next",
+                    url="https://www.beograd.rs/lat/beoinfo-vesti/a116900/Izlozba.html",
+                    title="Izložba u Beogradu",
+                    body="Izložba se otvara 18. novembra u 19 časova u Kulturnom centru.",
+                    published_at=first.published_at, published_at_precision="instant",
+                    ingested_at=first.ingested_at,
+                )
+                session.add(second)
+                session.flush()
+                errors = [{"raw_item_id": second.id, "error_type": "GeminiWorkerError"}]
+                if next_candidate == "same_cycle":
+                    cycle.details = {"processing_errors": [*cycle.details["processing_errors"],
+                                                           *errors]}
+                else:
+                    second_cycle = SchedulerRun(
+                        task_key=cycle.task_key, task_type=cycle.task_type, city=cycle.city,
+                        status="partial", scheduled_for=NOW - timedelta(minutes=5),
+                        started_at=NOW - timedelta(minutes=5),
+                        finished_at=NOW - timedelta(minutes=3),
+                        details={"processing_errors": errors},
+                    )
+                    session.add(second_cycle)
+                    session.flush()
+                    expected_cycle = second_cycle.id
+                expected_id = second.id
+            session.commit()
+    finally:
+        engine.dispose()
+    cycle_directory = tmp_path / "cycle"
+    cycle_directory.mkdir()
+    (cycle_directory / "server-report.json").write_text(
+        json.dumps({"status": "PRIMARY_PARTIAL", "run_id": preferred_id}), encoding="utf-8",
+    )
+    storage = PrivateStore({})
+    runtime._export_committed_fallback(
+        storage, database, tmp_path, ready={"snapshot": {"sha256": "c"*64}, "generation": "d"*32},
+        mode="editorial", environment=hosted_environment(),
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    if next_candidate == "none":
+        assert receipt == {"gpt_fallback_export_status": "no_pending_candidates"}
+        assert storage.files == {}
+        return
+    payload = json.loads(storage.download(receipt["gpt_fallback_request_sha256"]))
+    validate_request_binding(receipt, payload)
+    assert payload["scheduler_run_id"] == expected_cycle
+    assert [candidate["raw_item_id"] for candidate in payload["candidates"]] == [expected_id]
