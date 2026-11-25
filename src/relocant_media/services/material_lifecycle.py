@@ -816,12 +816,12 @@ def _fallback_or_block(session: Session, record: SchedulerRun, run: EditorialRun
 
 def _unconfirmed_rejection_fallback(session: Session, record: SchedulerRun,
                                    run: EditorialRun | None, post: Post | None,
-                                   now: datetime) -> None:
+                                   now: datetime, *,
+                                   reason: str = "rejection_audit_budget_exhausted") -> None:
     # Допуск только к резерву: источник, риск, Post и квитанции проверяются отдельно.
     record.details = {**record.details, "rejection_justified": None,
                       "unconfirmed_rejection_fallback": True}
-    _fallback_or_block(session, record, run, post, now,
-                       reason="rejection_audit_budget_exhausted")
+    _fallback_or_block(session, record, run, post, now, reason=reason)
 
 
 def before_attempt(session: Session, raw_id: int, *, now: datetime,
@@ -1123,6 +1123,7 @@ def authorize_refreshed_evidence(session: Session, raw_id: int, *, now: datetime
 
 def after_error(session: Session, raw_id: int, error_type: str, *, now: datetime,
                 channel: Literal["primary", "fallback", "rejection_audit"] | None = None,
+                fallback_on_audit_error: bool = False,
                 ) -> SchedulerRun:
     now = _now(now)
     raw, source, run, post = _objects(session, raw_id)
@@ -1147,6 +1148,16 @@ def after_error(session: Session, raw_id: int, error_type: str, *, now: datetime
         record.details = {**record.details, "rejection_review_history": history[-AUDIT_ATTEMPTS:]}
         if data["audit_attempts"] >= AUDIT_ATTEMPTS:
             _unconfirmed_rejection_fallback(session, record, run, post, now)
+        elif (
+            fallback_on_audit_error and data["state"] == "processing"
+            and data.get("attempt_kind") == "rejection_audit"
+            and data["fallback_attempts"] < FALLBACK_ATTEMPTS
+            and source.ownership in {"official", "media"}
+            and _retry_snapshot_allowed(session, raw, source, run, post, data, now=now)
+        ):
+            _unconfirmed_rejection_fallback(
+                session, record, run, post, now, reason="rejection_audit_model_unavailable",
+            )
         else:
             _set(record, now=now, state="waiting", action="audit_rejection",
                  reason="rejection_audit_error",
@@ -1226,26 +1237,35 @@ def can_retry_snapshot(session: Session, raw_id: int, *, now: datetime) -> bool:
     record = _read_record(session, raw_id)
     if record is None:
         return False
-    raw, source, run, post = _objects(session, raw_id)
     data = record.details
-    ranking = run.outcome.get("ranking") if run else None
-    category = str(ranking.get("category", "")).strip().lower() if isinstance(ranking, dict) else ""
     allowed = (data.get("next_action") == "retry_prepare"
                and now >= _stamp(data["next_attempt_at"])
                or data.get("state") == "processing" and data.get("retry_authorized") is True
                or data.get("next_action") == "fallback"
                and (data.get("rejection_justified") is False
                     or data.get("unconfirmed_rejection_fallback") is True))
+    if not allowed:
+        return False
+    raw, source, run, post = _objects(session, raw_id)
+    return _retry_snapshot_allowed(session, raw, source, run, post, data, now=now)
+
+
+def _retry_snapshot_allowed(
+    session: Session, raw: RawItem, source: Source, run: EditorialRun | None,
+    post: Post | None, data: dict[str, Any], *, now: datetime,
+) -> bool:
+    ranking = run.outcome.get("ranking") if run else None
+    category = str(ranking.get("category", "")).strip().lower() if isinstance(ranking, dict) else ""
     try:
-        return bool(allowed and source.enabled and source.auto_publish and not source.high_risk
+        return bool(source.enabled and source.auto_publish and not source.high_risk
                     and (not category or category in AUTO_PUBLISH_CATEGORIES)
-                    and not _owner_approved(session, raw_id, run)
+                    and not _owner_approved(session, raw.id, run)
                     and run is not None and post is None and run.post_id is None
                     and run.delivery_status == "pending" and not _has_receipt(run, post)
                     and not any(key in run.outcome for key in (
                         "_package", "_owner_review", "_reader_submission_id", "_rich_delivery",
                         "_media_delivery",
-                    )) and data.get("fingerprints", {}).get(str(raw_id)) == _fingerprint(raw)
+                    )) and data.get("fingerprints", {}).get(str(raw.id)) == _fingerprint(raw)
                     and _fresh(raw, source, now).action == "keep")
     except ValueError:
         return False
