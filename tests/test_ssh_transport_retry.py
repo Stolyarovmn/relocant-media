@@ -14,6 +14,31 @@ def storage():
         "storage.example", "editorial_state", 22, Path("test-key"), Path("known-hosts")))
 
 
+@pytest.mark.parametrize("operation,size,compression", [
+    ("get_blob", 0, "yes"),
+    ("put_blob", client.MIN_COMPRESSED_UPLOAD, "yes"),
+    ("put_blob", client.MIN_COMPRESSED_UPLOAD - 1, "no"),
+    ("verify_blob", 0, "no"),
+    ("read_state", 0, "no"),
+    ("write_state", 0, "no"),
+])
+def test_only_blob_transfers_request_ssh_compression(storage, operation, size, compression,
+                                                     monkeypatch):
+    request = {"op": operation}
+    payload = b"a" * size
+
+    def run(command, **kwargs):
+        assert f"-oCompression={compression}" in command
+        header, _, content = kwargs["input"].partition(b"\n")
+        assert json.loads(header) == request
+        assert content == payload
+        kwargs["stdout"].write(b"{}\n")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(client.subprocess, "run", run)
+    assert storage.exchange_once(request, payload) == ({}, b"")
+
+
 @pytest.mark.parametrize("operation", ["health", "read_state", "get_blob", "put_blob"])
 def test_safe_transport_retries_exact_request_and_payload(storage, monkeypatch, operation):
     calls = []
