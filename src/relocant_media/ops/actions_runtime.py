@@ -999,7 +999,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             raise ValueError("digest preview requires a manual request")
         when = datetime.fromisoformat(environment["DIGEST_PREVIEW_AT"])
         result = asyncio.run(preview_digest(
-            database, when, environment.get("RELOCANT_MAP_TELEGRAM_APP", ""),
+            database, when, environment.get("RELOCANT_MAP_TELEGRAM_APP", ""), state=state,
         ))
         print(json.dumps({"digest_preview": result}, ensure_ascii=False), flush=True)
         return 0
