@@ -28,6 +28,12 @@ _CHANGED = re.compile(
     r"\b(?:otkaz|odloz|pomer|cancel|postpon|reschedul|otmen|perenos)\w*"
 )
 _EVENT_SENTENCE = re.compile(r"\b(?:koncert|nastup|festival|izlozb|predstav)\w*")
+_BITEF_CARD_DATE = re.compile(r"^Datum događaja: (\d{1,2})\.(\d{1,2})\.(20\d{2})\.$", re.M)
+_NAMED_DAY = r"\d{1,2}\.\s+[a-z]+(?:\s+20\d{2}\.?)?"
+_BITEF_RESCHEDULE = re.compile(
+    rf"\bplaniran[ao]? za (?P<old>{_NAMED_DAY})\b[^.!?]{{0,130}}?"
+    rf"\bpomera(?: se)? na (?P<new>{_NAMED_DAY})\b"
+)
 
 
 def is_undated_venue_source(config: SourceConfig) -> bool:
@@ -79,6 +85,31 @@ def named_venue_sources(item: RawItem, source: Source) -> dict[str, SourceConfig
     return result
 
 
+def verified_bitef_reschedule(body: str) -> date | None:
+    """Use the club's current card date when its notice explicitly moves one previous date."""
+    dates = _BITEF_CARD_DATE.findall(body)
+    text = " ".join(folded(body).split())
+    changes = list(_BITEF_RESCHEDULE.finditer(text))
+    if len(dates) != 1 or len(changes) != 1 or _CHANGED.findall(text) != ["pomera"]:
+        return None
+    try:
+        day, month, year = map(int, dates[0])
+        current = date(year, month, day)
+    except ValueError:
+        return None
+    notice = changes[0]
+    old = event_dates(notice["old"], year)
+    new = event_dates(notice["new"], year)
+    if (len(old) != 1 or new != {current.isoformat()} or not old.isdisjoint(new)
+            or event_dates(text, year) != old | new):
+        return None
+    try:
+        date.fromisoformat(next(iter(old)))
+    except ValueError:
+        return None
+    return current
+
+
 def matches_venue_evidence(
     media: RawItem | CollectedArticle, venue: RawItem | CollectedArticle, config: SourceConfig,
     *, published: date,
@@ -97,9 +128,16 @@ def matches_venue_evidence(
         return False
     media_lead = folded(media.body[:_LEAD_LIMIT])
     venue_lead = folded(venue.body[:_LEAD_LIMIT])
-    if any(_CHANGED.search(text) for text in (media_title, venue_title, media_lead, venue_lead)):
+    if any(_CHANGED.search(text) for text in (media_title, venue_title, media_lead)):
         return False
-    days = event_dates(venue_lead, published.year)
+    is_bitef = config.extraction.strategy == "bitefartcafe_events"
+    if _CHANGED.search(folded(venue.body) if is_bitef else venue_lead):
+        moved_to = verified_bitef_reschedule(venue.body) if is_bitef else None
+        if moved_to is None:
+            return False
+        days = frozenset({moved_to.isoformat()})
+    else:
+        days = event_dates(venue_lead, published.year)
     if len(days) != 1:
         return False
     try:

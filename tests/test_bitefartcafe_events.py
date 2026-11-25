@@ -179,6 +179,20 @@ def test_concert_map_uses_program_start_and_verified_club_point() -> None:
     assert place["schedule_source_url"] == FIRST_URL
 
 
+@pytest.mark.parametrize("new_day", ["30", "31"])
+def test_concert_map_requires_the_card_date_to_match_the_reschedule(new_day: str) -> None:
+    html = _detail_with_cards(_event_card("30.10.2026.", "Mitropolita Petra 8", "#")).replace(
+        "Na koncertima postoji",
+        f"Koncert, planiran za 29. oktobar, pomera na {new_day}. oktobar. Na koncertima postoji",
+    )
+    place = resolve_event_place(_map_snapshot(html), html, profile=load_city_profile("belgrade"))
+    if new_day == "30":
+        assert place is not None
+        assert place["starts_at"] == "2026-10-30T21:00:00+01:00"
+    else:
+        assert place is None
+
+
 @pytest.mark.parametrize("old_value,new_value", [
     ("Mitropolita Petra 8", "Mali Kalemegdan 2"),
     ("Program traje od 21h", "Vrata otvaramo u 21h"),
