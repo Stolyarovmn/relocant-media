@@ -4,6 +4,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
+from relocant_media.ai.evidence_scope import (
+    EVENT_SCOPE_INSTRUCTION,
+    PRACTICAL_IMPACT_INSTRUCTION,
+    UTILITY_PRECISION_INSTRUCTION,
+    unsupported_action_traffic_effect,
+)
 from relocant_media.ai.linked_update import LinkedUpdateFactsCheck
 from relocant_media.ai.models import (
     ClaimSet,
@@ -65,6 +71,7 @@ def draft_coverage_reason(
     supported = {item.claim_id for item in verification.claims if item.supported}
     allowed = set(draft.claim_ids) & supported & set(by_id)
     by_source = {(document.source_id, document.url): document for document in documents}
+    sources = tuple(f"{document.title}\n{document.body}" for document in documents)
     covered_ids: set[str] = set()
     for segment in check.segments:
         if segment.assessment != "supported":
@@ -88,6 +95,10 @@ def draft_coverage_reason(
             document = by_source.get((source_id, url))
             if document is None or not quote.strip() or quote not in document.body:
                 return "draft_coverage_ungrounded"
+        if unsupported_action_traffic_effect(
+            segment.text, quotes=(quote for _, _, quote in checked), sources=sources,
+        ):
+            return "draft_coverage_unsupported"
     if (len(set(check.scope_claim_ids)) != len(check.scope_claim_ids)
             or not set(check.scope_claim_ids).issubset(covered_ids)):
         return "draft_coverage_invalid_claim"
@@ -133,7 +144,7 @@ FACTS_COVERAGE_INSTRUCTION = (
     "Если факты полностью подтверждены, но тема чувствительная, возможен approve "
     "по фактам с sensitive_substance: автоматическая публикация всё равно запрещена, "
     "решение о риске принимает владелец отдельно."
-)
+) + EVENT_SCOPE_INSTRUCTION + PRACTICAL_IMPACT_INSTRUCTION + UTILITY_PRECISION_INSTRUCTION
 
 
 FACTS_COVERAGE_INSTRUCTION += (

@@ -71,7 +71,8 @@ def test_independent_prompts_fetches_and_computed_rubric():
             call["system_instruction"])
         assert "Остальной заголовок проверяй по фактам" in call["system_instruction"]
         assert "полное имя, школа, домашний адрес" in call["system_instruction"]
-        assert "действующего официального объявления о розыске" in call["system_instruction"]
+        assert "действующей публичной ориентировки" in call["system_instruction"]
+        assert "статус поиска — по двум независимым источникам" in call["system_instruction"]
     assert "utility" not in provider.calls[0]["system_instruction"]
     assert "Один пост — один повод" in provider.calls[1]["system_instruction"]
     assert "Диапазон слов ориентировочный" in provider.calls[1]["system_instruction"]

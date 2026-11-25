@@ -801,11 +801,12 @@ def validate_fallback_package(
                 for document in requested.documents
             )
         )
-        ready_package = package.outcome.status == PublicationStatus.READY and outcome.reason in {
-            "package_independently_reviewed",
-            "package_requires_review",
-            "event_place_requires_verification",
-        }
+        ready_package = outcome.status == PublicationStatus.READY or (
+            package.outcome.status == PublicationStatus.READY and outcome.reason in {
+                "package_requires_review",
+                "event_place_requires_verification",
+            }
+        )
         if not (ready_package or explicit_utility_review):
             raise FallbackValidationError("Пакет не прошёл действующие редакционные проверки")
         existing = session.get(EditorialRun, package.raw_item_id, populate_existing=True)

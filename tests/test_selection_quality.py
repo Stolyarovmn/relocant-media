@@ -187,13 +187,14 @@ def test_air_serbia_cancellation_gets_a_second_look_or_review(corrected) -> None
         assert provider.calls == ["rank", "rank"]
 
 
+@pytest.mark.parametrize("hours", ["Do 15.00\n", ""])
 @pytest.mark.parametrize("corrected", [True, False])
-def test_short_official_water_outage_is_not_discarded(corrected) -> None:
+def test_short_official_water_outage_is_not_discarded(corrected, hours) -> None:
     profile = load_city_profile("belgrade")
     document = _document().model_copy(update={
         "url": "https://www.beograd.rs/lat/servisne-informacije/vodovod-i-kanalizacija/a1/x.html",
         "title": "Kvarovi na mreži za 14. novembar 2026. godine",
-        "body": "Do 15.00\nČukarica: Ljube Rankovića 47 – Ostružnica\nBez v ode su potrošači.",
+        "body": f"{hours}Čukarica: Ljube Rankovića 47 – Ostružnica\nBez v ode su potrošači.",
     })
     rejected = _ranking().model_copy(update={"should_process": False})
     selected = _ranking().model_copy(update={"selection": brief(profile, document)})

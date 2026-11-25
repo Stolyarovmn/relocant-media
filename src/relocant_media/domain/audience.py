@@ -4,6 +4,7 @@ import re
 from urllib.parse import urlsplit
 
 from relocant_media.domain.attention import normalize
+from relocant_media.domain.freshness import has_service_day
 
 AUDIENCE_POLICY_VERSION = "belgrade-audience-v1"
 READER_VALUE_POLICY_VERSION = "reader-value-v2"
@@ -121,4 +122,26 @@ def local_utility_notice(source_id: str, url: str, title: str, body: str) -> boo
             return False
     elif source_id != "bvk_outage_news" and not source_id.startswith("eds_belgrade_outages_"):
         return False
-    return bool(_OUTAGE_NOTICE.search(f"{title}\n{body}") and _NOTICE_TIME.search(body))
+    return bool(
+        _OUTAGE_NOTICE.search(f"{title}\n{body}")
+        and (_NOTICE_TIME.search(body) or has_service_day(title, body))
+    )
+
+
+def official_water_notice(source_id: str, url: str, title: str, body: str) -> bool:
+    """Recognize only dated, registered water notices for the official water route."""
+    try:
+        parts = urlsplit(url)
+        if parts.scheme != "https" or parts.username is not None or parts.password is not None:
+            return False
+    except ValueError:
+        return False
+    is_city_water = (
+        source_id == "city_beograd_news" and parts.hostname in {"beograd.rs", "www.beograd.rs"}
+        and "/servisne-informacije/vodovod-i-kanalizacija/" in parts.path
+    )
+    is_water_utility = source_id == "bvk_outage_news" and parts.hostname in {"bvk.rs", "www.bvk.rs"}
+    return (
+        (is_city_water or is_water_utility) and has_service_day(title, body)
+        and local_utility_notice(source_id, url, title, body)
+    )
