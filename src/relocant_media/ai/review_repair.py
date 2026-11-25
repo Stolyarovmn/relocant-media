@@ -10,7 +10,11 @@ from relocant_media.ai.audience_policy import (
     AUDIENCE_MISMATCH_FLAG,
     PROFILE_AUDIENCE_MISMATCH_FLAG,
 )
-from relocant_media.ai.channel_style import CHANNEL_DRAFT_STYLE, writing_instruction
+from relocant_media.ai.channel_style import (
+    CHANNEL_DRAFT_STYLE,
+    CHANNEL_STYLE_VERSION,
+    writing_instruction,
+)
 from relocant_media.ai.independent_reviews import (
     require_unchanged_review_sources,
     review_context_profile,
@@ -168,7 +172,9 @@ def review_with_repairs(
             if early_date_repair:
                 return reviewed_package(current, provider, live_documents, audit=record)
             return current
-        outcome = current.outcome.model_copy(update={"draft": draft})
+        outcome = current.outcome.model_copy(update={
+            "draft": draft, "writing_matrix_version": CHANNEL_STYLE_VERSION,
+        })
         # Stale approvals are discarded. reviewed_package binds both new reviews to
         # the new context and draft hashes after re-fetching the live documents.
         placeholders = tuple(r.model_copy(update={

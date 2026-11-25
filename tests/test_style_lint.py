@@ -78,11 +78,24 @@ def test_report_holds_only_aggregates_of_recent_editorial_posts(reviewed):
     report = style_report.build_report(session, now=NOW, days=7, city="belgrade")
     stats = report["categories"]["transport"]
     assert report["posts"] == 1 and report["measured_with_matrix"] == "ru-local-news-v4"
+    assert report["written_with_matrix"] == {} and report["writing_matrix_unknown"] == 1
     assert stats["over_range"] == 1 and stats["with_long_paragraph"] == 1
     assert stats["bureaucratese_terms"] == {"в связи с": 1}
     text = json.dumps(report, ensure_ascii=False) + style_report.markdown(report)
     assert secret not in text and "77" not in text
     assert "| transport | 1 | 45–100 |" in style_report.markdown(report)
+
+
+def test_writing_matrix_version_is_not_replaced_by_measurement_version(reviewed):
+    session, run = reviewed
+    _publish(session, run, category="city", when=datetime(2026, 11, 22, tzinfo=UTC),
+             body=_words(62), writing_matrix_version="ru-local-news-v3")
+    report = style_report.build_report(session, now=NOW, days=7, city="belgrade")
+    cohort = report["written_with_matrix"]["ru-local-news-v3"]
+    assert report["measured_with_matrix"] == "ru-local-news-v4"
+    assert report["writing_matrix_unknown"] == 0 and cohort["posts"] == 1
+    assert cohort["categories"]["city"]["median_words"] == 62
+    assert "ru-local-news-v3 — 1" in style_report.markdown(report)
 
 
 def test_report_skips_old_and_reader_posts(reviewed):

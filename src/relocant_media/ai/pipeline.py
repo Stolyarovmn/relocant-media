@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 from pydantic import BaseModel, ValidationError
 
 from relocant_media.ai.audience_policy import profile_audience_policy, profile_draft_style
-from relocant_media.ai.channel_style import writing_context, writing_instruction
+from relocant_media.ai.channel_style import (
+    CHANNEL_STYLE_VERSION,
+    writing_context,
+    writing_instruction,
+)
 from relocant_media.ai.models import (
     ClaimSet,
     EditorialOutcome,
@@ -408,6 +412,7 @@ class EditorialPipeline:
                 verification=verification,
                 draft=draft,
                 confidence=overall_confidence,
+                writing_matrix_version=CHANNEL_STYLE_VERSION,
             )
 
         status = PublicationStatus.READY
@@ -437,4 +442,5 @@ class EditorialPipeline:
             verification=verification,
             draft=draft,
             confidence=overall_confidence,
+            writing_matrix_version=CHANNEL_STYLE_VERSION,
         )

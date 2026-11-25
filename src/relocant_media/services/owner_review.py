@@ -17,7 +17,11 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import Session
 
-from relocant_media.ai.channel_style import CHANNEL_DRAFT_STYLE, writing_instruction
+from relocant_media.ai.channel_style import (
+    CHANNEL_DRAFT_STYLE,
+    CHANNEL_STYLE_VERSION,
+    writing_instruction,
+)
 from relocant_media.ai.models import EvidenceDocument, PublicationStatus
 from relocant_media.ai.package import (
     EditorialPackage,
@@ -650,7 +654,9 @@ def revise_package(
     original = package.outcome.draft
     if (original.title.split(), original.body.split()) == (draft.title.split(), draft.body.split()):
         raise OwnerRevisionUnchangedError("owner comment produced no safe draft change")
-    outcome = package.outcome.model_copy(update={"draft": draft})
+    outcome = package.outcome.model_copy(update={
+        "draft": draft, "writing_matrix_version": CHANNEL_STYLE_VERSION,
+    })
     placeholders = tuple(
         review.model_copy(update={
             "reviewer_id": f"pending-{review.role}",

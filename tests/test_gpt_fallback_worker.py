@@ -13,6 +13,7 @@ from test_gpt_fallback_service import NOW, package_for_request
 from test_gpt_fallback_service import fallback_session as service_session
 from test_server_cycle import seeded as server_seeded
 
+from relocant_media.ai.channel_style import CHANNEL_STYLE_VERSION
 from relocant_media.ai.models import EditorialOutcome, EvidenceDocument, RussianDraft
 from relocant_media.ai.package import EditorialPackage, canonical_json, context_sha256, draft_sha256
 from relocant_media.domain.city_profile import load_city_profile
@@ -307,13 +308,23 @@ def test_revalidation_failure_prevents_import_after_successful_live_fetch(
         assert session.get(EditorialRun, package.raw_item_id) is None
 
 
-@pytest.mark.parametrize("invalidate", [False, True])
+@pytest.mark.parametrize("invalidate,declares_version", [
+    (False, False), (False, True), (True, False),
+])
 def test_real_fallback_validation_requires_the_recorded_gemini_failure(
-    fallback_session, monkeypatch, invalidate,
+    fallback_session, monkeypatch, invalidate, declares_version,
 ):
     session, raw, scheduler = fallback_session
     request = gpt_fallback.build_request(session, now=NOW)
     package = package_for_request(request)
+    if declares_version:
+        package = package.model_copy(update={"outcome": package.outcome.model_copy(update={
+            "writing_matrix_version": CHANNEL_STYLE_VERSION,
+        })})
+        digest = context_sha256(package)
+        package = package.model_copy(update={"reviews": tuple(
+            review.model_copy(update={"context_sha256": digest}) for review in package.reviews
+        )})
     fetched = []
     if invalidate:
         scheduler.details = {"processing_errors": [
@@ -331,7 +342,24 @@ def test_real_fallback_validation_requires_the_recorded_gemini_failure(
     assert result["imported"] == (0 if invalidate else 1)
     assert result["fallback_required"] is invalidate
     assert fetched == ([] if invalidate else [True])
-    assert (session.get(EditorialRun, raw.id) is None) is invalidate
+    stored = session.get(EditorialRun, raw.id)
+    assert (stored is None) is invalidate
+    if stored is not None:
+        assert stored.outcome["writing_matrix_version"] == CHANNEL_STYLE_VERSION
+        package_outcome = stored.outcome["_package"]["outcome"]
+        assert ("writing_matrix_version" in package_outcome) is declares_version
+
+
+def test_fallback_cannot_attest_a_different_writing_matrix(fallback_session):
+    session, raw, _ = fallback_session
+    request = gpt_fallback.build_request(session, now=NOW)
+    package = package_for_request(request)
+    package = package.model_copy(update={"outcome": package.outcome.model_copy(update={
+        "writing_matrix_version": "ru-local-news-v999",
+    })})
+    with pytest.raises(gpt_fallback.FallbackValidationError, match="Версия матрицы"):
+        gpt_fallback.validate_fallback_package(session, request, package, now=NOW)
+    assert session.get(EditorialRun, raw.id) is None
 
 
 @pytest.mark.parametrize("different_reply", [False, True])
