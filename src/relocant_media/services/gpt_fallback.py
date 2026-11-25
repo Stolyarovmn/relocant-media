@@ -382,9 +382,12 @@ def _apply_request_references(request: dict[str, Any], references: list[dict[str
 
 def build_request(
     session: Session, *, now: datetime, scheduler_run_id: int | None = None,
+    minimum_response_time: timedelta | None = None,
 ) -> dict[str, Any] | None:
     """Действующие коммунальные предупреждения идут перед обычной очередью резерва."""
     now = _utc(now)
+    request_end = now + REQUEST_TTL
+    cutoff = now + minimum_response_time if minimum_response_time is not None else None
     with session.no_autoflush:
         profile = load_city_profile("belgrade")
         registry = _registry()
@@ -447,6 +450,9 @@ def build_request(
                         and not eligible_policy_reassessment(session, raw_id, now=now)
                         and not can_retry_snapshot(session, raw_id, now=now)):
                     continue
+                respond_by = _candidate_respond_by(session, raw_id, request_end=request_end)
+                if cutoff is not None and datetime.fromisoformat(respond_by) < cutoff:
+                    continue
                 try:
                     candidate = _candidate_request(
                         session, raw_id, profile=profile, registry=registry, now=now
@@ -458,9 +464,7 @@ def build_request(
                         continue
                 except ValueError:
                     continue
-                candidate["respond_by"] = _candidate_respond_by(
-                    session, raw_id, request_end=now + REQUEST_TTL,
-                )
+                candidate["respond_by"] = respond_by
                 candidates.append(candidate)
                 _apply_request_references(request, references)
                 try:
