@@ -732,6 +732,10 @@ def validate_fallback_package(
             or package.presentation is None
         ):
             raise FallbackValidationError("Пакет не совпадает с точным событием запроса")
+        requested_matrix = (parsed.writing_brief or {}).get("version")
+        if (package.outcome.writing_matrix_version is not None
+                and package.outcome.writing_matrix_version != requested_matrix):
+            raise FallbackValidationError("Версия матрицы пакета не совпадает с запросом")
         if requested.flight_review_parent is not None and (
             package.linked_update is None
             or package.linked_update.parent != requested.flight_review_parent

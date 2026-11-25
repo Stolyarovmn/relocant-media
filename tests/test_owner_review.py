@@ -12,6 +12,7 @@ from test_editorial_package import bind_context, package_payload, parse
 from test_editorial_pipeline import FakeProvider, _claims, _ranking, _verification
 from test_water_outage_scope import CITY_BODY, CITY_URL
 
+from relocant_media.ai.channel_style import CHANNEL_STYLE_VERSION
 from relocant_media.ai.models import EvidenceDocument, RussianDraft, SelectionBrief
 from relocant_media.ai.package import EditorialPackage, canonical_json, draft_sha256
 from relocant_media.ai.pipeline import EditorialPipeline
@@ -604,6 +605,7 @@ def test_owner_revision_discards_old_reviews_and_creates_new_exact_version(engin
         "independent_facts", "independent_utility",
     ]
     assert revised.outcome.draft.title == "Отключение воды на Звездаре"
+    assert revised.outcome.writing_matrix_version == CHANNEL_STYLE_VERSION
     assert all(review.reviewer_id.startswith("server-") for review in revised.reviews)
 
     with Session(engine) as session:
@@ -613,6 +615,7 @@ def test_owner_revision_discards_old_reviews_and_creates_new_exact_version(engin
         post = session.get(Post, run.post_id)
         assert review.status == "superseded"
         assert post.title == "Отключение воды на Звездаре"
+        assert run.outcome["writing_matrix_version"] == CHANNEL_STYLE_VERSION
         assert run.outcome["_package_sha256"] == _package_hash(revised)
         assert review.payload["successor_package_sha256"] == _package_hash(revised)
 

@@ -46,6 +46,7 @@ def import_package(
     session: Session, package: EditorialPackage, *, now: datetime | None = None,
     replace_empty_hold: bool = False, replace_map_hold: bool = False,
     replace_flight_hold: bool = False,
+    requested_writing_matrix: str | None = None,
 ) -> EditorialRun:
     """Dedicated session required. Matching imports do not reset delivery receipts."""
     outcome = evaluate_package(package, now=now)
@@ -182,6 +183,8 @@ def import_package(
             session.flush()
         saved_outcome = {**outcome.model_dump(mode="json"),
                          "_package": payload, "_package_sha256": fingerprint}
+        if outcome.writing_matrix_version is None and requested_writing_matrix is not None:
+            saved_outcome["writing_matrix_version"] = requested_writing_matrix
         if is_reader_report_source(source):
             submission_id = submission_id_for(item)
             if submission_id is None:

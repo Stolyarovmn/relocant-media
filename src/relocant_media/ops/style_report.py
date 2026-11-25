@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 import sys
 from collections import Counter
@@ -21,7 +22,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from relocant_media.ai.channel_style import CHANNEL_STYLE_VERSION, word_range
-from relocant_media.domain.style_lint import LONG_PARAGRAPH_WORDS, lint
+from relocant_media.ai.models import WRITING_MATRIX_VERSION_PATTERN
+from relocant_media.domain.style_lint import LONG_PARAGRAPH_WORDS, StyleFlags, lint
 from relocant_media.storage.models import EditorialRun, Post
 
 MAX_DAYS = 30
@@ -29,6 +31,21 @@ MAX_DAYS = 30
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _category_summary(flags: list[StyleFlags]) -> dict[str, Any]:
+    terms: Counter[str] = Counter()
+    for item in flags:
+        terms.update(item.bureaucratese)
+    return {
+        "posts": len(flags), "word_range": list(flags[0].word_range),
+        "median_words": statistics.median(item.words for item in flags),
+        "over_range": sum(1 for item in flags if item.over_range),
+        "under_range": sum(1 for item in flags if item.under_range),
+        "with_long_paragraph": sum(1 for item in flags if item.long_paragraphs),
+        "with_bureaucratese": sum(1 for item in flags if item.bureaucratese),
+        "bureaucratese_terms": dict(sorted(terms.items())),
+    }
 
 
 def build_report(session: Session, *, now: datetime, days: int,
@@ -44,7 +61,9 @@ def build_report(session: Session, *, now: datetime, days: int,
         .where(EditorialRun.delivery_status == "sent", Post.telegram_message_id > 0,
                Post.city == city, Post.published_at >= since,
                Post.published_at <= now)).all()
-    groups: dict[str, list[Any]] = {}
+    groups: dict[str, list[StyleFlags]] = {}
+    by_matrix: dict[str, dict[str, list[StyleFlags]]] = {}
+    unknown_matrix = 0
     reader_posts = 0
     for row in rows:
         post: Post = row[0]
@@ -55,38 +74,41 @@ def build_report(session: Session, *, now: datetime, days: int,
         if isinstance(outcome, dict) and "_reader_submission_id" in outcome:
             reader_posts += 1
             continue
-        groups.setdefault(post.category, []).append(
-            lint(post.body, word_range(post.category)))
-    categories: dict[str, Any] = {}
-    for category, flags in sorted(groups.items()):
-        terms: Counter[str] = Counter()
-        for item in flags:
-            terms.update(item.bureaucratese)
-        low, high = word_range(category)
-        categories[category] = {
-            "posts": len(flags), "word_range": [low, high],
-            "median_words": statistics.median(item.words for item in flags),
-            "over_range": sum(1 for item in flags if item.over_range),
-            "under_range": sum(1 for item in flags if item.under_range),
-            "with_long_paragraph": sum(1 for item in flags if item.long_paragraphs),
-            "with_bureaucratese": sum(1 for item in flags if item.bureaucratese),
-            "bureaucratese_terms": dict(sorted(terms.items())),
+        flags = lint(post.body, word_range(post.category))
+        groups.setdefault(post.category, []).append(flags)
+        version = outcome.get("writing_matrix_version") if isinstance(outcome, dict) else None
+        if isinstance(version, str) and re.fullmatch(WRITING_MATRIX_VERSION_PATTERN, version):
+            by_matrix.setdefault(version, {}).setdefault(post.category, []).append(flags)
+        else:
+            unknown_matrix += 1
+    written_with_matrix = {
+        version: {
+            "posts": sum(len(flags) for flags in categories.values()),
+            "categories": {key: _category_summary(flags)
+                           for key, flags in sorted(categories.items())},
         }
-    # The rules the sample was measured with; the version each text was written under
-    # is not stored yet (#313).
+        for version, categories in sorted(by_matrix.items())
+    }
     return {"version": 1, "generated_at": now.isoformat(), "city": city, "days": days,
             "window": {"from": since.isoformat(), "to": now.isoformat()},
             "measured_with_matrix": CHANNEL_STYLE_VERSION,
             "long_paragraph_words": LONG_PARAGRAPH_WORDS,
             "posts": sum(len(flags) for flags in groups.values()),
-            "reader_posts_excluded": reader_posts, "categories": categories}
+            "reader_posts_excluded": reader_posts,
+            "categories": {key: _category_summary(flags) for key, flags in sorted(groups.items())},
+            "written_with_matrix": written_with_matrix,
+            "writing_matrix_unknown": unknown_matrix}
 
 
 def markdown(report: dict[str, Any]) -> str:
+    matrices = ", ".join(f"{key} — {value['posts']}"
+                         for key, value in report.get("written_with_matrix", {}).items())
+    unknown = report.get("writing_matrix_unknown", report["posts"])
+    matrix_line = f"При подготовке использовали {matrices}. " if matrices else ""
     lines = [f"## Матрица подачи: {report['city']}, {report['days']} дн.", "",
              f"Период: {report['window']['from']} — {report['window']['to']}. "
-             f"Измерено по правилам {report['measured_with_matrix']}; с какой версией "
-             "матрицы писали каждый текст, пока не хранится.", "",
+             f"Измерено по правилам {report['measured_with_matrix']}.",
+             f"{matrix_line}Публикации с неизвестной версией — {unknown}.", "",
              f"Постов: {report['posts']}; материалы читателей не считаются "
              f"({report['reader_posts_excluded']}). Флаги — подсказки, не блок.", "",
              "| Категория | Постов | Диапазон | Медиана слов | Длиннее | Короче | "
