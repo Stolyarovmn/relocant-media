@@ -55,6 +55,7 @@ _STATE_PRIORITY = {
     NewsroomState.SENT: 11,
 }
 _DELIVERY_CHECKS = ("sending", "uncertain_send", "sent_without_receipt", "receipt_conflict")
+_STAGING_ONLY_REASON = "staging_delivery_only"
 
 
 def public_delivery_checks(value: object) -> dict[str, int] | None:
@@ -161,6 +162,13 @@ def _delivery_state(run: EditorialRun | None, post: Post | None) -> NewsroomStat
     if (run.delivery_status == "sent" and post is not None
             and type(post.telegram_message_id) is int and post.telegram_message_id > 0):
         return NewsroomState.SENT
+    if (
+        run.delivery_status == "sent" and post is not None
+        and type(run.staging_message_id) is int and run.staging_message_id > 0
+        and post.telegram_message_id is None and post.published_at is None
+    ):
+        # The legacy staging sender marks a test-chat receipt as sent.
+        return NewsroomState.HELD
     if (run.delivery_status == "sent" or run.staging_message_id is not None or post is not None
             and (post.telegram_message_id is not None or post.published_at is not None)):
         return NewsroomState.UNCERTAIN
@@ -182,6 +190,8 @@ def _state(
         return NewsroomState.UNCERTAIN, "delivery_reconciliation_required"
     if delivery_state == NewsroomState.SENDING:
         return NewsroomState.SENDING, "delivery_reconciliation_required"
+    if delivery_state == NewsroomState.HELD:
+        return NewsroomState.HELD, _STAGING_ONLY_REASON
     if blocked_reason and delivery_state != NewsroomState.SENT:
         return NewsroomState.HELD, blocked_reason
     if run is not None:
@@ -466,7 +476,10 @@ def build_newsroom_inbox(
                     for submission in sorted(submissions.values(), key=lambda item: item.id)
                 ],
                 "last_error": failure_summary,
-                "retry": _retry_info(state, failure_summary, terminal_blocked=terminal_blocked),
+                "retry": _retry_info(
+                    state, failure_summary,
+                    terminal_blocked=terminal_blocked or reason_code == _STAGING_ONLY_REASON,
+                ),
             }
         )
 

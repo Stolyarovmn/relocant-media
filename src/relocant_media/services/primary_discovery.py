@@ -19,7 +19,7 @@ from relocant_media.collectors.linked_tour_map import STRATEGY as TOUR_MAP_STRAT
 from relocant_media.collectors.linked_tour_map import supported_tour_map_url
 from relocant_media.collectors.ticket_vision_events import STRATEGY as TICKET_VISION_STRATEGY
 from relocant_media.collectors.ticket_vision_events import ticket_event_url
-from relocant_media.collectors.venue_feed import _allowed
+from relocant_media.collectors.venue_feed import _allowed, _index_article_url
 from relocant_media.domain.flight_notices import city_carriers
 from relocant_media.sources.registry import SourceConfig
 
@@ -100,6 +100,18 @@ def source_for_url(url: str, sources: dict[str, SourceConfig]) -> str | None:
                 and ARTICLE_PATH.fullmatch(parts.path)):
             return "cukarica_news"
         for key, source in sources.items():
+            if source.source_type == "official_sports_news":
+                try:
+                    if source.extraction.article_index is not None:
+                        _index_article_url(url, source)
+                    else:
+                        prefix = (source.url.path or "").rstrip("/") + "/"
+                        if not parts.path.rstrip("/").startswith(prefix):
+                            continue
+                        _allowed(url, source)
+                except ValueError:
+                    continue
+                return key
             if source.source_type != "official_venue_events":
                 continue
             if source.extraction.strategy == TICKET_VISION_STRATEGY:

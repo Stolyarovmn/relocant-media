@@ -54,6 +54,18 @@ class Weather:
         return {"rhmz_forecast": self.forecast_status, "meteoalarm": self.warning_status}
 
 
+def _warning_text(hazard: str, level: str, starts: datetime, ends: datetime,
+                  tomorrow: datetime) -> str:
+    if (starts == tomorrow - timedelta(days=1)
+            and ends in (tomorrow - timedelta(minutes=1), tomorrow)):
+        period = "весь день"
+    elif starts.date() == ends.date():
+        period = f"с {starts:%H:%M} до {ends:%H:%M}"
+    else:
+        period = f"с {starts:%d.%m} в {starts:%H:%M} до {ends:%d.%m} в {ends:%H:%M}"
+    return f"{hazard.capitalize()}. Предупреждение РХМЗ действует {period}. Уровень — {level}."
+
+
 def _warning_reading(content: bytes, now: datetime) -> tuple[str | None, WeatherStatus]:
     if (now.utcoffset() is None or len(content) > 600_000
             or re.search(rb"<!\s*(?:doctype|entity)", content, re.I)):
@@ -94,12 +106,12 @@ def _warning_reading(content: bytes, now: datetime) -> tuple[str | None, Weather
         except (OverflowError, ValueError):
             unreadable = True
             continue
-        period = (f"{starts:%H:%M}–{ends:%H:%M}" if starts.date() == ends.date() else
-                  f"{starts:%d.%m %H:%M}–{ends:%d.%m %H:%M}")
-        text = f"РХМЗ предупреждает: {_HAZARDS[event]}, {_LEVELS[level]} уровень, {period}."
-        alerts.append((tuple(_LEVELS).index(level), text))
+        alerts.append((tuple(_LEVELS).index(level), _HAZARDS[event], starts, ends, _LEVELS[level]))
     if alerts:
-        return max(alerts)[1], "partial" if unreadable else "ok"
+        _, hazard, starts, ends, level = max(alerts)
+        return _warning_text(hazard, level, starts, ends, tomorrow), (
+            "partial" if unreadable else "ok"
+        )
     return None, "invalid_payload" if unreadable else "none_active"
 
 

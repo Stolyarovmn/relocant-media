@@ -7,11 +7,14 @@ import json
 import os
 import re
 import sqlite3
+from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from relocant_media.domain.event_map_policy import event_map_review_reason
+from relocant_media.domain.map_links import is_map_event_url
 from relocant_media.domain.quiet_hours import QUIET_END, QUIET_START, QUIET_ZONE
 from relocant_media.ops.collection_timing import COLLECTION_GROUPS
 from relocant_media.ops.ssh_state_client import SSHConfig, SSHStateClient
@@ -25,6 +28,19 @@ def _token(value: object) -> str | None:
     return value if isinstance(value, str) and _TOKEN.fullmatch(value) else None
 
 
+def _reported_decision(
+    status: object, reason: object, delivery: object, has_post: bool,
+    previous_status: object, previous_reason: object,
+) -> tuple[str | None, str | None]:
+    if (
+        status == "blocked" and reason == "lifecycle_separate_publication_approval_required"
+        and delivery == "pending" and not has_post
+        and previous_status == "skipped" and previous_reason == "ranking_rejected"
+    ):
+        return "skipped", "ranking_rejected"
+    return _token(status), _token(reason)
+
+
 def _safe_durations(value: object, names: tuple[str, ...]) -> dict[str, float]:
     if not isinstance(value, dict):
         return {}
@@ -33,6 +49,15 @@ def _safe_durations(value: object, names: tuple[str, ...]) -> dict[str, float]:
         if isinstance(seconds := value.get(name), (int, float))
         and not isinstance(seconds, bool) and 0 <= seconds <= 24 * 60 * 60
     }
+
+
+def _confirmed_map_button(raw: str, message_id: int) -> bool:
+    receipt = json.loads(raw).get("_rich_delivery")
+    if not isinstance(receipt, dict):
+        return False
+    url = receipt.get("map_url")
+    return (receipt.get("state") == "sent" and receipt.get("message_ids") == [message_id]
+            and isinstance(url, str) and is_map_event_url(url))
 
 
 def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
@@ -54,7 +79,8 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
     uri = snapshot.resolve(strict=True).as_uri() + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True)) as db:
         rows = db.execute(
-            """SELECT post.telegram_message_id, post.category, editorial_run.outcome
+            """SELECT post.telegram_message_id, post.category, editorial_run.outcome,
+                      post.title, post.body
                FROM post JOIN editorial_run ON editorial_run.post_id = post.id
                WHERE post.city = 'belgrade' AND editorial_run.delivery_status = 'sent'
                  AND post.telegram_message_id IS NOT NULL
@@ -62,22 +88,35 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
                  AND julianday(post.published_at) <= julianday(?)
                ORDER BY post.published_at, post.id""", bounds,
         ).fetchall()
-        unconfirmed = []
-        for message_id, category, raw in rows:
-            outcome = json.loads(raw)
-            receipt = outcome.get("_rich_delivery") or {}
-            if category in {"events", "transport", "utilities"} and not receipt.get("map_url"):
-                unconfirmed.append(message_id)
+        map_posts: dict[int, tuple[str, bool]] = {}
+        for message_id, category, raw, title, body in rows:
+            if category in {"transport", "utilities"} or event_map_review_reason(
+                None, category, title, body, current_delivery=True, city="belgrade",
+            ) is not None:
+                _, already_confirmed = map_posts.get(message_id, (category, False))
+                map_posts[message_id] = (
+                    category, already_confirmed or _confirmed_map_button(raw, message_id),
+                )
         decisions = db.execute(
             """SELECT json_extract(editorial_run.outcome, '$.status'),
-                      json_extract(editorial_run.outcome, '$.reason'), COUNT(*)
+                      json_extract(editorial_run.outcome, '$.reason'),
+                      editorial_run.delivery_status, editorial_run.post_id IS NOT NULL,
+                      json_extract(editorial_run.outcome, '$._lifecycle_block.previous_status'),
+                      json_extract(editorial_run.outcome, '$._lifecycle_block.previous_reason'),
+                      COUNT(*)
                FROM editorial_run JOIN raw_item ON raw_item.id = editorial_run.raw_item_id
                JOIN source ON source.id = raw_item.source_id
                WHERE source.city = 'belgrade'
                  AND julianday(editorial_run.created_at) >= julianday(?)
                  AND julianday(editorial_run.created_at) <= julianday(?)
-               GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 20""", bounds,
+               GROUP BY 1, 2, 3, 4, 5, 6""", bounds,
         ).fetchall()
+        decision_counts: Counter[tuple[str | None, str | None]] = Counter()
+        for status, reason, delivery, has_post, before_status, before_reason, count in decisions:
+            decision = _reported_decision(
+                status, reason, delivery, bool(has_post), before_status, before_reason,
+            )
+            decision_counts[decision] += count
         held = db.execute(
             """SELECT lifecycle.status, json_extract(lifecycle.details, '$.reason'),
                       post.telegram_message_id
@@ -121,11 +160,26 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
                GROUP BY 1, 2, 3, 4 ORDER BY 5 DESC LIMIT 30""",
             ((now - timedelta(days=30)).astimezone(UTC).isoformat(),),
         ).fetchall()
+    unconfirmed = [message_id for message_id, (_, confirmed) in map_posts.items() if not confirmed]
+    confirmed_count = len(map_posts) - len(unconfirmed)
+    by_category: dict[str, dict[str, int]] = {}
+    for category, confirmed in map_posts.values():
+        counts = by_category.setdefault(category, {"posts": 0, "confirmed_at_send": 0})
+        counts["posts"] += 1
+        counts["confirmed_at_send"] += int(confirmed)
     return {
         "local_date": local.date().isoformat(), "timezone": QUIET_ZONE.key,
         "standalone_published_count": len(rows),
         "published_message_ids": [row[0] for row in rows],
         "map_button_delivery_unconfirmed": unconfirmed,
+        "map_button_coverage": {
+            "posts": len(map_posts),
+            "confirmed_at_send": confirmed_count,
+            "unconfirmed": len(unconfirmed),
+            "confirmed_percent": round(100 * confirmed_count / len(map_posts), 1)
+            if map_posts else None,
+            "by_category": by_category,
+        },
         "morning_hold": {
             "materials": len(held),
             "published_message_ids": sorted({
@@ -136,8 +190,8 @@ def observe_day(snapshot: Path, now: datetime) -> dict[str, Any]:
                 for status, reason, _ in held
             ),
         },
-        "decisions": [{"status": _token(status), "reason": _token(reason), "count": count}
-                      for status, reason, count in decisions],
+        "decisions": [{"status": status, "reason": reason, "count": count}
+                      for (status, reason), count in decision_counts.most_common(20)],
         "latest_cycle_status": _token(cycle[0]) if cycle else None,
         "gpt_deferred_count": details.get("gpt_deferred_count", 0),
         "remaining_count": details.get("remaining_count"),
@@ -167,7 +221,7 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
         materials = []
         for raw_id in details.get("processed_raw_item_ids", [])[:5]:
             row = db.execute(
-                """SELECT raw_item.source_id, editorial_run.outcome,
+                """SELECT raw_item.source_id, editorial_run.outcome, editorial_run.post_id,
                           editorial_run.delivery_status, post.telegram_message_id, post.category
                    FROM raw_item
                    LEFT JOIN editorial_run ON editorial_run.raw_item_id = raw_item.id
@@ -177,8 +231,14 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
             ).fetchone()
             if row is None:
                 continue
-            source, raw_outcome, delivery, message_id, category = row
+            source, raw_outcome, post_id, delivery, message_id, category = row
             outcome = json.loads(raw_outcome) if raw_outcome else {}
+            before = outcome.get("_lifecycle_block")
+            previous = before if isinstance(before, dict) else {}
+            decision_status, decision_reason = _reported_decision(
+                outcome.get("status"), outcome.get("reason"), delivery, post_id is not None,
+                previous.get("previous_status"), previous.get("previous_reason"),
+            )
             presentation = (outcome.get("_package") or {}).get("presentation") or {}
             native_map = bool(presentation.get("native_map"))
             source_map = bool(presentation.get("source_map"))
@@ -187,7 +247,7 @@ def observe_cycle(snapshot: Path, started_at: str) -> dict[str, Any] | None:
                           "source_link" if source_map else None)
             materials.append({
                 "raw_item_id": raw_id, "source_id": _token(source),
-                "status": _token(outcome.get("status")), "reason": _token(outcome.get("reason")),
+                "status": decision_status, "reason": decision_reason,
                 "rubric": _token(presentation.get("rubric_id")),
                 "has_map": native_map or source_map or has_button,
                 "map_format": map_format,

@@ -80,6 +80,7 @@ export function safeLink(value) {
 
 const shareApp = "https://t.me/relocant_media_belgrade_bot";
 const repairTarget = /^repair_(event_[a-f0-9]{20})_(-?\d{1,9}_-?\d{1,9})$/;
+const timelineTarget = /^timeline_(event_[a-f0-9]{20})_(\d{10})(?:_(-?\d{1,9}_-?\d{1,9}))?$/;
 
 function repairKey(point) {
   if (!coords(point?.lat, point?.lon)) return "";
@@ -92,15 +93,26 @@ export function repairLaunchPoint(incident, key) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+function telegramShare(start, title) {
+  const target = `${shareApp}?startapp=${start}`;
+  const text = typeof title === "string" ? title.trim().slice(0, 200) : "";
+  return `https://t.me/share/url?url=${encodeURIComponent(target)}`
+    + (text ? `&text=${encodeURIComponent(text)}` : "");
+}
+
 // Ссылка «Поделиться»: окно отправки Telegram с карточкой этой же карты.
 export function shareLink(id, title = "", places = false, repairPoint = null) {
   if (typeof id !== "string" || !eventId.test(id)) return "";
   const key = places ? "" : repairKey(repairPoint);
   const start = key ? `repair_${id}_${key}` : `${places ? "places_" : ""}${id}`;
-  const target = `${shareApp}?startapp=${start}`;
-  const text = typeof title === "string" ? title.trim().slice(0, 200) : "";
-  return `https://t.me/share/url?url=${encodeURIComponent(target)}`
-    + (text ? `&text=${encodeURIComponent(text)}` : "");
+  return telegramShare(start, title);
+}
+
+export function shareTimelineLink(id, title, instant, repairPoint = null) {
+  if (typeof id !== "string" || !eventId.test(id) || !Number.isFinite(instant)) return "";
+  const key = repairKey(repairPoint);
+  const start = `timeline_${id}_${instant / 1000}${key ? `_${key}` : ""}`;
+  return timelineTarget.test(start) ? telegramShare(start, title) : "";
 }
 
 export function launchEvent(search, telegramParam) {
@@ -126,6 +138,11 @@ export function launchMap(search, telegramParam) {
       if (eventId.test(value)) break;
       const repair = repairTarget.exec(value);
       if (repair) return { mode: "incidents", id: repair[1], repairKey: repair[2] };
+      const timed = timelineTarget.exec(value);
+      if (timed) return {
+        mode: "incidents", id: timed[1], timelineAt: Number(timed[2]) * 1000,
+        ...(timed[3] ? { repairKey: timed[3] } : {}),
+      };
       if (value === "places") return { mode: "places", id: "" };
       if (value.startsWith("places_") && eventId.test(value.slice(7))) {
         return { mode: "places", id: value.slice(7) };

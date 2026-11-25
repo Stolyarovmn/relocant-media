@@ -5,6 +5,7 @@ import pytest
 from test_bgsaobracaj_notices import PUBLISHED, SCHEDULE, ZONE
 from test_independent_reviews import Provider, documents, package
 
+from relocant_media.ai.channel_style import CHANNEL_STYLE_VERSION
 from relocant_media.ai.package import context_sha256, draft_sha256, evaluate_package
 from relocant_media.ai.provider import StructuredOutputError
 from relocant_media.ai.review_repair import review_with_repairs
@@ -191,6 +192,7 @@ def test_repair_gets_both_fresh_reviews_and_preserves_all_other_fields():
     original = value.model_dump(exclude={"reviews"})
     final = result.model_dump(exclude={"reviews"})
     del original["outcome"]["draft"], final["outcome"]["draft"]
+    assert final["outcome"].pop("writing_matrix_version") == CHANNEL_STYLE_VERSION
     assert original == final
     assert all(r.context_sha256 == context_sha256(result) and
                r.draft_sha256 == draft_sha256(result.outcome.draft) for r in result.reviews)

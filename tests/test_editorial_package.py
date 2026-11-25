@@ -140,6 +140,26 @@ def event_payload() -> dict:
     return payload
 
 
+@pytest.mark.parametrize("fixture,context,receipt", [
+    (package_payload,
+     "3dd86916050177fc31830d85656090a17917c8a3e653bcf1272e9048644f8780",
+     "c631991389f7dbde0b091aaac0276a401475052116a03ea0a63a729568473d50"),
+    (event_payload,
+     "476a2b4417e05426afe6843d8e7701baf01b5f4f70367943c31d03fa3722cd7d",
+     "14e2880975c6b37623bf4a77cf31b5e647cc75fea582bcd15df88a8638c9b916"),
+])
+def test_historical_packages_keep_receipt_and_review_hashes(fixture, context, receipt):
+    import hashlib
+
+    from relocant_media.ai.package import canonical_json
+
+    package = parse(fixture())
+    payload = package.model_dump(mode="json")
+    assert "writing_matrix_version" not in payload["outcome"]
+    assert context_sha256(package) == context
+    assert hashlib.sha256(canonical_json(payload).encode()).hexdigest() == receipt
+
+
 @pytest.mark.parametrize("field", ["body", "high_risk", "event_key"])
 def test_v2_reviews_bind_the_entire_bundle(field: str) -> None:
     payload = event_payload()

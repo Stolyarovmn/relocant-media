@@ -30,6 +30,43 @@ def test_healthy_stale_and_storage_unavailable(tmp_path):
     assert watchdog.inspect(client, NOW, tmp_path, allow_recovery=True).status == "storage"
 
 
+@pytest.mark.parametrize(
+    "timestamp", [None, "invalid", "2026-11-13T08:44:00", "2026-11-13T10:00:00Z"],
+)
+def test_invalid_time_alerts_without_resetting_storage(
+    tmp_path, monkeypatch, timestamp,
+):
+    client = Mock()
+    run_id, attempt = "123", "2"
+    metadata = {"id": 123, "run_attempt": 2, "path": watchdog.WORKFLOW,
+                "head_branch": "main", "status": "in_progress"}
+    monkeypatch.setattr(watchdog, "run_metadata", lambda _id: metadata)
+    recovery = Mock()
+    monkeypatch.setattr(watchdog, "recover", recovery)
+    for state in (
+        {"status": "ready", "last_editorial_at": timestamp},
+        {"status": "busy", "run_id": run_id, "run_attempt": attempt, "started_at": timestamp},
+    ):
+        client.read_status.return_value = (state, "sha", None)
+        check = watchdog.inspect(client, NOW, tmp_path, allow_recovery=True)
+        assert check.status == "invalid_state_time"
+        assert watchdog.should_notify(check, "")
+        assert not watchdog.should_notify(check, check.key)
+        assert "время" in watchdog.notification(check)
+    recovery.assert_not_called()
+    client.write.assert_not_called()
+
+
+def test_initial_cutover_provides_clock_before_first_editorial_run(tmp_path):
+    client = Mock()
+    state = {"status": "ready", "cutover": {"at": NOW.isoformat()}}
+    client.read_status.return_value = (state, "sha", None)
+    assert watchdog.inspect(client, NOW, tmp_path, allow_recovery=True).status == "healthy"
+    assert watchdog.inspect(
+        client, NOW + timedelta(hours=1), tmp_path, allow_recovery=True,
+    ).status == "stale"
+
+
 @pytest.mark.parametrize(("run_status", "checkpoint", "allowed", "expected"), [
     ("in_progress", None, True, "running"),
     ("completed", None, True, "busy"),
@@ -95,7 +132,8 @@ def test_morning_alert_keeps_legacy_queue_state_and_is_deduplicated_by_day(
     file.write_text(status.key, encoding="utf-8")
     now = datetime(2026, 11, 22, 10, tzinfo=UTC)
     client = Mock()
-    client.read_status.return_value = ({"status": "ready"}, "sha", None)
+    ready = {"status": "ready", "last_editorial_at": now.isoformat()}
+    client.read_status.return_value = (ready, "sha", None)
     assert watchdog.inspect(client, now, tmp_path, allow_recovery=False).morning is None
     client.read_status.reset_mock()
     check = watchdog.inspect(client, now, tmp_path, allow_recovery=False, check_digests=True)
@@ -109,7 +147,9 @@ def test_morning_alert_keeps_legacy_queue_state_and_is_deduplicated_by_day(
     assert not watchdog.update_alerts(check, file)
     send.assert_awaited_once()
     assert watchdog.AlertState.read(file).queue == status.key
-    next_day = watchdog.inspect(client, now + timedelta(days=1), tmp_path,
+    tomorrow = now + timedelta(days=1)
+    ready["last_editorial_at"] = tomorrow.isoformat()
+    next_day = watchdog.inspect(client, tomorrow, tmp_path,
                                 allow_recovery=False, check_digests=True)
     assert watchdog.update_alerts(next_day, file)
     assert send.await_count == 2
@@ -119,7 +159,7 @@ def test_confirmed_morning_does_not_notify_owner(tmp_path, monkeypatch):
     now = datetime(2026, 11, 22, 10, tzinfo=UTC)
     client = Mock()
     client.read_status.return_value = (
-        {"status": "ready", "digest_receipts": {
+        {"status": "ready", "last_editorial_at": now.isoformat(), "digest_receipts": {
             "belgrade:2026-11-22:morning": {"state": "sent", "message_id": 152},
         }}, "sha", None,
     )

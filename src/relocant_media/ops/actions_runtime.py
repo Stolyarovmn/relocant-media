@@ -306,7 +306,10 @@ def _export_gpt_request(
             if request is None:
                 request = build_batch_request(session, now=now, scheduler_run_id=scheduler_run_id)
             if request is None:
-                request = build_request(session, now=now, scheduler_run_id=scheduler_run_id)
+                request = build_request(
+                    session, now=now, scheduler_run_id=scheduler_run_id,
+                    minimum_response_time=GPT_RESPONSE_MIN_MARGIN,
+                )
             deadlines = (_request_deadlines(session, request)
                          if request is not None else [])
     finally:
@@ -445,10 +448,15 @@ def _export_committed_fallback(
     try:
         with Session(engine) as session, session.no_autoflush:
             session.connection().exec_driver_sql("PRAGMA query_only=ON")
-            request = (build_request(session, now=now, scheduler_run_id=preferred_cycle)
-                       if preferred_cycle is not None else None)
+            request = (
+                build_request(session, now=now, scheduler_run_id=preferred_cycle,
+                              minimum_response_time=GPT_RESPONSE_MIN_MARGIN)
+                if preferred_cycle is not None else None
+            )
             if request is None:
-                request = build_request(session, now=now)
+                request = build_request(
+                    session, now=now, minimum_response_time=GPT_RESPONSE_MIN_MARGIN,
+                )
             if request is not None:
                 _require_public_fallback_documents(session, request)
     finally:
@@ -871,10 +879,22 @@ def export_public(database: Path, output: Path, observed_at: str, run_dir: Path 
 EDITORIAL_INTERVAL = timedelta(minutes=30)
 
 
+def parse_state_timestamp(value: object, now: datetime) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None or stamp > now + timedelta(minutes=1):
+        return None
+    return stamp
+
+
 def editorial_due(state: dict[str, Any], now: datetime) -> bool:
     """Editorial is due unless one was checkpointed less than 30 minutes ago."""
-    last = state.get("last_editorial_at")
-    return not isinstance(last, str) or now - datetime.fromisoformat(last) >= EDITORIAL_INTERVAL
+    last = parse_state_timestamp(state.get("last_editorial_at"), now)
+    return last is None or now - last >= EDITORIAL_INTERVAL
 
 
 def private_quota_observation(directory: Path) -> dict[str, Any] | None:
@@ -987,7 +1007,7 @@ def execute(store: CanonicalStore, drive: SnapshotStore, *, work: Path, output: 
             raise ValueError("digest preview requires a manual request")
         when = datetime.fromisoformat(environment["DIGEST_PREVIEW_AT"])
         result = asyncio.run(preview_digest(
-            database, when, environment.get("RELOCANT_MAP_TELEGRAM_APP", ""),
+            database, when, environment.get("RELOCANT_MAP_TELEGRAM_APP", ""), state=state,
         ))
         print(json.dumps({"digest_preview": result}, ensure_ascii=False), flush=True)
         return 0

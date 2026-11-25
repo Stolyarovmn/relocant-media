@@ -1,13 +1,13 @@
 import {
   addressHits, addressWindowText, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentMatchesId, incidentStatus, incidentTimes, kinds, launchDigestEvents,
-  launchMap, mapTheme, nextTransition, readIncidents, repairLaunchPoint, shareLink,
+  launchMap, mapTheme, nextTransition, readIncidents, repairLaunchPoint, shareLink, shareTimelineLink,
   pointsAtScale, searchAddresses, streetBounds, unexpired, updateStamp, visibleMapLines, weeklyRoadState,
 } from "./core.js?v=__MAP_REVISION__";
 import { calendarLink } from "./calendar.js?v=__MAP_REVISION__";
 import {
   corridorCaps, heatCells, heatComposition, heatOverview, keepsBoundaryInHeat, layerView,
-  timelineBands, timelineInstant, timelineLabel, timelineSteps,
+  timelineBands, timelineInstant, timelineLabel, timelineStepAt, timelineSteps,
 } from "./layer-views.js?v=__MAP_REVISION__";
 import { setupPlaces } from "./places.js?v=__MAP_REVISION__";
 import { loadSnapshot, snapshotNotice, snapshotRefreshDue } from "./snapshots.js?v=__MAP_REVISION__";
@@ -132,7 +132,15 @@ function installLayerView() {
   try { state.layerView = layerView(localStorage.getItem(key)); } catch { /* Session only. */ }
   const requested = new URLSearchParams(location.search).get("view");
   if (requested !== null) state.layerView = layerView(requested);
-  if (inTimeline() && (initialRoute.id || digestIds.length)) state.layerView = "detail";
+  const origin = Date.now();
+  const sharedStep = timelineStepAt(origin, initialRoute.timelineAt);
+  if (sharedStep) {
+    state.layerView = "timeline";
+    state.timelineOrigin = origin;
+    state.timelineStep = sharedStep;
+  } else if (inTimeline() && (initialRoute.id || digestIds.length)) {
+    state.layerView = "detail";
+  }
   for (const option of options) {
     option.addEventListener("click", () => {
       if (state.layerView !== option.dataset.view) state.timelineStep = 0;
@@ -153,6 +161,7 @@ function installLayerView() {
     summary.focus({ preventScroll: true });
   });
   apply();
+  return apply;
 }
 
 const inTimeline = () => state.layerView === "timeline";
@@ -469,7 +478,10 @@ function eventCard(incident, now) {
   const links = make("div", "event-links");
   links.append(link(incident.source, "Источник ↗"));
   const repairPoint = incident.id === state.selected ? state.selectedRepairPoint : null;
-  const share = shareLink(incident.id, incident.title, false, repairPoint);
+  const share = futureFrame()
+    ? shareTimelineLink(incident.id,
+      `${incident.title} · ${timelineLabel(now, false)} по Белграду`, now, repairPoint)
+    : shareLink(incident.id, incident.title, false, repairPoint);
   if (share) links.append(link(share, "Поделиться ↗"));
   const calendar = calendarLink(incident, Date.now());
   if (calendar) links.append(calendar);
@@ -973,6 +985,12 @@ function focusDigest() {
 }
 
 function openPendingEvent(incident) {
+  if (initialRoute.timelineAt && inTimeline()
+      && !incidentInPeriod(incident, viewClock(), viewPeriod())) {
+    state.timelineStep = 0;
+    state.layerView = "detail";
+    applyLayerView();
+  }
   const repairPoint = repairLaunchPoint(incident, initialRoute.repairKey);
   openEvent(incident, { repairPoint });
 }
@@ -1386,7 +1404,7 @@ function showMode(mode, id = "") {
 }
 
 installTheme();
-installLayerView();
+const applyLayerView = installLayerView();
 setupMap();
 const places = setupPlaces({ map: state.map, mobile, animate, telegram, byId, make, link, loadSnapshot, onSync: syncFeed });
 byId("show-incidents").addEventListener("click", () => {

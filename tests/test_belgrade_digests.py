@@ -20,6 +20,7 @@ from relocant_media.collectors.base import RawItem as CollectedItem
 from relocant_media.collectors.rhmz_forecast import (
     FORECAST_URL,
     WARNING_URL,
+    Weather,
     _forecast_reading,
     collect_weather,
     parse_forecast,
@@ -27,7 +28,7 @@ from relocant_media.collectors.rhmz_forecast import (
 )
 from relocant_media.domain.map_links import is_map_event_url, map_event_id
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
-from relocant_media.ops import belgrade_digests
+from relocant_media.ops import belgrade_digests, digest_preview
 from relocant_media.ops.belgrade_digests import (
     Entry,
     _evidence_sha,
@@ -199,10 +200,37 @@ def test_weather_warning_has_to_overlap_the_belgrade_day():
     <cap:expires>2026-11-14T16:00:00+00:00</cap:expires></entry></feed>"""
     now = datetime(2026, 11, 14, 7, 30, tzinfo=_ZONE)
     assert parse_warning(alert.encode(), now) == (
-        "РХМЗ предупреждает: сильный ветер, оранжевый уровень, 08:00–17:00."
+        "Сильный ветер. Предупреждение РХМЗ действует с 08:00 до 17:00. Уровень — оранжевый."
     )
     assert parse_warning(alert.replace("Belgrade", "Novi Sad").encode(), now) is None
     assert parse_warning(alert.encode(), now.replace(hour=18)) is None
+
+
+@pytest.mark.parametrize(("starts", "expires", "period"), [
+    ("14T00:00", "14T23:59", "весь день"),
+    ("14T00:00", "15T00:00", "весь день"),
+    ("14T22:00", "15T03:00", "с 14.11 в 22:00 до 15.11 в 03:00"),
+    ("13T22:00", "14T10:00", "с 13.11 в 22:00 до 14.11 в 10:00"),
+])
+def test_warning_uses_local_period_and_keeps_source_in_morning_digest(starts, expires, period):
+    raw = f"""<feed xmlns="http://www.w3.org/2005/Atom"
+    xmlns:cap="urn:oasis:names:tc:emergency:cap:1.2"><entry>
+    <cap:areaDesc>Belgrade</cap:areaDesc><cap:event>Rain orange</cap:event>
+    <cap:effective>2026-11-{starts}:00+01:00</cap:effective>
+    <cap:expires>2026-11-{expires}:00+01:00</cap:expires></entry></feed>"""
+    now = datetime(2026, 11, 14, 7, 30, tzinfo=_ZONE)
+    warning = parse_warning(raw.encode(), now)
+    assert warning == f"Сильный дождь. Предупреждение РХМЗ действует {period}. Уровень — оранжевый."
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        entries = belgrade_digests.morning_entries(session, now, forecast=None, warning=warning)
+    engine.dispose()
+    slot = due_slot(now)
+    assert slot is not None
+    digest = render(slot, entries)
+    assert digest is not None and warning in digest.html
+    assert f'<a href="{WARNING_URL}">РХМЗ / MeteoAlarm</a>' in digest.html
 
 
 @pytest.mark.asyncio
@@ -655,7 +683,7 @@ async def test_optional_unconfirmed_reminder_does_not_delay_a_ready_evening_dige
 
 
 @pytest.mark.asyncio
-async def test_morning_transport_recalls_only_a_confirmed_full_revision():
+async def test_morning_transport_recalls_only_a_confirmed_full_revision(tmp_path, monkeypatch):
     first = due_slot(datetime(2026, 11, 22, 7, 30, tzinfo=_ZONE))
     next_day = due_slot(datetime(2026, 11, 23, 7, 30, tzinfo=_ZONE))
     next_week = due_slot(datetime(2026, 11, 29, 7, 30, tzinfo=_ZONE))
@@ -687,6 +715,20 @@ async def test_morning_transport_recalls_only_a_confirmed_full_revision():
     assert shorter and shorter.full_transport_revisions == ()
     assert "Продолжаются изменения" in shorter.html and "Виноградску" not in shorter.html
     assert "https://t.me/eduvbelgrad/152" in shorter.html and shorter.map_url == digest.map_url
+    monkeypatch.setattr(
+        digest_preview, "collect_weather",
+        AsyncMock(return_value=Weather(None, None, "ok", "none_active")),
+    )
+    monkeypatch.setattr(digest_preview, "morning_entries", lambda *_: [entry])
+    stored = json.dumps(state, sort_keys=True)
+    result = await digest_preview.preview(
+        tmp_path / "saved.sqlite3", next_day.scheduled, "", state=state,
+    )
+    assert isinstance(result["html"], str)
+    assert "Продолжаются изменения" in result["html"] and "Виноградску" not in result["html"]
+    assert "https://t.me/eduvbelgrad/152" in result["html"]
+    assert result["map_url"] == shorter.map_url
+    assert json.dumps(state, sort_keys=True) == stored
 
     linked = replace(entry, url="https://t.me/eduvbelgrad/149", link_text="Подробнее")
     assert _morning_continuations(next_day, [linked], state)[0].url == linked.url

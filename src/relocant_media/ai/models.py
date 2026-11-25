@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
+WRITING_MATRIX_VERSION_PATTERN = r"^[a-z0-9][a-z0-9_.-]{0,63}$"
+
 
 class EvidenceDocument(BaseModel):
     source_id: str = Field(min_length=1)
@@ -101,3 +103,12 @@ class EditorialOutcome(BaseModel):
     verification: VerificationResult | None = None
     draft: RussianDraft | None = None
     confidence: float = Field(ge=0.0, le=1.0)
+    writing_matrix_version: str | None = Field(default=None, pattern=WRITING_MATRIX_VERSION_PATTERN)
+
+    @model_serializer(mode="wrap")
+    def serialize_compatible(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        # Historical packages bind the outcome in both their receipt and review context.
+        if self.writing_matrix_version is None:
+            payload.pop("writing_matrix_version", None)
+        return payload

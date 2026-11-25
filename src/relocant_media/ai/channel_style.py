@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from relocant_media.ai.models import WRITING_MATRIX_VERSION_PATTERN
 from relocant_media.domain.city_profile import CityEditorialProfile
 
 
@@ -29,7 +30,7 @@ class _WritingFormat(BaseModel):
 class _WritingMatrix(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: str
+    version: str = Field(pattern=WRITING_MATRIX_VERSION_PATTERN)
     common: str
     voice: str
     context: str

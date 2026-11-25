@@ -19,6 +19,7 @@ from relocant_media.ai.package import StrictModel, canonical_json
 from relocant_media.collectors.base import RawItem as CollectedArticle
 from relocant_media.collectors.linked_tour_map import TourMapUnavailable
 from relocant_media.collectors.ticket_vision_events import TicketCardUnavailable
+from relocant_media.collectors.venue_feed import _index_article_url
 from relocant_media.domain.dedup import EventCandidate, canonicalize_url, same_event
 from relocant_media.domain.source_locations import is_public_https_url
 from relocant_media.ingestion.persistence import capture_collected_batch, sync_source
@@ -242,10 +243,17 @@ def refresh_gpt_evidence(
             )
         existing = [(registry[doc.source_id], doc.url) for doc in candidate.documents]
         seen = {canonicalize_url(url) for _, url in existing}
-        alternatives = [
-            (_registered_alternative(url, registry), url)
-            for url in payload.result.urls if canonicalize_url(url) not in seen
-        ]
+        alternatives = []
+        for url in payload.result.urls:
+            if canonicalize_url(url) in seen:
+                continue
+            config = _registered_alternative(url, registry)
+            if config.extraction.article_index is not None:
+                url = _index_article_url(url, config)
+            identity = canonicalize_url(url)
+            if identity not in seen:
+                alternatives.append((config, url))
+                seen.add(identity)
         planned = existing + alternatives
         if len({source.id for source, _ in planned}) != len(planned):
             raise FallbackValidationError("Нужен один документ от каждого источника")

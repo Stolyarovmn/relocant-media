@@ -540,8 +540,10 @@ def run_worker(
                     session, package.raw_item_id, lease, now=now or datetime.now(UTC),
                 )
                 phase = "import"
+                brief = payload.request.get("writing_brief") or {}
                 run = import_package(session, package, now=now, replace_empty_hold=True,
-                                     replace_map_hold=True, replace_flight_hold=True)
+                                     replace_map_hold=True, replace_flight_hold=True,
+                                     requested_writing_matrix=brief.get("version"))
                 from relocant_media.services.material_lifecycle import after_result
 
                 lifecycle = after_result(session, package.raw_item_id, now=now or datetime.now(UTC))

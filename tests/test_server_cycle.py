@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from test_channel_delivery import reviewed as _reviewed
 from test_editorial_integration import prepare_service
 
+from relocant_media.ai.channel_style import CHANNEL_STYLE_VERSION
 from relocant_media.ai.models import EvidenceDocument, SelectionBrief
 from relocant_media.ai.package import canonical_json, context_sha256, draft_sha256
 from relocant_media.collectors.base import RawItem as CollectedItem
@@ -177,6 +178,7 @@ def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch, 
         assert package.event.documents[0].raw_item_id == raw_id
         assert package.event.documents[0].ownership == "official"
         assert package.event.editorial_rule_version == "belgrade-editorial-v2"
+        assert package.outcome.writing_matrix_version == CHANNEL_STYLE_VERSION
         assert package.outcome.draft.title.startswith("[тестовый запуск]")
         assert package.presentation.rubric_id == "city_changes"
         assert package.outcome.draft.body.endswith("#Транспорт")
@@ -200,7 +202,9 @@ def test_complete_package_is_bound_before_review(seeded, tmp_path, monkeypatch, 
         "ready" if source_enabled else "human_review")
     assert provider.calls == ["rank", "claims", "verify", "draft"]
     with Session(engine) as session:
-        payload = session.get(EditorialRun, raw_id).outcome["_package"]
+        outcome = session.get(EditorialRun, raw_id).outcome
+        assert outcome["writing_matrix_version"] == CHANNEL_STYLE_VERSION
+        payload = outcome["_package"]
     package = server_cycle.EditorialPackage.model_validate_json(json.dumps(payload))
     assert context_sha256(package) == seen[0]
     assert all(r.context_sha256 == seen[0] for r in package.reviews)

@@ -167,12 +167,20 @@ def test_success_claims_before_side_effect_and_restores_receipts(
     engine.dispose()
 
 
-@pytest.mark.parametrize(("minutes", "due"), [(None, True), (10, False), (29, False), (31, True)])
+@pytest.mark.parametrize(
+    ("minutes", "due"), [(None, True), (-0.5, False), (10, False), (29, False), (31, True)],
+)
 def test_editorial_is_due_once_the_half_hour_interval_has_passed(minutes, due):
     now = datetime(2026, 10, 28, 12, tzinfo=UTC)
     state = {} if minutes is None else {
         'last_editorial_at': (now - timedelta(minutes=minutes)).isoformat()}
     assert runtime.editorial_due(state, now) is due
+
+
+@pytest.mark.parametrize("timestamp", ["invalid", "2026-10-28T11:59:00", "2026-10-28T14:00:00Z"])
+def test_bad_timestamp_does_not_block_scheduled_editorial(timestamp):
+    now = datetime(2026, 10, 28, 12, tzinfo=UTC)
+    assert runtime.editorial_due({"last_editorial_at": timestamp}, now)
 
 
 def test_auto_mode_runs_editorial_when_due_then_intake_until_the_next_hour(

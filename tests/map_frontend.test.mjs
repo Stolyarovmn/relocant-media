@@ -8,7 +8,7 @@ import {
   addressHits, addressWindowText, agendaDays, belgradeDate, buildAddressIndex, clusterMapPoints, exactMapPoints, incidentCountdown,
   incidentInPeriod, incidentMatchesId, incidentStatus, incidentTimes, launchDigestEvents, launchEvent, launchMap, launchPlaces,
   mapTheme, nextTransition, placeCategory, placeCountdown, placeOnDay, placeOptionLabel, placeStatus,
-  pointsAtScale, readIncidents, readPlaces, repairLaunchPoint, searchAddresses, shareLink,
+  pointsAtScale, readIncidents, readPlaces, repairLaunchPoint, searchAddresses, shareLink, shareTimelineLink,
   straightLineDistance, streetBounds,
   unexpired, visibleMapLines, weeklyRoadState,
 } from "../web/newsroom/map/core.js";
@@ -16,7 +16,7 @@ import { agendaVisit, setupPlaces } from "../web/newsroom/map/places.js";
 import { agendaFavorites } from "../web/newsroom/map/favorites.js";
 import {
   corridorCaps, heatCells, heatComposition, heatOverview, keepsBoundaryInHeat, layerView,
-  timelineBands, timelineInstant, timelineLabel, timelineSteps,
+  timelineBands, timelineInstant, timelineLabel, timelineStepAt, timelineSteps,
 } from "../web/newsroom/map/layer-views.js";
 import { loadSnapshot, snapshotRefreshDue } from "../web/newsroom/map/snapshots.js";
 
@@ -24,6 +24,39 @@ const savedAddress = {
   street: "Kralja Bodina", number: "7", municipality: "Voždovac", lat: 44.78, lon: 20.48,
 };
 const savedNow = Date.parse("2026-11-23T08:30:00+01:00");
+
+test("a shared timeline slot keeps its absolute time as the recipient's clock advances", () => {
+  const origin = Date.parse("2026-11-24T20:43:00Z");
+  const instant = timelineInstant(origin, 5);
+  const recipientNow = Date.parse("2026-11-24T21:10:00Z");
+  const step = timelineStepAt(recipientNow, instant);
+  assert.equal(step, 4);
+  assert.equal(timelineInstant(recipientNow, step), instant);
+  assert.equal(timelineStepAt(instant, instant), 0);
+  assert.equal(timelineStepAt(recipientNow, instant + 60_000), 0);
+  assert.equal(timelineStepAt(recipientNow, instant + 24 * 3_600_000), 0);
+  assert.equal(timelineStepAt(recipientNow, undefined), 0);
+});
+
+test("sharing a forecast reopens the same incident, time and optional repair address", () => {
+  const event = "event_0123456789abcdef0123";
+  const at = Date.parse("2026-11-25T00:30:00Z");
+  const point = { lat: 44.735692, lon: 20.323031 };
+  const label = "Ремонт · 25 нояб., 01:30 по Белграду";
+  const shared = new URL(shareTimelineLink(event, label, at, point));
+  const app = new URL(shared.searchParams.get("url"));
+  const start = app.searchParams.get("startapp");
+  assert.equal(shared.searchParams.get("text"), label);
+  const route = { mode: "incidents", id: event, timelineAt: at, repairKey: "44735692_20323031" };
+  assert.deepEqual(launchMap("", start), route);
+  assert.deepEqual(launchMap(`?tgWebAppStartParam=${start}`), route);
+  assert.deepEqual(launchMap(`?event=${event}`, start), { mode: "incidents", id: event });
+  assert.deepEqual(launchMap("", `timeline_${event}_31_bad`), { mode: "incidents", id: "" });
+  assert.equal(shareTimelineLink(event, label, NaN), "");
+  const withoutAddress = new URL(new URL(shareTimelineLink(event, label, at)).searchParams.get("url"));
+  assert.deepEqual(launchMap("", withoutAddress.searchParams.get("startapp")),
+    { mode: "incidents", id: event, timelineAt: at });
+});
 const savedWindow = { starts_at: "2026-11-23T08:00:00+01:00", ends_at: "2026-11-23T14:00:00+01:00" };
 const watchIncident = (id, overrides = {}) => ({
   id: `event_${id.repeat(20)}`, kind: "water", title: "Работы на водопроводе",
@@ -523,6 +556,42 @@ test("карта возвращает проверенный снимок пос
   assert.equal(recovered.cached, false);
   assert.equal(recovered.generatedAt, "2026-11-22T08:00:00Z");
   assert.equal(responses.size, 1);
+});
+
+test("снимок с будущей меткой не блокирует актуальные объявления", async () => {
+  let stored;
+  const storage = { open: async () => ({
+    match: async () => stored?.clone(),
+    put: async (_url, response) => { stored = response.clone(); },
+  }) };
+  const url = "./incidents.json";
+  const publishedAt = "2026-11-25T01:50:00Z";
+  const future = "2199-11-25T01:50:00Z";
+  const headers = { date: new Date("2026-11-25T01:51:00Z").toUTCString() };
+  const feed = (generated_at, entries = [], serverHeaders = headers) =>
+    Response.json({ version: 1, generated_at, incidents: entries }, { headers: serverHeaders });
+  const original = () => feed(publishedAt, [{
+    id: waterId, kind: "water", title: "Работы на водопроводе", source_url: "https://www.beograd.rs/",
+  }]);
+
+  await loadSnapshot(url, readIncidents, { storage, fetcher: async () => original() });
+  const fallback = await loadSnapshot(url, readIncidents, { storage, fetcher: async () => feed(future) });
+  assert.equal(fallback.cached, true);
+  assert.equal(fallback.generatedAt, publishedAt);
+  assert.equal(fallback.entries[0].id, waterId);
+  assert.equal((await stored.clone().json()).generated_at, publishedAt);
+
+  stored = feed(future);
+  const recovered = await loadSnapshot(url, readIncidents, { storage, fetcher: async () => original() });
+  assert.equal(recovered.cached, false);
+  assert.equal(recovered.entries[0].id, waterId);
+  assert.equal((await stored.clone().json()).generated_at, publishedAt);
+
+  const serverClock = await loadSnapshot(url, readIncidents, {
+    storage, fetcher: async () => feed(future, [], { date: new Date(future).toUTCString() }),
+  });
+  assert.equal(serverClock.cached, false);
+  assert.equal(serverClock.generatedAt, future);
 });
 
 test("кэш выключен в некоторых браузерах, свежие данные всё равно открываются", async () => {

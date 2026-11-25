@@ -110,8 +110,14 @@ def test_publication_date_alone_cannot_match_a_same_day_event(
     assert [item.id for item, _ in _members(session, article)] == expected
 
 
-def test_gpt_exports_the_same_exact_documents_for_the_same_announcement(venue_bundle):
+@pytest.mark.parametrize("rescheduled", [False, True])
+def test_gpt_exports_the_same_exact_documents_for_the_same_announcement(venue_bundle, rescheduled):
     session, article, venue = venue_bundle
+    if rescheduled:
+        venue.body += (
+            "\nKoncert, planiran za 26. novembar, iz organizacionih razloga, "
+            "pomera na 27. novembar."
+        )
     session.add(SchedulerRun(
         task_key="editorial-primary:belgrade", task_type="editorial_primary",
         city="belgrade", status="partial", scheduled_for=NOW - timedelta(minutes=10),
@@ -128,3 +134,11 @@ def test_gpt_exports_the_same_exact_documents_for_the_same_announcement(venue_bu
     assert documents[1]["published_at"] is None
     assert documents[1]["auto_publish"] is False
     assert DETAILS in documents[1]["body"]
+
+
+@pytest.mark.parametrize("new_day,extra", [("28", ""), ("27", " Koncert je otkazan.")])
+def test_ambiguous_reschedule_does_not_pair(venue_bundle, new_day, extra):
+    session, article, venue = venue_bundle
+    venue.body += f"\nKoncert, planiran za 26. novembar, pomera na {new_day}. novembar.{extra}"
+    session.flush()
+    assert [item.id for item, _ in _members(session, article)] == [article.id]

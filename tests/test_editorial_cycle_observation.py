@@ -61,7 +61,7 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
     snapshot = tmp_path / "snapshot.sqlite3"
     with sqlite3.connect(snapshot) as db:
         db.executescript("""
-            CREATE TABLE post(id, city, telegram_message_id, category, published_at);
+            CREATE TABLE post(id, city, telegram_message_id, category, published_at, title, body);
             CREATE TABLE source(id, city);
             CREATE TABLE raw_item(id, source_id);
             CREATE TABLE editorial_run(post_id, raw_item_id, delivery_status, outcome, created_at);
@@ -81,15 +81,32 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
             db.execute("INSERT INTO submission VALUES (?, 'news_tip', ?, ?, ?)",
                        (ident, json.dumps(payload), status, "2026-11-17T08:00:00+00:00"))
         # Полночь Белграда = 23:00 UTC накануне; вчерашний пост не входит.
-        for number, published, category, outcome in [
-            (125, "2026-11-16T22:59:00+00:00", "events", {}),
-            (126, "2026-11-16T23:01:00+00:00", "transport", {}),
+        map_url = "https://t.me/relocant_media_belgrade_bot?startapp=places_event_0123456789abcdef0123"
+        for number, published, category, title, body, outcome in [
+            (125, "2026-11-16T22:59:00+00:00", "events", "Выставка", "", {}),
+            (126, "2026-11-16T23:01:00+00:00", "transport", "Перекрытие", "", {}),
             (128, "2026-11-17T10:36:00+00:00", "events",
-             {"_rich_delivery": {"map_url": "https://t.me/bot?startapp=places_example"}}),
-            (130, "2026-11-18T00:00:00+00:00", "events", {}),
+             "Концерт", "Площадка: городской зал.", {"_rich_delivery": {
+                 "map_url": map_url, "state": "sent", "message_ids": [128],
+             }}),
+            (130, "2026-11-18T00:00:00+00:00", "events", "Концерт", "", {}),
+            (131, "2026-11-17T11:37:00+00:00", "events",
+             "Как подключиться к ярмарке", "Участвовать можно онлайн.", {}),
+            (132, "2026-11-17T12:38:00+00:00", "culture",
+             "Выставка", "Где: городской музей.", {"_rich_delivery": {
+                 "map_url": map_url, "state": "sent", "message_ids": [128],
+             }}),
+            (133, "2026-11-17T13:39:00+00:00", "utilities",
+             "Отключение воды", "", {"_rich_delivery": {
+                 "map_url": "https://example.org/unrelated", "state": "sent", "message_ids": [133],
+             }}),
+            (134, "2026-11-17T14:40:00+00:00", "transport",
+             "Изменение движения", "", {"_rich_delivery": {
+                 "map_url": map_url, "state": "uncertain", "message_ids": [134],
+             }}),
         ]:
-            db.execute("INSERT INTO post VALUES (?, 'belgrade', ?, ?, ?)",
-                       (number, number, category, published))
+            db.execute("INSERT INTO post VALUES (?, 'belgrade', ?, ?, ?, ?, ?)",
+                       (number, number, category, published, title, body))
             db.execute("INSERT INTO raw_item VALUES (?, 'a')", (number,))
             db.execute("INSERT INTO editorial_run VALUES (?, ?, 'sent', ?, ?)",
                        (number, number, json.dumps(outcome), published))
@@ -98,11 +115,34 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
             json.dumps({"status": "human_review", "reason": "PRIVATE TOKEN:secret"}),
             "2026-11-17T08:00:00+00:00",
         ))
+        rejected = {"status": "skipped", "reason": "ranking_rejected"}
+        blocked = {
+            "status": "blocked", "reason": "lifecycle_separate_publication_approval_required",
+        }
+        lifecycle_rejection = {**blocked, "_lifecycle_block": {
+            "previous_status": "skipped", "previous_reason": "ranking_rejected",
+        }}
+        for item_id, post_id, decision in [
+            (600, None, rejected),
+            (601, None, lifecycle_rejection),
+            (602, None, blocked),
+            (603, 603, lifecycle_rejection),
+        ]:
+            db.execute("INSERT INTO raw_item VALUES (?, 'a')", (item_id,))
+            if post_id is not None:
+                db.execute(
+                    "INSERT INTO post (id, city, category) VALUES (?, 'belgrade', 'health')",
+                    (post_id,),
+                )
+            db.execute("INSERT INTO editorial_run VALUES (?, ?, 'pending', ?, ?)", (
+                post_id, item_id, json.dumps(decision), "2026-11-17T19:59:00+00:00",
+            ))
         db.execute("""
             INSERT INTO scheduler_run VALUES
             (1, 'editorial-primary:belgrade', ?, ?, ?, 'belgrade', 'editorial_primary')
         """, (
-            "partial", json.dumps({"gpt_deferred_count": 6, "remaining_count": 100}),
+            "partial", json.dumps({"gpt_deferred_count": 6, "remaining_count": 100,
+                                   "processed_raw_item_ids": [600, 601, 602, 603]}),
             "2026-11-17T20:00:00+00:00",
         ))
         for ident, raw, date, city, status, reason, replacement in [
@@ -124,9 +164,20 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
             }), date, city))
     report = observe_day(snapshot, datetime(2026, 11, 17, 21, tzinfo=UTC))
     assert report["local_date"] == "2026-11-17"
-    assert report["standalone_published_count"] == 2
-    assert report["published_message_ids"] == [126, 128]
-    assert report["map_button_delivery_unconfirmed"] == [126]
+    assert report["standalone_published_count"] == 6
+    assert report["published_message_ids"] == [126, 128, 131, 132, 133, 134]
+    assert report["map_button_delivery_unconfirmed"] == [126, 132, 133, 134]
+    assert report["map_button_coverage"] == {
+        "posts": 5, "confirmed_at_send": 1, "unconfirmed": 4, "confirmed_percent": 20.0,
+        "by_category": {
+            "transport": {"posts": 2, "confirmed_at_send": 0},
+            "events": {"posts": 1, "confirmed_at_send": 1},
+            "culture": {"posts": 1, "confirmed_at_send": 0},
+            "utilities": {"posts": 1, "confirmed_at_send": 0},
+        },
+    }
+    assert observe_day(snapshot, datetime(2026, 11, 16, 2, tzinfo=UTC))[
+        "map_button_coverage"]["confirmed_percent"] is None
     assert report["gpt_deferred_count"] == 6
     assert report["morning_hold"] == {
         "materials": 3, "published_message_ids": [128], "deadline_exceeded": 1,
@@ -143,6 +194,17 @@ def test_daily_audit_uses_belgrade_day_and_keeps_only_sanitized_public_status(tm
          "outcome": "published", "count": 1},
     ]
     assert {"status": "human_review", "reason": None, "count": 1} in report["decisions"]
+    assert {"status": "skipped", "reason": "ranking_rejected", "count": 2} in report["decisions"]
+    assert {"status": "blocked", "reason": "lifecycle_separate_publication_approval_required",
+            "count": 2} in report["decisions"]
+    cycle = observe_cycle(snapshot, "2026-11-17T20:00:00Z")
+    assert cycle is not None
+    assert [(row["status"], row["reason"]) for row in cycle["materials"]] == [
+        ("skipped", "ranking_rejected"),
+        ("skipped", "ranking_rejected"),
+        ("blocked", "lifecycle_separate_publication_approval_required"),
+        ("blocked", "lifecycle_separate_publication_approval_required"),
+    ]
     with pytest.raises(ValueError, match="timezone"):
         observe_day(snapshot, datetime(2026, 11, 17))
 

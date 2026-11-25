@@ -11,12 +11,21 @@ class ArticleScopeConfig(BaseModel):
     pattern: str = Field(min_length=1)
 
 
+class ArticleIndexConfig(BaseModel):
+    item_selector: str = Field(min_length=1)
+    link_selector: str = Field(min_length=1)
+    date_selector: str = Field(min_length=1)
+    path_pattern: str = Field(min_length=1)
+
+
 class ExtractionConfig(BaseModel):
     strategy: str
     status: str | None = None
     # Why a non-active source is not collected: shown in source-health (#328).
     inactive_reason: str | None = None
     feed_url: str | None = None
+    feed_title_pattern: str | None = None
+    article_index: ArticleIndexConfig | None = None
     article_selectors: tuple[str, ...] = (".entry-content", "article .content", "article")
     article_lead_selectors: tuple[str, ...] = ()
     article_scope: ArticleScopeConfig | None = None

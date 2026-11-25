@@ -18,7 +18,7 @@ import httpx
 
 from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.ops.actions_recovery import recover
-from relocant_media.ops.actions_runtime import EDITORIAL_INTERVAL, REPO
+from relocant_media.ops.actions_runtime import EDITORIAL_INTERVAL, REPO, parse_state_timestamp
 from relocant_media.ops.belgrade_digests import (
     DigestDelivery,
     digest_delivery,
@@ -51,6 +51,8 @@ MESSAGES = {
     "running_too_long": "Редакционный запуск в Белграде удерживает очередь больше 90 минут.",
     "stale": "Редакция Белграда больше часа не сохраняла редакционный цикл. "
              "Проверьте расписание и последние запуски.",
+    "invalid_state_time": "Редакция Белграда: время последнего цикла или начала текущего запуска "
+                          "в хранилище некорректно. Проверьте журнал редакции.",
     "restored": "Очередь редакции Белграда восстановлена из проверенного снимка.",
     "healthy": "Редакция Белграда снова работает. Очередь доступна, свежий цикл сохранён.",
 }
@@ -161,8 +163,14 @@ def _inspect_queue(
     if state.get("status") == "ready":
         if capacity_low:
             return Check("storage_capacity")
-        last = state.get("last_editorial_at") or state.get("cutover", {}).get("at")
-        if last and now - datetime.fromisoformat(last) >= 2 * EDITORIAL_INTERVAL:
+        value = state.get("last_editorial_at")
+        cutover = state.get("cutover")
+        if value is None and isinstance(cutover, dict):
+            value = cutover.get("at")
+        last = parse_state_timestamp(value, now)
+        if last is None:
+            return Check("invalid_state_time")
+        if now - last >= 2 * EDITORIAL_INTERVAL:
             return Check("stale")
         return Check("healthy")
     run_id, attempt = state.get("run_id"), state.get("run_attempt")
@@ -178,7 +186,12 @@ def _inspect_queue(
             or run["path"] != WORKFLOW or run["head_branch"] != "main"):
         return Check("busy", run_id)
     if run["status"] != "completed":
-        age = now - datetime.fromisoformat(state["started_at"])
+        started = parse_state_timestamp(state.get("started_at"), now)
+        if started is None:
+            return (
+                Check("storage_capacity") if capacity_low else Check("invalid_state_time", run_id)
+            )
+        age = now - started
         if age >= timedelta(minutes=90):
             return Check("running_too_long", run_id)
         return Check("storage_capacity") if capacity_low else Check("running", run_id)

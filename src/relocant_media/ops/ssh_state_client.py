@@ -19,6 +19,7 @@ from typing import Any
 MAX_BLOB = 256 * 1024 * 1024
 MAX_HEADER = 1024 * 1024
 MAX_STATE = 512 * 1024
+MIN_COMPRESSED_UPLOAD = 1024 * 1024
 REMOTE_HELPER = "/usr/local/libexec/relocant-media/ssh-state-storage"
 RETRY_SAFE_OPERATIONS = frozenset({"health", "read_state", "get_blob", "verify_blob", "put_blob"})
 ERRORS = frozenset({"state_missing", "blob_missing", "state_exists", "conflict",
@@ -97,8 +98,9 @@ class SSHConfig:
                    _file(environment.get("EDITORIAL_SSH_KEY_PATH", ""), private=True),
                    _file(environment.get("EDITORIAL_SSH_KNOWN_HOSTS_PATH", ""), private=False))
 
-    def command(self) -> list[str]:
+    def command(self, *, compress: bool = False) -> list[str]:
         return ["ssh", "-F", "/dev/null", "-T", "-oBatchMode=yes",
+                "-oCompression=yes" if compress else "-oCompression=no",
                 "-oStrictHostKeyChecking=yes", f"-oUserKnownHostsFile={self.known_hosts}",
                 "-oGlobalKnownHostsFile=/dev/null", "-oIdentityAgent=none", "-oIdentitiesOnly=yes",
                 "-oPasswordAuthentication=no", "-oKbdInteractiveAuthentication=no",
@@ -138,12 +140,18 @@ class SSHStateClient:
         header = json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
         if len(header) > MAX_HEADER or len(payload) > MAX_BLOB:
             raise ValueError("SSH storage request exceeds bound")
+        operation = request.get("op")
+        compress = operation == "get_blob" or (
+            operation == "put_blob" and len(payload) >= MIN_COMPRESSED_UPLOAD
+        )
         # A private temporary file avoids buffering an entire response twice in RAM.
         # Remote diagnostics are never copied to Actions logs or exception messages.
         with tempfile.TemporaryFile() as response:
             try:
-                process = subprocess.run(self.config.command(), input=header + payload,
-                    stdout=response, stderr=subprocess.DEVNULL, timeout=180, check=False)
+                process = subprocess.run(
+                    self.config.command(compress=compress), input=header + payload,
+                    stdout=response, stderr=subprocess.DEVNULL, timeout=180, check=False,
+                )
             except subprocess.TimeoutExpired:
                 raise SSHStorageError("storage_error", "timeout") from None
             except OSError:
