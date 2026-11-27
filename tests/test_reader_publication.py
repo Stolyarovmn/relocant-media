@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from relocant_media.bot.api import TelegramAPIError, TelegramBotAPI
+from relocant_media.bot.transport import TelegramAPIError, telegram_result
 from relocant_media.services.private_intake import process_private_updates
 from relocant_media.services.reader_forwarded_source import public_forward_urls
 from relocant_media.services.reader_publication import (
@@ -220,7 +220,7 @@ async def test_closed_keyboard_reconciles_without_repeating_final_answer(
                         code, json={"ok": False, "error_code": code, "description": description},
                         request=httpx.Request("POST", "https://example.org/editMessageReplyMarkup"),
                     )
-                    return TelegramBotAPI._result(method, response)
+                    return telegram_result(method, response)
             return await super()._call(method, payload)
 
     try:
