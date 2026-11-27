@@ -57,7 +57,7 @@ class Weather:
 def _warning_text(hazard: str, level: str, starts: datetime, ends: datetime,
                   tomorrow: datetime) -> str:
     if (starts == tomorrow - timedelta(days=1)
-            and ends in (tomorrow - timedelta(minutes=1), tomorrow)):
+            and tomorrow - timedelta(minutes=1) <= ends <= tomorrow):
         period = "весь день"
     elif starts.date() == ends.date():
         period = f"с {starts:%H:%M} до {ends:%H:%M}"
