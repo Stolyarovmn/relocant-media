@@ -105,6 +105,11 @@ function pruneReceipts(state, now) {
   }
 }
 
+function hasContiguousPrefix(state, count) {
+  return count <= state.events.length && state.events.slice(0, count).every((event, index) =>
+    event.sequence === state.ack_sequence + index + 1);
+}
+
 function finish(state, busy, notice) {
   const event = clone(busy.event);
   if (notice) event.notice = notice;
@@ -438,8 +443,8 @@ export class Ingress {
       const callbackNotice = callback && typeof update.callback_query.id === "string";
       if (callbackNotice) notice = { key: `callback:${update.update_id}`,
         text: "Нажатие получено. Это прежнее меню; используйте актуальные кнопки внизу чата." };
-      if (notice?.receipt_only) event.receipt_only = true;
       const pending = notice && this.canSend(state);
+      if (pending && notice.receipt_only) event.receipt_only = true;
       const busy = {
         id: randomUUID(), phase: "prepared", expires_at: this.now() + LIMITS.attemptMs, event,
         ...(pending && {
@@ -522,11 +527,22 @@ export class Ingress {
         throw new HttpError(400, "invalid_peek");
       }
       return this.transaction((state) => {
+        const start = Math.max(after, state.ack_sequence);
+        const offset = start - state.ack_sequence;
+        if (start > state.exported_through || !hasContiguousPrefix(state, offset)) {
+          throw new HttpError(409, "peek_conflict");
+        }
         const events = [];
-        for (const event of state.events) {
-          if (event.sequence <= Math.max(after, state.ack_sequence)) continue;
-          if (events.length >= limit || bytes({ status: "ready", events: [...events, event] }) > LIMITS.exportBytes) break;
-          events.push(event);
+        for (let index = offset; index < state.events.length && events.length < limit; index++) {
+          const event = state.events[index];
+          if (event.sequence !== start + events.length + 1) {
+            throw new HttpError(409, "peek_conflict");
+          }
+          // Older preview writers could mark a relay without reserving a Bot API receipt.
+          const exported = { ...event };
+          if (exported.receipt_only && !exported.notice) delete exported.receipt_only;
+          if (bytes({ status: "ready", events: [...events, exported] }) > LIMITS.exportBytes) break;
+          events.push(exported);
         }
         const result = { status: "ready", events: clone(events) };
         const through = events.at(-1)?.sequence ?? state.exported_through;
@@ -557,7 +573,11 @@ export class Ingress {
         }
         if (input.through < state.ack_sequence || input.through > state.exported_through ||
             state.busy?.event.sequence <= input.through) throw new HttpError(409, "ack_conflict");
-        state.events = state.events.filter((event) => event.sequence > input.through);
+        const count = input.through - state.ack_sequence;
+        if (!hasContiguousPrefix(state, count)) {
+          throw new HttpError(409, "ack_conflict");
+        }
+        state.events = state.events.slice(count);
         state.cases = state.cases.filter((item) => !(terminal.has(item.status) &&
           (state.case_sequences[item.reference] ?? Infinity) <= input.through));
         const retained = new Set(state.cases.map((item) => item.reference));

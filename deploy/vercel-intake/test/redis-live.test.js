@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { LUA_READ, LUA_WRITE, LUA_METADATA, RedisRestStore } from "../lib/redis-store.js";
 import { Conflict, paths } from "../lib/store.js";
-import { fixture, message } from "./helpers.js";
+import { fixture, message, seed } from "./helpers.js";
 
 const container = process.env.REDIS_TEST_CONTAINER;
 const execute = promisify(execFile);
@@ -153,4 +153,71 @@ test("Redis Lua: зашифрованный seed, fake Bot, peek и канони
   const writes = f.requests.filter((command) => command[1] === LUA_WRITE).length;
   assert.deepEqual((await ingress.ingress.transfer({ operation: "peek" })).events, []);
   assert.equal(f.requests.filter((command) => command[1] === LUA_WRITE).length, writes);
+});
+
+test("Redis Lua: пропуск позиции отклоняется, повторный ACK не меняет снимок", onlyWithRedis, async (t) => {
+  const f = await adapter(t);
+  const fixtureState = await fixture({ store: f.store, env: f.env, mode: "preview" });
+  const { ingress } = fixtureState;
+  for (let id = 1; id <= 3; id++) await fixtureState.receive(message(id, "Тестовое событие"));
+  const initial = await f.store.read(f.selected.state);
+  await assert.rejects(ingress.transfer({ operation: "peek", after: 2 }),
+    { status: 409, code: "peek_conflict" });
+  await assert.rejects(ingress.transfer({ operation: "ack", through: 2, snapshot_sha256: "a".repeat(64) }),
+    { status: 409, code: "ack_conflict" });
+  assert.deepEqual(await f.store.read(f.selected.state), initial);
+  const first = await ingress.transfer({ operation: "peek", limit: 1 });
+  assert.deepEqual(first.events.map(event => event.sequence), [1]);
+  await assert.rejects(ingress.transfer({ operation: "peek", after: 2 }),
+    { status: 409, code: "peek_conflict" });
+  const next = await ingress.transfer({ operation: "peek", after: 1 });
+  assert.deepEqual(next.events.map(event => event.sequence), [2, 3]);
+
+  const ack = { operation: "ack", through: 2, snapshot_sha256: "a".repeat(64) };
+  await ingress.transfer(ack);
+  const saved = await f.store.read(f.selected.state);
+  assert.equal(saved.value.ack_sequence, 2);
+  assert.deepEqual(saved.value.events.map(event => event.sequence), [3]);
+  await ingress.transfer(ack);
+  await ingress.transfer({ ...ack, snapshot_sha256: "b".repeat(64), open_drafts: [] });
+  assert.deepEqual(await f.store.read(f.selected.state), saved);
+});
+
+test("Redis Lua: разрыв в сохранённой очереди не увеличивает курсор и не удаляет события", onlyWithRedis, async (t) => {
+  const f = await adapter(t);
+  const fixtureState = await fixture({ store: f.store, env: f.env, mode: "preview" });
+  for (let id = 1; id <= 3; id++) await fixtureState.receive(message(id, "Тестовое событие"));
+  await fixtureState.ingress.transfer({ operation: "peek" });
+  const saved = await f.store.read(f.selected.state);
+  saved.value.events.splice(1, 1);
+  const etag = await f.store.write(f.selected.state, saved.value, saved.etag);
+  await assert.rejects(fixtureState.ingress.transfer({ operation: "peek" }),
+    { status: 409, code: "peek_conflict" });
+  await assert.rejects(fixtureState.ingress.transfer({ operation: "peek", after: 2 }),
+    { status: 409, code: "peek_conflict" });
+  await assert.rejects(fixtureState.ingress.transfer({
+    operation: "ack", through: 3, snapshot_sha256: "a".repeat(64),
+  }), { status: 409, code: "ack_conflict" });
+  assert.deepEqual(await f.store.read(f.selected.state), { value: saved.value, etag });
+});
+
+test("Redis Lua: без отправки кнопка передаётся обычным событием и подтверждается", onlyWithRedis, async (t) => {
+  const f = await adapter(t);
+  const fixtureState = await fixture({ store: f.store, env: f.env, mode: "preview",
+    seed: seed({ legacy_conversations: [42] }) });
+  const update = message(1, "Разрешить публикацию");
+  await fixtureState.receive(update);
+  await fixtureState.receive(update);
+  const saved = await f.store.read(f.selected.state);
+  assert.deepEqual(saved.value.events, [{ sequence: 1, update }]);
+  assert.deepEqual(fixtureState.calls, []);
+
+  // Replay a previously written preview envelope with the old marker.
+  saved.value.events[0].receipt_only = true;
+  await f.store.write(f.selected.state, saved.value, saved.etag);
+  const batch = await fixtureState.ingress.transfer({ operation: "peek" });
+  assert.deepEqual(batch.events, [{ sequence: 1, update }]);
+  await fixtureState.ingress.transfer({ operation: "ack", through: 1,
+    snapshot_sha256: "a".repeat(64) });
+  assert.deepEqual((await fixtureState.state()).events, []);
 });

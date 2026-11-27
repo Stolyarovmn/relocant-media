@@ -16,7 +16,8 @@ test("пустой и повторный peek не пишут Blob; новый �
   assert.equal(f.calls.length, 1);
   assert.equal((await f.state()).exported_through, 0);
   for (let repeat = 0; repeat < 3; repeat++) {
-    assert.deepEqual((await f.ingress.transfer({ operation: "peek", after: 99 })).events, []);
+    await assert.rejects(f.ingress.transfer({ operation: "peek", after: 99 }),
+      { status: 409, code: "peek_conflict" });
   }
   assert.equal(f.store.revision, 5);
   await assert.rejects(f.ingress.transfer({ operation: "ack", through: 1,

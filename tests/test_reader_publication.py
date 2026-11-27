@@ -26,7 +26,7 @@ from relocant_media.services.reader_resolution import (
     record_reader_resolution_callback,
 )
 from relocant_media.services.serverless_intake import import_inbox
-from relocant_media.storage.models import Base, Submission
+from relocant_media.storage.models import Base, Submission, TelegramUpdateReceipt
 
 OWNER = 3002000011
 
@@ -172,6 +172,36 @@ console.log(JSON.stringify((await f.ingress.transfer({operation:'peek'})).events
                 assert receipt["signature"]["label"] == "@reader_alias"
             assert len(list(session.scalars(select(Submission)))) == 1
         assert bot.sent == []
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_js_preview_control_without_receipt_is_imported():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Для проверки контракта приёмника нужен Node.js.")
+    script = """
+import { fixture, message, seed } from './deploy/vercel-intake/test/helpers.js';
+const f = await fixture({ mode: "preview", seed: seed({ legacy_conversations: [42] }) });
+await f.receive(message(1, "Разрешить публикацию"));
+console.log(JSON.stringify(await f.ingress.transfer({ operation: "peek" })));
+"""
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        check=True, capture_output=True, text=True, encoding="utf-8", timeout=30,
+    )
+    events = json.loads(result.stdout)["events"]
+    assert len(events) == 1
+    assert "receipt_only" not in events[0] and "notice" not in events[0]
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    try:
+        assert await import_inbox(
+            engine, Bot(), events, owner_user_id=None, owner_chat_id=None, after=0,
+        ) == 1
+        with Session(engine) as session:
+            assert session.get(TelegramUpdateReceipt, 1) is not None
     finally:
         engine.dispose()
 
