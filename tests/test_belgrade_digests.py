@@ -207,17 +207,19 @@ def test_weather_warning_has_to_overlap_the_belgrade_day():
 
 
 @pytest.mark.parametrize(("starts", "expires", "period"), [
-    ("14T00:00", "14T23:59", "весь день"),
-    ("14T00:00", "15T00:00", "весь день"),
-    ("14T22:00", "15T03:00", "с 14.11 в 22:00 до 15.11 в 03:00"),
-    ("13T22:00", "14T10:00", "с 13.11 в 22:00 до 14.11 в 10:00"),
+    ("14T00:00:00", "14T23:59:00", "весь день"),
+    ("14T00:00:00", "14T23:59:59", "весь день"),
+    ("14T00:00:00", "15T00:00:00", "весь день"),
+    ("14T00:00:00", "14T23:58:59", "с 00:00 до 23:58"),
+    ("14T22:00:00", "15T03:00:00", "с 14.11 в 22:00 до 15.11 в 03:00"),
+    ("13T22:00:00", "14T10:00:00", "с 13.11 в 22:00 до 14.11 в 10:00"),
 ])
 def test_warning_uses_local_period_and_keeps_source_in_morning_digest(starts, expires, period):
     raw = f"""<feed xmlns="http://www.w3.org/2005/Atom"
     xmlns:cap="urn:oasis:names:tc:emergency:cap:1.2"><entry>
     <cap:areaDesc>Belgrade</cap:areaDesc><cap:event>Rain orange</cap:event>
-    <cap:effective>2026-11-{starts}:00+01:00</cap:effective>
-    <cap:expires>2026-11-{expires}:00+01:00</cap:expires></entry></feed>"""
+    <cap:effective>2026-11-{starts}+01:00</cap:effective>
+    <cap:expires>2026-11-{expires}+01:00</cap:expires></entry></feed>"""
     now = datetime(2026, 11, 14, 7, 30, tzinfo=_ZONE)
     warning = parse_warning(raw.encode(), now)
     assert warning == f"Сильный дождь. Предупреждение РХМЗ действует {period}. Уровень — оранжевый."
