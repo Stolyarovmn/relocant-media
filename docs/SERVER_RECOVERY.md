@@ -17,15 +17,15 @@ Telegram IDs, offsets и `sent/sending/uncertain`; новую очередь и 
 таймеры, дожидается `worker.lock` и захватывает `intake-consumer.lock`. Занятый intake
 приводит к безопасному переносу deploy; активные процессы не убиваются. Оба файловых
 дескриптора удерживаются до окончания установки или rollback. Maintenance проверяет,
-что их inode принадлежат lock-файлам рядом именно с канонической SQLite.
+что их inode совпадают с файлами в защищённом каталоге `/var/lib/relocant-locks`.
 
 `server_database_maintenance upgrade` требует существующий локальный `DATABASE_URL`
 без query-параметров. Он допускает только полную схему v7 либо уже совместимую v8.
 Нельзя автоматически инициализировать пустую БД или обновлять неизвестные/legacy версии.
 `verify_sqlite_schema` остаётся проверкой без мутаций.
 
-Для v7 до изменений создаётся уникальная SQLite backup-копия и квитанция рядом
-с `worker.lock` с режимом `0600`, принадлежащие пользователю deploy (обычно root).
+Для v7 до изменений создаётся уникальная SQLite backup-копия и квитанция с режимом
+`0600` в принадлежащем root каталоге `/var/lib/relocant-deploy` с режимом `0700`.
 SQLite backup включает committed WAL; выполняются integrity/FK, hash/readback и fsync.
 В одной транзакции добавляется только `raw_item.published_at_precision DEFAULT 'unknown'`
 и меняется `user_version=8`: точность исторических дат не придумывается. Проверяется
@@ -47,6 +47,7 @@ lock-файлами: сначала проверенная БД v7, затем �
 откатить checkout после проверки v7 **до установки новой версии самого себя**.
 Обычный запуск этого старого service проблему не исправляет.
 
+Сначала выполните [подготовку защищённых путей](SERVER_DEPLOYMENT.md#подготовка-защищённых-путей-при-обновлении-старого-сервера).
 После merge взять полный SHA с подтверждённым push-CI `main`, включающий recovery-код.
 Подставить его в `recovery_sha` ниже. Команда предназначена для терминала существующего
 сервера с root-доступом; секреты не передаются в чат или аргументах. Она не запускает
@@ -69,9 +70,10 @@ if systemctl is-active --quiet relocant-deploy.service; then
   echo 'Deploy is active: wait for completion before repeating recovery.' >&2
   exit 75
 fi
-[ -z "$(git -c safe.directory="$app" -C "$app" status --porcelain)" ]
-git -c safe.directory="$app" -C "$app" fetch --no-tags "$remote" refs/heads/main
-[ "$(git -c safe.directory="$app" -C "$app" rev-parse FETCH_HEAD)" = "$recovery_sha" ]
+checkout_status="$(git -C "$app" status --porcelain)"
+[ -z "$checkout_status" ]
+git -C "$app" fetch --no-tags "$remote" refs/heads/main
+[ "$(git -C "$app" rev-parse FETCH_HEAD)" = "$recovery_sha" ]
 curl -fsSL -H 'Accept: application/vnd.github+json' \
   "https://api.github.com/repos/$repo/actions/runs?head_sha=$recovery_sha&event=push&per_page=100" |
   python3 -c 'import json,sys
@@ -83,7 +85,7 @@ assert ci and ci[0]["status"]=="completed" and ci[0]["conclusion"]=="success"
 ' "$recovery_sha"
 recovery_dir=$(mktemp -d /run/relocant-recovery.XXXXXX)
 trap 'rm -rf "$recovery_dir"' EXIT
-git -c safe.directory="$app" -C "$app" show \
+git -C "$app" show \
   "$recovery_sha:deploy/server/deploy-green-main.sh" > "$recovery_dir/deploy.sh"
 chmod 0700 "$recovery_dir/deploy.sh"
 RELOCANT_EXPECTED_TARGET_SHA="$recovery_sha" RELOCANT_REPAIR_DATABASE=true \

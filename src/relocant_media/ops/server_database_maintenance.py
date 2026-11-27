@@ -33,10 +33,10 @@ def database_path(value: str) -> Path:
     return path
 
 
-def require_locks(database: Path, worker_fd: int, intake_fd: int) -> None:
+def require_locks(lock_dir: Path, worker_fd: int, intake_fd: int) -> None:
     for descriptor, name in ((worker_fd, "worker.lock"), (intake_fd, "intake-consumer.lock")):
         actual = os.fstat(descriptor)
-        expected = (database.parent / name).stat()
+        expected = (lock_dir / name).stat()
         if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
             raise ValueError("canonical server lock identity differs")
         # Inherited descriptors share the deploy shell's open file descriptions.
@@ -142,8 +142,10 @@ def save_receipt(path: Path, payload: dict[str, Any]) -> None:
     sync(path)
 
 
-def upgrade(database: Path, receipt: Path, *, worker_fd: int, intake_fd: int) -> None:
-    require_locks(database, worker_fd, intake_fd)
+def upgrade(
+    database: Path, receipt: Path, *, worker_fd: int, intake_fd: int, lock_dir: Path | None = None,
+) -> None:
+    require_locks(lock_dir or database.parent, worker_fd, intake_fd)
     if receipt.exists() or receipt.with_suffix(".tmp").exists():
         raise ValueError("deployment receipt already exists")
     with writable_database(database) as connection:
@@ -194,8 +196,10 @@ def upgrade(database: Path, receipt: Path, *, worker_fd: int, intake_fd: int) ->
         save_receipt(receipt, record)
 
 
-def rollback(database: Path, receipt: Path, *, worker_fd: int, intake_fd: int) -> None:
-    require_locks(database, worker_fd, intake_fd)
+def rollback(
+    database: Path, receipt: Path, *, worker_fd: int, intake_fd: int, lock_dir: Path | None = None,
+) -> None:
+    require_locks(lock_dir or database.parent, worker_fd, intake_fd)
     record = json.loads(receipt.read_text())
     if record.get("version") != 1 or record.get("database") != str(database):
         raise ValueError("rollback receipt does not match canonical database")
@@ -230,13 +234,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["upgrade", "rollback"])
     parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--lock-dir", type=Path)
     parser.add_argument("--worker-fd", type=int, default=9)
     parser.add_argument("--intake-fd", type=int, default=8)
     args = parser.parse_args()
     try:
         database = database_path(os.environ["DATABASE_URL"])
         operation = upgrade if args.mode == "upgrade" else rollback
-        operation(database, args.receipt, worker_fd=args.worker_fd, intake_fd=args.intake_fd)
+        operation(
+            database, args.receipt, worker_fd=args.worker_fd, intake_fd=args.intake_fd,
+            lock_dir=args.lock_dir,
+        )
     except Exception as error:
         parser.exit(1, f"server database maintenance blocked: {type(error).__name__}\n")
     print(f"server database maintenance: {args.mode} verified")
