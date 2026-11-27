@@ -1,10 +1,12 @@
 import os
 from collections.abc import Iterator
 
+import httpx
 import pytest
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
+from relocant_media.bot.api import TelegramBotAPI
 from relocant_media.bot.runtime import TelegramRuntime
 from relocant_media.storage.models import (
     AdRequest,
@@ -110,6 +112,27 @@ async def test_ad_command_creates_submission_and_ad_request(db_session: Session)
     assert result.action == "submitted"
     assert db_session.scalar(select(func.count()).select_from(Submission)) == 1
     assert db_session.scalar(select(func.count()).select_from(AdRequest)) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_telegram_update_receipt_keeps_status_without_token(
+    db_session: Session,
+) -> None:
+    token = "123456:test-private-bot-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert token in request.url.path
+        return httpx.Response(403, json={"ok": False, "description": token})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        runtime = TelegramRuntime(db_session, TelegramBotAPI(token, client), city="belgrade")
+        with pytest.raises(httpx.HTTPStatusError):
+            await runtime.process(_private_message(201, 21, "/tip"))
+
+    receipt = db_session.get(TelegramUpdateReceipt, 201)
+    assert receipt is not None
+    assert receipt.status == "failed"
+    assert receipt.error == "Telegram sendMessage returned HTTP 403"
 
 
 @pytest.mark.asyncio

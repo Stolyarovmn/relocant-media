@@ -1,11 +1,105 @@
 import json
+import logging
+import traceback
 
 import httpx
 import pytest
 
-from relocant_media.bot.api import TelegramBotAPI
+from relocant_media.bot.api import PhotoUpload, TelegramAPIError, TelegramBotAPI
 from relocant_media.bot.formatting import compact_source_link
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
+from relocant_media.ops import smoke
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multipart", [False, True])
+async def test_bot_http_failure_hides_token_in_exception_and_logs(caplog, multipart):
+    token = "123456:test-private-bot-token"
+    private_text = "private-response-marker"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert token in request.url.path
+        return httpx.Response(
+            403, json={"ok": False, "description": f"{token} {private_text}"},
+            headers={"Location": str(request.url)},
+        )
+
+    caplog.set_level(logging.INFO, logger="httpx")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        bot = TelegramBotAPI(token, client)
+        with pytest.raises(httpx.HTTPStatusError, match="HTTP 403") as caught:
+            if multipart:
+                await bot.send_photo(1, PhotoUpload("photo.png", b"\x89PNG\r\n\x1a\n"))
+            else:
+                await bot.send_message(1, "private request")
+
+    error = caught.value
+    assert error.response.status_code == 403
+    assert error.response.json() == {}
+    assert "location" not in error.response.headers
+    assert "403" in caplog.text
+    assert token not in caplog.text
+    assert token not in str(error.request.url)
+    assert token not in str(error.response.request.url)
+    assert private_text not in "".join(traceback.format_exception(error))
+    assert token not in "".join(traceback.format_exception(error))
+
+
+@pytest.mark.asyncio
+async def test_bot_transport_failure_preserves_type_without_original_error():
+    token = "123456:test-private-bot-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout(f"timeout for {request.url}", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.ReadTimeout, match="sendMessage") as caught:
+            await TelegramBotAPI(token, client).send_message(1, "private request")
+
+    assert caught.value.__context__ is None
+    assert token not in str(caught.value.request.url)
+    assert token not in "".join(traceback.format_exception(caught.value))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_bot_rejection_hides_response_description_and_invalid_json(malformed):
+    token = "123456:test-private-bot-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if malformed:
+            return httpx.Response(200, text=f"{{invalid {token}")
+        return httpx.Response(200, json={"ok": False, "description": token})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(TelegramAPIError, match="Telegram sendMessage") as caught:
+            await TelegramBotAPI(token, client).send_message(1, "private request")
+
+    assert caught.value.__context__ is None
+    assert token not in "".join(traceback.format_exception(caught.value))
+
+
+def test_telegram_smoke_cli_hides_token_in_json_and_traceback(monkeypatch, capsys):
+    token = "123456:test-private-bot-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert token in request.url.path
+        return httpx.Response(403, text=str(request.url))
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr("sys.argv", ["smoke", "--telegram"])
+    monkeypatch.setattr(smoke.settings, "telegram_bot_token", token)
+    monkeypatch.setattr(smoke.httpx, "Client", lambda **_: client)
+    monkeypatch.setattr(smoke, "check_api", lambda *_: {})
+    monkeypatch.setattr(smoke, "check_telegram", lambda c: smoke._telegram_call(c, "getMe", {}))
+    with pytest.raises(SystemExit) as caught:
+        smoke.main()
+
+    assert caught.value.code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False, "error": "Telegram getMe returned HTTP 403",
+    }
+    assert token not in "".join(traceback.format_exception(caught.value))
 
 
 @pytest.mark.asyncio

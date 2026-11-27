@@ -3,7 +3,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 import httpx
 
@@ -12,14 +12,12 @@ from relocant_media.bot.formatting import (
     formatted_text_units,
     source_link_entities,
 )
+from relocant_media.bot.transport import TelegramAPIError as TelegramAPIError
+from relocant_media.bot.transport import telegram_result, telegram_transport_error
 from relocant_media.bot.updates import ALLOWED_UPDATE_TYPES
 from relocant_media.domain.map_links import is_map_event_url
 from relocant_media.domain.quiet_hours import silent_channel_post
 from relocant_media.domain.source_locations import is_public_https_url
-
-
-class TelegramAPIError(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -86,20 +84,22 @@ class TelegramBotAPI:
         return silent_channel_post(chat_id, self._clock)
 
     async def _call(self, method: str, payload: Mapping[str, object]) -> object:
-        response = await self._client.post(f"{self._base_url}/{method}", json=dict(payload))
-        return self._result(method, response)
+        return await self._post(method, json=dict(payload))
 
-    @staticmethod
-    def _result(method: str, response: httpx.Response) -> object:
-        response.raise_for_status()
-        raw: object = response.json()
-        if not isinstance(raw, dict):
-            raise TelegramAPIError(f"Telegram {method} returned a non-object response")
-        data = cast(dict[str, object], raw)
-        if data.get("ok") is not True:
-            description = data.get("description")
-            raise TelegramAPIError(f"Telegram {method} failed: {description}")
-        return data.get("result")
+    async def _post(
+        self, method: str, *, json: object = None, data: Mapping[str, str] | None = None,
+        files: Mapping[str, tuple[str, bytes, str]] | None = None,
+    ) -> object:
+        try:
+            response = await self._client.post(
+                f"{self._base_url}/{method}", json=json, data=data, files=files,
+                follow_redirects=False,
+            )
+        except httpx.RequestError as error:
+            failure = telegram_transport_error(method, error)
+        else:
+            return telegram_result(method, response)
+        raise failure
 
     @staticmethod
     def _photo(photo: Path | PhotoUpload) -> tuple[str, bytes, str]:
@@ -175,12 +175,12 @@ class TelegramBotAPI:
             data["caption_entities"] = json.dumps(
                 list(caption_entities), ensure_ascii=False, separators=(",", ":")
             )
-        response = await self._client.post(
-            f"{self._base_url}/sendPhoto",
+        result = await self._post(
+            "sendPhoto",
             data=data,
             files={"photo": upload},
         )
-        return self._message_id(self._result("sendPhoto", response))
+        return self._message_id(result)
 
     async def send_rich_message(
         self, chat_id: int | str, html: str, *, photo: PhotoUpload | None = None,
@@ -229,12 +229,11 @@ class TelegramBotAPI:
                 )
             if reply:
                 data["reply_parameters"] = json.dumps(reply)
-            response = await self._client.post(
-                f"{self._base_url}/sendRichMessage",
+            result = await self._post(
+                "sendRichMessage",
                 data=data,
                 files={media_id: upload},
             )
-            result = self._result("sendRichMessage", response)
         return self._message_id(result)
 
     async def edit_map_button(self, chat_id: int, message_id: int, url: str) -> bool:
@@ -285,10 +284,7 @@ class TelegramBotAPI:
         group = {"chat_id": str(chat_id), "media": json.dumps(media, ensure_ascii=False)}
         if self._silent(chat_id):
             group["disable_notification"] = "true"
-        response = await self._client.post(
-            f"{self._base_url}/sendMediaGroup", data=group, files=files,
-        )
-        result = self._result("sendMediaGroup", response)
+        result = await self._post("sendMediaGroup", data=group, files=files)
         if not isinstance(result, list) or len(result) != len(photos):
             raise TelegramAPIError("sendMediaGroup returned an incomplete album")
         ids = [self._message_id(item) for item in result]
@@ -391,9 +387,8 @@ class TelegramBotAPI:
             form = {key: value if isinstance(value, str) else json.dumps(value)
                     for key, value in payload.items()}
             form["caption"] = html
-            response = await self._client.post(f"{self._base_url}/sendPhoto", data=form,
-                                               files={"photo": self._photo(photo)})
-            return self._message_id(self._result("sendPhoto", response))
+            result = await self._post("sendPhoto", data=form, files={"photo": self._photo(photo)})
+            return self._message_id(result)
         payload.update(text=html, link_preview_options={"is_disabled": True})
         return self._message_id(await self._call("sendMessage", payload))
 

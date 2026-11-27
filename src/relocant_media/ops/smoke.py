@@ -4,6 +4,11 @@ from typing import Any, cast
 
 import httpx
 
+from relocant_media.bot.transport import (
+    TelegramAPIError,
+    telegram_result,
+    telegram_transport_error,
+)
 from relocant_media.config import settings, telegram_setup_errors
 
 
@@ -20,14 +25,16 @@ def _json_object(response: httpx.Response, label: str) -> dict[str, Any]:
 
 
 def _telegram_call(client: httpx.Client, method: str, payload: dict[str, object]) -> object:
-    response = client.post(
-        f"https://api.telegram.org/bot{settings.telegram_bot_token}/{method}",
-        json=payload,
-    )
-    data = _json_object(response, f"Telegram {method}")
-    if data.get("ok") is not True:
-        raise SmokeCheckError(f"Telegram {method} failed: {data.get('description')}")
-    return data.get("result")
+    try:
+        response = client.post(
+            f"https://api.telegram.org/bot{settings.telegram_bot_token}/{method}",
+            json=payload, follow_redirects=False,
+        )
+    except httpx.RequestError as error:
+        failure = telegram_transport_error(method, error)
+    else:
+        return telegram_result(method, response)
+    raise failure
 
 
 def check_api(client: httpx.Client, base_url: str) -> dict[str, object]:
@@ -83,7 +90,7 @@ def main() -> None:
             result: dict[str, object] = {"api": check_api(client, args.base_url)}
             if args.telegram:
                 result["telegram"] = check_telegram(client)
-    except (httpx.HTTPError, SmokeCheckError) as error:
+    except (httpx.HTTPError, SmokeCheckError, TelegramAPIError) as error:
         print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False))
         raise SystemExit(1) from error
 
