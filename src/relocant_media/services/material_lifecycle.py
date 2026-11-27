@@ -48,6 +48,7 @@ from relocant_media.storage.models import (
 )
 
 if TYPE_CHECKING:
+    from relocant_media.ai.package import EditorialPackage
     from relocant_media.services.editorial import ReviewedEventInputs
 
 POLICY_VERSION = "material-lifecycle-v1"
@@ -289,24 +290,53 @@ def _validate(data: dict[str, Any]) -> bool:
         return False
 
 
-def _stored_coverage_reason(run: EditorialRun | None) -> str | None:
-    if run is None or "_package" not in run.outcome:
-        return None
-    from relocant_media.ai.package import (
-        EditorialPackage,
-        canonical_json,
-        package_coverage_reason,
-    )
+def _stored_package(run: EditorialRun) -> EditorialPackage:
+    from relocant_media.ai.package import EditorialPackage, canonical_json
 
     payload = run.outcome["_package"]
     if hashlib.sha256(canonical_json(payload).encode()).hexdigest() != (
             run.outcome.get("_package_sha256")):
-        return "invalid_reviewed_package"
+        raise ValueError("invalid reviewed package hash")
+    return EditorialPackage.model_validate_json(json.dumps(payload))
+
+
+def _stored_coverage_reason(run: EditorialRun | None) -> str | None:
+    if run is None or "_package" not in run.outcome:
+        return None
+    from relocant_media.ai.package import package_coverage_reason
+
     try:
-        package = EditorialPackage.model_validate_json(json.dumps(payload))
+        package = _stored_package(run)
     except ValueError:
         return "invalid_reviewed_package"
     return package_coverage_reason(package)
+
+
+def _ready_official_water(raw: RawItem, source: Source, run: EditorialRun,
+                          post: Post, reason: Any, *, now: datetime) -> bool:
+    from relocant_media.ai.models import PublicationStatus
+    from relocant_media.ai.package import evaluate_package, has_official_water_notice
+    from relocant_media.services.editorial import _snapshot_member
+
+    if (reason != "package_independently_reviewed" or post.category != "utilities"
+            or not source.enabled or not source.auto_publish or source.high_risk
+            or run.delivery_status != "pending" or _unsafe_delivery(run, post)
+            or "_package" not in run.outcome):
+        return False
+    try:
+        package = _stored_package(run)
+        if (not has_official_water_notice(package) or package.event is None
+                or (package.raw_item_id, package.source_id, package.article_id, package.city)
+                != (raw.id, source.id, raw.external_id, source.city)
+                or (package.outcome.draft.title, package.outcome.draft.body)
+                != (post.title, post.body)
+                or _snapshot_member(raw, source)
+                not in [document.model_dump(mode="json") for document in package.event.documents]):
+            return False
+        evaluated = evaluate_package(package, now=now)
+    except ValueError:
+        return False
+    return evaluated.status == PublicationStatus.READY
 
 
 def _reviewable_utility(
@@ -333,7 +363,7 @@ def _wait_for_owner(record: SchedulerRun, *, now: datetime) -> None:
 def _restore_unqueued_utility(
     session: Session, record: SchedulerRun, *, now: datetime,
 ) -> None:
-    """Repair only a false terminal hold before an owner card ever existed."""
+    """Repair a false utility hold while the original package remains safe to use."""
     data = record.details
     raw_id = data.get("raw_item_id")
     if (type(raw_id) is not int or data.get("lifecycle_root_raw_id")
@@ -352,11 +382,19 @@ def _restore_unqueued_utility(
     if (run is None or post is None or post.status != "blocked"
             or run.outcome.get("status") != "blocked"
             or run.outcome.get("reason") != "lifecycle_separate_publication_approval_required"
-            or not isinstance(old, dict) or old.get("previous_status") != "human_review"
+            or not isinstance(old, dict)
             or old.get("policy_version") != POLICY_VERSION
-            or not _reviewable_utility(source, run, post, old.get("previous_reason"))
             or data.get("fingerprints", {}).get(str(raw_id)) != _fingerprint(raw)
             or fresh.action != "keep"):
+        return
+    previous_status, reason = old.get("previous_status"), old.get("previous_reason")
+    ready = (
+        previous_status == "ready" and data.get("delivery_attempts") == 0
+        and _ready_official_water(raw, source, run, post, reason, now=now)
+    )
+    if not ready and (
+        previous_status != "human_review" or not _reviewable_utility(source, run, post, reason)
+    ):
         return
     if session.scalar(select(Submission.id).where(
         Submission.kind == "owner_editorial_review",
@@ -364,10 +402,14 @@ def _restore_unqueued_utility(
     ).limit(1)) is not None:
         return
     outcome = {key: value for key, value in run.outcome.items() if key != "_lifecycle_block"}
-    run.outcome = {**outcome, "status": "human_review", "reason": old["previous_reason"],
-                   "_recovered_owner_hold": old}
-    post.status = "human_review"
-    _wait_for_owner(record, now=now)
+    post.status = "ready" if ready else "human_review"
+    archive_key = "_recovered_ready_hold" if ready else "_recovered_owner_hold"
+    run.outcome = {**outcome, "status": post.status, "reason": reason, archive_key: old}
+    if ready:
+        _set(record, now=now, state="ready", action="deliver",
+             reason="reviewed_ready", next_at=now)
+    else:
+        _wait_for_owner(record, now=now)
     record.finished_at = None
 
 
@@ -721,12 +763,17 @@ def _refresh(session: Session, raw_id: int, now: datetime) -> SchedulerRun:
             and _reviewable_utility(source, run, post, run.outcome.get("reason"))):
         _wait_for_owner(record, now=now)
         return record
+    ready_water = (
+        category == "utilities" and run is not None and post is not None
+        and run.outcome.get("status") == post.status == "ready"
+        and _ready_official_water(raw, source, run, post, run.outcome.get("reason"), now=now)
+    )
     if not owner_approved and (source.high_risk or not source.auto_publish
             or category in HIGH_RISK_CATEGORIES
-            or category and category not in AUTO_PUBLISH_CATEGORIES):
+            or category and category not in AUTO_PUBLISH_CATEGORIES and not ready_water):
         _block(session, record, run, post, now=now, reason="separate_publication_approval_required")
         return record
-    coverage_reason = _stored_coverage_reason(run)
+    coverage_reason = None if ready_water else _stored_coverage_reason(run)
     if coverage_reason == "independent_sensitivity_review_required":
         if not owner_approved:
             _block(session, record, run, post, now=now,
