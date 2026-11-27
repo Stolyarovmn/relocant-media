@@ -9,6 +9,7 @@ from facts_check_helpers import reviewed_package_for
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session
 from test_bgsaobracaj_notices import ARTICLE, PUBLISHED, SCHEDULE
+from test_editorial_package import bind_context
 
 from relocant_media.ai.package import canonical_json
 from relocant_media.collectors.beograd_article import parse_beograd_article
@@ -359,6 +360,91 @@ def test_only_fresh_unqueued_verified_utility_recovers_from_false_block(session,
         assert post.status == run.outcome["status"] == "human_review"
         assert "_recovered_owner_hold" in run.outcome
         assert record.finished_at is None
+
+
+@pytest.fixture
+def ready_official_water(session):
+    source = Source(id="city_beograd_news", city="belgrade", name="Город",
+                    url="https://www.beograd.rs/", source_type="official", trust=1,
+                    ownership="official", auto_publish=True, high_risk=False, enabled=True)
+    session.add(source)
+    session.flush()
+    notice = session.get(RawItem, 1)
+    notice.source_id = source.id
+    notice.url = source.url + "lat/servisne-informacije/vodovod-i-kanalizacija/a1/x.html"
+    notice.title = "Deo grada bez vode 20. novembra"
+    notice.body = "Na uglu ulica, 20. novembra, potrošači će biti bez vode."
+    run = editorial(session, status="ready", category="utilities", post=True,
+                    reason="package_independently_reviewed")
+    post = session.get(Post, run.post_id)
+    post.title = "Отключение воды 20 ноября"
+    post.body = "На перекрёстке отключат воду 20 ноября."
+    payload = reviewed_package_for(notice, source, title=post.title, body=post.body, now=NOW)
+    payload["outcome"]["ranking"].update(category="utilities", confidence=0.99)
+    payload["outcome"]["confidence"] = 0.99
+    payload["outcome"]["verification"]["claims"][0]["confidence"] = 0.99
+    bind_context(payload)
+    run.outcome = {**run.outcome, "draft": payload["outcome"]["draft"], "_package": payload,
+                   "_package_sha256": hashlib.sha256(canonical_json(payload).encode()).hexdigest()}
+    return run, post, notice, source
+
+
+def test_reviewed_water_notice_can_reach_channel_delivery_without_owner(
+    session, ready_official_water,
+):
+    run, post, _, _ = ready_official_water
+    assert lifecycle_state(session, 1, now=NOW)["next_action"] == "deliver"
+    assert post.status == run.outcome["status"] == "ready"
+    assert before_delivery_attempt(session, 1, now=NOW)
+
+
+@pytest.mark.parametrize("obstacle", [
+    None, "expired", "owner_decided", "source_changed", "source_disabled", "tampered",
+    "attempted",
+])
+def test_only_fresh_verified_unsent_water_recovers_from_old_ready_block(
+    session, ready_official_water, obstacle,
+):
+    run, post, notice, source = ready_official_water
+    state = lifecycle_state(session, 1, now=NOW)
+    record = session.scalar(select(SchedulerRun))
+    record.status = "blocked"
+    record.finished_at = NOW
+    record.details = {**state, "state": "blocked", "next_action": None, "next_attempt_at": None,
+                      "reason": "separate_publication_approval_required"}
+    run.outcome = {**run.outcome, "status": "blocked",
+                   "reason": "lifecycle_separate_publication_approval_required",
+                   "_lifecycle_block": {"policy_version": "material-lifecycle-v1",
+                                        "previous_status": "ready",
+                                        "previous_reason": "package_independently_reviewed"}}
+    post.status = "blocked"
+    if obstacle == "owner_decided":
+        session.add(Submission(kind="owner_editorial_review", status="rejected",
+                               payload={"raw_item_id": 1}))
+    elif obstacle == "source_changed":
+        notice.body += " Дополнение к объявлению."
+    elif obstacle == "source_disabled":
+        source.auto_publish = False
+    elif obstacle == "tampered":
+        run.outcome = {**run.outcome, "_package_sha256": "0" * 64}
+    elif obstacle == "attempted":
+        record.details = {**record.details, "delivery_attempts": 1}
+    checked = NOW + (MATERIAL_TTL if obstacle == "expired" else timedelta(minutes=5))
+    session.commit()
+
+    sweep = sweep_materials(session, city="belgrade", now=checked)
+    assert record.details["deadline_at"] == state["deadline_at"]
+    if obstacle:
+        assert sweep.blocked_ids == (1,)
+        assert post.status == "blocked"
+        assert not before_delivery_attempt(session, 1, now=checked)
+    else:
+        assert sweep.blocked_ids == ()
+        assert record.details["next_action"] == "deliver"
+        assert post.status == run.outcome["status"] == "ready"
+        assert "_recovered_ready_hold" in run.outcome
+        assert record.finished_at is None
+        assert before_delivery_attempt(session, 1, now=checked)
 
 
 @pytest.mark.parametrize("obstacle", [
