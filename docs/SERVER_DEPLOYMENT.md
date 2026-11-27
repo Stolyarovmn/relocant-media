@@ -1,8 +1,12 @@
 # Guarded production deployment
 
-The production editorial checkout lives at `/opt/relocant-media/app`. A successful GitHub
-merge does **not** by itself update a server that predates the deploy watcher, so one guarded
-bootstrap is required before production can keep itself current.
+Рабочая редакция запускается в GitHub Actions. Сервер в режиме [хранилища SSH](ACTIONS_SSH_STORAGE.md)
+не использует эти службы. Его таймеры `relocant-editorial`, `relocant-intake` и `relocant-deploy`
+должны оставаться отключёнными.
+
+Эта инструкция применяется только к установкам, которые ещё используют редакцию на сервере.
+Их рабочая копия находится в `/opt/relocant-media/app`. Для первой установки наблюдателя за
+веткой `main` требуется однократный защищённый запуск.
 
 ## Подготовка защищённых путей при обновлении старого сервера
 
@@ -39,12 +43,16 @@ bootstrap is required before production can keep itself current.
 
 ## First guarded bootstrap from a stale checkout
 
-After preparing the protected paths, run the following from a shell that can use `sudo`. It fetches `main` without changing the
-working tree, requires a completed successful push run from the canonical
-`.github/workflows/ci.yml` for that exact target SHA on `main`, extracts the deploy script from
-that already-green commit, and only then executes it as root:
+После подготовки защищённых путей выполните весь блок через `sudo`. Получение `main` пишет
+`FETCH_HEAD` в принадлежащий root каталог `.git`. Проверка успешного push-CI в
+`.github/workflows/ci.yml` выполняется для точного SHA до извлечения и запуска скрипта.
 
 ```sh
+sudo /bin/sh <<'SH'
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+
 cd /opt/relocant-media/app
 REMOTE_URL=https://github.com/Stolyarovmn/relocant-media.git
 GITHUB_REPO=Stolyarovmn/relocant-media
@@ -74,15 +82,19 @@ else:
 ' "$TARGET" main "$CI_WORKFLOW_PATH"
 )"
 [ "$CI_STATE" = completed:success ]
-TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT INT TERM
-git show "${TARGET}:deploy/server/deploy-green-main.sh" > "$TMP"
-sudo env \
+BOOTSTRAP_DIR="$(mktemp -d /run/relocant-bootstrap.XXXXXX)"
+trap 'rm -f "$BOOTSTRAP_DIR/deploy.sh" && rmdir "$BOOTSTRAP_DIR"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+git show "${TARGET}:deploy/server/deploy-green-main.sh" > "$BOOTSTRAP_DIR/deploy.sh"
+env \
   RELOCANT_APP_DIR=/opt/relocant-media/app \
   RELOCANT_GIT_REMOTE_URL="$REMOTE_URL" \
   RELOCANT_GITHUB_REPO="$GITHUB_REPO" \
   RELOCANT_CI_WORKFLOW_PATH="$CI_WORKFLOW_PATH" \
-  /bin/sh "$TMP"
+  RELOCANT_EXPECTED_TARGET_SHA="$TARGET" \
+  /bin/sh "$BOOTSTRAP_DIR/deploy.sh"
+SH
 ```
 
 The bootstrap never starts an editorial cycle and never calls Telegram. A dirty checkout,
@@ -113,10 +125,10 @@ editorial service is allowed to finish naturally before the shared worker lock i
 running private-intake service causes deployment to defer instead of being killed. Timers are
 restored on every exit path.
 
-If package installation or database validation fails, the checkout is reset to the previous
-SHA and the previous editable package is restored best-effort. No migration is performed by
-this deployment command: an incompatible SQLite schema blocks the rollout and requires the
-existing explicit maintenance/backup path.
+Развёртывание проверяет SQLite v8. При полной схеме v7 оно создаёт закрытую резервную
+копию и выполняет проверяемый переход на v8 под обеими блокировками. Другие схемы
+останавливают развёртывание. При сбое скрипт восстанавливает прежний коммит, пакет
+и, если было обновление схемы, базу по квитанции. [Процедура восстановления](SERVER_RECOVERY.md).
 
 After a successful rollout the script installs the editorial/intake units plus
 `relocant-deploy.service` and `relocant-deploy.timer`, reloads systemd, and enables the deploy
@@ -130,8 +142,5 @@ exact-SHA CI, worker-lock, database and final-main guards; it does not run an ed
 and it does not call Telegram. When production already matches `main` and the installed
 control plane matches the checked-in files, the watcher exits without touching systemd.
 
-For the current production channel this deployment is also the boundary that makes Telegram
-presentation changes real. Current `main` hides the raw final source URL behind the clickable
-`Источник` entity and asks Telegram for a large preview of the same verified primary-source
-URL. Older server checkouts can therefore visibly produce long links/no preview even when the
-repository has already fixed that behavior.
+В штатной редакции GitHub Actions запускает текущий `main` после успешного CI точного
+коммита. Обновлять серверную копию для изменения публикаций не требуется.
