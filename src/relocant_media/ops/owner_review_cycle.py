@@ -29,7 +29,7 @@ from relocant_media.services.owner_review_prepare import (
     prepare_owner_decision_holds,
     summarize_preparation_audit,
 )
-from relocant_media.storage.file_lock import file_lock
+from relocant_media.storage.file_lock import file_lock, runtime_lock_dir
 from relocant_media.storage.models import Submission
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -132,7 +132,7 @@ def main() -> None:
     ):
         raise ValueError("existing persistent SQLite required")
     directory = Path(url.database).parent
-    with file_lock(directory / "worker.lock") as acquired:
+    with file_lock(runtime_lock_dir(directory) / "worker.lock") as acquired:
         if not acquired:
             print(json.dumps({"status": "busy"}, ensure_ascii=False))
             return

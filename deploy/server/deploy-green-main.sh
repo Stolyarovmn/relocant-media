@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
 APP_DIR="${RELOCANT_APP_DIR:-/opt/relocant-media/app}"
@@ -9,7 +9,10 @@ REMOTE_URL="${RELOCANT_GIT_REMOTE_URL:-https://github.com/Stolyarovmn/relocant-m
 BRANCH="${RELOCANT_GIT_BRANCH:-main}"
 GITHUB_REPO="${RELOCANT_GITHUB_REPO:-Stolyarovmn/relocant-media}"
 CI_WORKFLOW_PATH="${RELOCANT_CI_WORKFLOW_PATH:-.github/workflows/ci.yml}"
-WORKER_LOCK="${RELOCANT_WORKER_LOCK:-/var/lib/relocant-media/worker.lock}"
+WORKER_LOCK="${RELOCANT_WORKER_LOCK:-/var/lib/relocant-locks/worker.lock}"
+LOCK_DIR="$(dirname "$WORKER_LOCK")"
+INTAKE_LOCK="$LOCK_DIR/intake-consumer.lock"
+DEPLOY_STATE_DIR="${RELOCANT_DEPLOY_STATE_DIR:-/var/lib/relocant-deploy}"
 SYSTEMD_DIR="${RELOCANT_SYSTEMD_DIR:-/etc/systemd/system}"
 DEPLOY_LIBEXEC_DIR="${RELOCANT_DEPLOY_LIBEXEC_DIR:-/usr/local/libexec/relocant-media}"
 DEPLOY_EXEC="$DEPLOY_LIBEXEC_DIR/deploy-green-main.sh"
@@ -27,6 +30,122 @@ if [ "$TEST_MODE" != "true" ] && [ "$(id -u)" -ne 0 ]; then
   exit 77
 fi
 
+if [ "$TEST_MODE" != "true" ]; then
+  if [ "$WORKER_LOCK" != /var/lib/relocant-locks/worker.lock ] ||
+     [ "$DEPLOY_STATE_DIR" != /var/lib/relocant-deploy ]; then
+    echo "deployment requires the installed shared locks and deploy state paths" >&2
+    exit 78
+  fi
+  # Use the system interpreter before trusting any executable from the deployment.
+  /usr/bin/python3 -I - "$APP_DIR" "$VENV_PYTHON" "$ENV_FILE" "$SYSTEMD_DIR" \
+    "$DEPLOY_LIBEXEC_DIR" "$DEPLOY_STATE_DIR" "$WORKER_LOCK" "$INTAKE_LOCK" \
+    "$SYSTEMCTL_BIN" "$CURL_BIN" "$PYTHON_BIN" <<'PYTHON'
+from collections import deque
+import grp
+import os
+from pathlib import Path
+import stat
+import sys
+
+
+def trusted_path(value, *, optional=False, shared_lock=False):
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"expected a canonical absolute path: {value}")
+    parts = deque(path.parts[1:])
+    current = Path("/")
+    links = 0
+    while parts:
+        component = parts.popleft()
+        if component == "..":
+            current = current.parent
+            continue
+        current /= component
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            if optional and not parts:
+                return current
+            raise
+        is_link = stat.S_ISLNK(info.st_mode)
+        final_lock = shared_lock and not parts
+        write_mask = 0o002 if final_lock else 0o022
+        if info.st_uid != 0 or (not is_link and info.st_mode & write_mask):
+            raise ValueError(f"untrusted owner or write permissions: {current}")
+        if final_lock and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+            raise ValueError(f"shared lock must be a regular file with one name: {current}")
+        if is_link:
+            links += 1
+            if links > 40:
+                raise ValueError(f"too many symbolic links: {value}")
+            target = Path(os.readlink(current))
+            if target.is_absolute():
+                parts.extendleft(reversed(target.parts[1:]))
+                current = Path("/")
+            else:
+                parts.extendleft(reversed(target.parts))
+                current = current.parent
+    return current
+
+
+def trusted_tree(root):
+    def failed(error):
+        raise error
+
+    for folder, directories, files in os.walk(root, onerror=failed):
+        for name in (*directories, *files):
+            entry = Path(folder) / name
+            info = entry.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                target = trusted_path(entry)
+                if target.is_dir() and not target.is_relative_to(root):
+                    raise ValueError(f"directory link leaves trusted tree: {entry}")
+            elif info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError(f"untrusted owner or write permissions: {entry}")
+            elif not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                raise ValueError(f"unexpected file type: {entry}")
+
+
+try:
+    app, venv_python, env_file, systemd, libexec, state, worker, intake, *tools = sys.argv[1:]
+    checkout = trusted_path(app)
+    if not (checkout / ".git").is_dir() or (checkout / ".git").is_symlink():
+        raise ValueError("production checkout requires an in-place Git directory")
+    trusted_tree(checkout)
+    trusted_tree(trusted_path(Path(venv_python).parent.parent))
+    for path in (venv_python, env_file, *tools):
+        if not trusted_path(path).is_file():
+            raise ValueError(f"expected a regular file: {path}")
+    if not trusted_path(systemd).is_dir():
+        raise ValueError(f"expected a directory: {systemd}")
+    for path in (libexec, state):
+        candidate = trusted_path(path, optional=True)
+        if candidate.exists() and (candidate != Path(path) or not candidate.is_dir()):
+            raise ValueError(f"expected an in-place deploy directory: {path}")
+    receipt_dir = Path(state)
+    if receipt_dir.exists() and stat.S_IMODE(receipt_dir.stat().st_mode) != 0o700:
+        raise ValueError(f"deploy state directory must have mode 0700: {state}")
+    runtime_group = grp.getgrnam("relocant").gr_gid
+    lock_parent = Path(worker).parent
+    parent_info = trusted_path(lock_parent).stat()
+    if parent_info.st_gid != runtime_group or stat.S_IMODE(parent_info.st_mode) != 0o750:
+        raise ValueError(f"shared lock directory must be root:relocant mode 0750: {lock_parent}")
+    for path in (worker, intake):
+        info = trusted_path(path, shared_lock=True).stat()
+        if info.st_gid != runtime_group or stat.S_IMODE(info.st_mode) != 0o660:
+            raise ValueError(f"shared lock must be root:relocant mode 0660: {path}")
+    for path in (receipt_dir / "deploy.lock", Path(libexec) / "deploy-green-main.sh",
+                 *(Path(systemd) / f"relocant-{name}.{kind}"
+                   for name in ("editorial", "intake", "deploy") for kind in ("service", "timer"))):
+        checked = trusted_path(path, optional=True) if path.parent.exists() else path
+        if checked != path or (path.exists() and not path.is_file()):
+            raise ValueError(f"expected an in-place deploy file: {path}")
+except (KeyError, OSError, ValueError) as error:
+    print(f"deployment path validation failed: {error}", file=sys.stderr)
+    sys.exit(78)
+PYTHON
+fi
+
 for path in "$APP_DIR" "$SYSTEMD_DIR"; do
   if [ ! -d "$path" ]; then
     echo "required directory is missing: $path" >&2
@@ -38,17 +157,21 @@ if [ ! -x "$SYSTEMCTL_BIN" ] || [ ! -x "$CURL_BIN" ] || [ ! -x "$PYTHON_BIN" ] |
   exit 78
 fi
 
+umask 077
+/usr/bin/install -d -m 0700 "$DEPLOY_STATE_DIR"
+exec 7>>"$DEPLOY_STATE_DIR/deploy.lock"
+if ! /usr/bin/flock -n 7; then
+  echo "another deployment is active" >&2
+  exit 75
+fi
+umask 022
 cd "$APP_DIR"
 
-git_safe() {
-  git -c "safe.directory=$APP_DIR" "$@"
-}
-
-if [ "$(git_safe symbolic-ref --short -q HEAD || true)" != "$BRANCH" ]; then
+if [ "$(git symbolic-ref --short -q HEAD || true)" != "$BRANCH" ]; then
   echo "production checkout must be on $BRANCH" >&2
   exit 78
 fi
-if [ -n "$(git_safe status --porcelain)" ]; then
+if ! checkout_status="$(git status --porcelain)" || [ -n "$checkout_status" ]; then
   echo "production checkout is not clean" >&2
   exit 78
 fi
@@ -84,7 +207,7 @@ install_control_plane() {
 
 control_backup=""
 snapshot_control_plane() {
-  control_backup="$(mktemp -d)"
+  control_backup="$(mktemp -d "$DEPLOY_STATE_DIR/control.XXXXXXXX")"
   for unit in \
     relocant-editorial.service relocant-editorial.timer \
     relocant-intake.service relocant-intake.timer \
@@ -123,9 +246,9 @@ restore_control_plane() {
 # Fetch and validate the exact target before touching editorial timers. This makes
 # frequent unattended checks cheap and non-disruptive when main has not changed or
 # when the newest commit is not yet backed by successful CI.
-current="$(git_safe rev-parse --verify HEAD)"
-git_safe fetch --no-tags "$REMOTE_URL" "refs/heads/$BRANCH"
-target="$(git_safe rev-parse --verify FETCH_HEAD)"
+current="$(git rev-parse --verify HEAD)"
+git fetch --no-tags "$REMOTE_URL" "refs/heads/$BRANCH"
+target="$(git rev-parse --verify FETCH_HEAD)"
 if [ -n "$EXPECTED_TARGET" ]; then
   case "$EXPECTED_TARGET" in
     *[!0-9a-f]* ) echo "expected target must be a full lowercase commit SHA" >&2; exit 78 ;;
@@ -136,7 +259,7 @@ if [ -n "$EXPECTED_TARGET" ]; then
   fi
 fi
 
-if [ "$current" != "$target" ] && ! git_safe merge-base --is-ancestor "$current" "$target"; then
+if [ "$current" != "$target" ] && ! git merge-base --is-ancestor "$current" "$target"; then
   echo "refusing non-fast-forward production deployment: current=$current target=$target" >&2
   exit 78
 fi
@@ -202,14 +325,14 @@ restart_timers() {
   "$SYSTEMCTL_BIN" start relocant-editorial.timer relocant-intake.timer >/dev/null 2>&1
 }
 deployment_started=false
-migration_receipt="${WORKER_LOCK}.deploy-${target}-$$.json"
+migration_receipt="$DEPLOY_STATE_DIR/deploy-${target}-$$.json"
 rollback() {
   echo "deployment failed; restoring database and checkout $current" >&2
   if [ -f "$migration_receipt" ]; then
     "$VENV_PYTHON" -m relocant_media.ops.server_database_maintenance rollback \
-      --receipt "$migration_receipt" || return 1
+      --receipt "$migration_receipt" --lock-dir "$LOCK_DIR" || return 1
   fi
-  git_safe reset --hard "$current" >/dev/null 2>&1 || return 1
+  git reset --hard "$current" >/dev/null 2>&1 || return 1
   "$VENV_PYTHON" -m pip install -e "$APP_DIR" >/dev/null 2>&1 || return 1
   restore_control_plane || return 1
 }
@@ -237,7 +360,10 @@ trap finish_deployment EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-exec 9>"$WORKER_LOCK"
+if [ "$TEST_MODE" = "true" ]; then
+  touch "$WORKER_LOCK" "$INTAKE_LOCK"
+fi
+exec 9<"$WORKER_LOCK"
 if ! /usr/bin/flock -w 2100 9; then
   echo "could not acquire editorial worker lock" >&2
   exit 75
@@ -248,10 +374,7 @@ if "$SYSTEMCTL_BIN" is-active --quiet relocant-intake.service; then
 fi
 # Intake owns this lock while polling as well as while storing updates. Checking
 # systemd alone leaves a start race; hold both locks through migration and rollback.
-intake_lock="$(dirname "$WORKER_LOCK")/intake-consumer.lock"
-exec 8>"$intake_lock"
-chown --reference="$WORKER_LOCK" "$intake_lock"
-chmod --reference="$WORKER_LOCK" "$intake_lock"
+exec 8<"$INTAKE_LOCK"
 if ! /usr/bin/flock -n 8; then
   echo "private intake consumer is active; deployment deferred" >&2
   exit 75
@@ -259,7 +382,7 @@ fi
 
 # Main may advance while we wait for the worker lock. Never deploy an intermediate
 # commit and call it current production; defer and let the next watcher pass retry.
-latest_line="$(git_safe ls-remote --exit-code "$REMOTE_URL" "refs/heads/$BRANCH")"
+latest_line="$(git ls-remote --exit-code "$REMOTE_URL" "refs/heads/$BRANCH")"
 latest="$(printf '%s\n' "$latest_line" | awk 'NR == 1 {print $1}')"
 if [ -z "$latest" ] || [ "$latest" != "$target" ]; then
   echo "public $BRANCH advanced while deployment was waiting; retry later" >&2
@@ -268,7 +391,7 @@ fi
 
 snapshot_control_plane
 deployment_started=true
-git_safe merge --ff-only "$target"
+git merge --ff-only "$target"
 if ! "$VENV_PYTHON" -m pip install -e "$APP_DIR"; then
   exit 1
 fi
@@ -286,7 +409,7 @@ if [ "$TEST_MODE" != "true" ] || [ "$FORCE_DATABASE_CHECK" = true ]; then
   . "$ENV_FILE"
   set +a
   if ! "$VENV_PYTHON" -m relocant_media.ops.server_database_maintenance upgrade \
-    --receipt "$migration_receipt"; then
+    --receipt "$migration_receipt" --lock-dir "$LOCK_DIR"; then
     echo "persistent database verification or known-version upgrade failed" >&2
     exit 78
   fi

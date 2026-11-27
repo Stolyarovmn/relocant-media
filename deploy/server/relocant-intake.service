@@ -9,6 +9,7 @@ User=relocant
 Group=relocant
 WorkingDirectory=/opt/relocant-media/app
 EnvironmentFile=/etc/relocant-media.env
+Environment=RELOCANT_RUNTIME_LOCK_DIR=/var/lib/relocant-locks
 ExecStart=/opt/relocant-media/venv/bin/python -m relocant_media.ops.intake_batch
 TimeoutStartSec=70min
 MemoryMax=450M
@@ -19,5 +20,5 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/relocant-media /var/log/relocant-media
+ReadWritePaths=/var/lib/relocant-media /var/log/relocant-media /var/lib/relocant-locks
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

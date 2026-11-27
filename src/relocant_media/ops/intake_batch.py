@@ -25,7 +25,7 @@ from relocant_media.services.private_intake import receive_private_tips
 from relocant_media.services.reader_resolution import process_reader_resolutions
 from relocant_media.services.serverless_intake import import_inbox
 from relocant_media.services.submission_queue import batch_submissions
-from relocant_media.storage.file_lock import file_lock
+from relocant_media.storage.file_lock import file_lock, runtime_lock_dir
 from relocant_media.storage.models import Submission
 from relocant_media.storage.sqlite_schema import verify_sqlite_schema
 
@@ -204,7 +204,7 @@ def _run_owner_review() -> tuple[int, dict[str, Any]]:
 def _run_actions_submission_pipeline(directory: Path) -> int:
     output = directory / "runs" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     # server_runtime creates this directory when it begins the cycle.
-    with file_lock(directory / "worker.lock") as locked:
+    with file_lock(runtime_lock_dir(directory) / "worker.lock") as locked:
         if not locked:
             return 75
         completed = subprocess.run(
@@ -225,13 +225,14 @@ def main() -> None:
             or not Path(url.database).is_file()):
         raise ValueError("existing persistent SQLite required")
     directory = Path(url.database).parent
+    lock_dir = runtime_lock_dir(directory)
     state_path = directory / "intake-batch-state.json"
     owner_enabled = os.environ.get("EDITORIAL_OWNER_REVIEW_ENABLED") == "true"
     private_enabled = os.environ.get("EDITORIAL_PRIVATE_INTAKE_ENABLED") == "true"
     reader_feedback_enabled = os.environ.get("EDITORIAL_PRIVATE_FEEDBACK_ENABLED") == "true"
     owner_user_id = _optional_positive_int("EDITORIAL_OWNER_USER_ID", required=owner_enabled)
     owner_chat_id = _optional_positive_int("EDITORIAL_OWNER_CHAT_ID", required=owner_enabled)
-    with file_lock(directory/"intake-consumer.lock") as acquired:
+    with file_lock(lock_dir / "intake-consumer.lock") as acquired:
         if not acquired:
             raise SystemExit("Другой приёмник уже работает")
         state = json.loads(state_path.read_text()) if state_path.is_file() else {}
@@ -259,7 +260,7 @@ def main() -> None:
                     accept_private_tips=private_enabled,
                     owner_user_id=owner_user_id,
                     owner_chat_id=owner_chat_id,
-                    store_guard=lambda: file_lock(directory/"worker.lock"),
+                    store_guard=lambda: file_lock(lock_dir / "worker.lock"),
                     run_pipeline=pipeline,state=state,checkpoint=checkpoint,
                     reader_feedback_enabled=reader_feedback_enabled,
                     ingress_token=os.environ.get("EDITORIAL_INGRESS_TOKEN"))

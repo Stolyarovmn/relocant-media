@@ -6,6 +6,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+def runtime_lock_dir(state_dir: Path) -> Path:
+    """Keep local locks by their state unless a server unit configures a shared directory."""
+    override = os.environ.get("RELOCANT_RUNTIME_LOCK_DIR")
+    return Path(override) if override else state_dir
+
+
 @contextmanager
 def file_lock(path: Path, *, blocking: bool = False) -> Iterator[bool]:
     with path.open("a+b") as handle:

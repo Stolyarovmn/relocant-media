@@ -3,6 +3,9 @@ import pathlib
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 ROOT = pathlib.Path(__file__).parents[1]
 SCRIPT = ROOT / "deploy/server/deploy-green-main.sh"
@@ -131,6 +134,8 @@ def _run(
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     systemd_dir = tmp_path / "systemd"
     systemd_dir.mkdir(exist_ok=True)
+    lock_dir = tmp_path / "shared-locks"
+    lock_dir.mkdir(exist_ok=True)
     deploy_libexec_dir = tmp_path / "libexec"
     systemctl, curl, venv_python, systemctl_log = _mocks(tmp_path)
     env = {
@@ -139,7 +144,8 @@ def _run(
         "RELOCANT_APP_DIR": str(work),
         "RELOCANT_GIT_REMOTE_URL": str(remote),
         "RELOCANT_GIT_BRANCH": "main",
-        "RELOCANT_WORKER_LOCK": str(tmp_path / "worker.lock"),
+        "RELOCANT_WORKER_LOCK": str(lock_dir / "worker.lock"),
+        "RELOCANT_DEPLOY_STATE_DIR": str(tmp_path / "deploy-state"),
         "RELOCANT_SYSTEMD_DIR": str(systemd_dir),
         "RELOCANT_DEPLOY_LIBEXEC_DIR": str(deploy_libexec_dir),
         "RELOCANT_SYSTEMCTL_BIN": str(systemctl),
@@ -286,6 +292,83 @@ def test_root_deploy_service_executes_only_installed_root_owned_script() -> None
     assert "ExecStart=/usr/local/libexec/relocant-media/deploy-green-main.sh" in service
     assert checkout_exec not in service
     assert "NoNewPrivileges=true" in service
+    assert "WorkingDirectory=/\n" in service
+
+
+def _trusted_path_checker():
+    source = SCRIPT.read_text(encoding="utf-8").split("<<'PYTHON'\n", 1)[1]
+    definitions = source.split("\ntry:\n    app,", 1)[0]
+    namespace = {}
+    exec(definitions, namespace)
+    return namespace["trusted_path"]
+
+
+@pytest.mark.parametrize("uid, mode", [(1000, 0o750), (0, 0o775)])
+def test_guard_rejects_mutable_checkout_ancestor(monkeypatch, uid, mode):
+    checker = _trusted_path_checker()
+    parent = pathlib.Path("/opt/relocant-media")
+
+    def lstat(path):
+        if path == parent:
+            return SimpleNamespace(st_uid=uid, st_mode=stat.S_IFDIR | mode)
+        if path == parent.parent:
+            return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+        raise AssertionError(f"guard continued through an untrusted ancestor: {path}")
+
+    monkeypatch.setattr(pathlib.Path, "lstat", lstat)
+    with pytest.raises(
+        ValueError, match=r"untrusted owner or write permissions: /opt/relocant-media"
+    ):
+        checker(parent / "app" / ".git")
+
+
+def test_guard_checks_intermediate_symlink_target_before_following_dot_dot(monkeypatch):
+    checker = _trusted_path_checker()
+
+    def lstat(path):
+        mode = stat.S_IFDIR | 0o755
+        if path == pathlib.Path("/opt/venv"):
+            mode = stat.S_IFLNK | 0o777
+        elif path == pathlib.Path("/opt/tenant"):
+            mode = stat.S_IFDIR | 0o777
+        return SimpleNamespace(st_uid=0, st_mode=mode)
+
+    monkeypatch.setattr(pathlib.Path, "lstat", lstat)
+    monkeypatch.setattr(os, "readlink", lambda _: "tenant/../verified")
+    with pytest.raises(ValueError, match=r"untrusted owner or write permissions: /opt/tenant"):
+        checker("/opt/venv/bin/python")
+
+
+def test_guard_allows_shared_group_write_only_on_regular_lock(monkeypatch):
+    checker = _trusted_path_checker()
+    lock = pathlib.Path("/var/lib/relocant-locks/worker.lock")
+    info = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o660, st_nlink=1)
+
+    def lstat(path):
+        if path == lock:
+            return info
+        return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o750)
+
+    monkeypatch.setattr(pathlib.Path, "lstat", lstat)
+    assert checker(lock, shared_lock=True) == lock
+    info.st_mode = stat.S_IFLNK | 0o777
+    with pytest.raises(ValueError, match="shared lock must be a regular file"):
+        checker(lock, shared_lock=True)
+
+
+def test_second_deployment_defers_before_fetch_and_systemd(tmp_path):
+    fcntl = pytest.importorskip("fcntl")
+    work, remote, initial, _ = _repository(tmp_path)
+    state = tmp_path / "deploy-state"
+    state.mkdir()
+    with (state / "deploy.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        result, log = _run(work, remote, tmp_path)
+    assert result.returncode == 75
+    assert "another deployment is active" in result.stderr
+    assert _git(work, "rev-parse", "HEAD") == initial
+    assert not (work / ".git/FETCH_HEAD").exists()
+    assert not _systemctl_calls(log)
 
 
 def test_pinned_recovery_rejects_advanced_main_before_timer_changes(tmp_path: pathlib.Path) -> None:
@@ -336,7 +419,9 @@ def test_pinned_same_head_repair_runs_known_migration_under_both_locks(
         assert connection.execute('PRAGMA user_version').fetchone() == (8,)
         assert connection.execute('SELECT update_id FROM telegram_update_receipt').fetchall() == [
             (12345,)]
-    assert list(tmp_path.glob('worker.lock.deploy-*.before-v8.sqlite3'))
+    assert list((tmp_path / 'deploy-state').glob('deploy-*.before-v8.sqlite3'))
+    assert not list(tmp_path.glob('*.before-v8.sqlite3'))
+    assert stat.S_IMODE((tmp_path / 'deploy-state').stat().st_mode) == 0o700
 
 
 def test_failed_unit_install_restores_database_checkout_and_control_files(tmp_path: pathlib.Path

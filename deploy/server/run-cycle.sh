@@ -2,7 +2,7 @@
 set -eu
 
 output="/var/lib/relocant-media/runs/$(date -u +%Y%m%dT%H%M%S.%NZ)"
-lock="/var/lib/relocant-media/worker.lock"
+lock="${RELOCANT_RUNTIME_LOCK_DIR:-/var/lib/relocant-media}/worker.lock"
 python="/opt/relocant-media/venv/bin/python"
 
 exec 9>"$lock"

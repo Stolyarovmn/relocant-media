@@ -9,6 +9,7 @@ User=relocant
 Group=relocant
 WorkingDirectory=/opt/relocant-media/app
 EnvironmentFile=/etc/relocant-media.env
+Environment=RELOCANT_RUNTIME_LOCK_DIR=/var/lib/relocant-locks
 ExecStartPre=/bin/sh /opt/relocant-media/app/deploy/server/check-main-sync.sh
 ExecStart=/opt/relocant-media/app/deploy/server/run-cycle.sh
 TimeoutStartSec=70min
@@ -20,6 +21,6 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/relocant-media /var/log/relocant-media
+ReadWritePaths=/var/lib/relocant-media /var/log/relocant-media /var/lib/relocant-locks
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 

@@ -4,9 +4,42 @@ The production editorial checkout lives at `/opt/relocant-media/app`. A successf
 merge does **not** by itself update a server that predates the deploy watcher, so one guarded
 bootstrap is required before production can keep itself current.
 
+## Подготовка защищённых путей при обновлении старого сервера
+
+Согласуйте окно работ до слияния изменений, если старый таймер развёртывания активен.
+Запишите исходные состояния таймеров. Остановите старый таймер развёртывания и таймеры
+редакции и приёма только в согласованное окно. Дождитесь завершения активных запусков
+и проверьте, что отсутствуют ручные процессы, использующие прежние lock-файлы.
+
+Подготовьте проверенный checkout и виртуальное окружение из доверенного источника.
+Проверьте владельца root и отсутствие записи для группы и остальных на всём пути,
+включая `/opt/relocant-media`, содержимое checkout, Git-метаданные, окружение и цели
+символических ссылок. Смена владельца существующего каталога сама по себе не
+подтверждает происхождение его содержимого. Сохраните доступ на чтение и исполнение
+для `relocant`. Файл `/etc/relocant-media.env` должен принадлежать root.
+
+Создайте `/var/lib/relocant-locks` с владельцем `root:relocant` и режимом `0750`.
+Подготовьте в нём два обычных файла `worker.lock` и `intake-consumer.lock` с владельцем
+`root:relocant` и режимом `0660`. Службам нужен доступ к самим файлам, а изменение
+записей каталога выполняет root. Файлы блокировок не пересоздаются при обычном deploy.
+Старые пути оставьте для контролируемого отката. Каталог `/var/lib/relocant-deploy`
+в режиме `0700` хранит отдельную блокировку deploy и закрытые артефакты восстановления.
+
+Запустите bootstrap новой версии, прошедшей CI на точном SHA. После установки проверьте,
+что обе рабочие службы используют `RELOCANT_RUNTIME_LOCK_DIR=/var/lib/relocant-locks`.
+Эту переменную не следует переопределять в файле окружения. Ручные прогоны, использующие
+ту же SQLite, должны явно использовать этот же каталог блокировок. На Actions сохраняются
+локальные блокировки соответствующего рабочего каталога.
+
+Для отката сначала снова остановите запуск новых заданий и дождитесь завершения работающих.
+При необходимости восстановите БД и предыдущий runtime штатной процедурой восстановления.
+Согласованно восстановите прежние unit-файлы, которые используют прежнюю пару блокировок.
+Верните таймеры в записанное исходное состояние после проверки совместимости БД и runtime.
+Сохраните защищённые права checkout и закрытые квитанции для последующего разбора.
+
 ## First guarded bootstrap from a stale checkout
 
-Run the following from a shell that can use `sudo`. It fetches `main` without changing the
+After preparing the protected paths, run the following from a shell that can use `sudo`. It fetches `main` without changing the
 working tree, requires a completed successful push run from the canonical
 `.github/workflows/ci.yml` for that exact target SHA on `main`, extracts the deploy script from
 that already-green commit, and only then executes it as root:
@@ -63,6 +96,7 @@ plane; it does not stop the editorial/intake timers or reinstall the application
 `deploy/server/deploy-green-main.sh` only updates the runtime when all of these are true:
 
 - the checkout is on `main` and completely clean;
+- the checkout, Git metadata, runtime, configuration and deploy paths pass ownership checks;
 - the current checkout can fast-forward to the public GitHub `main`;
 - the exact target SHA has a completed successful push run from the canonical `ci.yml` on
   `main`;
