@@ -208,3 +208,35 @@ def test_attributed_subjective_statement_can_be_supported_without_transport_util
         title="Куратор рассказал о выставке", body=statement)
     seal(payload)
     assert evaluate_package(parse(payload), now=NOW).status == "ready"
+
+
+def test_coverage_accepts_exact_source_title_and_rejects_spliced_or_changed_title():
+    from relocant_media.ai.draft_coverage import draft_coverage_reason
+
+    payload = synthetic_package()
+    title = "Плановые отключения 29 ноября 2026 года"
+    payload["evidence"]["title"] = title
+    payload["event"]["documents"][0]["title"] = title
+    claim = payload["outcome"]["claims"]["claims"][0]
+    claim.update(text=title)
+    claim["citations"][0]["quote"] = title
+    payload["outcome"]["draft"].update(title=title, body=title)
+    seal(payload)
+    package = parse(payload)
+    check = package.reviews[0].facts_check
+    documents = package.event.documents
+    assert draft_coverage_reason(check, package.outcome.draft, package.outcome.claims,
+                                 package.outcome.verification, documents, "transport") is None
+    # Даже реальная цитата другого/изменившегося заголовка не заменяет точный снимок.
+    changed = documents[0].model_copy(update={"title": title.replace("29", "30")})
+    assert draft_coverage_reason(check, package.outcome.draft, package.outcome.claims,
+                                 package.outcome.verification, (changed,), "transport") == (
+                                     "draft_coverage_ungrounded")
+    spliced = title + " " + documents[0].body
+    claim["citations"][0]["quote"] = spliced
+    seal(payload)
+    package = parse(payload)
+    assert draft_coverage_reason(package.reviews[0].facts_check, package.outcome.draft,
+                                 package.outcome.claims, package.outcome.verification,
+                                 package.event.documents, "transport") == (
+                                     "draft_coverage_ungrounded")

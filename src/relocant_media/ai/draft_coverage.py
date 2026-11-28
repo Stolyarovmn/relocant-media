@@ -93,7 +93,8 @@ def draft_coverage_reason(
             return "draft_coverage_ungrounded"
         for source_id, url, quote in checked:
             document = by_source.get((source_id, url))
-            if document is None or not quote.strip() or quote not in document.body:
+            if (document is None or not quote.strip()
+                    or not any(quote in field for field in (document.title, document.body))):
                 return "draft_coverage_ungrounded"
         if unsupported_action_traffic_effect(
             segment.text, quotes=(quote for _, _, quote in checked), sources=sources,
@@ -119,7 +120,8 @@ FACTS_COVERAGE_INSTRUCTION = (
     "посимвольно: конкатенация segments каждого field должна полностью воспроизводить "
     "это поле, включая пробелы и переносы. Для каждого содержательного фрагмента укажи "
     "только реально использованные draft.claim_ids с supported verification и точные "
-    "citations этих claims (source_id, URL, непрерывная дословная quote из evidence.body). "
+    "citations этих claims (source_id, URL, непрерывная дословная quote целиком "
+    "из evidence.title или evidence.body). "
     "Проверь смысловое следование фрагмента именно из этих claims и цитат, а не просто "
     "их тематическое сходство. Несуществующая связь или новое существенное последствие "
     "означает unsupported/uncertain даже при правдоподобии. Нельзя охватить одним "
