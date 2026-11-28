@@ -315,3 +315,21 @@ def test_serbian_draft_is_regenerated_once_in_russian() -> None:
     assert provider.drafts == 2
     assert result.draft is not None
     assert result.draft.title == _draft().title
+
+
+def test_claim_can_quote_exact_source_title_without_splicing_fields():
+    from relocant_media.ai.pipeline import _citations_are_grounded, _ungrounded_quotes
+
+    document = _document().model_copy(update={
+        "title": "Planirana iskljucenja za 29. novembar 2026.",
+    })
+    claims = _claims(quote=document.title)
+    assert _citations_are_grounded(claims, (document,))
+    assert _ungrounded_quotes(claims, (document,)) == []
+    for quote in ("30. novembar 2026.", document.title + " " + document.body):
+        invalid = _claims(quote=quote)
+        assert not _citations_are_grounded(invalid, (document,))
+        assert _ungrounded_quotes(invalid, (document,)) == [quote]
+    foreign = document.model_copy(update={"url": "https://www.beograd.rs/other.html"})
+    assert not _citations_are_grounded(claims, (foreign,))
+    assert _ungrounded_quotes(claims, (foreign,)) == [document.title]

@@ -96,8 +96,8 @@ def _citations_are_grounded(
             if document is None or citation.url != document.url:
                 return False
             quote = _normalize_text(citation.quote)
-            evidence = _normalize_text(document.body)
-            if not quote or quote not in evidence:
+            evidence = (_normalize_text(document.title), _normalize_text(document.body))
+            if not quote or not any(quote in field for field in evidence):
                 return False
     return True
 
@@ -133,12 +133,16 @@ def _ungrounded_quotes(
     claims: ClaimSet,
     documents: tuple[EvidenceDocument, ...],
 ) -> list[str]:
-    bodies = {document.source_id: _normalize_text(document.body) for document in documents}
+    fields = {document.source_id: (document.url, tuple(
+        _normalize_text(text) for text in (document.title, document.body)))
+        for document in documents}
     return [
         citation.quote
         for claim in claims.claims
         for citation in claim.citations
-        if _normalize_text(citation.quote) not in bodies.get(citation.source_id, "")
+        if not (document := fields.get(citation.source_id)) or citation.url != document[0]
+        or not citation.quote.strip()
+        or not any(_normalize_text(citation.quote) in field for field in document[1])
     ]
 
 

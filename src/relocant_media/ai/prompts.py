@@ -62,7 +62,9 @@ READER_REPORT_DRAFT = """
 CLAIMS_SYSTEM = COMMON_GROUNDING_RULES + """
 Extract atomic factual claims that could appear in a news post. Mark a claim material when changing
 or removing it could change a reader's decision or understanding. Every claim must cite at least one
-exact evidence excerpt and the matching source_id and URL. Never fabricate a citation excerpt.
+exact evidence excerpt and the matching source_id and URL. A quote must be a continuous excerpt
+wholly within one supplied document.title or document.body; never splice the two fields or
+quote metadata as source text. Never fabricate a citation excerpt.
 """ + EVENT_SCOPE_INSTRUCTION
 
 VERIFY_SYSTEM = COMMON_GROUNDING_RULES + """
